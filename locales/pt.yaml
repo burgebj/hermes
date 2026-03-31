@@ -326,6 +326,7 @@ gateway:
     mode_new:              "⚙️ Progresso de ferramentas: **NEW** — mostrado quando a ferramenta muda (comprimento da pré-visualização: `display.tool_preview_length`, predefinição 40)."
     mode_all:              "⚙️ Progresso de ferramentas: **ALL** — cada chamada de ferramenta é mostrada (comprimento da pré-visualização: `display.tool_preview_length`, predefinição 40)."
     mode_verbose:          "⚙️ Progresso de ferramentas: **VERBOSE** — cada chamada de ferramenta com os argumentos completos."
+    mode_full:             "⚙️ Tool progress: **FULL** - complete args, no truncation."
     saved_suffix:          "_(guardado para **{platform}** — produz efeito na próxima mensagem)_"
     save_failed:           "_(não foi possível guardar na configuração: {error})_"
 

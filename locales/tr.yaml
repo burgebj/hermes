@@ -326,6 +326,7 @@ gateway:
     mode_new:              "⚙️ Araç ilerlemesi: **NEW** — araç değiştiğinde gösterilir (önizleme uzunluğu: `display.tool_preview_length`, varsayılan 40)."
     mode_all:              "⚙️ Araç ilerlemesi: **ALL** — her araç çağrısı gösterilir (önizleme uzunluğu: `display.tool_preview_length`, varsayılan 40)."
     mode_verbose:          "⚙️ Araç ilerlemesi: **VERBOSE** — her araç çağrısı tüm argümanlarıyla gösterilir."
+    mode_full:             "⚙️ Tool progress: **FULL** - complete args, no truncation."
     saved_suffix:          "_(**{platform}** için kaydedildi — sonraki mesajda geçerli olur)_"
     save_failed:           "_(yapılandırmaya kaydedilemedi: {error})_"
 
