@@ -190,6 +190,8 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_DEEPINFRA_TTS_BASE_URL = "https://api.deepinfra.com/v1/openai"
+DEFAULT_DEEPINFRA_TTS_VOICE = "default"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -365,6 +367,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "neutts",
     "kittentts",
     "piper",
+    "deepinfra",
 })
 
 DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
@@ -974,39 +977,75 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     return output_path
 
 
+def _tts_response_format_from_path(output_path: str) -> str:
+    """Pick an OpenAI-compatible TTS response format from the output extension."""
+    if output_path.endswith(".ogg"):
+        return "opus"
+    if output_path.endswith(".wav"):
+        return "wav"
+    if output_path.endswith(".flac"):
+        return "flac"
+    return "mp3"
+
+
 # ===========================================================================
-# Provider: OpenAI TTS
+# Provider: OpenAI TTS (also used by every OpenAI-compatible TTS endpoint —
+# DeepInfra delegates here via _generate_deepinfra_tts).
 # ===========================================================================
-def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """
-    Generate audio using OpenAI TTS.
+def _generate_openai_tts(
+    text: str,
+    output_path: str,
+    tts_config: Dict[str, Any],
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    voice: Optional[str] = None,
+    speed: Optional[float] = None,
+) -> str:
+    """Generate audio via the OpenAI ``audio.speech.create`` SDK shape.
+
+    Optional kwargs let OpenAI-compatible backends (DeepInfra etc.) reuse
+    this function — they resolve credentials/model themselves and pass
+    them through, skipping the OpenAI-only ``_resolve_openai_audio_client_config``.
 
     Args:
         text: Text to convert.
         output_path: Where to save the audio file.
-        tts_config: TTS config dict.
+        tts_config: TTS config dict (used for ``tts.openai`` sub-block
+            and the global ``speed`` default).
+        api_key: Bearer token. When None, resolved from the OpenAI auth
+            chain (config → env → managed gateway).
+        base_url: API base URL. When None, falls back to
+            ``tts.openai.base_url`` then the OpenAI default.
+        model: Model id. When None, reads ``tts.openai.model``.
+        voice: Voice id. When None, reads ``tts.openai.voice``.
+        speed: Playback speed. When None, reads ``tts.openai.speed`` /
+            ``tts.speed``.
 
     Returns:
         Path to the saved audio file.
     """
-    api_key, base_url = _resolve_openai_audio_client_config()
+    if api_key is None:
+        api_key, fallback_base = _resolve_openai_audio_client_config()
+        base_url = base_url or fallback_base
 
-    oai_config = tts_config.get("openai", {})
-    model = oai_config.get("model", DEFAULT_OPENAI_MODEL)
-    voice = oai_config.get("voice", DEFAULT_OPENAI_VOICE)
-    base_url = oai_config.get("base_url", base_url)
-    speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
+    oai_config = tts_config.get("openai", {}) if isinstance(tts_config, dict) else {}
+    if model is None:
+        model = oai_config.get("model", DEFAULT_OPENAI_MODEL)
+    if voice is None:
+        voice = oai_config.get("voice", DEFAULT_OPENAI_VOICE)
+    if base_url is None:
+        base_url = oai_config.get("base_url", DEFAULT_OPENAI_BASE_URL)
+    if speed is None:
+        speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
 
-    # Determine response format from extension
-    if output_path.endswith(".ogg"):
-        response_format = "opus"
-    else:
-        response_format = "mp3"
+    response_format = _tts_response_format_from_path(output_path)
 
     OpenAIClient = _import_openai_client()
     client = OpenAIClient(api_key=api_key, base_url=base_url)
     try:
-        create_kwargs = {
+        create_kwargs: Dict[str, Any] = {
             "model": model,
             "voice": voice,
             "input": text,
@@ -1023,6 +1062,76 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         close = getattr(client, "close", None)
         if callable(close):
             close()
+
+
+# ===========================================================================
+# Provider: DeepInfra TTS
+# ===========================================================================
+#
+# DeepInfra serves TTS over an OpenAI-compatible /v1/openai/audio/speech
+# endpoint. Models are discovered live via the shared catalog helper
+# (filtered by the ``tts`` surface tag) — no hardcoded model ids in this
+# file, so retired models disappear from hermes the next time the
+# catalog is fetched without a patch.
+
+
+def _list_deepinfra_tts_models() -> list[str]:
+    """Return ``tts``-tagged DeepInfra model ids from the live catalog.
+
+    Empty list when the catalog is unreachable. Callers must handle that
+    case — the runtime in :func:`_generate_deepinfra_tts` errors out
+    when no model is configured *and* the catalog is empty.
+    """
+    try:
+        from hermes_cli.models import _fetch_deepinfra_models_by_tag
+    except Exception:
+        return []
+    items = _fetch_deepinfra_models_by_tag("tts")
+    if not items:
+        return []
+    return [item["id"] for item in items]
+
+
+def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Resolve DeepInfra credentials/model, then delegate to the OpenAI handler.
+
+    DeepInfra's audio endpoint is OpenAI-compatible, so there's no need
+    to duplicate the SDK call — we just pass an explicit api_key /
+    base_url / model / voice through.
+    """
+    api_key = (os.environ.get("DEEPINFRA_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError(
+            "DEEPINFRA_API_KEY not set. Run `hermes setup` to configure, "
+            "or set the env var directly."
+        )
+
+    di_config = tts_config.get("deepinfra", {}) if isinstance(tts_config, dict) else {}
+    model = di_config.get("model") if isinstance(di_config, dict) else None
+    if not isinstance(model, str) or not model.strip():
+        candidates = _list_deepinfra_tts_models()
+        if not candidates:
+            raise ValueError(
+                "No DeepInfra TTS model available. Pin one in config.yaml "
+                "under tts.deepinfra.model, or check connectivity to "
+                "api.deepinfra.com so the live catalog can be fetched."
+            )
+        model = candidates[0]
+    base_url = (
+        di_config.get("base_url")
+        or os.environ.get("DEEPINFRA_BASE_URL")
+        or DEFAULT_DEEPINFRA_TTS_BASE_URL
+    )
+    return _generate_openai_tts(
+        text,
+        output_path,
+        tts_config,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        voice=di_config.get("voice", DEFAULT_DEEPINFRA_TTS_VOICE),
+        speed=float(di_config.get("speed", tts_config.get("speed", 1.0))),
+    )
 
 
 # ===========================================================================
@@ -1978,6 +2087,17 @@ def text_to_speech_tool(
                 }, ensure_ascii=False)
             logger.info("Generating speech with OpenAI TTS...")
             _generate_openai_tts(text, file_str, tts_config)
+
+        elif provider == "deepinfra":
+            try:
+                _import_openai_client()
+            except ImportError:
+                return json.dumps({
+                    "success": False,
+                    "error": "DeepInfra TTS uses the 'openai' SDK but it isn't installed."
+                }, ensure_ascii=False)
+            logger.info("Generating speech with DeepInfra TTS...")
+            _generate_deepinfra_tts(text, file_str, tts_config)
 
         elif provider == "minimax":
             logger.info("Generating speech with MiniMax TTS...")

@@ -1598,10 +1598,10 @@ DEFAULT_CONFIG = {
             # "normalize_audio": True,
         },
     },
-    
+
     "stt": {
         "enabled": True,
-        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "elevenlabs" (Scribe)
+        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "elevenlabs" (Scribe) | "deepinfra"
         "local": {
             "model": "base",  # tiny, base, small, medium, large-v3
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
@@ -2853,6 +2853,21 @@ OPTIONAL_ENV_VARS = {
     "AZURE_FOUNDRY_BASE_URL": {
         "description": "Azure Foundry base URL (set via 'hermes model' for endpoint-specific config)",
         "prompt": "Azure Foundry base URL",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "DEEPINFRA_API_KEY": {
+        "description": "DeepInfra API key (100+ top models via api.deepinfra.com)",
+        "prompt": "DeepInfra API Key",
+        "url": "https://deepinfra.com/dash/api_keys",
+        "password": True,
+        "category": "provider",
+    },
+    "DEEPINFRA_BASE_URL": {
+        "description": "DeepInfra base URL override",
+        "prompt": "DeepInfra base URL (leave empty for default)",
         "url": None,
         "password": False,
         "category": "provider",

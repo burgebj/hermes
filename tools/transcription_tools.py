@@ -98,6 +98,7 @@ GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 OPENAI_BASE_URL = os.getenv("STT_OPENAI_BASE_URL", "https://api.openai.com/v1")
 XAI_STT_BASE_URL = os.getenv("XAI_STT_BASE_URL", "https://api.x.ai/v1")
 ELEVENLABS_STT_BASE_URL = os.getenv("ELEVENLABS_STT_BASE_URL", "https://api.elevenlabs.io/v1")
+DEEPINFRA_STT_BASE_URL = os.getenv("DEEPINFRA_BASE_URL", "https://api.deepinfra.com/v1/openai")
 
 SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
 LOCAL_NATIVE_AUDIO_FORMATS = {".wav", ".aiff", ".aif"}
@@ -825,6 +826,15 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "deepinfra":
+            if _HAS_OPENAI and (os.environ.get("DEEPINFRA_API_KEY") or "").strip():
+                return "deepinfra"
+            logger.warning(
+                "STT provider 'deepinfra' configured but DEEPINFRA_API_KEY not set "
+                "(or openai package missing)"
+            )
+            return "none"
+
         return provider  # Unknown — let it fail downstream
 
     # --- Auto-detect (no explicit provider): local > groq > openai > xai > elevenlabs -
@@ -850,6 +860,9 @@ def _get_provider(stt_config: dict) -> str:
     if _HAS_MISTRAL and get_env_value("MISTRAL_API_KEY"):
         logger.info("No local STT available, using Mistral Voxtral Transcribe API")
         return "mistral"
+    if _HAS_OPENAI and (os.environ.get("DEEPINFRA_API_KEY") or "").strip():
+        logger.info("No local STT available, using DeepInfra Whisper API")
+        return "deepinfra"
     try:
         from tools.xai_http import resolve_xai_http_credentials
 
@@ -1325,22 +1338,36 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
-    """Transcribe using OpenAI Whisper API (paid)."""
-    try:
-        api_key, base_url = _resolve_openai_audio_client_config()
-    except ValueError as exc:
-        return {
-            "success": False,
-            "transcript": "",
-            "error": str(exc),
-        }
+def _transcribe_openai(
+    file_path: str,
+    model_name: str,
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    provider_label: str = "openai",
+) -> Dict[str, Any]:
+    """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape.
+
+    Also serves as the shared backend for every OpenAI-compatible STT
+    endpoint (DeepInfra etc.) — callers pass an explicit ``api_key`` /
+    ``base_url`` to skip the OpenAI-only auth chain, and a
+    ``provider_label`` so the response carries the right ``provider``
+    name.
+    """
+    if api_key is None:
+        try:
+            api_key, fallback_base = _resolve_openai_audio_client_config()
+        except ValueError as exc:
+            return {"success": False, "transcript": "", "error": str(exc)}
+        base_url = base_url or fallback_base
 
     if not _HAS_OPENAI:
         return {"success": False, "transcript": "", "error": "openai package not installed"}
 
-    # Auto-correct model if caller passed a Groq-only model
-    if model_name in GROQ_MODELS:
+    # Auto-correct model if caller passed a Groq-only model. Only applies
+    # to the native OpenAI path — third-party endpoints may legitimately
+    # serve a whisper-large-v3 variant.
+    if provider_label == "openai" and model_name in GROQ_MODELS:
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
 
@@ -1356,10 +1383,12 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
                 )
 
             transcript_text = _extract_transcript_text(transcription)
-            logger.info("Transcribed %s via OpenAI API (%s, %d chars)",
-                         Path(file_path).name, model_name, len(transcript_text))
+            logger.info(
+                "Transcribed %s via %s (%s, %d chars)",
+                Path(file_path).name, provider_label, model_name, len(transcript_text),
+            )
 
-            return {"success": True, "transcript": transcript_text, "provider": "openai"}
+            return {"success": True, "transcript": transcript_text, "provider": provider_label}
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -1374,7 +1403,7 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
     except APIError as e:
         return {"success": False, "transcript": "", "error": f"API error: {e}"}
     except Exception as e:
-        logger.error("OpenAI transcription failed: %s", e, exc_info=True)
+        logger.error("%s transcription failed: %s", provider_label, e, exc_info=True)
         return {"success": False, "transcript": "", "error": f"Transcription failed: {e}"}
 
 # ---------------------------------------------------------------------------
@@ -1615,6 +1644,72 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: DeepInfra (OpenAI-compatible /v1/audio/transcriptions)
+# ---------------------------------------------------------------------------
+
+
+def _list_deepinfra_stt_models() -> list[str]:
+    """Return ``stt``-tagged DeepInfra model ids from the live catalog.
+
+    Empty list when the catalog is unreachable. The runtime in
+    :func:`_transcribe_deepinfra` errors out if no model is configured
+    *and* the catalog yields nothing — we don't hardcode a fallback so
+    upstream model retirements don't require a hermes patch.
+    """
+    try:
+        from hermes_cli.models import _fetch_deepinfra_models_by_tag
+    except Exception:
+        return []
+    items = _fetch_deepinfra_models_by_tag("stt")
+    if not items:
+        return []
+    return [item["id"] for item in items]
+
+
+def _transcribe_deepinfra(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Resolve DeepInfra credentials/model, then delegate to the OpenAI handler.
+
+    DeepInfra's STT endpoint is OpenAI-compatible, so the actual SDK
+    call lives in :func:`_transcribe_openai` — this wrapper only owns
+    DeepInfra-specific credential and model resolution.
+    """
+    api_key = (os.environ.get("DEEPINFRA_API_KEY") or "").strip()
+    if not api_key:
+        return {"success": False, "transcript": "", "error": "DEEPINFRA_API_KEY not set"}
+
+    stt_config = _load_stt_config()
+    di_config = stt_config.get("deepinfra", {}) if isinstance(stt_config, dict) else {}
+    base_url = str(
+        di_config.get("base_url")
+        or os.environ.get("DEEPINFRA_BASE_URL")
+        or DEEPINFRA_STT_BASE_URL
+    ).strip().rstrip("/")
+
+    if not model_name:
+        candidates = _list_deepinfra_stt_models()
+        if not candidates:
+            return {
+                "success": False,
+                "transcript": "",
+                "error": (
+                    "No DeepInfra STT model available. Pin one in "
+                    "config.yaml under stt.deepinfra.model, or check "
+                    "connectivity to api.deepinfra.com so the live catalog "
+                    "can be fetched."
+                ),
+            }
+        model_name = candidates[0]
+
+    return _transcribe_openai(
+        file_path,
+        model_name,
+        api_key=api_key,
+        base_url=base_url,
+        provider_label="deepinfra",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1691,6 +1786,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         elevenlabs_cfg = stt_config.get("elevenlabs", {})
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
         return _transcribe_elevenlabs(file_path, model_name)
+
+    if provider == "deepinfra":
+        di_config = stt_config.get("deepinfra", {})
+        model_name = model or di_config.get("model") or ""
+        return _transcribe_deepinfra(file_path, model_name)
 
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
