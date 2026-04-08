@@ -15,9 +15,10 @@ Config keys this provider responds to::
       search_backend: "searxng"     # explicit per-capability
       backend: "searxng"            # shared fallback
 
-Env var::
+Env vars::
 
-    SEARXNG_URL=http://localhost:8080
+    SEARXNG_API_URL=http://localhost:8080  # preferred
+    SEARXNG_URL=http://localhost:8080      # legacy alias
 """
 
 from __future__ import annotations
@@ -43,8 +44,11 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         return "SearXNG"
 
     def is_available(self) -> bool:
-        """Return True when ``SEARXNG_URL`` is set."""
-        return bool(os.getenv("SEARXNG_URL", "").strip())
+        """Return True when a SearXNG URL is configured."""
+        return bool(
+            os.getenv("SEARXNG_API_URL", "").strip()
+            or os.getenv("SEARXNG_URL", "").strip()
+        )
 
     def supports_search(self) -> bool:
         return True
@@ -56,9 +60,12 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         """Execute a search against the configured SearXNG instance."""
         import httpx
 
-        base_url = os.getenv("SEARXNG_URL", "").strip().rstrip("/")
+        base_url = (
+            os.getenv("SEARXNG_API_URL", "").strip()
+            or os.getenv("SEARXNG_URL", "").strip()
+        ).rstrip("/")
         if not base_url:
-            return {"success": False, "error": "SEARXNG_URL is not set"}
+            return {"success": False, "error": "SEARXNG_API_URL or SEARXNG_URL is not set"}
 
         params: Dict[str, Any] = {
             "q": query,
@@ -132,7 +139,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             "tag": "Free, privacy-respecting metasearch. Point SEARXNG_URL at your instance.",
             "env_vars": [
                 {
-                    "key": "SEARXNG_URL",
+                    "key": "SEARXNG_API_URL",
                     "prompt": "SearXNG instance URL (e.g. http://localhost:8080)",
                     "url": "https://searx.space/",
                 },
