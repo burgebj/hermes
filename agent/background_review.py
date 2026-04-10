@@ -297,6 +297,9 @@ def summarize_background_review_actions(
                     "target": args.get("target", "memory"),
                     "content": args.get("content", ""),
                     "old_text": args.get("old_text", ""),
+                    "name": args.get("name", ""),
+                    "old_string": args.get("old_string", ""),
+                    "new_string": args.get("new_string", ""),
                 }
 
     actions: List[str] = []
@@ -334,9 +337,30 @@ def summarize_background_review_actions(
             action = detail.get("action", "")
             content = detail.get("content", "")
             old_text = detail.get("old_text", "")
+            skill_name = detail.get("name", "")
             max_preview = 120
             if is_skill:
-                actions.append(f"📝 {message}" if message else f"Skill {action}")
+                change = data.get("_change", {})
+                old_string = change.get("old", "") or detail.get("old_string", "")
+                new_string = change.get("new", "") or detail.get("new_string", "")
+                description = change.get("description", "")
+                if action == "patch" and (old_string or new_string):
+                    old_preview = old_string[:80].replace("\n", " ") + (
+                        "…" if len(old_string) > 80 else ""
+                    )
+                    new_preview = new_string[:80].replace("\n", " ") + (
+                        "…" if len(new_string) > 80 else ""
+                    )
+                    actions.append(
+                        f"📝 Skill '{skill_name}' patched: "
+                        f"\"{old_preview}\" → \"{new_preview}\""
+                    )
+                elif action == "create" and description:
+                    actions.append(f"📝 Skill '{skill_name}' created: {description}")
+                elif action == "edit" and description:
+                    actions.append(f"📝 Skill '{skill_name}' rewritten: {description}")
+                else:
+                    actions.append(f"📝 {message}" if message else f"Skill {action}")
             elif action == "add" and content:
                 preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
                 actions.append(f"{label} ➕ {preview}")
@@ -351,6 +375,8 @@ def summarize_background_review_actions(
         elif "created" in message.lower():
             actions.append(message)
         elif "updated" in message.lower():
+            actions.append(message)
+        elif is_skill and "patched" in message.lower():
             actions.append(message)
         elif (
             "added" in message.lower()
