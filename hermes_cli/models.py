@@ -3503,6 +3503,15 @@ def validate_requested_model(
         }
 
     if normalized == "custom" or normalized.startswith("custom:"):
+        # Mistral API /models endpoint is not reliably reachable. Trust model name when base_url targets api.mistral.ai.
+        if base_url and "api.mistral.ai" in base_url:
+            return {
+                "accepted": True,
+                "persist": True,
+                "recognized": True,
+                "message": None,
+            }
+
         # Try probing with correct auth for the api_mode.
         if api_mode == "anthropic_messages":
             probe = probe_api_models(api_key, base_url, api_mode=api_mode)
