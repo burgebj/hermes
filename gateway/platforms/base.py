@@ -2936,7 +2936,7 @@ class BasePlatformAdapter(ABC):
             path = match.group("path").strip()
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
-            path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+            path = path.lstrip("`\"'*_").rstrip("`\"'*_,.;:)}]")
             if path:
                 try:
                     media.append((os.path.expanduser(path), has_voice_tag))
