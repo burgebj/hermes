@@ -143,7 +143,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat), 'nextcloud_talk:jusap2do' (Nextcloud Talk uses the conversation token from the URL)"
             },
             "message": {
                 "type": "string",
@@ -194,21 +194,43 @@ def _handle_send(args):
 
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
-        try:
-            from gateway.channel_directory import resolve_channel_name
-            resolved = resolve_channel_name(platform_name, target_ref)
-            if resolved:
-                chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
-            else:
+        # NC Talk has its own alias map in config.yaml (there's no
+        # bot API to list conversations, so we can't use channel_directory).
+        if platform_name == "nextcloud_talk":
+            try:
+                from gateway.config import load_gateway_config, Platform as _P
+                _gcfg = load_gateway_config()
+                _pcfg = _gcfg.platforms.get(_P.NEXTCLOUD_TALK)
+                if _pcfg:
+                    _resolved = _resolve_nextcloud_talk_target(_pcfg, target_ref)
+                    if _resolved:
+                        chat_id, thread_id, _ = _parse_target_ref(
+                            platform_name, _resolved,
+                        )
+                        if not chat_id:
+                            # The resolver returned a token that _parse_target_ref
+                            # doesn't recognize as explicit -- accept it directly.
+                            chat_id = _resolved
+                            is_explicit = True
+            except Exception:
+                pass  # fall through to the generic resolver
+
+        if not chat_id:
+            try:
+                from gateway.channel_directory import resolve_channel_name
+                resolved = resolve_channel_name(platform_name, target_ref)
+                if resolved:
+                    chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
+                else:
+                    return json.dumps({
+                        "error": f"Could not resolve '{target_ref}' on {platform_name}. "
+                        f"Use send_message(action='list') to see available targets."
+                    })
+            except Exception:
                 return json.dumps({
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
-                    f"Use send_message(action='list') to see available targets."
+                    f"Try using a numeric channel ID instead."
                 })
-        except Exception:
-            return json.dumps({
-                "error": f"Could not resolve '{target_ref}' on {platform_name}. "
-                f"Try using a numeric channel ID instead."
-            })
 
     from tools.interrupt import is_interrupted
     if is_interrupted():
@@ -351,6 +373,46 @@ def _handle_send(args):
         return json.dumps(_error(f"Send failed: {e}"))
 
 
+
+def _resolve_nextcloud_talk_target(pconfig, target_ref: str):
+    """Resolve a user-supplied name to a NC Talk conversation token.
+
+    NC Talk bot API has no endpoint to list conversations a bot is
+    attached to, so users define friendly aliases in config.yaml
+    under gateway.nextcloud_talk.extra.channel_aliases. This helper
+    mirrors NextcloudTalkPlatform._resolve_chat_identifier but works
+    without an adapter instance - it reads directly from the
+    PlatformConfig.extra dict so the CLI can resolve names without
+    the full gateway runtime.
+
+    Resolution order:
+    1. Exact alias match (case-insensitive) in channel_aliases
+    2. Raw alphanumeric token fallback (NC Talk tokens are alphanumeric,
+       may contain - or _, no whitespace)
+
+    Returns the conversation token or None if unresolvable.
+    """
+    if not target_ref:
+        return None
+    target_ref = target_ref.strip()
+    if not target_ref:
+        return None
+
+    extra = getattr(pconfig, "extra", {}) or {}
+    aliases = extra.get("channel_aliases") or {}
+    if isinstance(aliases, dict):
+        lowered = target_ref.lower()
+        for alias, token in aliases.items():
+            if str(alias).strip().lower() == lowered:
+                return str(token).strip()
+
+    # Raw-token fallback
+    if all(ch.isalnum() or ch in ("-", "_") for ch in target_ref):
+        return target_ref
+
+    return None
+
+
 def _parse_target_ref(platform_name: str, target_ref: str):
     """Parse a tool target into chat_id/thread_id and whether it is explicit."""
     if platform_name == "telegram":
@@ -409,6 +471,12 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             # Preserve the leading '+' — signal-cli and sms/whatsapp adapters
             # expect E.164 format for direct recipients.
             return target_ref.strip(), None, True
+    # Note: nextcloud_talk does NOT early-return here even for
+    # alphanumeric refs. The alias resolver in _send() needs to run so
+    # friendly names like "niko" get mapped to the actual token
+    # (e.g. "svvac3ix") via channel_aliases. The raw-token fallback
+    # in _resolve_nextcloud_talk_target preserves the "pass it through"
+    # behavior for refs that happen to look like tokens.
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
@@ -760,6 +828,23 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         return last_result
 
     # --- Non-media platforms ---
+    # --- Non-Telegram/Discord platforms ---
+    # Nextcloud Talk explicitly rejects media attachments: the Talk bot API
+    # has no file-upload endpoint, so any attempt to send a voice memo, image,
+    # or document via the bot is impossible. Return a clear error instead of
+    # silently dropping the media and pretending success — the LLM needs to
+    # understand this is a hard limitation, not a warning.
+    if platform == Platform.NEXTCLOUD_TALK and media_files:
+        return {
+            "error": (
+                "Nextcloud Talk bot API does not support file attachments "
+                "(voice memos, images, documents). Only plain text messages "
+                "can be sent via the bot. See "
+                "https://github.com/nextcloud/spreed/issues/10715 for the "
+                "upstream feature request. Do not retry — this is a hard "
+                "limitation of the Nextcloud Talk Bot API, not a config issue."
+            )
+        }
     if media_files and not message.strip():
         return {
             "error": (
@@ -800,6 +885,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
+        elif platform == Platform.NEXTCLOUD_TALK:
+            result = await _send_nextcloud_talk(pconfig, chat_id, chunk)
         else:
             # Plugin platform: route through the gateway's live adapter if
             # available, otherwise the plugin's standalone_sender_fn.
@@ -1589,6 +1676,35 @@ async def _send_bluebubbles(extra, chat_id, message):
     except Exception as e:
         return _error(f"BlueBubbles send failed: {e}")
 
+
+async def _send_nextcloud_talk(
+    pconfig, chat_id: str, message: str,
+):
+    """Send a message via Talk User-API without requiring the adapter.
+
+    Used by cron jobs and send_message_tool outside the gateway process.
+    """
+    from gateway.platforms.nextcloud_talk import TalkUserClient
+    import os
+
+    extra = getattr(pconfig, "extra", {}) or {}
+    nc_url = extra.get("nextcloud_url", "")
+    username = extra.get("username", "hermes")
+    pw_env = extra.get("app_password_env", "NEXTCLOUD_TALK_APP_PASSWORD")
+    password = os.environ.get(pw_env, "").strip()
+    if not nc_url or not password:
+        return {"error": "NextcloudTalk not configured"}
+
+    client = TalkUserClient(base_url=nc_url, username=username, password=password)
+    try:
+        ok, msg_id, err = await client.send_message(chat_id, message)
+        if not ok:
+            return _error(f"NextcloudTalk send failed: {err}")
+        return {"success": True, "platform": "nextcloud_talk", "chat_id": chat_id, "message_id": msg_id}
+    except Exception as e:
+        return _error(f"NextcloudTalk send failed: {e}")
+    finally:
+        await client.close()
 
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via Feishu/Lark using the adapter's send pipeline."""

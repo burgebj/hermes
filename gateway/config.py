@@ -127,6 +127,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    NEXTCLOUD_TALK = "nextcloud_talk"
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -1772,6 +1774,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             name=os.getenv("BLUEBUBBLES_HOME_CHANNEL_NAME", "Home"),
             thread_id=os.getenv("BLUEBUBBLES_HOME_CHANNEL_THREAD_ID") or None,
         )
+    # Nextcloud Talk: configured via YAML (gateway.nextcloud_talk section
+    # or platforms.nextcloud_talk.extra). Only the bot secret lives in .env
+    # as NEXTCLOUD_TALK_BOT_SECRET, read at adapter init time via the
+    # bot_secret_env config field.
 
     # QQ (Official Bot API v2)
     qq_app_id = os.getenv("QQ_APP_ID")
