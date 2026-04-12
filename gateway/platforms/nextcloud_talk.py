@@ -407,7 +407,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
         logger.warning("talk: could not download %s: %s", name, err)
         return None
 
-    _LOCAL_COMMANDS = {"/new", "/reset", "/help", "!new", "!reset", "!help"}
+    _LOCAL_COMMANDS = {"/new", "/reset", "/help"}
 
     async def _handle_command(
         self, text: str, chat_id: str,
@@ -419,7 +419,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
         if cmd not in self._LOCAL_COMMANDS:
             return None
 
-        if cmd in ("/new", "/reset", "!new", "!reset"):
+        if cmd in ("/new", "/reset"):
             from gateway.session import build_session_key
             source = self.build_source(
                 chat_id=chat_id,
@@ -433,7 +433,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
                 return f"❌ Konnte Session nicht zurücksetzen: {exc}"
             return "✓ Session zurückgesetzt."
 
-        if cmd in ("/help", "!help"):
+        if cmd == "/help":
             return (
                 "**Hermes auf Nextcloud Talk**\n\n"
                 "Befehle:\n"
@@ -580,8 +580,12 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
 
         self._record_chat_name(chat_id, parsed.get("user_name", ""))
 
+        # Normalize ! prefix to / (Talk intercepts / commands, so users use !)
+        if text.startswith("!"):
+            text = "/" + text[1:]
+
         # Commands
-        if text.startswith("/") or text.startswith("!"):
+        if text.startswith("/"):
             reply = await self._handle_command(text, chat_id)
             if reply is not None:
                 await self.send(chat_id, reply)
