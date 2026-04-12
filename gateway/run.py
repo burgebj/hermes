@@ -11986,6 +11986,8 @@ class GatewayRunner:
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
+            agent_holder: list = [None]
+
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
             enriched_prompt = prompt
@@ -12033,6 +12035,8 @@ class GatewayRunner:
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
+                agent_holder[0] = agent
+
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
@@ -12041,7 +12045,89 @@ class GatewayRunner:
                 finally:
                     self._cleanup_agent_resources(agent)
 
-            result = await self._run_in_executor_with_context(run_sync)
+            loop = asyncio.get_event_loop()
+            _bg_timeout_raw = float(os.getenv("HERMES_AGENT_TIMEOUT", 1800))
+            _bg_timeout = _bg_timeout_raw if _bg_timeout_raw > 0 else None
+            _bg_warning_raw = float(os.getenv("HERMES_AGENT_TIMEOUT_WARNING", 900))
+            _bg_warning = _bg_warning_raw if _bg_warning_raw > 0 else None
+            _bg_warning_fired = False
+            _POLL_INTERVAL = 5.0
+
+            _executor_task = asyncio.ensure_future(
+                loop.run_in_executor(None, run_sync)
+            )
+
+            _inactivity_timeout = False
+            result = None
+            while True:
+                done, _ = await asyncio.wait(
+                    {_executor_task}, timeout=_POLL_INTERVAL
+                )
+                if done:
+                    result = _executor_task.result()
+                    break
+                if _bg_timeout is None:
+                    continue
+                _bg_agent = agent_holder[0]
+                _idle_secs = 0.0
+                if _bg_agent and hasattr(_bg_agent, "get_activity_summary"):
+                    try:
+                        _act = _bg_agent.get_activity_summary()
+                        _idle_secs = _act.get("seconds_since_activity", 0.0)
+                    except Exception:
+                        pass
+                if (not _bg_warning_fired and _bg_warning is not None
+                        and _idle_secs >= _bg_warning):
+                    _bg_warning_fired = True
+                    _elapsed_warn = int(_bg_warning // 60) or 1
+                    try:
+                        await adapter.send(
+                            source.chat_id,
+                            f"⚠️ Background task {task_id}: no activity for "
+                            f"{_elapsed_warn} min. Will time out soon if it "
+                            f"remains idle.",
+                            metadata=_thread_metadata,
+                        )
+                    except Exception:
+                        pass
+                if _idle_secs >= _bg_timeout:
+                    _inactivity_timeout = True
+                    break
+
+            if _inactivity_timeout:
+                _timed_out_agent = agent_holder[0]
+                _activity = {}
+                if _timed_out_agent and hasattr(_timed_out_agent, "get_activity_summary"):
+                    try:
+                        _activity = _timed_out_agent.get_activity_summary()
+                    except Exception:
+                        pass
+                _cur_tool = _activity.get("current_tool")
+                _secs_ago = _activity.get("seconds_since_activity", 0)
+                _timeout_mins = int(_bg_timeout // 60) or 1
+
+                logger.error(
+                    "Background task %s idle for %.0fs (timeout %.0fs) | tool=%s",
+                    task_id, _secs_ago, _bg_timeout, _cur_tool or "none",
+                )
+
+                if _timed_out_agent and hasattr(_timed_out_agent, "interrupt"):
+                    _timed_out_agent.interrupt("Execution timed out (inactivity)")
+
+                _diag_parts = [
+                    f"⏱️ Background task {task_id} timed out — no activity "
+                    f"for {_timeout_mins} min.",
+                ]
+                if _cur_tool:
+                    _diag_parts.append(f"Last active tool: `{_cur_tool}`.")
+                _diag_parts.append("Use /background to retry with a different prompt.")
+
+                await adapter.send(
+                    source.chat_id,
+                    "\n".join(_diag_parts),
+                    metadata=_thread_metadata,
+                )
+                return
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
@@ -12100,6 +12186,16 @@ class GatewayRunner:
                     metadata=_thread_metadata,
                 )
 
+        except asyncio.CancelledError:
+            logger.warning("Background task %s cancelled (gateway shutdown?)", task_id)
+            try:
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=f"⚠️ Background task {task_id} was cancelled (gateway restart or shutdown).",
+                    metadata=_thread_metadata,
+                )
+            except Exception:
+                pass
         except Exception as e:
             logger.exception("Background task %s failed", task_id)
             try:
