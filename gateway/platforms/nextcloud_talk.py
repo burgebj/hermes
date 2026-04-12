@@ -407,7 +407,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
         logger.warning("talk: could not download %s: %s", name, err)
         return None
 
-    _LOCAL_COMMANDS = {"/new", "/reset", "/help"}
+    _LOCAL_COMMANDS = {"/new", "/reset", "/help", "!new", "!reset", "!help"}
 
     async def _handle_command(
         self, text: str, chat_id: str,
@@ -581,7 +581,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
         self._record_chat_name(chat_id, parsed.get("user_name", ""))
 
         # Commands
-        if text.startswith("/"):
+        if text.startswith("/") or text.startswith("!"):
             reply = await self._handle_command(text, chat_id)
             if reply is not None:
                 await self.send(chat_id, reply)
