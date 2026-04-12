@@ -419,7 +419,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
         if cmd not in self._LOCAL_COMMANDS:
             return None
 
-        if cmd in ("/new", "/reset"):
+        if cmd in ("/new", "/reset", "!new", "!reset"):
             from gateway.session import build_session_key
             source = self.build_source(
                 chat_id=chat_id,
@@ -433,7 +433,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
                 return f"❌ Konnte Session nicht zurücksetzen: {exc}"
             return "✓ Session zurückgesetzt."
 
-        if cmd == "/help":
+        if cmd in ("/help", "!help"):
             return (
                 "**Hermes auf Nextcloud Talk**\n\n"
                 "Befehle:\n"
