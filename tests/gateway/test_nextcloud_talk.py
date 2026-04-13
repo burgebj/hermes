@@ -494,8 +494,8 @@ async def test_client_download_file(tmp_path):
 
 SAMPLE_USER_MSG = {
     "id": 1773, "token": "svvac3ix",
-    "actorType": "users", "actorId": "niko",
-    "actorDisplayName": "Niko Syring",
+    "actorType": "users", "actorId": "testuser",
+    "actorDisplayName": "Test User",
     "message": "erkläre mir X",
     "messageParameters": {},
     "systemMessage": "", "timestamp": 1744178400,
@@ -522,8 +522,8 @@ def test_parse_user_message_text_only():
     assert parsed["text"] == "erkläre mir X"
     assert parsed["message_id"] == 1773
     assert parsed["chat_id"] == "svvac3ix"
-    assert parsed["user_id"] == "niko"
-    assert parsed["user_name"] == "Niko Syring"
+    assert parsed["user_id"] == "testuser"
+    assert parsed["user_name"] == "Test User"
     assert parsed["attachment"] is None
 
 
@@ -733,11 +733,11 @@ async def test_on_poll_message_text_with_ack(monkeypatch):
     monkeypatch.setattr(adapter, "handle_message", fake_handle)
     msg = {
         "id": 50, "token": "room1", "actorType": "users",
-        "actorId": "niko", "actorDisplayName": "Niko",
+        "actorId": "testuser", "actorDisplayName": "Test User",
         "message": "hi", "messageParameters": {}, "systemMessage": "",
     }
     await adapter._on_poll_message(msg, "room1")
-    assert timeline[0] == ("send", "\u23f3 denke nach...")
+    assert timeline[0] == ("send", "\u23f3 Thinking...")
     assert timeline[1] == ("runtime", "hi")
 
 
@@ -797,12 +797,12 @@ async def test_on_poll_message_command(monkeypatch):
     monkeypatch.setattr(adapter, "handle_message", fake_handle)
     msg = {
         "id": 60, "token": "room1", "actorType": "users",
-        "actorId": "niko", "actorDisplayName": "Niko",
+        "actorId": "testuser", "actorDisplayName": "Test User",
         "message": "/reset", "messageParameters": {}, "systemMessage": "",
     }
     await adapter._on_poll_message(msg, "room1")
     assert forwarded == []
-    assert any("zurückgesetzt" in s.lower() for s in sent)
+    assert any("session reset" in s.lower() for s in sent)
 
 
 # ---------------------------------------------------------------------------
@@ -944,7 +944,7 @@ async def test_on_poll_message_with_image(monkeypatch, tmp_path):
 
     msg = {
         "id": 70, "token": "room1", "actorType": "users",
-        "actorId": "niko", "actorDisplayName": "Niko",
+        "actorId": "testuser", "actorDisplayName": "Test User",
         "message": "{file}",
         "messageParameters": {
             "file": {
@@ -1044,7 +1044,7 @@ async def test_voice_memo_with_stt(monkeypatch, tmp_path):
 
     msg = {
         "id": 70, "token": "room1", "actorType": "users",
-        "actorId": "niko", "actorDisplayName": "Niko",
+        "actorId": "testuser", "actorDisplayName": "Test User",
         "message": "{file}",
         "messageParameters": {
             "file": {

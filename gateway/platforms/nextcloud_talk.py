@@ -100,6 +100,7 @@ class TalkUserClient:
                 auth=self._auth,
                 headers=self._OCS_HEADERS,
                 timeout=poll_timeout + 15,
+                limits=httpx.Limits(max_keepalive_connections=0),
             )
 
     async def close(self) -> None:
@@ -430,18 +431,18 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
                 self._session_store.reset_session(session_key)
             except Exception as exc:
                 logger.exception("talk: reset session failed")
-                return f"❌ Konnte Session nicht zurücksetzen: {exc}"
-            return "✓ Session zurückgesetzt."
+                return f"❌ Failed to reset session: {exc}"
+            return "✓ Session reset."
 
         if cmd == "/help":
             return (
-                "**Hermes auf Nextcloud Talk**\n\n"
-                "Befehle:\n"
-                "- `/new` oder `/reset` — Session zurücksetzen\n"
-                "- `/help` — diese Hilfe\n\n"
-                "Alles andere wird von Hermes verarbeitet. "
-                "Für Hermes-interne Befehle wie `/model`, `/status` "
-                "usw. einfach eingeben."
+                "**Hermes on Nextcloud Talk**\n\n"
+                "Commands:\n"
+                "- `/new` or `/reset` — Reset session\n"
+                "- `/help` — Show this help\n\n"
+                "Everything else is processed by Hermes. "
+                "For built-in commands like `/model`, `/status`, "
+                "etc. just type them directly."
             )
 
         return None
@@ -595,7 +596,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
         ack_msg_id = None
         if self._show_status_updates:
             try:
-                ok, mid, _ = await self._client.send_message(chat_id, "\u23f3 denke nach...")
+                ok, mid, _ = await self._client.send_message(chat_id, "\u23f3 Thinking...")
                 if ok:
                     ack_msg_id = mid
             except Exception:

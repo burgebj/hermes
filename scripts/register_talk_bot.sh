@@ -3,7 +3,7 @@
 # Helper for installing the Hermes bot in Nextcloud Talk.
 #
 # Usage:
-#   ./scripts/register_talk_bot.sh [<lxc-ip>] [<nc-container>]
+#   ./scripts/register_talk_bot.sh <hermes-host-ip> [<nc-container>]
 #
 # Environment variables (alternative to positional args):
 #   NC_CONTAINER   Name of the Docker container running Nextcloud
@@ -16,7 +16,7 @@
 
 set -e
 
-LXC_IP="${1:-10.254.1.119}"
+LXC_IP="${1:?Usage: $0 <hermes-host-ip>}"
 NC_CONTAINER="${2:-${NC_CONTAINER:-nextcloud}}"
 WEBHOOK_URL="http://${LXC_IP}:8765/talk/webhook"
 SECRET="$(openssl rand -hex 32)"
@@ -51,12 +51,12 @@ Step 2 — For each Talk conversation you want Hermes in, run:
   (The conversation token is the random string in the Talk URL, e.g.
   https://nextcloud.example.com/call/n3xtc10ud → token is "n3xtc10ud")
 
-Step 3 — On the LXC, add these lines to /home/niko/.hermes/.env:
+Step 3 — On the Hermes host, add these lines to ~/.hermes/.env:
 
   NEXTCLOUD_TALK_URL=https://<your-nextcloud-domain>
   NEXTCLOUD_TALK_BOT_SECRET=${SECRET}
 
-  Then: chmod 600 /home/niko/.hermes/.env
+  Then: chmod 600 ~/.hermes/.env
 
 Step 4 — Restart the 'hermes gateway' process so it picks up the env vars.
 
@@ -69,7 +69,7 @@ Step 5 — In a Talk DM with the Hermes bot, send "ping". You should get a reply
   (same args, no docker exec wrapper)
 
 - If the bot replies from the wrong endpoint or never replies at all,
-  check /home/niko/.hermes/sessions/request_dump_*.json for the failed
+  check ~/.hermes/sessions/request_dump_*.json for the failed
   request details. See docs/superpowers/plans/ for troubleshooting.
 
 EOF
