@@ -111,6 +111,7 @@ class NotificationClient:
                 "Accept": "application/json",
             },
             timeout=30.0,
+            limits=httpx.Limits(max_keepalive_connections=0),
         )
 
     async def fetch_notifications(self, etag: str = "") -> tuple:
@@ -197,6 +198,15 @@ class NextcloudNotificationService(BaseService):
         self._last_seen_id = 0
         self._last_activity_id = 0
 
+    def _on_poll_done(self, task: asyncio.Task):
+        """Log if poll task dies unexpectedly."""
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc:
+            logger.error("[NC Notifications] Poll task died: %s", exc, exc_info=exc)
+
     async def start(self) -> bool:
         if not self._nc_url or not self._password:
             logger.warning("NC Notifications: missing nextcloud_url or password")
@@ -216,6 +226,7 @@ class NextcloudNotificationService(BaseService):
             except Exception as e:
                 logger.warning("[NC Notifications] Activity baseline fetch failed: %s", e)
         self._poll_task = asyncio.create_task(self._poll_loop())
+        self._poll_task.add_done_callback(self._on_poll_done)
         logger.info("[NC Notifications] Started (poll_interval=%ds, stored_events=%d)",
                     self._poll_interval, self._store.count())
         return True
@@ -312,6 +323,12 @@ class NextcloudNotificationService(BaseService):
             text += f"\n{event.message}"
         if event.link:
             text += f"\nLink: {event.link}"
+
+        # For calendar reminders: add tool guidance
+        if event.app == "dav" and "calendar" in event.object_type.lower():
+            text += "\n\n[System] This is a calendar reminder. Execute the task described above."
+            text += " Use skill_view() to load relevant skills, then execute_code to run commands."
+            text += " Do NOT use non-existent tools — check available tools first."
 
         # Use the event sender as user_id so the notification lands in their
         # existing chat session, preserving context for follow-up questions.
