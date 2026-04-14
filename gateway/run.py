@@ -7106,6 +7106,16 @@ class GatewayRunner:
                     svc_config.setdefault("username", talk_cfg.extra.get("username", "hermes"))
                     svc_config.setdefault("app_password_env", talk_cfg.extra.get("app_password_env", "NEXTCLOUD_TALK_APP_PASSWORD"))
             return NextcloudNotificationService(svc_config)
+        elif name == "nextcloud_files":
+            from gateway.services.nextcloud_files import NextcloudFilesService
+            svc_config = dict(config.get("extra", config))
+            if not svc_config.get("nextcloud_url"):
+                talk_cfg = self.config.platforms.get(Platform.NEXTCLOUD_TALK) if hasattr(Platform, "NEXTCLOUD_TALK") else None
+                if talk_cfg and talk_cfg.extra:
+                    svc_config.setdefault("nextcloud_url", talk_cfg.extra.get("nextcloud_url", ""))
+                    svc_config.setdefault("username", talk_cfg.extra.get("username", "hermes"))
+                    svc_config.setdefault("app_password_env", talk_cfg.extra.get("app_password_env", "NEXTCLOUD_TALK_APP_PASSWORD"))
+            return NextcloudFilesService(svc_config)
         logger.warning("Unknown service: %s", name)
         return None
 
