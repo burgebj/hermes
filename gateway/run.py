@@ -766,6 +766,8 @@ def _collect_auto_append_media_tags(
 
     return media_tags, has_voice_directive
 
+from gateway.response_filters import normalize_live_gateway_response
+
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
 # Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
@@ -9594,13 +9596,22 @@ class GatewayRunner:
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
 
-            response = agent_result.get("final_response") or ""
+            response = normalize_live_gateway_response(
+                agent_result.get("final_response"),
+                failed=bool(agent_result.get("failed")),
+            )
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
             # produce visible content after exhausting all retries (nudge,
             # prefill, empty-retry, fallback).  Sending the raw sentinel
             # looks like a bug; a short explanation is more helpful.
+            #
+            # NOTE: normalize_live_gateway_response() canonicalizes "(empty)"
+            # into the silent-marker set and would return "" for it — but only
+            # when failed=False. A genuine empty-generation failure arrives with
+            # failed=True, so the sentinel survives normalization and is
+            # rewritten into the explanation below.
             if response == "(empty)":
                 response = (
                     "⚠️ The model returned no response after processing tool "
@@ -17976,6 +17987,7 @@ class GatewayRunner:
                     else:
                         _stream_consumer.on_commentary(text)
                     return
+                text = normalize_live_gateway_response(text)
                 if already_streamed or not _status_adapter or not str(text or "").strip():
                     return
                 safe_schedule_threadsafe(
@@ -19214,7 +19226,10 @@ class GatewayRunner:
                         or _previewed
                         or (_sc and getattr(_sc, "final_content_delivered", False))
                     )
-                    first_response = result.get("final_response", "")
+                    first_response = normalize_live_gateway_response(
+                        result.get("final_response"),
+                        failed=bool(result.get("failed")),
+                    )
                     if first_response and not _already_streamed:
                         try:
                             logger.info(
