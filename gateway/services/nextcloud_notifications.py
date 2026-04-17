@@ -328,10 +328,9 @@ class NextcloudNotificationService(BaseService):
 
         # For calendar reminders: add tool guidance
         if event.app == "dav" and "calendar" in event.object_type.lower():
-            text += "\n\n[System] Dies ist ein Kalender-Reminder. Fuehre die Beschreibung als Aufgabe aus."
-            text += " Fuer Email-Aufgaben: skill_view(\"himalaya\") laden, dann execute_code mit himalaya CLI."
-            text += " Fuer HA-Aufgaben: ha_get_state/ha_call_service nutzen."
-            text += " KEIN Tool namens \"email\" verwenden — das existiert nicht."
+            text += "\n\n[System] This is a calendar reminder. Execute the task described above."
+            text += " Use skill_view() to load relevant skills, then execute_code to run commands."
+            text += " Do NOT use non-existent tools — check available tools first."
 
         # Use the event sender as user_id so the notification lands in their
         # existing chat session, preserving context for follow-up questions.

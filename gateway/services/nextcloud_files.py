@@ -58,6 +58,10 @@ class FileSyncState:
         self._entries[path] = {"etag": etag, "size": size, "mtime": mtime}
         self.save()
 
+    def set_nosave(self, path: str, etag: str, size: int, mtime: float):
+        """Set entry without saving — call save() or async_save() after batch."""
+        self._entries[path] = {"etag": etag, "size": size, "mtime": mtime}
+
     def remove(self, path: str):
         self._entries.pop(path, None)
         self.save()
@@ -392,10 +396,16 @@ class NextcloudFilesService(BaseService):
         pass
 
     def _to_remote_path(self, local_path: Path) -> str:
+        resolved = local_path.resolve()
+        if not str(resolved).startswith(str(self._local_path.resolve())):
+            raise ValueError(f"Path traversal blocked: {local_path}")
         return "/" + str(local_path.relative_to(self._local_path))
 
     def _to_local_path(self, remote_path: str) -> Path:
-        return self._local_path / remote_path.lstrip("/")
+        candidate = (self._local_path / remote_path.lstrip("/")).resolve()
+        if not str(candidate).startswith(str(self._local_path.resolve())):
+            raise ValueError(f"Path traversal blocked: {remote_path}")
+        return candidate
 
     async def _download_file(self, remote_path: str, file_info: FileInfo) -> bool:
         local_path = self._to_local_path(remote_path)
@@ -432,7 +442,8 @@ class NextcloudFilesService(BaseService):
 
     async def _upload_file(self, local_path: Path):
         remote_path = self._to_remote_path(local_path)
-        file_size = local_path.stat().st_size
+        file_stat = await asyncio.to_thread(local_path.stat)
+        file_size = file_stat.st_size
         self._uploading.add(local_path)
 
         # Ensure parent directory exists on NC (WebDAV PUT doesn't auto-create)
@@ -450,7 +461,7 @@ class NextcloudFilesService(BaseService):
         if etag:
             self._sync_state.set(
                 remote_path, etag=etag,
-                size=file_size, mtime=local_path.stat().st_mtime,
+                size=file_size, mtime=file_stat.st_mtime,
             )
             logger.info("[NC Files] Uploaded %s", remote_path)
 

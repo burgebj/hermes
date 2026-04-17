@@ -13,10 +13,10 @@ def test_service_event_construction():
         app="deck",
         object_type="card",
         object_id="42",
-        subject="Niko assigned you a card",
+        subject="Alice assigned you a card",
         message="",
-        link="https://nextcloud.syring.it/apps/deck/#/board/5/card/42",
-        sender="niko",
+        link="https://nc.example.com/apps/deck/#/board/5/card/42",
+        sender="alice",
         timestamp="2026-04-10T12:00:00+02:00",
         action="react",
         raw={"notification_id": 123},
@@ -85,18 +85,18 @@ def test_parse_notification_to_service_event():
         "app": "deck",
         "object_type": "card",
         "object_id": "42",
-        "subject": "Niko Syring assigned you a card",
+        "subject": "Alice assigned you a card",
         "message": "",
-        "link": "https://nextcloud.syring.it/apps/deck/#/board/5/card/42",
+        "link": "https://nc.example.com/apps/deck/#/board/5/card/42",
         "datetime": "2026-04-10T12:00:00+02:00",
-        "user": "niko",
+        "user": "alice",
     }
     rules = [{"app": "deck", "object_type": "card", "action": "react"}]
     event = _parse_notification(raw, rules)
     assert event.notification_id == 965
     assert event.app == "deck"
     assert event.action == "react"
-    assert event.sender == "niko"
+    assert event.sender == "alice"
 
 
 def test_parse_notification_files_sharing():
@@ -106,11 +106,11 @@ def test_parse_notification_files_sharing():
         "app": "files_sharing",
         "object_type": "remote_share",
         "object_id": "15",
-        "subject": "Niko shared report.pdf with you",
+        "subject": "Alice shared report.pdf with you",
         "message": "",
         "link": "https://nc.example.com/f/15",
         "datetime": "2026-04-10T13:00:00+02:00",
-        "user": "niko",
+        "user": "alice",
     }
     rules = [{"app": "files_sharing", "action": "react"}, {"app": "*", "action": "silent"}]
     event = _parse_notification(raw, rules)
@@ -219,7 +219,7 @@ async def test_react_event_calls_handle_message():
         subject="Test card assigned",
         message="",
         link="https://nc.example.com/deck/card/42",
-        sender="niko",
+        sender="alice",
         timestamp="2026-04-10T12:00:00+02:00",
         action="react",
         raw={},
@@ -282,7 +282,7 @@ async def test_silent_event_stored():
         subject="New comment",
         message="",
         link="",
-        sender="niko",
+        sender="alice",
         timestamp="2026-04-10T12:00:00+02:00",
         action="silent",
         raw={},
@@ -305,7 +305,7 @@ def test_notification_store_add_and_query():
     event = ServiceEvent(
         service="test", notification_id=1, app="deck",
         object_type="card", object_id="1", subject="Test",
-        message="", link="", sender="niko",
+        message="", link="", sender="alice",
         timestamp="2026-04-10T12:00:00+02:00", action="silent", raw={},
     )
     store.add(event)
@@ -326,7 +326,7 @@ def test_notification_store_persists_across_instances():
     store1.add(ServiceEvent(
         service="test", notification_id=1, app="deck",
         object_type="card", object_id="1", subject="Persist test",
-        message="", link="", sender="niko",
+        message="", link="", sender="alice",
         timestamp="2026-04-10T12:00:00+02:00", action="silent", raw={},
     ))
 
@@ -346,7 +346,7 @@ def test_notification_store_query_by_app():
         store.add(ServiceEvent(
             service="test", notification_id=i, app=app,
             object_type="", object_id=str(i), subject=f"Event {i}",
-            message="", link="", sender="niko",
+            message="", link="", sender="alice",
             timestamp=f"2026-04-10T{12+i}:00:00+02:00", action="silent", raw={},
         ))
 
@@ -366,7 +366,7 @@ def test_notification_store_max_events():
         store.add(ServiceEvent(
             service="test", notification_id=i, app="test",
             object_type="", object_id=str(i), subject=f"Event {i}",
-            message="", link="", sender="niko",
+            message="", link="", sender="alice",
             timestamp="2026-04-10T12:00:00+02:00", action="silent", raw={},
         ))
 
@@ -396,7 +396,7 @@ async def test_silent_event_uses_persistent_store():
     event = ServiceEvent(
         service="test", notification_id=300, app="comments",
         object_type="", object_id="1", subject="Stored event",
-        message="", link="", sender="niko",
+        message="", link="", sender="alice",
         timestamp="2026-04-10T12:00:00+02:00", action="silent", raw={},
     )
     await svc.on_event(event)
@@ -430,20 +430,20 @@ def test_rules_type_without_object_type():
 
 def test_extract_sender_from_activity_user_field():
     from gateway.services.nextcloud_notifications import _extract_sender
-    raw = {"user": "niko", "subject_rich": ["{user} created file", {"user": {"type": "user", "id": "niko"}}]}
-    assert _extract_sender(raw) == "niko"
+    raw = {"user": "alice", "subject_rich": ["{user} created file", {"user": {"type": "user", "id": "alice"}}]}
+    assert _extract_sender(raw) == "alice"
 
 
 def test_extract_sender_from_notification_actor():
     from gateway.services.nextcloud_notifications import _extract_sender
-    raw = {"user": "hermes", "subjectRichParameters": {"actor": {"id": "niko"}}}
-    assert _extract_sender(raw) == "niko"
+    raw = {"user": "hermes", "subjectRichParameters": {"actor": {"id": "alice"}}}
+    assert _extract_sender(raw) == "alice"
 
 
 def test_extract_sender_fallback_to_user():
     from gateway.services.nextcloud_notifications import _extract_sender
-    raw = {"user": "niko"}
-    assert _extract_sender(raw) == "niko"
+    raw = {"user": "alice"}
+    assert _extract_sender(raw) == "alice"
 
 
 # === File event check ===
