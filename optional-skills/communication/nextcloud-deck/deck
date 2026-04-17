@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Nextcloud Deck CLI Helper — full feature set
+set -eo pipefail
+
+source ~/.hermes/.env
+NC_URL="${NEXTCLOUD_URL:?Set NEXTCLOUD_URL in .env}"
+NC_USER="${NEXTCLOUD_USER:-hermes}"
+NC_PASS="${NEXTCLOUD_TALK_APP_PASSWORD:?Set NEXTCLOUD_TALK_APP_PASSWORD in .env}"
+API="$NC_URL/index.php/apps/deck/api/v1.0"
+OCS="$NC_URL/ocs/v2.php/apps/deck/api/v1.0"
+AUTH="$NC_USER:$NC_PASS"
+HDR=(-H "OCS-APIRequest: true" -H "Accept: application/json" -H "Content-Type: application/json")
+
+_get()  { curl -s -u "$AUTH" "${HDR[@]}" "$API$1"; }
+_post() { curl -s -u "$AUTH" "${HDR[@]}" -X POST -d "$2" "$API$1"; }
+_put()  { curl -s -u "$AUTH" "${HDR[@]}" -X PUT -d "$2" "$API$1"; }
+_del()  { curl -s -u "$AUTH" "${HDR[@]}" -X DELETE "$API$1"; }
+_ocs_get()  { curl -s -u "$AUTH" "${HDR[@]}" "$OCS$1"; }
+_ocs_post() { curl -s -u "$AUTH" "${HDR[@]}" -X POST -d "$2" "$OCS$1"; }
+_ocs_del()  { curl -s -u "$AUTH" "${HDR[@]}" -X DELETE "$OCS$1"; }
+
+# Build JSON safely via jq — handles quotes, newlines, unicode, parens
+_json() { jq -n "$@"; }
+
+case "${1:-help}" in
+  # === Boards ===
+  boards)
+    _get "/boards" ;;
+  board)
+    _get "/boards/${2:?usage: deck board BOARD_ID}" ;;
+  create-board)
+    TITLE="${2:?usage: deck create-board TITLE [COLOR]}"
+    COLOR="${3:-0800fd}"
+    _post "/boards" "$(_json --arg t "$TITLE" --arg c "$COLOR" '{title:$t,color:$c}')" ;;
+  delete-board)
+    _del "/boards/${2:?usage: deck delete-board BOARD_ID}" ;;
+
+  # === Stacks ===
+  stacks)
+    _get "/boards/${2:?usage: deck stacks BOARD_ID}/stacks" ;;
+  create-stack)
+    BOARD="${2:?usage: deck create-stack BOARD_ID TITLE}"
+    TITLE="${3:?}"
+    _post "/boards/$BOARD/stacks" "$(_json --arg t "$TITLE" '{title:$t,order:999}')" ;;
+  delete-stack)
+    BOARD="${2:?usage: deck delete-stack BOARD_ID STACK_ID}"
+    STACK="${3:?}"
+    _del "/boards/$BOARD/stacks/$STACK" ;;
+
+  # === Cards ===
+  cards)
+    _get "/boards/${2:?usage: deck cards BOARD_ID}/stacks" ;;
+  card)
+    BOARD="${2:?usage: deck card BOARD_ID STACK_ID CARD_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    _get "/boards/$BOARD/stacks/$STACK/cards/$CARD" ;;
+  create-card)
+    BOARD="${2:?usage: deck create-card BOARD_ID STACK_ID TITLE [DESCRIPTION]}"
+    STACK="${3:?}"
+    TITLE="${4:?}"
+    DESC="${5:-}"
+    _post "/boards/$BOARD/stacks/$STACK/cards" "$(_json --arg t "$TITLE" --arg d "$DESC" '{title:$t,type:"plain",order:999,description:$d}')" ;;
+  create-card-stdin)
+    BOARD="${2:?usage: echo 'description' | deck create-card-stdin BOARD_ID STACK_ID TITLE}"
+    STACK="${3:?}"
+    TITLE="${4:?}"
+    DESC=$(cat)
+    _post "/boards/$BOARD/stacks/$STACK/cards" "$(_json --arg t "$TITLE" --arg d "$DESC" '{title:$t,type:"plain",order:999,description:$d}')" ;;
+  update-card)
+    BOARD="${2:?usage: deck update-card BOARD_ID STACK_ID CARD_ID TITLE [DESCRIPTION]}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    TITLE="${5:?}"
+    DESC="${6:-}"
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" --arg d "$DESC" '{title:$t,type:"plain",owner:"hermes",description:$d,order:999}')" ;;
+  update-card-stdin)
+    BOARD="${2:?usage: echo 'description' | deck update-card-stdin BOARD_ID STACK_ID CARD_ID TITLE}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    TITLE="${5:?}"
+    DESC=$(cat)
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" --arg d "$DESC" '{title:$t,type:"plain",owner:"hermes",description:$d,order:999}')" ;;
+  move-card)
+    BOARD="${2:?usage: deck move-card BOARD_ID CARD_ID TARGET_STACK_ID}"
+    CARD="${3:?}"
+    TARGET="${4:?}"
+    _put "/boards/$BOARD/stacks/$TARGET/reorder" "{\"cardId\":$CARD,\"order\":0,\"stackId\":$TARGET}" ;;
+  delete-card)
+    BOARD="${2:?usage: deck delete-card BOARD_ID STACK_ID CARD_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    _del "/boards/$BOARD/stacks/$STACK/cards/$CARD" ;;
+  set-duedate)
+    BOARD="${2:?usage: deck set-duedate BOARD_ID STACK_ID CARD_ID DUEDATE}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    DUEDATE="${5:?}"  # ISO format: 2026-04-20T12:00:00+00:00
+    TITLE=$(_get "/boards/$BOARD/stacks/$STACK/cards/$CARD" | jq -r '.title')
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" --arg dd "$DUEDATE" '{title:$t,type:"plain",owner:"hermes",order:999,duedate:$dd}')" ;;
+  done)
+    BOARD="${2:?usage: deck done BOARD_ID STACK_ID CARD_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    TITLE=$(_get "/boards/$BOARD/stacks/$STACK/cards/$CARD" | jq -r '.title')
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" '{title:$t,type:"plain",owner:"hermes",order:999,done:true}')" ;;
+  undone)
+    BOARD="${2:?usage: deck undone BOARD_ID STACK_ID CARD_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    TITLE=$(_get "/boards/$BOARD/stacks/$STACK/cards/$CARD" | jq -r '.title')
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" '{title:$t,type:"plain",owner:"hermes",order:999,done:null}')" ;;
+
+  # === Labels ===
+  labels)
+    _get "/boards/${2:?usage: deck labels BOARD_ID}" | jq '[.labels[] | {id,title,color}]' ;;
+  create-label)
+    BOARD="${2:?usage: deck create-label BOARD_ID TITLE COLOR}"
+    TITLE="${3:?}"
+    COLOR="${4:?}"  # hex without #, e.g. FF7A66
+    _post "/boards/$BOARD/labels" "$(_json --arg t "$TITLE" --arg c "$COLOR" '{title:$t,color:$c}')" ;;
+  assign-label)
+    BOARD="${2:?usage: deck assign-label BOARD_ID STACK_ID CARD_ID LABEL_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    LABEL="${5:?}"
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD/assignLabel" "{\"labelId\":$LABEL}" ;;
+  remove-label)
+    BOARD="${2:?usage: deck remove-label BOARD_ID STACK_ID CARD_ID LABEL_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    LABEL="${5:?}"
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD/removeLabel" "{\"labelId\":$LABEL}" ;;
+
+  # === Users ===
+  assign-user)
+    BOARD="${2:?usage: deck assign-user BOARD_ID STACK_ID CARD_ID USER_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    USER="${5:?}"
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD/assignUser" "$(_json --arg u "$USER" '{userId:$u}')" ;;
+  unassign-user)
+    BOARD="${2:?usage: deck unassign-user BOARD_ID STACK_ID CARD_ID USER_ID}"
+    STACK="${3:?}"
+    CARD="${4:?}"
+    USER="${5:?}"
+    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD/unassignUser" "$(_json --arg u "$USER" '{userId:$u}')" ;;
+
+  # === Comments ===
+  comments)
+    _ocs_get "/cards/${2:?usage: deck comments CARD_ID}/comments" ;;
+  add-comment)
+    CARD="${2:?usage: deck add-comment CARD_ID MESSAGE}"
+    MSG="${3:?}"
+    _ocs_post "/cards/$CARD/comments" "$(_json --arg m "$MSG" '{message:$m}')" ;;
+  add-comment-stdin)
+    CARD="${2:?usage: echo 'message' | deck add-comment-stdin CARD_ID}"
+    MSG=$(cat)
+    _ocs_post "/cards/$CARD/comments" "$(_json --arg m "$MSG" '{message:$m}')" ;;
+  delete-comment)
+    CARD="${2:?usage: deck delete-comment CARD_ID COMMENT_ID}"
+    COMMENT="${3:?}"
+    _ocs_del "/cards/$CARD/comments/$COMMENT" ;;
+
+  help|*)
+    echo "Usage: deck <command> [args]"
+    echo ""
+    echo "Board & Stack:"
+    echo "  boards                                    List all boards"
+    echo "  board <id>                                Board details with labels"
+    echo "  create-board <title> [color]              Create board"
+    echo "  delete-board <id>                         Delete board"
+    echo "  stacks <board>                            List stacks"
+    echo "  create-stack <board> <title>              Create stack"
+    echo "  delete-stack <board> <stack>              Delete stack"
+    echo ""
+    echo "Cards:"
+    echo "  cards <board>                             All cards (via stacks)"
+    echo "  card <board> <stack> <card>               Single card details"
+    echo "  create-card <board> <stack> <title> [desc]  Create card"
+    echo "  create-card-stdin <board> <stack> <title>   Create card (desc from stdin)"
+    echo "  update-card <board> <stack> <card> <title> [desc]  Update card"
+    echo "  update-card-stdin <board> <stack> <card> <title>   Update card (desc from stdin)"
+    echo "  move-card <board> <card> <target_stack>   Move card"
+    echo "  delete-card <board> <stack> <card>        Delete card"
+    echo "  set-duedate <board> <stack> <card> <date> Set due date (ISO)"
+    echo "  done <board> <stack> <card>               Mark card done"
+    echo "  undone <board> <stack> <card>             Mark card not done"
+    echo ""
+    echo "Labels:"
+    echo "  labels <board>                            List labels"
+    echo "  create-label <board> <title> <color>      Create label"
+    echo "  assign-label <board> <stack> <card> <label>  Assign label"
+    echo "  remove-label <board> <stack> <card> <label>  Remove label"
+    echo ""
+    echo "Users:"
+    echo "  assign-user <board> <stack> <card> <user>   Assign user"
+    echo "  unassign-user <board> <stack> <card> <user> Unassign user"
+    echo ""
+    echo "Comments:"
+    echo "  comments <card>                           List comments"
+    echo "  add-comment <card> <message>              Add comment"
+    echo "  add-comment-stdin <card>                  Add comment (from stdin)"
+    echo "  delete-comment <card> <comment_id>        Delete comment"
+    ;;
+esac

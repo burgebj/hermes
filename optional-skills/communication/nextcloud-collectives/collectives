@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# Nextcloud Collectives CLI Helper — full feature set
+set -eo pipefail
+
+source ~/.hermes/.env
+NC_URL="${NEXTCLOUD_URL:?Set NEXTCLOUD_URL in .env}"
+NC_USER="${NEXTCLOUD_USER:-hermes}"
+NC_PASS="${NEXTCLOUD_TALK_APP_PASSWORD:?Set NEXTCLOUD_TALK_APP_PASSWORD in .env}"
+API="$NC_URL/ocs/v2.php/apps/collectives/api/v1.0"
+DAV="$NC_URL/remote.php/dav/files/$NC_USER"
+AUTH="$NC_USER:$NC_PASS"
+HDR=(-H "OCS-APIRequest: true" -H "Accept: application/json" -H "Content-Type: application/json")
+
+_get()    { curl -s -u "$AUTH" "${HDR[@]}" "$API$1"; }
+_post()   { curl -s -u "$AUTH" "${HDR[@]}" -X POST -d "$2" "$API$1"; }
+_put()    { curl -s -u "$AUTH" "${HDR[@]}" -X PUT -d "$2" "$API$1"; }
+_patch()  { curl -s -u "$AUTH" "${HDR[@]}" -X PATCH "$API$1"; }
+_del()    { curl -s -u "$AUTH" "${HDR[@]}" -X DELETE "$API$1"; }
+
+# WebDAV path for a page: /.Collectives/<collective>/<filePath>/<fileName>
+# Uses jq to extract fields, encodes spaces as %20 for curl
+_dav_path() {
+  local CID="$1" PID="$2"
+  _get "/collectives/$CID/pages/$PID" | jq -r '
+    .ocs.data |
+    (if .page then .page else . end) |
+    "/" + .collectivePath + "/" +
+    (if .filePath != "" then .filePath + "/" else "" end) +
+    .fileName
+  ' | sed 's/ /%20/g'
+}
+
+case "${1:-help}" in
+
+  # === Collectives ===
+  collectives)
+    _get "/collectives" ;;
+  create-collective)
+    NAME="${2:?usage: collectives create-collective NAME [EMOJI]}"
+    EMOJI="${3:-}"
+    if [ -n "$EMOJI" ]; then
+      _post "/collectives" "{\"name\":\"$NAME\",\"emoji\":\"$EMOJI\"}"
+    else
+      _post "/collectives" "{\"name\":\"$NAME\"}"
+    fi ;;
+  update-collective)
+    CID="${2:?usage: collectives update-collective COLLECTIVE_ID EMOJI}"
+    EMOJI="${3:?}"
+    _put "/collectives/$CID" "{\"emoji\":\"$EMOJI\"}" ;;
+  trash-collective)
+    _del "/collectives/${2:?usage: collectives trash-collective COLLECTIVE_ID}" ;;
+  trashed-collectives)
+    _get "/collectives/trash" ;;
+  restore-collective)
+    _patch "/collectives/trash/${2:?usage: collectives restore-collective COLLECTIVE_ID}" ;;
+  delete-collective)
+    CID="${2:?usage: collectives delete-collective COLLECTIVE_ID [delete-team]}"
+    CIRCLE="${3:-false}"
+    _del "/collectives/trash/$CID?circle=$CIRCLE" ;;
+  set-edit-level)
+    CID="${2:?usage: collectives set-edit-level COLLECTIVE_ID LEVEL}"
+    LEVEL="${3:?}"
+    _put "/collectives/$CID/editLevel" "{\"level\":$LEVEL}" ;;
+  set-share-level)
+    CID="${2:?usage: collectives set-share-level COLLECTIVE_ID LEVEL}"
+    LEVEL="${3:?}"
+    _put "/collectives/$CID/shareLevel" "{\"level\":$LEVEL}" ;;
+  set-page-mode)
+    CID="${2:?usage: collectives set-page-mode COLLECTIVE_ID MODE}"
+    MODE="${3:?}"
+    _put "/collectives/$CID/pageMode" "{\"mode\":$MODE}" ;;
+
+  # === Pages ===
+  pages)
+    _get "/collectives/${2:?usage: collectives pages COLLECTIVE_ID}/pages" ;;
+  page)
+    CID="${2:?usage: collectives page COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    _get "/collectives/$CID/pages/$PID" ;;
+  create-page)
+    CID="${2:?usage: collectives create-page COLLECTIVE_ID PARENT_ID TITLE}"
+    PARENT="${3:?}"
+    TITLE="${4:?}"
+    _post "/collectives/$CID/pages/$PARENT" "{\"title\":\"$TITLE\"}" ;;
+  move-page)
+    CID="${2:?usage: collectives move-page COLLECTIVE_ID PAGE_ID PARENT_ID [INDEX]}"
+    PID="${3:?}"
+    PARENT="${4:?}"
+    IDX="${5:-0}"
+    _put "/collectives/$CID/pages/$PID" "{\"parentId\":$PARENT,\"index\":$IDX}" ;;
+  copy-page)
+    CID="${2:?usage: collectives copy-page COLLECTIVE_ID PAGE_ID PARENT_ID}"
+    PID="${3:?}"
+    PARENT="${4:?}"
+    _put "/collectives/$CID/pages/$PID" "{\"parentId\":$PARENT,\"copy\":true}" ;;
+  trash-page)
+    CID="${2:?usage: collectives trash-page COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    _del "/collectives/$CID/pages/$PID" ;;
+  trashed-pages)
+    _get "/collectives/${2:?usage: collectives trashed-pages COLLECTIVE_ID}/pages/trash" ;;
+  restore-page)
+    CID="${2:?usage: collectives restore-page COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    _patch "/collectives/$CID/pages/trash/$PID" ;;
+  delete-page)
+    CID="${2:?usage: collectives delete-page COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    _del "/collectives/$CID/pages/trash/$PID" ;;
+  touch-page)
+    CID="${2:?usage: collectives touch-page COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    _get "/collectives/$CID/pages/$PID/touch" ;;
+  set-page-emoji)
+    CID="${2:?usage: collectives set-page-emoji COLLECTIVE_ID PAGE_ID EMOJI}"
+    PID="${3:?}"
+    EMOJI="${4:?}"
+    _put "/collectives/$CID/pages/$PID/emoji" "{\"emoji\":\"$EMOJI\"}" ;;
+  set-page-width)
+    CID="${2:?usage: collectives set-page-width COLLECTIVE_ID PAGE_ID true|false}"
+    PID="${3:?}"
+    FULL="${4:?}"
+    _put "/collectives/$CID/pages/$PID/fullWidth" "{\"fullWidth\":$FULL}" ;;
+
+  # === Page Content (WebDAV) ===
+  read-page)
+    CID="${2:?usage: collectives read-page COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    WPATH=$(_dav_path "$CID" "$PID")
+    curl -s -u "$AUTH" "$DAV$WPATH" ;;
+  write-page)
+    CID="${2:?usage: collectives write-page COLLECTIVE_ID PAGE_ID FILE_PATH}"
+    PID="${3:?}"
+    FILE="${4:?}"
+    WPATH=$(_dav_path "$CID" "$PID")
+    curl -s -u "$AUTH" -X PUT -T "$FILE" "$DAV$WPATH"
+    _get "/collectives/$CID/pages/$PID/touch" >/dev/null ;;
+  write-page-stdin)
+    CID="${2:?usage: echo 'markdown' | collectives write-page-stdin COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    TMPFILE=$(mktemp)
+    trap "rm -f $TMPFILE" EXIT
+    cat > "$TMPFILE"
+    WPATH=$(_dav_path "$CID" "$PID")
+    curl -s -u "$AUTH" -X PUT -T "$TMPFILE" "$DAV$WPATH"
+    _get "/collectives/$CID/pages/$PID/touch" >/dev/null ;;
+
+  # === Tags ===
+  tags)
+    _get "/collectives/${2:?usage: collectives tags COLLECTIVE_ID}/tags" ;;
+  create-tag)
+    CID="${2:?usage: collectives create-tag COLLECTIVE_ID NAME COLOR}"
+    NAME="${3:?}"
+    COLOR="${4:?}"
+    _post "/collectives/$CID/tags" "{\"name\":\"$NAME\",\"color\":\"$COLOR\"}" ;;
+  update-tag)
+    CID="${2:?usage: collectives update-tag COLLECTIVE_ID TAG_ID NAME COLOR}"
+    TAG="${3:?}"
+    NAME="${4:?}"
+    COLOR="${5:?}"
+    _put "/collectives/$CID/tags/$TAG" "{\"name\":\"$NAME\",\"color\":\"$COLOR\"}" ;;
+  delete-tag)
+    CID="${2:?usage: collectives delete-tag COLLECTIVE_ID TAG_ID}"
+    TAG="${3:?}"
+    _del "/collectives/$CID/tags/$TAG" ;;
+  tag-page)
+    CID="${2:?usage: collectives tag-page COLLECTIVE_ID PAGE_ID TAG_ID}"
+    PID="${3:?}"
+    TAG="${4:?}"
+    _put "/collectives/$CID/pages/$PID/tags/$TAG" "{}" ;;
+  untag-page)
+    CID="${2:?usage: collectives untag-page COLLECTIVE_ID PAGE_ID TAG_ID}"
+    PID="${3:?}"
+    TAG="${4:?}"
+    _del "/collectives/$CID/pages/$PID/tags/$TAG" ;;
+
+  # === Attachments ===
+  attachments)
+    CID="${2:?usage: collectives attachments COLLECTIVE_ID PAGE_ID}"
+    PID="${3:?}"
+    _get "/collectives/$CID/pages/$PID/attachments" ;;
+  upload-attachment)
+    CID="${2:?usage: collectives upload-attachment COLLECTIVE_ID PAGE_ID FILE_PATH}"
+    PID="${3:?}"
+    FILE="${4:?}"
+    curl -s -u "$AUTH" -H "OCS-APIRequest: true" -H "Accept: application/json" \
+      -X POST -F "file=@$FILE" "$API/collectives/$CID/pages/$PID/attachments" ;;
+  delete-attachment)
+    CID="${2:?usage: collectives delete-attachment COLLECTIVE_ID PAGE_ID ATTACHMENT_ID}"
+    PID="${3:?}"
+    AID="${4:?}"
+    _del "/collectives/$CID/pages/$PID/attachments/$AID" ;;
+
+  # === Shares ===
+  shares)
+    _get "/collectives/${2:?usage: collectives shares COLLECTIVE_ID}/shares" ;;
+  create-share)
+    CID="${2:?usage: collectives create-share COLLECTIVE_ID [editable]}"
+    EDITABLE="${3:-false}"
+    _post "/collectives/$CID/shares" "{\"editable\":$EDITABLE}" ;;
+  create-page-share)
+    CID="${2:?usage: collectives create-page-share COLLECTIVE_ID PAGE_ID [editable]}"
+    PID="${3:?}"
+    EDITABLE="${4:-false}"
+    _post "/collectives/$CID/pages/$PID/shares" "{\"editable\":$EDITABLE}" ;;
+  delete-share)
+    CID="${2:?usage: collectives delete-share COLLECTIVE_ID TOKEN}"
+    TOKEN="${3:?}"
+    _del "/collectives/$CID/shares/$TOKEN" ;;
+  delete-page-share)
+    CID="${2:?usage: collectives delete-page-share COLLECTIVE_ID PAGE_ID TOKEN}"
+    PID="${3:?}"
+    TOKEN="${4:?}"
+    _del "/collectives/$CID/pages/$PID/shares/$TOKEN" ;;
+
+  # === Templates ===
+  templates)
+    _get "/collectives/${2:?usage: collectives templates COLLECTIVE_ID}/pages/templates" ;;
+  create-template)
+    CID="${2:?usage: collectives create-template COLLECTIVE_ID PARENT_ID TITLE}"
+    PARENT="${3:?}"
+    TITLE="${4:?}"
+    _post "/collectives/$CID/pages/templates/$PARENT" "{\"title\":\"$TITLE\"}" ;;
+  delete-template)
+    CID="${2:?usage: collectives delete-template COLLECTIVE_ID TEMPLATE_ID}"
+    TID="${3:?}"
+    _del "/collectives/$CID/pages/templates/$TID" ;;
+
+  # === Search ===
+  search)
+    CID="${2:?usage: collectives search COLLECTIVE_ID QUERY}"
+    QUERY="${3:?}"
+    # urlencode via bash: replace spaces with +
+    _get "/collectives/$CID/search?searchString=${QUERY// /+}" ;;
+
+  help|*)
+    echo "Usage: collectives <command> [args]"
+    echo ""
+    echo "Collectives:"
+    echo "  collectives                                    List all collectives"
+    echo "  create-collective <name> [emoji]               Create collective"
+    echo "  update-collective <id> <emoji>                 Update emoji"
+    echo "  trash-collective <id>                          Move to trash"
+    echo "  trashed-collectives                            List trashed"
+    echo "  restore-collective <id>                        Restore from trash"
+    echo "  delete-collective <id> [delete-team]           Permanently delete"
+    echo "  set-edit-level <id> <level>                    Set edit permission level"
+    echo "  set-share-level <id> <level>                   Set share permission level"
+    echo "  set-page-mode <id> <mode>                      Set page mode (0=rich,1=md)"
+    echo ""
+    echo "Pages:"
+    echo "  pages <cid>                                    List all pages"
+    echo "  page <cid> <pid>                               Get page metadata"
+    echo "  create-page <cid> <parent_id> <title>          Create page"
+    echo "  move-page <cid> <pid> <parent_id> [index]      Move page"
+    echo "  copy-page <cid> <pid> <parent_id>              Copy page"
+    echo "  trash-page <cid> <pid>                         Trash page"
+    echo "  trashed-pages <cid>                            List trashed pages"
+    echo "  restore-page <cid> <pid>                       Restore page"
+    echo "  delete-page <cid> <pid>                        Permanently delete page"
+    echo "  touch-page <cid> <pid>                         Update lastEditedUser"
+    echo "  set-page-emoji <cid> <pid> <emoji>             Set page emoji"
+    echo "  set-page-width <cid> <pid> true|false          Set full width"
+    echo ""
+    echo "Page Content (WebDAV):"
+    echo "  read-page <cid> <pid>                          Read markdown content"
+    echo "  write-page <cid> <pid> <file_path>             Write content from file"
+    echo "  write-page-stdin <cid> <pid>                   Write content from stdin"
+    echo ""
+    echo "Tags:"
+    echo "  tags <cid>                                     List tags"
+    echo "  create-tag <cid> <name> <color>                Create tag (color=#hex)"
+    echo "  update-tag <cid> <tag_id> <name> <color>       Update tag"
+    echo "  delete-tag <cid> <tag_id>                      Delete tag"
+    echo "  tag-page <cid> <pid> <tag_id>                  Add tag to page"
+    echo "  untag-page <cid> <pid> <tag_id>                Remove tag from page"
+    echo ""
+    echo "Attachments:"
+    echo "  attachments <cid> <pid>                        List attachments"
+    echo "  upload-attachment <cid> <pid> <file>            Upload file"
+    echo "  delete-attachment <cid> <pid> <aid>             Delete attachment"
+    echo ""
+    echo "Shares:"
+    echo "  shares <cid>                                   List shares"
+    echo "  create-share <cid> [editable]                  Create collective share"
+    echo "  create-page-share <cid> <pid> [editable]       Create page share"
+    echo "  delete-share <cid> <token>                     Delete collective share"
+    echo "  delete-page-share <cid> <pid> <token>          Delete page share"
+    echo ""
+    echo "Templates:"
+    echo "  templates <cid>                                List templates"
+    echo "  create-template <cid> <parent_id> <title>      Create template"
+    echo "  delete-template <cid> <template_id>            Delete template"
+    echo ""
+    echo "Search:"
+    echo "  search <cid> <query>                           Search pages in collective"
+    ;;
+esac
