@@ -557,7 +557,7 @@ PLATFORM_HINTS = {
         "formatting and has a 32KB per-message limit. Replies are plain "
         "text with Markdown. Code blocks are rendered with syntax "
         "highlighting in the Talk Web UI. There is no typing indicator "
-        "— users see a ⏳ Thinking... acknowledgment when you start"
+        "— users see a ⏳ Thinking... acknowledgment when you start "
         "working, followed by your actual answer when ready."
     ),
     "sms": (
