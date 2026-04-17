@@ -291,6 +291,8 @@ class NextcloudNotificationService(BaseService):
             await asyncio.sleep(self._poll_interval if backoff == 5 else backoff)
 
     async def on_event(self, event: ServiceEvent):
+        if event.action == "ignore":
+            return
         if event.action == "react":
             await self._deliver_react(event)
         else:

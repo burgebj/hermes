@@ -6750,14 +6750,17 @@ class GatewayRunner:
                 _phase_elapsed(),
             )
 
-            # Stop services before tearing down the rest (services may be mid-delivery)
-            for _svc_name, _svc in list(self.services.items()):
-                try:
-                    await _svc.stop()
-                    logger.info("Service %s stopped", _svc_name)
-                except Exception as _e:
-                    logger.error("Service %s stop error: %s", _svc_name, _e)
-            self.services.clear()
+            # Stop services before tearing down the rest (services may be mid-delivery).
+            # getattr guard: tests mock GatewayRunner without running __init__.
+            _services = getattr(self, "services", None)
+            if _services:
+                for _svc_name, _svc in list(_services.items()):
+                    try:
+                        await _svc.stop()
+                        logger.info("Service %s stopped", _svc_name)
+                    except Exception as _e:
+                        logger.error("Service %s stop error: %s", _svc_name, _e)
+                _services.clear()
 
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
