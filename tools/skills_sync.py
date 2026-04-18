@@ -172,18 +172,36 @@ def _dir_hash(directory: Path) -> str:
     return hasher.hexdigest()
 
 
+def _load_auto_sync_bundled() -> bool:
+    """Check if auto_sync_bundled is enabled in config.yaml.
+
+    Returns True (default) if config doesn't exist or key is missing.
+    """
+    try:
+        import yaml
+        config_path = HERMES_HOME / "config.yaml"
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            return config.get("skills", {}).get("auto_sync_bundled", True)
+    except Exception:
+        pass
+    return True
+
+
 def sync_skills(quiet: bool = False) -> dict:
     """
     Sync bundled skills into ~/.hermes/skills/ using the manifest.
 
     Returns:
         dict with keys: copied (list), updated (list), skipped (int),
-                        user_modified (list), cleaned (list), total_bundled (int)
+                        skipped_auto (int), user_modified (list), cleaned (list),
+                        total_bundled (int)
     """
     bundled_dir = _get_bundled_dir()
     if not bundled_dir.exists():
         return {
-            "copied": [], "updated": [], "skipped": 0,
+            "copied": [], "updated": [], "skipped": 0, "skipped_auto": 0,
             "user_modified": [], "cleaned": [], "total_bundled": 0,
         }
 
@@ -197,12 +215,21 @@ def sync_skills(quiet: bool = False) -> dict:
     user_modified = []
     skipped = 0
 
+    auto_sync = _load_auto_sync_bundled()
+    skipped_auto = 0
+
     for skill_name, skill_src in bundled_skills:
         dest = _compute_relative_dest(skill_src, bundled_dir)
         bundled_hash = _dir_hash(skill_src)
 
         if skill_name not in manifest:
             # ── New skill — never offered before ──
+            if not auto_sync:
+                # Auto-sync disabled: skip new skills without adding to manifest,
+                # so they can be picked up later if auto_sync_bundled is re-enabled.
+                skipped += 1
+                skipped_auto += 1
+                continue
             try:
                 if dest.exists():
                     # User already has a skill with the same name — don't overwrite.
@@ -310,6 +337,7 @@ def sync_skills(quiet: bool = False) -> dict:
         "copied": copied,
         "updated": updated,
         "skipped": skipped,
+        "skipped_auto": skipped_auto,
         "user_modified": user_modified,
         "cleaned": cleaned,
         "total_bundled": len(bundled_skills),
@@ -422,6 +450,8 @@ if __name__ == "__main__":
         f"{len(result['updated'])} updated",
         f"{result['skipped']} unchanged",
     ]
+    if result.get("skipped_auto"):
+        parts.append(f"{result['skipped_auto']} auto-skilled (auto_sync_bundled=false)")
     if result["user_modified"]:
         names = result["user_modified"]
         MAX_SHOW = 5
