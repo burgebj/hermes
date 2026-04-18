@@ -8645,15 +8645,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
             if result["copied"]:
                 print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
             if result.get("updated"):
-<<<<<<< HEAD
                 print(
                     f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
                 )
-=======
-                print(f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}")
             if result.get("skipped_auto"):
-                print(f"  ⏭ {result['skipped_auto']} new bundled skill(s) skipped (skills.auto_sync_bundled=false)")
->>>>>>> 77dec231 (fix(skills): make reset restore bypass auto-sync suppression)
+                print(
+                    f"  ⏭ {result['skipped_auto']} new bundled skill(s) skipped "
+                    f"(skills.auto_sync_bundled=false)"
+                )
             if result.get("user_modified"):
                 print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
             if result.get("cleaned"):
