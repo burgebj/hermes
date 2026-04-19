@@ -359,3 +359,82 @@ def base_url_host_matches(base_url: str, domain: str) -> bool:
     if not domain:
         return False
     return hostname == domain or hostname.endswith("." + domain)
+
+
+# ---------------------------------------------------------------------------
+# Invisible-unicode injection detection (shared by prompt_builder, memory_tool,
+# cronjob_tools, skills_guard). ZWJ inside emoji grapheme clusters (e.g. 🧙‍♂️)
+# is legitimate and must not be flagged; ZWJ between non-pictographic chars is
+# the classic injection shape and IS flagged.
+# ---------------------------------------------------------------------------
+
+# Default blocklist of invisible unicode characters commonly used in
+# prompt-injection attacks. ZWJ (U+200D) is included here but has a context
+# check applied — see find_unsafe_invisibles().
+BLOCKLIST_INVISIBLES = frozenset({
+    '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
+    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+})
+
+
+def _is_pictographic(cp: int) -> bool:
+    """True if codepoint is in a range that emoji sequences draw from.
+
+    Used to distinguish legitimate ZWJ inside emoji grapheme clusters
+    (e.g. 🧙‍♂️ = 🧙 + ZWJ + ♂ + VS16) from ZWJ used for injection.
+
+    Not an exhaustive Unicode emoji-property table — covers the ranges that
+    carry nearly all real emoji codepoints. False negatives here mean a
+    legitimate emoji ZWJ sequence gets flagged; false positives would let an
+    injection past. Prefer false-negative-side errors.
+    """
+    return (
+        0x1F000 <= cp <= 0x1FFFF  # emoji planes
+        or 0x2600 <= cp <= 0x27BF  # Misc Symbols, Dingbats
+        or 0x2300 <= cp <= 0x23FF  # Misc Technical (⌚, ⏰)
+        or 0x2B00 <= cp <= 0x2BFF  # Misc Symbols and Arrows (⭐, ⬅)
+        or cp in (0x00A9, 0x00AE, 0x2122, 0x2139)  # ©, ®, ™, ℹ
+        or cp in (0x3030, 0x303D, 0x3297, 0x3299)  # CJK symbols used as emoji
+    )
+
+
+def _zwj_in_emoji_context(content: str, idx: int) -> bool:
+    """True if the ZWJ at content[idx] sits between two pictographic chars
+    (skipping variation selectors), i.e. is part of a real emoji sequence.
+    """
+    if idx <= 0 or idx >= len(content) - 1:
+        return False
+    left = idx - 1
+    while left >= 0 and content[left] in ('\ufe0f', '\ufe0e'):
+        left -= 1
+    if left < 0 or not _is_pictographic(ord(content[left])):
+        return False
+    right = idx + 1
+    while right < len(content) and content[right] in ('\ufe0f', '\ufe0e'):
+        right += 1
+    if right >= len(content) or not _is_pictographic(ord(content[right])):
+        return False
+    return True
+
+
+def find_unsafe_invisibles(content, blocklist=BLOCKLIST_INVISIBLES):
+    """Return the set of blocklisted invisible chars occurring in content
+    in positions that are NOT legitimate emoji ZWJ sequences.
+
+    ZWJ (U+200D) inside an emoji sequence is allowed; all other invisibles in
+    the blocklist are flagged on any occurrence. Callers can pass a wider
+    blocklist (e.g. skills_guard scans extra bidi-isolate chars); the ZWJ
+    emoji-context check still applies.
+    """
+    flagged = set()
+    for char in blocklist:
+        if char not in content:
+            continue
+        if char != '\u200d':
+            flagged.add(char)
+            continue
+        for i, ch in enumerate(content):
+            if ch == '\u200d' and not _zwj_in_emoji_context(content, i):
+                flagged.add(char)
+                break
+    return flagged

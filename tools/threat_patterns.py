@@ -44,6 +44,8 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
+from utils import find_unsafe_invisibles
+
 # Each entry: (regex, pattern_id, scope)
 # scope ∈ {"all", "context", "strict"}
 _PATTERNS: List[Tuple[str, str, str]] = [
@@ -206,11 +208,11 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
 
     findings: List[str] = []
 
-    # Invisible unicode — single pass through the content set, not 17
-    # ``in`` lookups.
-    char_set = set(content)
-    invisible_hits = char_set & INVISIBLE_CHARS
-    for ch in invisible_hits:
+    # Invisible unicode. ZWJ (U+200D) inside an emoji grapheme cluster
+    # (🧙‍♂️, 👨‍👩‍👧) is legitimate and allowed; ZWJ between non-pictographic
+    # chars and every other blocklisted invisible is flagged on any
+    # occurrence. See utils.find_unsafe_invisibles.
+    for ch in find_unsafe_invisibles(content, INVISIBLE_CHARS):
         findings.append(f"invisible_unicode_U+{ord(ch):04X}")
 
     # Threat patterns
