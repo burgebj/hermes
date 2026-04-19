@@ -262,9 +262,10 @@ class PlaceholderSTT:
 
 class LlamaCppSTT:
     """STT via local llama.cpp router with Whisper-compatible endpoint."""
-    def __init__(self, base_url: str, api_key: str = ""):
+    def __init__(self, base_url: str, api_key: str = "", language: str = ""):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._language = language
 
     async def transcribe(self, audio_path: str) -> Optional[str]:
         headers = {}
@@ -276,7 +277,9 @@ class LlamaCppSTT:
                     resp = await client.post(
                         f"{self._base_url}/v1/audio/transcriptions",
                         files={"file": (os.path.basename(audio_path), f)},
-                        data={"model": "whisper"},
+                        data={"model": "whisper", **(
+                            {"language": self._language} if self._language else {}
+                        )},
                     )
                 if resp.status_code == 200:
                     return resp.json().get("text", "").strip() or None
@@ -356,6 +359,7 @@ class NextcloudTalkPlatform(BasePlatformAdapter):
             self._stt = LlamaCppSTT(
                 base_url=stt_config["base_url"],
                 api_key=stt_config.get("api_key", ""),
+                language=stt_config.get("language", ""),
             )
         else:
             self._stt = PlaceholderSTT()
