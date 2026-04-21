@@ -15,9 +15,19 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 
 # ── Text aux tasks — _resolve_auto ──────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _clear_aux_unhealthy_cache():
+    from agent.auxiliary_client import _reset_aux_unhealthy_cache
+
+    _reset_aux_unhealthy_cache()
+    yield
+    _reset_aux_unhealthy_cache()
 
 
 class TestResolveAutoMainFirst:

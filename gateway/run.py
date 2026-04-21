@@ -1241,6 +1241,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
         "api_mode": runtime.get("api_mode"),
+        "default_headers": dict(runtime.get("headers") or {}),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
@@ -1289,6 +1290,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "base_url": runtime.get("base_url"),
                     "provider": runtime.get("provider"),
                     "api_mode": runtime.get("api_mode"),
+                    "default_headers": dict(runtime.get("headers") or {}),
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
@@ -2634,6 +2636,7 @@ class GatewayRunner:
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
                 "max_tokens": override.get("max_tokens"),
+                "default_headers": dict(override.get("default_headers") or override.get("headers") or {}),
             }
             if override_runtime.get("api_key"):
                 logger.debug(
@@ -2728,6 +2731,7 @@ class GatewayRunner:
             "base_url": runtime_kwargs.get("base_url"),
             "provider": runtime_kwargs.get("provider"),
             "api_mode": runtime_kwargs.get("api_mode"),
+            "default_headers": dict(runtime_kwargs.get("default_headers") or runtime_kwargs.get("headers") or {}),
             "command": runtime_kwargs.get("command"),
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
@@ -2741,6 +2745,7 @@ class GatewayRunner:
                 runtime["provider"],
                 runtime["base_url"],
                 runtime["api_mode"],
+                tuple(sorted(runtime["default_headers"].items())),
                 runtime["command"],
                 tuple(runtime["args"]),
             ),

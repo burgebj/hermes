@@ -137,6 +137,7 @@ def init_agent(
     agent,
     base_url: str = None,
     api_key: str = None,
+    default_headers: Dict[str, Any] = None,
     provider: str = None,
     api_mode: str = None,
     acp_command: str = None,
@@ -209,6 +210,7 @@ def init_agent(
     Args:
         base_url (str): Base URL for the model API (optional)
         api_key (str): API key for authentication (optional, uses env var if not provided)
+        default_headers (Dict[str, Any]): Extra headers to attach to OpenAI-compatible requests.
         provider (str): Provider identifier (optional; used for telemetry/routing hints)
         api_mode (str): API mode override: "chat_completions" or "codex_responses"
         model (str): Model name to use (default: "anthropic/claude-opus-4.6")
@@ -272,6 +274,15 @@ def init_agent(
     agent._chat_type = chat_type
     agent._thread_id = thread_id
     agent._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+    agent._user_default_headers = {}
+    if isinstance(default_headers, dict):
+        for key, value in default_headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                agent._user_default_headers[key_str] = value_str
     # Pluggable print function — CLI replaces this with _cprint so that
     # raw ANSI status lines are routed through prompt_toolkit's renderer
     # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -725,27 +736,30 @@ def init_agent(
                 client_kwargs["command"] = agent.acp_command
                 client_kwargs["args"] = agent.acp_args
             effective_base = base_url
+            merged_headers = dict(getattr(agent, "_user_default_headers", {}) or {})
             if base_url_host_matches(effective_base, "openrouter.ai"):
                 from agent.auxiliary_client import build_or_headers
-                client_kwargs["default_headers"] = build_or_headers()
+                merged_headers.update(build_or_headers())
             elif base_url_host_matches(effective_base, "integrate.api.nvidia.com"):
                 from agent.auxiliary_client import build_nvidia_nim_headers
-                client_kwargs["default_headers"] = build_nvidia_nim_headers(effective_base)
+                merged_headers.update(build_nvidia_nim_headers(effective_base))
             elif base_url_host_matches(effective_base, "api.routermint.com"):
-                client_kwargs["default_headers"] = _ra()._routermint_headers()
+                merged_headers.update(_ra()._routermint_headers())
             elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
                 from hermes_cli.models import copilot_default_headers
 
-                client_kwargs["default_headers"] = copilot_default_headers()
+                merged_headers.update(copilot_default_headers())
             elif base_url_host_matches(effective_base, "api.kimi.com"):
-                client_kwargs["default_headers"] = {
+                merged_headers.update({
                     "User-Agent": "claude-code/0.1.0",
-                }
+                })
             elif base_url_host_matches(effective_base, "portal.qwen.ai"):
-                client_kwargs["default_headers"] = _ra()._qwen_portal_headers()
+                merged_headers.update(_ra()._qwen_portal_headers())
             elif base_url_host_matches(effective_base, "chatgpt.com"):
                 from agent.auxiliary_client import _codex_cloudflare_headers
-                client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
+                merged_headers.update(_codex_cloudflare_headers(api_key))
+            if merged_headers:
+                client_kwargs["default_headers"] = merged_headers
             elif "default_headers" not in client_kwargs:
                 # Fall back to profile.default_headers for providers that
                 # declare custom headers (e.g. Kimi User-Agent on non-kimi.com
@@ -776,8 +790,11 @@ def init_agent(
                 _routed_headers = getattr(_routed_client, "_custom_headers", None)
                 if not _routed_headers:
                     _routed_headers = getattr(_routed_client, "_default_headers", None)
+                merged_headers = dict(getattr(agent, "_user_default_headers", {}) or {})
                 if _routed_headers:
-                    client_kwargs["default_headers"] = dict(_routed_headers)
+                    merged_headers.update(dict(_routed_headers))
+                if merged_headers:
+                    client_kwargs["default_headers"] = merged_headers
             else:
                 # When the user explicitly chose a non-OpenRouter provider
                 # but no credentials were found, fail fast with a clear
@@ -829,8 +846,11 @@ def init_agent(
                             _fb_headers = getattr(_fb_client, "_custom_headers", None)
                             if not _fb_headers:
                                 _fb_headers = getattr(_fb_client, "_default_headers", None)
+                            merged_headers = dict(getattr(agent, "_user_default_headers", {}) or {})
                             if _fb_headers:
-                                client_kwargs["default_headers"] = dict(_fb_headers)
+                                merged_headers.update(dict(_fb_headers))
+                            if merged_headers:
+                                client_kwargs["default_headers"] = merged_headers
                             _fb_resolved = True
                             break
                     if not _fb_resolved:

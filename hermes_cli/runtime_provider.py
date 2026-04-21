@@ -38,6 +38,21 @@ def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
 
 
+def _normalize_custom_headers(raw_headers: Any) -> Dict[str, str]:
+    """Return sanitized custom headers from config."""
+    if not isinstance(raw_headers, dict):
+        return {}
+    headers: Dict[str, str] = {}
+    for key, value in raw_headers.items():
+        if key is None or value is None:
+            continue
+        key_str = str(key).strip()
+        value_str = str(value).strip()
+        if key_str and value_str:
+            headers[key_str] = value_str
+    return headers
+
+
 def _loopback_hostname(host: str) -> bool:
     h = (host or "").lower().rstrip(".")
     return h in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -217,6 +232,11 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
     if normalized_provider == "custom":
         return normalized_configured == "custom" or normalized_configured.startswith("custom:")
     return normalized_configured == normalized_provider
+
+
+def _get_model_headers(model_cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Return sanitized custom headers from model config."""
+    return _normalize_custom_headers(model_cfg.get("headers"))
 
 
 def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
@@ -546,6 +566,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     extra_body = entry.get("extra_body")
                     if isinstance(extra_body, dict):
                         result["extra_body"] = dict(extra_body)
+                    headers = _normalize_custom_headers(entry.get("headers"))
+                    if headers:
+                        result["headers"] = headers
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
                     # use the legacy ``api_mode`` spelling.  Accept both —
@@ -575,6 +598,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         extra_body = entry.get("extra_body")
                         if isinstance(extra_body, dict):
                             result["extra_body"] = dict(extra_body)
+                        headers = _normalize_custom_headers(entry.get("headers"))
+                        if headers:
+                            result["headers"] = headers
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
@@ -622,6 +648,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         extra_body = entry.get("extra_body")
         if isinstance(extra_body, dict):
             result["extra_body"] = dict(extra_body)
+        headers = _normalize_custom_headers(entry.get("headers"))
+        if headers:
+            result["headers"] = headers
         api_mode = _parse_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
@@ -725,6 +754,9 @@ def _resolve_named_custom_runtime(
                 **dict(pool_result.get("request_overrides") or {}),
                 **request_overrides,
             }
+        headers = _normalize_custom_headers(custom_provider.get("headers"))
+        if headers:
+            pool_result["headers"] = headers
         return pool_result
 
     _cp_is_openai_url   = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
@@ -761,6 +793,9 @@ def _resolve_named_custom_runtime(
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = request_overrides
+    headers = _normalize_custom_headers(custom_provider.get("headers"))
+    if headers:
+        result["headers"] = headers
     return result
 
 
@@ -888,12 +923,15 @@ def _resolve_openrouter_runtime(
             provider_name=requested_provider if requested_norm != "custom" else None,
         )
         if pool_result:
+            headers = _get_model_headers(model_cfg)
+            if headers:
+                pool_result["headers"] = headers
             return pool_result
 
     if effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
-    return {
+    result = {
         "provider": effective_provider,
         "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
         or _detect_api_mode_for_url(base_url)
@@ -902,6 +940,11 @@ def _resolve_openrouter_runtime(
         "api_key": api_key,
         "source": source,
     }
+    if effective_provider == "custom":
+        headers = _get_model_headers(model_cfg)
+        if headers:
+            result["headers"] = headers
+    return result
 
 
 def _resolve_azure_foundry_runtime(

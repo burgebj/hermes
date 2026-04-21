@@ -344,6 +344,7 @@ class AIAgent:
         self,
         base_url: str = None,
         api_key: str = None,
+        default_headers: Dict[str, Any] = None,
         provider: str = None,
         api_mode: str = None,
         acp_command: str = None,
@@ -416,6 +417,7 @@ class AIAgent:
             self,
             base_url=base_url,
             api_key=api_key,
+            default_headers=default_headers,
             provider=provider,
             api_mode=api_mode,
             acp_command=acp_command,
@@ -1018,12 +1020,16 @@ class AIAgent:
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
+        default_headers = dict(getattr(self, "_user_default_headers", {}) or {})
+        if not default_headers:
+            default_headers = dict(getattr(self, "_client_kwargs", {}).get("default_headers") or {})
         return {
             "model": getattr(self, "model", "") or "",
             "provider": getattr(self, "provider", "") or "",
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
+            "default_headers": default_headers,
         }
 
     def _check_compression_model_feasibility(self) -> None:
@@ -3775,25 +3781,29 @@ class AIAgent:
             build_or_headers,
         )
 
+        merged_headers = dict(getattr(self, "_user_default_headers", {}) or {})
         if base_url_host_matches(base_url, "openrouter.ai"):
-            self._client_kwargs["default_headers"] = build_or_headers()
+            merged_headers.update(build_or_headers())
         elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
-            self._client_kwargs["default_headers"] = build_nvidia_nim_headers(base_url)
+            merged_headers.update(build_nvidia_nim_headers(base_url))
         elif base_url_host_matches(base_url, "api.routermint.com"):
-            self._client_kwargs["default_headers"] = _routermint_headers()
+            merged_headers.update(_routermint_headers())
         elif base_url_host_matches(base_url, "api.githubcopilot.com"):
             from hermes_cli.models import copilot_default_headers
 
-            self._client_kwargs["default_headers"] = copilot_default_headers()
+            merged_headers.update(copilot_default_headers())
         elif base_url_host_matches(base_url, "api.kimi.com"):
-            self._client_kwargs["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
+            merged_headers.update({"User-Agent": "claude-code/0.1.0"})
         elif base_url_host_matches(base_url, "portal.qwen.ai"):
-            self._client_kwargs["default_headers"] = _qwen_portal_headers()
+            merged_headers.update(_qwen_portal_headers())
         elif base_url_host_matches(base_url, "chatgpt.com"):
             from agent.auxiliary_client import _codex_cloudflare_headers
-            self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
+            merged_headers.update(_codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
-            )
+            ))
+
+        if merged_headers:
+            self._client_kwargs["default_headers"] = merged_headers
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
             _ph_headers = None

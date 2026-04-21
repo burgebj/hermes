@@ -408,6 +408,11 @@ def run_conversation(
             base_url=getattr(agent, "base_url", "") or "",
             api_key=getattr(agent, "api_key", "") or "",
             api_mode=getattr(agent, "api_mode", "") or "",
+            default_headers=(
+                agent._current_main_runtime().get("default_headers")
+                if hasattr(agent, "_current_main_runtime")
+                else None
+            ),
         )
     except Exception:
         pass
