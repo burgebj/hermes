@@ -12,6 +12,7 @@ if _src_root and _src_root not in sys.path:
 sys.path = [p for p in sys.path if p not in {"", "."}]
 
 import json
+import logging
 import signal
 import time
 import traceback
@@ -161,6 +162,31 @@ elif hasattr(signal, "SIGBREAK"):
 if hasattr(signal, "SIGINT"):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
+logger = logging.getLogger(__name__)
+
+
+def _register_shell_hooks() -> None:
+    """Wire shell hooks declared in config.yaml.
+
+    Mirrors gateway/run.py so the TUI's Python backend honors the same
+    ``hooks:`` block as the CLI and the messaging gateway.  Without this
+    call shell hooks silently never fire for TUI sessions even though
+    they appear correctly registered at the CLI level.
+
+    accept_hooks=False — register_from_config resolves the effective
+    value from HERMES_ACCEPT_HOOKS / hooks_auto_accept itself.  Failures
+    are logged but must never block TUI startup.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from agent.shell_hooks import register_from_config
+        register_from_config(load_config(), accept_hooks=False)
+    except Exception:
+        logger.debug(
+            "shell-hook registration failed at tui_gateway startup",
+            exc_info=True,
+        )
+
 
 def _log_exit(reason: str) -> None:
     """Record why the gateway subprocess is shutting down.
@@ -185,6 +211,7 @@ def _log_exit(reason: str) -> None:
 
 
 def main():
+    _register_shell_hooks()
     _install_sidecar_publisher()
 
     # MCP tool discovery — inline is safe here: TUI entry is a plain
