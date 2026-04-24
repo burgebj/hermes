@@ -155,7 +155,7 @@ class TalkUserClient:
         return resp.status_code, []
 
     async def join_conversation(self, token: str) -> "tuple[bool, Optional[str]]":
-        url = f"{self._base_url}/ocs/v2.php/apps/spreed/api/v1/room/{token}/participants/active"
+        url = f"{self._base_url}/ocs/v2.php/apps/spreed/api/v4/room/{token}/participants/active"
         try:
             resp = await self._http.post(url)
         except Exception as exc:
@@ -165,7 +165,7 @@ class TalkUserClient:
         return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
 
     async def list_conversations(self) -> "tuple[bool, list, Optional[str]]":
-        url = f"{self._base_url}/ocs/v2.php/apps/spreed/api/v1/room"
+        url = f"{self._base_url}/ocs/v2.php/apps/spreed/api/v4/room"
         try:
             resp = await self._http.get(url)
         except Exception as exc:
