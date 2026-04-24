@@ -134,6 +134,26 @@ class TestGatewayEmptyModelFallback:
         # Can't fill in a default without knowing the provider
         assert model == ""
 
+    def test_runtime_default_headers_preserved(self):
+        """Gateway runtime resolution should preserve custom model headers for AIAgent."""
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        runner._session_model_overrides = {}
+
+        with patch("gateway.run._resolve_gateway_model", return_value="gpt-5.4"), \
+             patch("gateway.run._resolve_runtime_agent_kwargs", return_value={
+                 "provider": "custom",
+                 "api_key": "***",
+                 "base_url": "https://api.example.com/v1",
+                 "api_mode": "codex_responses",
+                 "default_headers": {"User-Agent": "Hermes-Test/1.0"},
+             }):
+            model, kwargs = runner._resolve_session_agent_runtime()
+
+        assert model == "gpt-5.4"
+        assert kwargs["default_headers"] == {"User-Agent": "Hermes-Test/1.0"}
+
 
 class TestResolveGatewayModel:
     """Test _resolve_gateway_model reads model from config correctly."""

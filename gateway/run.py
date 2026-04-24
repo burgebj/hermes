@@ -16354,7 +16354,7 @@ class GatewayRunner:
         if not override:
             return model, runtime_kwargs
         model = override.get("model", model)
-        for key in ("provider", "api_key", "base_url", "api_mode"):
+        for key in ("provider", "api_key", "base_url", "api_mode", "default_headers"):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
