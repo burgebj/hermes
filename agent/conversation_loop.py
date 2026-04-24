@@ -685,9 +685,11 @@ def run_conversation(
                     break  # Under threshold or anti-thrash guard stopped it
 
     # Plugin hook: pre_llm_call
-    # Fired once per turn before the tool-calling loop.  Plugins can
-    # return a dict with a ``context`` key (or a plain string) whose
-    # value is appended to the current turn's user message.
+    # Fired once per turn before the tool-calling loop. Plugins can:
+    # - return a dict with a ``context`` key (or a plain string) whose
+    #   value is appended to the current turn's user message, and/or
+    # - return a dict with ``short_circuit_response`` to skip the model
+    #   call entirely and respond immediately.
     #
     # Context is ALWAYS injected into the user message, never the
     # system prompt.  This preserves the prompt cache prefix — the
@@ -697,6 +699,7 @@ def run_conversation(
     #
     # All injected context is ephemeral (not persisted to session DB).
     _plugin_user_context = ""
+    _plugin_short_circuit_response = None
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -711,8 +714,14 @@ def run_conversation(
         )
         _ctx_parts: list[str] = []
         for r in _pre_results:
-            if isinstance(r, dict) and r.get("context"):
-                _ctx_parts.append(str(r["context"]))
+            if isinstance(r, dict):
+                if r.get("context"):
+                    _ctx_parts.append(str(r["context"]))
+                if (
+                    _plugin_short_circuit_response is None
+                    and r.get("short_circuit_response") is not None
+                ):
+                    _plugin_short_circuit_response = str(r["short_circuit_response"])
             elif isinstance(r, str) and r.strip():
                 _ctx_parts.append(r)
         if _ctx_parts:
@@ -756,6 +765,16 @@ def run_conversation(
         agent._interrupt_message = None
         agent._interrupt_thread_signal_pending = False
 
+    if agent._interrupt_requested:
+        interrupted = True
+        _turn_exit_reason = "interrupted_by_user"
+        if not agent.quiet_mode:
+            agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
+    elif _plugin_short_circuit_response is not None:
+        final_response = _plugin_short_circuit_response
+        messages.append({"role": "assistant", "content": final_response})
+        _turn_exit_reason = "plugin_short_circuit"
+
     # Notify memory providers of the new turn so cadence tracking works.
     # Must happen BEFORE prefetch_all() so providers know which turn it is
     # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
@@ -771,8 +790,10 @@ def run_conversation(
     # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
     # Use original_user_message (clean input) — user_message may contain
     # injected skill content that bloats / breaks provider queries.
+    # Skip prefetch entirely when the turn is already interrupted or a
+    # plugin has short-circuited before any model call.
     _ext_prefetch_cache = ""
-    if agent._memory_manager:
+    if agent._memory_manager and not interrupted and _plugin_short_circuit_response is None:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
@@ -784,7 +805,11 @@ def run_conversation(
     # all run inside Codex). Default Hermes path is bypassed entirely.
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
-    if agent.api_mode == "codex_app_server":
+    if (
+        agent.api_mode == "codex_app_server"
+        and not interrupted
+        and _plugin_short_circuit_response is None
+    ):
         return agent._run_codex_app_server_turn(
             user_message=user_message,
             original_user_message=original_user_message,
@@ -793,7 +818,7 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    while _plugin_short_circuit_response is None and ((api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call):
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -4403,8 +4428,12 @@ def run_conversation(
     # Determine if conversation completed successfully
     completed = (
         final_response is not None
-        and api_call_count < agent.max_iterations
+        and not interrupted
         and not failed
+        and (
+            _turn_exit_reason == "plugin_short_circuit"
+            or api_call_count < agent.max_iterations
+        )
     )
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
