@@ -22,6 +22,59 @@ _ocs_del()  { curl -s -u "$AUTH" "${HDR[@]}" -X DELETE "$OCS$1"; }
 # Build JSON safely via jq — handles quotes, newlines, unicode, parens
 _json() { jq -n "$@"; }
 
+# Resolve real stackId for a given card by walking the board's stacks.
+# Returns the stackId or "null" if the card is not on the board.
+# Usage: _resolve_stack BOARD CARD
+_resolve_stack() {
+  _get "/boards/$1/stacks" \
+    | jq -r --argjson c "$2" '[.[] | select(.cards // [] | map(.id) | index($c))][0].id // "null"'
+}
+
+# Patch a card: GET full card, merge given overrides (as JSON string), PUT back.
+# Preserves owner, description, duedate, order, type, title unless overridden.
+# Required by the Deck API: PUT body must include all of title/type/owner/order,
+# otherwise fields get nuked or the API 500s.
+# Usage: _patch_card BOARD STACK CARD '{"done":"2026-04-23T10:00:00+00:00"}'
+_patch_card() {
+  local board="$1" stack="$2" card="$3" overrides="$4"
+  local current
+  current=$(_get "/boards/$board/stacks/$stack/cards/$card") || return 1
+  # Guard against HTML/error responses and API errors
+  if ! echo "$current" | jq -e 'type == "object" and has("id")' >/dev/null 2>&1; then
+    echo "$current"
+    return 1
+  fi
+  local body
+  body=$(echo "$current" | jq --argjson o "$overrides" '{
+    title,
+    description: (.description // ""),
+    type: (.type // "plain"),
+    owner: (.owner.uid // (.owner | tostring) // ""),
+    order: (.order // 999),
+    duedate
+  } + $o')
+  _put "/boards/$board/stacks/$stack/cards/$card" "$body"
+}
+
+# Current UTC timestamp in Deck's expected ISO 8601 format.
+_iso_now() { date -u +"%Y-%m-%dT%H:%M:%S+00:00"; }
+
+# For legacy syntax support: if user passed a stack that doesn't match the
+# card's real stack, auto-correct and warn to stderr. Returns the real stack.
+_ensure_stack() {
+  local board="$1" given_stack="$2" card="$3"
+  local real
+  real=$(_resolve_stack "$board" "$card")
+  if [ "$real" = "null" ] || [ -z "$real" ]; then
+    echo "error: card $card not found on board $board" >&2
+    return 1
+  fi
+  if [ -n "$given_stack" ] && [ "$given_stack" != "$real" ]; then
+    echo "warn: card $card is in stack $real (not $given_stack) — using $real" >&2
+  fi
+  echo "$real"
+}
+
 case "${1:-help}" in
   # === Boards ===
   boards)
@@ -73,14 +126,18 @@ case "${1:-help}" in
     CARD="${4:?}"
     TITLE="${5:?}"
     DESC="${6:-}"
-    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" --arg d "$DESC" '{title:$t,type:"plain",owner:"hermes",description:$d,order:999}')" ;;
+    STACK=$(_ensure_stack "$BOARD" "$STACK" "$CARD") || exit 1
+    _patch_card "$BOARD" "$STACK" "$CARD" \
+      "$(jq -n --arg t "$TITLE" --arg d "$DESC" '{title:$t, description:$d}')" ;;
   update-card-stdin)
     BOARD="${2:?usage: echo 'description' | deck update-card-stdin BOARD_ID STACK_ID CARD_ID TITLE}"
     STACK="${3:?}"
     CARD="${4:?}"
     TITLE="${5:?}"
     DESC=$(cat)
-    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" --arg d "$DESC" '{title:$t,type:"plain",owner:"hermes",description:$d,order:999}')" ;;
+    STACK=$(_ensure_stack "$BOARD" "$STACK" "$CARD") || exit 1
+    _patch_card "$BOARD" "$STACK" "$CARD" \
+      "$(jq -n --arg t "$TITLE" --arg d "$DESC" '{title:$t, description:$d}')" ;;
   move-card)
     BOARD="${2:?usage: deck move-card BOARD_ID CARD_ID TARGET_STACK_ID}"
     CARD="${3:?}"
@@ -96,20 +153,29 @@ case "${1:-help}" in
     STACK="${3:?}"
     CARD="${4:?}"
     DUEDATE="${5:?}"  # ISO format: 2026-04-20T12:00:00+00:00
-    TITLE=$(_get "/boards/$BOARD/stacks/$STACK/cards/$CARD" | jq -r '.title')
-    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" --arg dd "$DUEDATE" '{title:$t,type:"plain",owner:"hermes",order:999,duedate:$dd}')" ;;
+    STACK=$(_ensure_stack "$BOARD" "$STACK" "$CARD") || exit 1
+    _patch_card "$BOARD" "$STACK" "$CARD" \
+      "$(jq -n --arg dd "$DUEDATE" '{duedate:$dd}')" ;;
   done)
-    BOARD="${2:?usage: deck done BOARD_ID STACK_ID CARD_ID}"
-    STACK="${3:?}"
-    CARD="${4:?}"
-    TITLE=$(_get "/boards/$BOARD/stacks/$STACK/cards/$CARD" | jq -r '.title')
-    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" '{title:$t,type:"plain",owner:"hermes",order:999,done:true}')" ;;
+    BOARD="${2:?usage: deck done BOARD_ID [STACK_ID] CARD_ID}"
+    # Support both "done BOARD STACK CARD" (legacy) and "done BOARD CARD" (new).
+    if [ -n "$4" ]; then
+      STACK="$3"; CARD="$4"
+    else
+      STACK=""; CARD="${3:?}"
+    fi
+    STACK=$(_ensure_stack "$BOARD" "$STACK" "$CARD") || exit 1
+    _patch_card "$BOARD" "$STACK" "$CARD" \
+      "$(jq -n --arg ts "$(_iso_now)" '{done:$ts}')" ;;
   undone)
-    BOARD="${2:?usage: deck undone BOARD_ID STACK_ID CARD_ID}"
-    STACK="${3:?}"
-    CARD="${4:?}"
-    TITLE=$(_get "/boards/$BOARD/stacks/$STACK/cards/$CARD" | jq -r '.title')
-    _put "/boards/$BOARD/stacks/$STACK/cards/$CARD" "$(_json --arg t "$TITLE" '{title:$t,type:"plain",owner:"hermes",order:999,done:null}')" ;;
+    BOARD="${2:?usage: deck undone BOARD_ID [STACK_ID] CARD_ID}"
+    if [ -n "$4" ]; then
+      STACK="$3"; CARD="$4"
+    else
+      STACK=""; CARD="${3:?}"
+    fi
+    STACK=$(_ensure_stack "$BOARD" "$STACK" "$CARD") || exit 1
+    _patch_card "$BOARD" "$STACK" "$CARD" "$(jq -n '{done:null}')" ;;
 
   # === Labels ===
   labels)
@@ -184,8 +250,8 @@ case "${1:-help}" in
     echo "  move-card <board> <card> <target_stack>   Move card"
     echo "  delete-card <board> <stack> <card>        Delete card"
     echo "  set-duedate <board> <stack> <card> <date> Set due date (ISO)"
-    echo "  done <board> <stack> <card>               Mark card done"
-    echo "  undone <board> <stack> <card>             Mark card not done"
+    echo "  done <board> [<stack>] <card>             Mark card done (stack optional/auto-resolved)"
+    echo "  undone <board> [<stack>] <card>           Mark card not done (stack optional/auto-resolved)"
     echo ""
     echo "Labels:"
     echo "  labels <board>                            List labels"
