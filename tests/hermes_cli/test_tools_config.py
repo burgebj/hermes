@@ -79,6 +79,41 @@ def test_get_platform_tools_uses_default_when_platform_not_configured():
 def test_configurable_toolsets_include_messaging():
     assert any(ts_key == "messaging" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
 
+
+def test_get_platform_tools_composite_plus_explicit_toolset_extends_default():
+    config = {"platform_toolsets": {"cli": ["hermes-cli", "cognee"]}}
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "cognee" in enabled
+    assert "terminal" in enabled
+    assert "file" in enabled
+    assert "session_search" in enabled
+    assert enabled.isdisjoint(_DEFAULT_OFF_TOOLSETS)
+
+
+def test_get_platform_tools_composite_plus_explicit_preserves_disabled_default_off(monkeypatch):
+    monkeypatch.delenv("HASS_TOKEN", raising=False)
+    config = {"platform_toolsets": {"cli": ["hermes-cli", "cognee"]}}
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "cognee" in enabled
+    assert "homeassistant" not in enabled
+    assert "moa" not in enabled
+    assert "rl" not in enabled
+
+
+def test_get_platform_tools_composite_plus_explicit_keeps_ha_runtime_exception(monkeypatch):
+    monkeypatch.setenv("HASS_TOKEN", "fake-test-token")
+    config = {"platform_toolsets": {"cli": ["hermes-cli", "cognee"]}}
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "cognee" in enabled
+    assert "homeassistant" in enabled
+
+
 def test_get_platform_tools_default_telegram_includes_messaging():
     enabled = _get_platform_tools({}, "telegram")
 
