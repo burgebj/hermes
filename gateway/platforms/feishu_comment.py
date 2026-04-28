@@ -1075,6 +1075,9 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
             model=model,
             base_url=runtime_kwargs.get("base_url"),
             api_key=runtime_kwargs.get("api_key"),
+            default_headers=dict(
+                runtime_kwargs.get("default_headers") or runtime_kwargs.get("headers") or {}
+            ),
             provider=runtime_kwargs.get("provider"),
             api_mode=runtime_kwargs.get("api_mode"),
             credential_pool=runtime_kwargs.get("credential_pool"),

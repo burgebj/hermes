@@ -1773,6 +1773,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             model=model,
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
+            default_headers=dict(runtime.get("headers") or {}),
             provider=runtime.get("provider"),
             api_mode=runtime.get("api_mode"),
             acp_command=runtime.get("command"),

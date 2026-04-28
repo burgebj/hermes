@@ -256,5 +256,38 @@ class TestWikiReverseLookup(unittest.TestCase):
         self.assertEqual(second_call_kwargs[1].get("wiki_token") or second_call_kwargs[0][3], "WIKI123")
 
 
+class TestCommentAgentRuntime(unittest.TestCase):
+    @patch("gateway.platforms.feishu_comment._resolve_model_and_runtime")
+    @patch("run_agent.AIAgent")
+    def test_comment_agent_passes_runtime_default_headers(self, mock_agent_cls, mock_resolve):
+        from gateway.platforms.feishu_comment import _run_comment_agent
+
+        captured_kwargs = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+            def run_conversation(self, prompt, conversation_history=None):
+                return {"final_response": "ok", "api_calls": 1, "messages": []}
+
+        mock_agent_cls.side_effect = FakeAgent
+        mock_resolve.return_value = (
+            "gpt-5.4",
+            {
+                "provider": "custom",
+                "api_key": "test-key",
+                "base_url": "https://api.example.com/v1",
+                "api_mode": "codex_responses",
+                "default_headers": {"User-Agent": "Hermes-Test/1.0"},
+            },
+        )
+
+        result = _run_comment_agent("reply to this", Mock())
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured_kwargs["default_headers"], {"User-Agent": "Hermes-Test/1.0"})
+
+
 if __name__ == "__main__":
     unittest.main()
