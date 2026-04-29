@@ -4,8 +4,17 @@ from __future__ import annotations
 import json
 
 
-def test_cognee_query_tool_registered_and_available(monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", "/root/.hermes/profiles/cognee-lab")
+def test_cognee_query_tool_registered_and_available(monkeypatch, tmp_path):
+    home = tmp_path / "profile"
+    lab = home / "cognee_lab"
+    scripts = lab / "scripts"
+    py = lab / ".venv" / "bin" / "python"
+    scripts.mkdir(parents=True)
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\nexec python3 \"$@\"\n", encoding="utf-8")
+    py.chmod(0o755)
+    (scripts / "query.py").write_text("import json\nprint(json.dumps({'ok': True, 'results': []}))\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     from tools.registry import registry
     import tools.cognee_query_tool as tool
@@ -137,6 +146,50 @@ def test_fallback_source_extraction_strips_trailing_punctuation():
         "zephyr_runbook.md",
     ]
     assert _fallback_flatten_result_items(value)[0]["source_files"] == ["project_zephyr.md"]
+
+
+def test_cognee_query_answer_with_sources_combines_answer_and_chunk_sources(monkeypatch, tmp_path):
+    home = tmp_path / "profile"
+    lab = home / "cognee_lab"
+    scripts = lab / "scripts"
+    py = lab / ".venv" / "bin" / "python"
+    scripts.mkdir(parents=True)
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\nexec python3 \"$@\"\n", encoding="utf-8")
+    py.chmod(0o755)
+    (scripts / "query.py").write_text(
+        "import json, sys\n"
+        "search_type = sys.argv[sys.argv.index('--search-type') + 1]\n"
+        "answer_mode = '--answer' in sys.argv\n"
+        "if answer_mode and search_type == 'GRAPH_COMPLETION':\n"
+        "    payload = {'ok': True, 'query_meta': {'search_type': 'GRAPH_COMPLETION', 'answer_mode': True}, 'results': ['Hermes Lantern; owned by Iris Vale.'], 'source_files': [], 'sources': [], 'source_count': 0, 'result_items': [{'path': 'result[0]', 'source_files': [], 'text_preview': 'Hermes Lantern; owned by Iris Vale.', 'chars': 35}]}\n"
+        "else:\n"
+        "    payload = {'ok': True, 'query_meta': {'search_type': 'CHUNKS', 'answer_mode': False}, 'results': ['SOURCE_FILE: hermes_ops_pilot.md\\nThe pilot codename is Hermes Lantern and the pilot owner is Iris Vale.'], 'source_files': ['hermes_ops_pilot.md'], 'sources': [{'file': 'hermes_ops_pilot.md', 'mentions': 1, 'first_path': 'result[0]', 'text_preview': 'SOURCE_FILE: hermes_ops_pilot.md\\nThe pilot codename is Hermes Lantern'}], 'source_count': 1, 'result_items': [{'path': 'result[0]', 'source_files': ['hermes_ops_pilot.md'], 'text_preview': 'SOURCE_FILE: hermes_ops_pilot.md\\nThe pilot codename is Hermes Lantern', 'chars': 91}]}\n"
+        "print(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from tools.cognee_query_tool import cognee_query
+
+    payload = json.loads(cognee_query(
+        "What is the codename of the Hermes Ops pilot and who owns it?",
+        search_type="GRAPH_COMPLETION",
+        answer=True,
+        answer_with_sources=True,
+        include_raw=True,
+    ))
+
+    assert payload["success"] is True
+    assert payload["answer_mode"] is True
+    assert payload["answer_with_sources"] is True
+    assert payload["source_files"] == ["hermes_ops_pilot.md"]
+    assert payload["source_count"] == 1
+    assert payload["answer_text"] == "Hermes Lantern; owned by Iris Vale."
+    assert "source_raw" in payload["raw"]
+    assert payload["raw"]["answer_raw"]["source_files"] == []
+    assert payload["raw"]["source_raw"]["source_files"] == ["hermes_ops_pilot.md"]
+    assert "Hermes Lantern" in payload["result_text"]
 
 
 def test_cognee_query_loads_source_helpers_by_path_without_mutating_sys_path(monkeypatch, tmp_path):
