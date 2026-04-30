@@ -2197,9 +2197,6 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
             continue
         if isinstance(value, str) and value.strip():
             normalized[field] = value.strip()
-    provider = normalized.get("provider")
-    if isinstance(provider, str):
-        normalized["provider"] = provider.lower()
     raw_headers = main_runtime.get("default_headers") or main_runtime.get("headers")
     if isinstance(raw_headers, dict):
         default_headers: Dict[str, str] = {}
@@ -2212,6 +2209,9 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
                 default_headers[key_str] = value_str
         if default_headers:
             normalized["default_headers"] = default_headers
+    provider = normalized.get("provider")
+    if isinstance(provider, str):
+        normalized["provider"] = provider.lower()
     return normalized
 
 

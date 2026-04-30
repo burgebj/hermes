@@ -18582,15 +18582,22 @@ class GatewayRunner:
                             "Gateway auto-title failure suppressed (not user-visible): %s: %s",
                             task, exc,
                         )
+                    _title_main_runtime = None
+                    if agent:
+                        _runtime_fn = getattr(agent, "_current_main_runtime", None)
+                        if callable(_runtime_fn):
+                            _title_main_runtime = _runtime_fn()
+                        else:
+                            _title_main_runtime = {
+                                "model": getattr(agent, "model", None),
+                                "provider": getattr(agent, "provider", None),
+                                "base_url": getattr(agent, "base_url", None),
+                                "api_key": getattr(agent, "api_key", None),
+                                "api_mode": getattr(agent, "api_mode", None),
+                            }
                     maybe_auto_title_kwargs = {
                         "failure_callback": _title_failure_cb,
-                        "main_runtime": {
-                            "model": getattr(agent, "model", None),
-                            "provider": getattr(agent, "provider", None),
-                            "base_url": getattr(agent, "base_url", None),
-                            "api_key": getattr(agent, "api_key", None),
-                            "api_mode": getattr(agent, "api_mode", None),
-                        } if agent else None,
+                        "main_runtime": _title_main_runtime,
                     }
                     if self._is_telegram_topic_lane(source):
                         maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_telegram_topic_title_rename(

@@ -13,6 +13,7 @@ runs when the main provider has no working client.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -170,6 +171,98 @@ class TestResolveAutoMainFirst:
         # Runtime override wins
         assert mock_resolve.call_args.args[0] == "anthropic"
         assert mock_resolve.call_args.args[1] == "runtime-model"
+
+    def test_title_generation_preserves_runtime_default_headers(self, monkeypatch):
+        """Title generation through auto/main custom runtime keeps request headers."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create.return_value = SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+            mock_openai.return_value = mock_client
+
+            from agent.auxiliary_client import _client_cache, call_llm
+
+            _client_cache.clear()
+            call_llm(
+                task="title_generation",
+                messages=[{"role": "user", "content": "hello"}],
+                main_runtime={
+                    "provider": "custom",
+                    "model": "duck-title-model",
+                    "base_url": "https://duck.example.com/v1",
+                    "api_key": "duck-key",
+                    "api_mode": "chat_completions",
+                    "default_headers": {
+                        "User-Agent": "DuckCodeClient/1.0",
+                        "X-Duck-Relay": "enabled",
+                    },
+                },
+            )
+
+        kwargs = mock_openai.call_args.kwargs
+        assert kwargs["base_url"] == "https://duck.example.com/v1"
+        assert kwargs["default_headers"] == {
+            "User-Agent": "DuckCodeClient/1.0",
+            "X-Duck-Relay": "enabled",
+        }
+
+    def test_auto_cache_key_includes_runtime_default_headers(self):
+        """Different runtime headers must not reuse the same auto aux client."""
+        from agent.auxiliary_client import _client_cache_key
+
+        first = _client_cache_key(
+            "auto",
+            async_mode=False,
+            main_runtime={
+                "provider": "custom",
+                "model": "m",
+                "base_url": "https://duck.example.com/v1",
+                "api_key": "k",
+                "api_mode": "chat_completions",
+                "default_headers": {"User-Agent": "A"},
+            },
+        )
+        second = _client_cache_key(
+            "auto",
+            async_mode=False,
+            main_runtime={
+                "provider": "custom",
+                "model": "m",
+                "base_url": "https://duck.example.com/v1",
+                "api_key": "k",
+                "api_mode": "chat_completions",
+                "default_headers": {"User-Agent": "B"},
+            },
+        )
+
+        assert first != second
+
+    def test_custom_cache_key_includes_runtime_default_headers(self):
+        """Explicit custom clients also vary by runtime headers."""
+        from agent.auxiliary_client import _client_cache_key
+
+        first = _client_cache_key(
+            "custom",
+            async_mode=False,
+            base_url="https://duck.example.com/v1",
+            api_key="k",
+            api_mode="chat_completions",
+            main_runtime={"default_headers": {"User-Agent": "A"}},
+        )
+        second = _client_cache_key(
+            "custom",
+            async_mode=False,
+            base_url="https://duck.example.com/v1",
+            api_key="k",
+            api_mode="chat_completions",
+            main_runtime={"default_headers": {"User-Agent": "B"}},
+        )
+
+        assert first != second
 
 
 # ── Vision — resolve_vision_provider_client ─────────────────────────────────

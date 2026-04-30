@@ -4852,6 +4852,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         text,
                         raw,
                         session.get("history", []),
+                        main_runtime=(
+                            agent._current_main_runtime()
+                            if hasattr(agent, "_current_main_runtime")
+                            else None
+                        ),
                     )
                 except Exception:
                     pass

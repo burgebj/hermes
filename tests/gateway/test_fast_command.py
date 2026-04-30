@@ -4,7 +4,7 @@ import sys
 import threading
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -21,6 +21,7 @@ class _CapturingAgent:
 
     def __init__(self, *args, **kwargs):
         type(self).last_init = dict(kwargs)
+        self._init_kwargs = dict(kwargs)
         self.tools = []
 
     def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
@@ -32,9 +33,22 @@ class _CapturingAgent:
         }
         return {
             "final_response": "ok",
-            "messages": [],
+            "messages": [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": "ok"},
+            ],
             "api_calls": 1,
             "completed": True,
+        }
+
+    def _current_main_runtime(self):
+        return {
+            "model": self._init_kwargs.get("model", ""),
+            "provider": self._init_kwargs.get("provider", ""),
+            "base_url": self._init_kwargs.get("base_url", ""),
+            "api_key": self._init_kwargs.get("api_key", ""),
+            "api_mode": self._init_kwargs.get("api_mode", ""),
+            "default_headers": dict(self._init_kwargs.get("default_headers") or {}),
         }
 
 
@@ -189,3 +203,46 @@ async def test_run_agent_passes_priority_processing_to_gateway_agent(monkeypatch
     assert result["final_response"] == "ok"
     assert _CapturingAgent.last_init["service_tier"] == "priority"
     assert _CapturingAgent.last_init["request_overrides"] == {"service_tier": "priority"}
+
+
+@pytest.mark.asyncio
+async def test_run_agent_passes_runtime_headers_to_auto_title(monkeypatch, tmp_path):
+    _install_fake_agent(monkeypatch)
+    runner = _make_runner()
+    runner._session_db = object()
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "duck-title-model")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": "https://duck.example.com/v1",
+            "api_key": "duck-key",
+            "default_headers": {"User-Agent": "DuckCodeClient/1.0"},
+        },
+    )
+
+    import hermes_cli.tools_config as tools_config
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
+
+    with patch("agent.title_generator.maybe_auto_title") as mock_title:
+        result = await runner._run_agent(
+            message="title me",
+            context_prompt="",
+            history=[],
+            source=_make_source(),
+            session_id="session-1",
+            session_key="agent:main:telegram:dm:12345",
+        )
+
+    assert result["final_response"] == "ok"
+    mock_title.assert_called_once()
+    assert mock_title.call_args.kwargs["main_runtime"]["default_headers"] == {
+        "User-Agent": "DuckCodeClient/1.0"
+    }
