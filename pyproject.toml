@@ -109,6 +109,7 @@ pty = [
 ]
 honcho = ["honcho-ai==2.0.1"]
 mcp = ["mcp==1.26.0"]
+pocket-tts = ["pocket-tts==2.1.0", "scipy==1.17.1"]
 homeassistant = ["aiohttp==3.13.3"]
 sms = ["aiohttp==3.13.3"]
 # Computer use — macOS background desktop control via cua-driver (MCP stdio).
@@ -207,6 +208,7 @@ all = [
   "hermes-agent[sms]",
   "hermes-agent[acp]",
   "hermes-agent[google]",
+  "hermes-agent[pocket-tts]",
   "hermes-agent[web]",
   "hermes-agent[youtube]",
 ]
