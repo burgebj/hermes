@@ -829,17 +829,44 @@ class TestE2EChannelsList:
 
     def test_channels_with_directory(self, mcp_server_e2e, _event_loop, monkeypatch):
         import mcp_serve
+        # Use the wrapped format matching channel_directory.py writer output
         monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {
-            "telegram": [
-                {"id": "123456", "name": "Alice", "type": "dm"},
-                {"id": "-100999", "name": "Dev Group", "type": "group"},
-            ],
+            "updated_at": "2026-05-07T19:00:00",
+            "platforms": {
+                "telegram": [
+                    {"id": "123456", "name": "Alice", "type": "dm"},
+                    {"id": "-100999", "name": "Dev Group", "type": "group"},
+                ],
+                "discord": [
+                    {"id": "789", "name": "general", "type": "text"},
+                ],
+            },
         })
-        # Need to recreate server to pick up the new mock
         server, bridge = mcp_server_e2e
-        # The tool closure already captured the old mock, so test the function directly
-        directory = mcp_serve._load_channel_directory()
-        assert len(directory["telegram"]) == 2
+        result = _run_tool(server, "channels_list")
+        assert result["count"] == 3
+        targets = {c["target"] for c in result["channels"]}
+        assert "telegram:123456" in targets
+        assert "telegram:-100999" in targets
+        assert "discord:789" in targets
+
+    def test_channels_with_directory_platform_filter(self, mcp_server_e2e, _event_loop, monkeypatch):
+        import mcp_serve
+        monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {
+            "updated_at": "2026-05-07T19:00:00",
+            "platforms": {
+                "telegram": [
+                    {"id": "123456", "name": "Alice", "type": "dm"},
+                ],
+                "slack": [
+                    {"id": "C1234", "name": "general", "type": "channel"},
+                ],
+            },
+        })
+        server, bridge = mcp_server_e2e
+        result = _run_tool(server, "channels_list", {"platform": "telegram"})
+        assert result["count"] == 1
+        assert result["channels"][0]["target"] == "telegram:123456"
 
 
 class TestE2EPermissions:
