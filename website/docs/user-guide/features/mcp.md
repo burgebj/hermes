@@ -13,7 +13,7 @@ If you have ever wanted Hermes to use a tool that already exists somewhere else,
 ## What MCP gives you
 
 - Access to external tool ecosystems without writing a native Hermes tool first
-- Local stdio servers and remote HTTP MCP servers in the same config
+- Local stdio servers and remote HTTP/SSE MCP servers in the same config
 - Automatic tool discovery and registration at startup
 - Utility wrappers for MCP resources and prompts when supported by the server
 - Per-server filtering so you can expose only the MCP tools you actually want Hermes to see
@@ -72,9 +72,10 @@ Use stdio servers when:
 - you want low-latency access to local resources
 - you are following MCP server docs that show `command`, `args`, and `env`
 
-### HTTP servers
+### HTTP and SSE servers
 
-HTTP MCP servers are remote endpoints Hermes connects to directly.
+HTTP MCP servers are remote endpoints Hermes connects to directly. By default,
+Hermes uses MCP's Streamable HTTP transport for `url`-based servers.
 
 ```yaml
 mcp_servers:
@@ -84,7 +85,19 @@ mcp_servers:
       Authorization: "Bearer ***"
 ```
 
-Use HTTP servers when:
+Some older or service-specific MCP servers still expose the SSE transport
+instead. For those, keep the `url` config but add `transport: sse`:
+
+```yaml
+mcp_servers:
+  sse_api:
+    url: "https://mcp.example.com/sse"
+    transport: sse
+    headers:
+      Authorization: "Bearer ***"
+```
+
+Use URL-based servers when:
 - the MCP server is hosted elsewhere
 - your organization exposes internal MCP endpoints
 - you do not want Hermes spawning a local subprocess for that integration
@@ -100,8 +113,10 @@ Hermes reads MCP config from `~/.hermes/config.yaml` under `mcp_servers`.
 | `command` | string | Executable for a stdio MCP server |
 | `args` | list | Arguments for the stdio server |
 | `env` | mapping | Environment variables passed to the stdio server |
-| `url` | string | HTTP MCP endpoint |
+| `url` | string | Remote MCP endpoint |
+| `transport` | string | `sse` for URL-based servers that use the SSE transport instead of Streamable HTTP |
 | `headers` | mapping | HTTP headers for remote servers |
+| `auth` | string | `oauth` for URL-based servers that require OAuth 2.1 PKCE |
 | `timeout` | number | Tool call timeout |
 | `connect_timeout` | number | Initial connection timeout |
 | `enabled` | bool | If `false`, Hermes skips the server entirely |

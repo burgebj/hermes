@@ -22,7 +22,8 @@ mcp_servers:
     env: {}
 
     # OR
-    url: "..."          # HTTP servers
+    url: "..."          # Streamable HTTP or SSE servers
+    transport: sse      # optional; use only for SSE MCP servers
     headers: {}
 
     enabled: true
@@ -42,13 +43,14 @@ mcp_servers:
 | `command` | string | stdio | Executable to launch |
 | `args` | list | stdio | Arguments for the subprocess |
 | `env` | mapping | stdio | Environment passed to the subprocess |
-| `url` | string | HTTP | Remote MCP endpoint |
-| `headers` | mapping | HTTP | Headers for remote server requests |
+| `url` | string | HTTP/SSE | Remote MCP endpoint |
+| `transport` | string | HTTP/SSE | Set to `sse` for SSE MCP servers. Omit for default Streamable HTTP. |
+| `headers` | mapping | HTTP/SSE | Headers for remote server requests |
 | `enabled` | bool | both | Skip the server entirely when false |
 | `timeout` | number | both | Tool call timeout |
 | `connect_timeout` | number | both | Initial connection timeout |
 | `tools` | mapping | both | Filtering and utility-tool policy |
-| `auth` | string | HTTP | Authentication method. Set to `oauth` to enable OAuth 2.1 with PKCE |
+| `auth` | string | HTTP/SSE | Authentication method. Set to `oauth` to enable OAuth 2.1 with PKCE |
 | `sampling` | mapping | both | Server-initiated LLM request policy (see MCP guide) |
 
 ## `tools` policy keys
@@ -177,6 +179,17 @@ mcp_servers:
       exclude: [delete_customer, refund_payment]
 ```
 
+### SSE transport server
+
+```yaml
+mcp_servers:
+  legacy_sse:
+    url: "https://mcp.example.com/sse"
+    transport: sse
+    headers:
+      Authorization: "Bearer ***"
+```
+
 ### Resource-only docs server
 
 ```yaml
@@ -230,7 +243,7 @@ Keep this in mind when writing `include` / `exclude` filters — use the **origi
 
 ## OAuth 2.1 authentication
 
-For HTTP servers that require OAuth, set `auth: oauth` on the server entry:
+For URL-based servers that require OAuth, set `auth: oauth` on the server entry:
 
 ```yaml
 mcp_servers:
@@ -244,4 +257,4 @@ Behavior:
 - On first connect, a browser window opens for authorization
 - Tokens are persisted to `~/.hermes/mcp-tokens/<server>.json` and reused across sessions
 - Token refresh is automatic; re-authorization only happens when refresh fails
-- Only applies to HTTP/StreamableHTTP transport (`url`-based servers)
+- Applies to URL-based Streamable HTTP servers and URL-based SSE servers (`transport: sse`)
