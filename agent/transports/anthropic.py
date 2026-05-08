@@ -94,15 +94,18 @@ class AnthropicTransport(ProviderTransport):
         reasoning_parts = []
         reasoning_details = []
         tool_calls = []
+        raw_content = []
 
         for block in response.content:
+            raw_block = _to_plain_data(block)
+            if isinstance(raw_block, dict):
+                raw_content.append(raw_block)
             if block.type == "text":
                 text_parts.append(block.text)
             elif block.type == "thinking":
                 reasoning_parts.append(block.thinking)
-                block_dict = _to_plain_data(block)
-                if isinstance(block_dict, dict):
-                    reasoning_details.append(block_dict)
+                if isinstance(raw_block, dict):
+                    reasoning_details.append(raw_block)
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
@@ -118,6 +121,8 @@ class AnthropicTransport(ProviderTransport):
         finish_reason = self._STOP_REASON_MAP.get(response.stop_reason, "stop")
 
         provider_data = {}
+        if raw_content:
+            provider_data["_raw_anthropic_content"] = raw_content
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
 

@@ -1409,6 +1409,21 @@ def _extract_preserved_thinking_blocks(message: Dict[str, Any]) -> List[Dict[str
     return preserved
 
 
+def _extract_raw_anthropic_content(message: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Return exact Anthropic content blocks preserved from a prior response."""
+    raw_content = message.get("_raw_anthropic_content")
+    if not isinstance(raw_content, list) or not raw_content:
+        return None
+
+    blocks: List[Dict[str, Any]] = []
+    for block in raw_content:
+        plain_block = _to_plain_data(block)
+        if not isinstance(plain_block, dict):
+            return None
+        blocks.append(copy.deepcopy(plain_block))
+    return blocks
+
+
 def _convert_content_to_anthropic(content: Any) -> Any:
     """Convert OpenAI-style multimodal content arrays to Anthropic blocks."""
     if not isinstance(content, list):
@@ -1468,29 +1483,36 @@ def convert_messages_to_anthropic(
             continue
 
         if role == "assistant":
-            blocks = _extract_preserved_thinking_blocks(m)
-            if content:
+            from_raw_anthropic_content = False
+            raw_blocks = _extract_raw_anthropic_content(m)
+            if raw_blocks is not None:
+                blocks = raw_blocks
+                from_raw_anthropic_content = True
+            else:
+                blocks = _extract_preserved_thinking_blocks(m)
+            if content and raw_blocks is None:
                 if isinstance(content, list):
                     converted_content = _convert_content_to_anthropic(content)
                     if isinstance(converted_content, list):
                         blocks.extend(converted_content)
                 else:
                     blocks.append({"type": "text", "text": str(content)})
-            for tc in m.get("tool_calls", []):
-                if not tc or not isinstance(tc, dict):
-                    continue
-                fn = tc.get("function", {})
-                args = fn.get("arguments", "{}")
-                try:
-                    parsed_args = json.loads(args) if isinstance(args, str) else args
-                except (json.JSONDecodeError, ValueError):
-                    parsed_args = {}
-                blocks.append({
-                    "type": "tool_use",
-                    "id": _sanitize_tool_id(tc.get("id", "")),
-                    "name": fn.get("name", ""),
-                    "input": parsed_args,
-                })
+            if raw_blocks is None:
+                for tc in m.get("tool_calls", []):
+                    if not tc or not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments", "{}")
+                    try:
+                        parsed_args = json.loads(args) if isinstance(args, str) else args
+                    except (json.JSONDecodeError, ValueError):
+                        parsed_args = {}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": _sanitize_tool_id(tc.get("id", "")),
+                        "name": fn.get("name", ""),
+                        "input": parsed_args,
+                    })
             # Kimi's /coding endpoint (Anthropic protocol) requires assistant
             # tool-call messages to carry reasoning_content when thinking is
             # enabled server-side.  Preserve it as a thinking block so Kimi
@@ -1514,13 +1536,20 @@ def convert_messages_to_anthropic(
                 isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking")
                 for b in blocks
             )
-            if isinstance(reasoning_content, str) and not _already_has_thinking:
+            if (
+                raw_blocks is None
+                and isinstance(reasoning_content, str)
+                and not _already_has_thinking
+            ):
                 blocks.insert(0, {"type": "thinking", "thinking": reasoning_content})
             # Anthropic rejects empty assistant content
             effective = blocks or content
             if not effective or effective == "":
                 effective = [{"type": "text", "text": "(empty)"}]
-            result.append({"role": "assistant", "content": effective})
+            assistant_result = {"role": "assistant", "content": effective}
+            if from_raw_anthropic_content:
+                assistant_result["_raw_anthropic_content_preserved"] = True
+            result.append(assistant_result)
             continue
 
         if role == "tool":
@@ -1662,9 +1691,11 @@ def convert_messages_to_anthropic(
     # thinking blocks if it supports extended thinking.
     #
     # For direct Anthropic (strategy following clawdbot/OpenClaw):
-    # 1. Strip thinking/redacted_thinking from all assistant messages
-    #    EXCEPT the last one — preserves reasoning continuity on the
-    #    current tool-use chain while avoiding stale signature errors.
+    # 1. Strip thinking/redacted_thinking from reconstructed assistant
+    #    messages EXCEPT the last one. Assistant messages replayed from exact
+    #    raw Anthropic response content keep their signed thinking blocks.
+    #    This preserves reasoning continuity while avoiding stale signatures
+    #    from Hermes-synthesised or mutated blocks.
     # 2. Downgrade unsigned thinking blocks (no signature) to text —
     #    Anthropic can't validate them and will reject them.
     # 3. Strip cache_control from thinking/redacted_thinking blocks —
@@ -1710,10 +1741,16 @@ def convert_messages_to_anthropic(
                 # keep it: the upstream needs it for message-history validation.
                 new_content.append(b)
             m["content"] = new_content or [{"type": "text", "text": "(empty)"}]
-        elif _is_third_party or idx != last_assistant_idx:
+        elif _is_third_party or (
+            idx != last_assistant_idx
+            and not m.get("_raw_anthropic_content_preserved")
+        ):
             # Third-party endpoint: strip ALL thinking blocks from every
             # assistant message — signatures are Anthropic-proprietary.
-            # Direct Anthropic: strip from non-latest assistant messages only.
+            # Direct Anthropic: strip from non-latest assistant messages only
+            # unless those messages came from exact raw Anthropic response
+            # content. Raw blocks remain valid because Hermes did not
+            # reconstruct or synthesize them.
             stripped = [
                 b for b in m["content"]
                 if not (isinstance(b, dict) and b.get("type") in _THINKING_TYPES)
@@ -1748,6 +1785,8 @@ def convert_messages_to_anthropic(
         for b in m["content"]:
             if isinstance(b, dict) and b.get("type") in _THINKING_TYPES:
                 b.pop("cache_control", None)
+
+        m.pop("_raw_anthropic_content_preserved", None)
 
     return system, result
 
@@ -1969,5 +2008,3 @@ def build_anthropic_kwargs(
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
-
-

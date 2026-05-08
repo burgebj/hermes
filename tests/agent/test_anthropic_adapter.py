@@ -27,6 +27,33 @@ from agent.anthropic_adapter import (
 from agent.transports import get_transport
 
 
+def test_anthropic_transport_exposes_raw_content_blocks():
+    from agent.transports.anthropic import AnthropicTransport
+
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="thinking",
+                thinking="Need to inspect.",
+                signature="sig_1",
+            ),
+            SimpleNamespace(type="redacted_thinking", data="opaque_data"),
+            SimpleNamespace(type="text", text="Visible answer"),
+        ],
+        stop_reason="end_turn",
+    )
+
+    normalized = AnthropicTransport().normalize_response(response)
+
+    assert normalized.content == "Visible answer"
+    assert normalized.reasoning == "Need to inspect."
+    assert normalized.raw_anthropic_content == [
+        {"type": "thinking", "thinking": "Need to inspect.", "signature": "sig_1"},
+        {"type": "redacted_thinking", "data": "opaque_data"},
+        {"type": "text", "text": "Visible answer"},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -854,6 +881,104 @@ class TestConvertMessages:
         assert assistant_blocks[0]["thinking"] == "Need to inspect the tool result first."
         assert assistant_blocks[0]["signature"] == "sig_123"
         assert assistant_blocks[1]["type"] == "tool_use"
+
+    def test_raw_anthropic_content_preserves_old_signed_blocks(self):
+        messages = [
+            {"role": "user", "content": "Question 1"},
+            {
+                "role": "assistant",
+                "content": "flattened visible text",
+                "_raw_anthropic_content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Raw signed thought.",
+                        "signature": "sig_raw_1",
+                    },
+                    {"type": "redacted_thinking", "data": "opaque_redacted_data"},
+                    {"type": "text", "text": "raw visible text"},
+                ],
+            },
+            {"role": "user", "content": "Question 2"},
+            {"role": "assistant", "content": "Final answer"},
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        first_assistant = [m for m in result if m["role"] == "assistant"][0]
+        blocks = first_assistant["content"]
+
+        assert [b.get("type") for b in blocks] == [
+            "thinking",
+            "redacted_thinking",
+            "text",
+        ]
+        assert blocks[0]["signature"] == "sig_raw_1"
+        assert blocks[1]["data"] == "opaque_redacted_data"
+        assert blocks[2]["text"] == "raw visible text"
+        assert "_raw_anthropic_content_preserved" not in first_assistant
+
+    def test_raw_anthropic_content_is_source_of_truth_for_tool_use(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "_raw_anthropic_content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Use the tool.",
+                        "signature": "sig_tool",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "test_tool",
+                        "input": {"x": 1},
+                    },
+                ],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {"name": "test_tool", "arguments": "{\"x\": 1}"},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "tool output"},
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assistant = next(msg for msg in result if msg["role"] == "assistant")
+        tool_uses = [
+            block for block in assistant["content"]
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+
+        assert len(tool_uses) == 1
+        assert tool_uses[0]["input"] == {"x": 1}
+
+    def test_raw_anthropic_content_thinking_stripped_for_third_party(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "flattened text",
+                "_raw_anthropic_content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Anthropic signed thought.",
+                        "signature": "sig_raw",
+                    },
+                    {"type": "redacted_thinking", "data": "opaque_redacted_data"},
+                    {"type": "text", "text": "visible raw text"},
+                ],
+            },
+        ]
+
+        _, result = convert_messages_to_anthropic(
+            messages,
+            base_url="https://api.minimax.io/anthropic",
+        )
+        blocks = result[0]["content"]
+
+        assert [b.get("type") for b in blocks] == ["text"]
+        assert blocks[0]["text"] == "visible raw text"
 
     def test_converts_data_url_image_to_anthropic_image_block(self):
         messages = [

@@ -131,6 +131,11 @@ class NormalizedResponse:
         pd = self.provider_data or {}
         return pd.get("codex_message_items")
 
+    @property
+    def raw_anthropic_content(self):
+        pd = self.provider_data or {}
+        return pd.get("_raw_anthropic_content")
+
 
 # ---------------------------------------------------------------------------
 # Factory helpers

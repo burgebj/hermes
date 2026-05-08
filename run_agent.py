@@ -568,6 +568,53 @@ def _sanitize_messages_surrogates(messages: list) -> bool:
     return found
 
 
+def _to_plain_response_data(value: Any, *, _depth: int = 0, _path: Optional[set] = None) -> Any:
+    """Convert provider SDK response objects to JSON-compatible plain data."""
+    _MAX_DEPTH = 20
+    if _depth > _MAX_DEPTH:
+        return str(value)
+
+    if _path is None:
+        _path = set()
+
+    obj_id = id(value)
+    if obj_id in _path:
+        return str(value)
+
+    if hasattr(value, "model_dump"):
+        _path.add(obj_id)
+        try:
+            dumped = value.model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            dumped = value.model_dump()
+        result = _to_plain_response_data(dumped, _depth=_depth + 1, _path=_path)
+        _path.discard(obj_id)
+        return result
+    if isinstance(value, dict):
+        _path.add(obj_id)
+        result = {
+            k: _to_plain_response_data(v, _depth=_depth + 1, _path=_path)
+            for k, v in value.items()
+        }
+        _path.discard(obj_id)
+        return result
+    if isinstance(value, (list, tuple)):
+        _path.add(obj_id)
+        result = [_to_plain_response_data(v, _depth=_depth + 1, _path=_path) for v in value]
+        _path.discard(obj_id)
+        return result
+    if hasattr(value, "__dict__"):
+        _path.add(obj_id)
+        result = {
+            k: _to_plain_response_data(v, _depth=_depth + 1, _path=_path)
+            for k, v in vars(value).items()
+            if not k.startswith("_")
+        }
+        _path.discard(obj_id)
+        return result
+    return value
+
+
 def _escape_invalid_chars_in_json_strings(raw: str) -> str:
     """Escape unescaped control chars inside JSON string values.
 
@@ -9076,6 +9123,18 @@ class AIAgent:
         if "reasoning_content" not in msg and reasoning_text:
             msg["reasoning_content"] = reasoning_text
 
+        raw_anthropic_content = getattr(assistant_message, "raw_anthropic_content", None)
+        if raw_anthropic_content is None:
+            provider_data = getattr(assistant_message, "provider_data", None) or {}
+            if isinstance(provider_data, dict):
+                raw_anthropic_content = provider_data.get("_raw_anthropic_content")
+        preserved_raw_anthropic_content = _to_plain_response_data(raw_anthropic_content)
+        if (
+            isinstance(preserved_raw_anthropic_content, list)
+            and all(isinstance(block, dict) for block in preserved_raw_anthropic_content)
+        ):
+            msg["_raw_anthropic_content"] = preserved_raw_anthropic_content
+
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
             # Anthropic, OpenAI) can maintain reasoning continuity across turns.
@@ -10596,7 +10655,10 @@ class AIAgent:
             for msg in messages:
                 api_msg = msg.copy()
                 self._copy_reasoning_content_for_api(msg, api_msg)
-                for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
+                internal_fields = ["reasoning", "finish_reason", "_thinking_prefill"]
+                if self.api_mode != "anthropic_messages":
+                    internal_fields.append("_raw_anthropic_content")
+                for internal_field in internal_fields:
                     api_msg.pop(internal_field, None)
                 if _needs_sanitize:
                     self._sanitize_tool_calls_for_strict_api(api_msg)
@@ -11334,6 +11396,8 @@ class AIAgent:
                     api_msg.pop("finish_reason")
                 # Strip internal thinking-prefill marker
                 api_msg.pop("_thinking_prefill", None)
+                if self.api_mode != "anthropic_messages":
+                    api_msg.pop("_raw_anthropic_content", None)
                 # Strip Codex Responses API fields (call_id, response_item_id) for
                 # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
                 # Uses new dicts so the internal messages list retains the fields
