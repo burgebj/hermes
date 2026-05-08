@@ -447,16 +447,17 @@ async def test_discord_voice_linked_channel_skips_mention_requirement_and_auto_t
 
 
 @pytest.mark.asyncio
-async def test_discord_free_channel_skips_auto_thread(adapter, monkeypatch):
-    """Free-response channels must NOT auto-create threads — bot replies inline.
+async def test_discord_free_channel_skips_auto_thread_when_opted_out(adapter, monkeypatch):
+    """Free-response channels can opt out of auto-threading via the no_thread_channels list.
 
-    Without this, every message in a free-response channel would spin off a
-    thread (since the channel bypasses the @mention gate), defeating the
-    lightweight-chat purpose of free-response mode.
+    Per ad4542bf6d, free-response channels no longer skip auto-thread by
+    default — users must opt out explicitly via DISCORD_NO_THREAD_CHANNELS or
+    (now, with this change honoring it from YAML) discord.no_thread_channels.
     """
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "789")
     monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)  # default true
+    adapter.config.extra["no_thread_channels"] = ["789"]
 
     adapter._auto_create_thread = AsyncMock()
 
@@ -488,3 +489,84 @@ async def test_discord_voice_linked_parent_thread_still_requires_mention(adapter
     await adapter._handle_message(message)
 
     adapter.handle_message.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _discord_no_thread_channels: parser tests (mirror _discord_free_response_channels)
+# ---------------------------------------------------------------------------
+
+
+def test_discord_no_thread_channels_default_empty(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    assert adapter._discord_no_thread_channels() == set()
+
+
+def test_discord_no_thread_channels_list(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    adapter.config.extra["no_thread_channels"] = ["789", "999"]
+    assert adapter._discord_no_thread_channels() == {"789", "999"}
+
+
+def test_discord_no_thread_channels_csv_string(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    adapter.config.extra["no_thread_channels"] = "789, 999"
+    assert adapter._discord_no_thread_channels() == {"789", "999"}
+
+
+def test_discord_no_thread_channels_bare_int(adapter, monkeypatch):
+    # YAML `discord.no_thread_channels: 1499840531935662140` (single bare int)
+    # must coerce to str, matching free_response_channels behavior.
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    adapter.config.extra["no_thread_channels"] = 1499840531935662140
+    assert adapter._discord_no_thread_channels() == {"1499840531935662140"}
+
+
+def test_discord_no_thread_channels_int_list(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    adapter.config.extra["no_thread_channels"] = [1499840531935662140, 99999]
+    assert adapter._discord_no_thread_channels() == {"1499840531935662140", "99999"}
+
+
+def test_discord_no_thread_channels_empty_string(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    adapter.config.extra["no_thread_channels"] = ""
+    assert adapter._discord_no_thread_channels() == set()
+
+
+def test_discord_no_thread_channels_env_var_fallback(adapter, monkeypatch):
+    """When YAML key is unset, env var is honored (preserves existing behavior)."""
+    adapter.config.extra.pop("no_thread_channels", None)
+    monkeypatch.setenv("DISCORD_NO_THREAD_CHANNELS", "789,999")
+    assert adapter._discord_no_thread_channels() == {"789", "999"}
+
+
+def test_discord_no_thread_channels_yaml_takes_precedence_over_env(adapter, monkeypatch):
+    """When YAML key is set, env var is ignored (YAML is the source of truth)."""
+    adapter.config.extra["no_thread_channels"] = ["111"]
+    monkeypatch.setenv("DISCORD_NO_THREAD_CHANNELS", "789,999")
+    assert adapter._discord_no_thread_channels() == {"111"}
+
+
+@pytest.mark.asyncio
+async def test_discord_no_thread_channels_from_config_skips_auto_thread(adapter, monkeypatch):
+    """Channel listed in discord.no_thread_channels (YAML) must not auto-thread.
+
+    Regression guard: prior to this change, the YAML key was silently ignored
+    because the threading code read only DISCORD_NO_THREAD_CHANNELS env var.
+    """
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)  # default true
+    adapter.config.extra["no_thread_channels"] = ["789"]
+
+    adapter._auto_create_thread = AsyncMock()
+
+    message = make_message(
+        channel=FakeTextChannel(channel_id=789),
+        content="message in no-thread channel",
+    )
+
+    await adapter._handle_message(message)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    adapter.handle_message.assert_awaited_once()

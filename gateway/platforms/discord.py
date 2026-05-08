@@ -3551,6 +3551,27 @@ class DiscordAdapter(BasePlatformAdapter):
             return {part.strip() for part in s.split(",") if part.strip()}
         return set()
 
+    def _discord_no_thread_channels(self) -> set:
+        """Return Discord channel IDs where auto-threading is suppressed.
+
+        Reads ``discord.no_thread_channels`` from ``self.config.extra`` first,
+        falling back to ``DISCORD_NO_THREAD_CHANNELS`` env var when the YAML
+        key is unset. Mirrors ``_discord_free_response_channels`` so the YAML
+        key advertised in the example config behaves consistently with its
+        sibling keys (``free_response_channels``, ``allowed_channels``).
+        """
+        raw = self.config.extra.get("no_thread_channels")
+        if raw is None:
+            raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        # Coerce non-list scalars (str/int/float) to str before splitting,
+        # matching _discord_free_response_channels.
+        s = str(raw).strip() if raw is not None else ""
+        if s:
+            return {part.strip() for part in s.split(",") if part.strip()}
+        return set()
+
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
         return getattr(channel, "parent", None) or channel
@@ -4117,8 +4138,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # no_thread_channels: channels where bot responds directly without thread.
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
-            no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
-            no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
+            no_thread_channels = self._discord_no_thread_channels()
             skip_thread = bool(channel_ids & no_thread_channels)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in ("true", "1", "yes")
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
