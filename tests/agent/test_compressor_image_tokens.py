@@ -13,9 +13,9 @@ import pytest
 from agent.context_compressor import (
     _CHARS_PER_TOKEN,
     _IMAGE_CHAR_EQUIVALENT,
-    _IMAGE_TOKEN_ESTIMATE,
     _content_length_for_budget,
 )
+from agent.model_metadata import IMAGE_TOKEN_ESTIMATE as _IMAGE_TOKEN_ESTIMATE
 
 
 class TestContentLengthForBudget:

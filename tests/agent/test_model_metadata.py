@@ -94,14 +94,59 @@ class TestEstimateMessagesTokensRough:
         assert result > 0
         assert result == (len(str(msg)) + 3) // 4
 
-    def test_message_with_list_content(self):
-        """Vision messages with multimodal content arrays."""
+    def test_message_with_list_content_text_only(self):
+        """Multimodal content lists with only text parts: each text part
+        counts as plain `len(text)`, plus envelope overhead."""
         msg = {"role": "user", "content": [
-            {"type": "text", "text": "describe"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+            {"type": "text", "text": "describe what you see"},
         ]}
         result = estimate_messages_tokens_rough([msg])
-        assert result == (len(str(msg)) + 3) // 4
+        # Text part contributes len(text) chars; envelope adds dict overhead.
+        # The result should be > len(text)/4 (envelope) but bounded.
+        assert result > 0
+        assert result < (len(str(msg)) + 3) // 4 + 10  # close to legacy estimate
+
+    def test_image_part_does_not_inflate_with_base64_size(self):
+        """Regression for the pre-flight overcount bug: a multimodal message
+        with an image part must NOT scale with the base64 payload length.
+        Otherwise a 1MB image expands to ~333K phantom text tokens and falsely
+        trips compression on short conversations."""
+        import base64
+        small_b64 = base64.b64encode(b"\x00" * 100).decode()
+        large_b64 = base64.b64encode(b"\x00" * 1_000_000).decode()  # ~1.3MB of base64
+        small_msg = {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{small_b64}"}},
+        ]}
+        large_msg = {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{large_b64}"}},
+        ]}
+        small_est = estimate_messages_tokens_rough([small_msg])
+        large_est = estimate_messages_tokens_rough([large_msg])
+        # Both should be roughly IMAGE_TOKEN_ESTIMATE (~1600). They MUST NOT
+        # differ by orders of magnitude.
+        assert abs(small_est - large_est) < 50, (
+            f"Image base64 size leaked into token estimate: "
+            f"small={small_est}, large={large_est}"
+        )
+
+    def test_anthropic_style_image_part(self):
+        """Anthropic uses {type: image, source: {data: <base64>}} instead of
+        OpenAI's {type: image_url, image_url: {url: data:...}}. Both schemas
+        must be recognized so estimates don't blow up on Anthropic-routed
+        sessions."""
+        import base64
+        b64 = base64.b64encode(b"\x00" * 500_000).decode()
+        msg = {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": b64,
+            }},
+        ]}
+        est = estimate_messages_tokens_rough([msg])
+        # Should be on the order of IMAGE_TOKEN_ESTIMATE, not 100K+.
+        assert est < 5000, f"Anthropic image inflated estimate: {est}"
 
 
 # =========================================================================

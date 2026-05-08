@@ -1454,9 +1454,58 @@ def estimate_tokens_rough(text: str) -> int:
     return (len(text) + 3) // 4
 
 
+# Flat token cost per attached image part for rough estimation.  Real cost
+# varies by provider and dimensions (Anthropic ≈ width×height/750, GPT-4o up
+# to ~1700 for high-detail 2048×2048, Gemini 258/tile), but 1600 is a
+# realistic ceiling.  Using a flat cost here avoids the failure mode where
+# `len(str(msg))` on a multimodal content list expands the base64 image
+# payload into hundreds of thousands of phantom characters — a 1MB image
+# would otherwise estimate as ~333K tokens, falsely tripping pre-flight
+# compression on short conversations.
+IMAGE_TOKEN_ESTIMATE = 1600
+_IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+
+
+def _msg_chars_image_aware(msg: Any) -> int:
+    """Per-message char count for token estimation, ignoring base64 payloads.
+
+    Multimodal content lists (OpenAI- or Anthropic-style) substitute a flat
+    ``IMAGE_TOKEN_ESTIMATE * 4`` chars per image part instead of stringifying
+    the whole dict (which would include the base64 ``data:image/...`` URL).
+    Plain-string content and non-list content fall back to ``len(str(msg))``
+    so envelope overhead (role, name, tool_call_id, ...) is preserved.
+    """
+    if not isinstance(msg, dict):
+        return len(str(msg))
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return len(str(msg))
+
+    # Approximate envelope overhead: stringify the message minus content.
+    # `len(str({...}))` matches what the old code charged for non-image
+    # messages, so plain-text estimates stay calibrated.
+    envelope = {k: v for k, v in msg.items() if k != "content"}
+    total = len(str(envelope))
+
+    for part in content:
+        if isinstance(part, dict):
+            if part.get("type") in _IMAGE_PART_TYPES:
+                total += IMAGE_TOKEN_ESTIMATE * 4
+            else:
+                # Text parts: count just the text. Non-text non-image dicts
+                # (e.g. tool_result blocks) get full str() to be safe.
+                text = part.get("text")
+                total += len(text) if isinstance(text, str) else len(str(part))
+        elif isinstance(part, str):
+            total += len(part)
+        else:
+            total += len(str(part))
+    return total
+
+
 def estimate_messages_tokens_rough(messages: List[Dict[str, Any]]) -> int:
     """Rough token estimate for a message list (pre-flight only)."""
-    total_chars = sum(len(str(msg)) for msg in messages)
+    total_chars = sum(_msg_chars_image_aware(msg) for msg in messages)
     return (total_chars + 3) // 4
 
 
@@ -1477,7 +1526,7 @@ def estimate_request_tokens_rough(
     if system_prompt:
         total_chars += len(system_prompt)
     if messages:
-        total_chars += sum(len(str(msg)) for msg in messages)
+        total_chars += sum(_msg_chars_image_aware(msg) for msg in messages)
     if tools:
         total_chars += len(str(tools))
     return (total_chars + 3) // 4

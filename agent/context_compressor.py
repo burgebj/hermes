@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from agent.auxiliary_client import call_llm
 from agent.context_engine import ContextEngine
 from agent.model_metadata import (
+    IMAGE_TOKEN_ESTIMATE,
     MINIMUM_CONTEXT_LENGTH,
     get_model_context_length,
     estimate_messages_tokens_rough,
@@ -63,16 +64,11 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
-# Flat token cost per attached image part.  Real cost varies by provider and
-# dimensions (Anthropic ≈ width×height/750, GPT-4o up to ~1700 for
-# high-detail 2048×2048, Gemini 258/tile), but 1600 is a realistic ceiling
-# that keeps compression budgeting honest for multi-image conversations.
-# Matches Claude Code's IMAGE_TOKEN_ESTIMATE constant.
-_IMAGE_TOKEN_ESTIMATE = 1600
-# Same figure expressed in the char-budget currency the rest of the
-# compressor speaks in.  Used when accumulating message "content length"
-# for tail-cut decisions.
-_IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
+# Image token cost expressed as char-budget for the compressor's tail-cut
+# decisions.  The token figure itself lives in model_metadata so the rough
+# estimators there can use the same flat cap and avoid counting base64
+# payloads as text tokens.
+_IMAGE_CHAR_EQUIVALENT = IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 
 
