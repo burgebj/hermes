@@ -865,6 +865,7 @@ class SessionStore:
         # All _entries / _loaded mutations are protected by self._lock.
         db_end_session_id = None
         db_create_kwargs = None
+        old_transcript_session_id = None
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -903,10 +904,14 @@ class SessionStore:
                     # Track whether the expired session had any real conversation
                     reset_had_activity = entry.total_tokens > 0
                     db_end_session_id = entry.session_id
+                    old_transcript_session_id = entry.session_id
             else:
                 was_auto_reset = False
                 auto_reset_reason = None
                 reset_had_activity = False
+                # When force_new replaces an existing entry, clean up its transcript
+                if force_new and session_key in self._entries:
+                    old_transcript_session_id = self._entries[session_key].session_id
 
             # Create new session
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -945,6 +950,10 @@ class SessionStore:
                 self._db.create_session(**db_create_kwargs)
             except Exception as e:
                 print(f"[gateway] Warning: Failed to create SQLite session: {e}")
+
+        # Clean up the old transcript file after session reset
+        if old_transcript_session_id:
+            self._delete_transcript(old_transcript_session_id)
 
         return entry
 
@@ -1051,6 +1060,7 @@ class SessionStore:
 
         cutoff = _now() - timedelta(days=max_age_days)
         removed_keys: list[str] = []
+        removed_session_ids: list[str] = []
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -1073,10 +1083,15 @@ class SessionStore:
                         )
                 if entry.updated_at < cutoff:
                     removed_keys.append(key)
+                    removed_session_ids.append(entry.session_id)
             for key in removed_keys:
                 self._entries.pop(key, None)
             if removed_keys:
                 self._save()
+
+        # Delete orphaned transcript files outside the lock
+        for sid in removed_session_ids:
+            self._delete_transcript(sid)
 
         if removed_keys:
             logger.info(
@@ -1084,6 +1099,35 @@ class SessionStore:
                 len(removed_keys), max_age_days,
             )
         return len(removed_keys)
+
+    def cleanup_orphaned_transcripts(self) -> int:
+        """Remove JSONL transcript files that have no matching session entry.
+
+        Called on gateway startup to clean up transcript files left behind
+        by previous sessions that were replaced or pruned without deleting
+        their transcript files (#20098).
+        """
+        if not self.sessions_dir.is_dir():
+            return 0
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            known_ids = {e.session_id for e in self._entries.values()}
+
+        removed = 0
+        for path in self.sessions_dir.glob("*.jsonl"):
+            # Extract session_id from filename (e.g. "20260505_053804_914eb0.jsonl")
+            session_id = path.stem
+            if session_id not in known_ids:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError as exc:
+                    logger.debug("Could not remove orphaned transcript %s: %s", path, exc)
+
+        if removed:
+            logger.info("SessionStore cleaned up %d orphaned transcript files", removed)
+        return removed
 
     def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
         """Mark recently-active sessions as resumable after an unexpected exit.
@@ -1245,6 +1289,18 @@ class SessionStore:
     def get_transcript_path(self, session_id: str) -> Path:
         """Get the path to a session's legacy transcript file."""
         return self.sessions_dir / f"{session_id}.jsonl"
+
+    def _delete_transcript(self, session_id: str) -> None:
+        """Delete a session's legacy JSONL transcript file if it exists.
+
+        Silently ignores missing files — the transcript may never have been
+        written if the session was created but never received messages.
+        """
+        path = self.get_transcript_path(session_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug("Could not remove transcript %s: %s", path, exc)
     
     def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
         """Append a message to a session's transcript (SQLite + legacy JSONL).

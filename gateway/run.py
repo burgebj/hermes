@@ -3157,6 +3157,14 @@ class GatewayRunner:
         except Exception as e:
             logger.debug("Stuck-loop detection failed: %s", e)
 
+        # Clean up orphaned transcript files left by previous sessions (#20098)
+        try:
+            orphaned = self.session_store.cleanup_orphaned_transcripts()
+            if orphaned:
+                logger.info("Cleaned up %d orphaned session transcript(s)", orphaned)
+        except Exception as e:
+            logger.debug("Orphaned transcript cleanup failed: %s", e)
+
         connected_count = 0
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
