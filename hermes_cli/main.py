@@ -8554,6 +8554,17 @@ def _build_provider_choices() -> list[str]:
 
 def main():
     """Main entry point for hermes CLI."""
+    # Fix for Chinese Windows: force UTF-8 encoding on stdout/stderr
+    # to prevent UnicodeEncodeError crashes with emoji/Unicode in print()
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     from hermes_cli._parser import build_top_level_parser
 
     parser, subparsers, chat_parser = build_top_level_parser()
