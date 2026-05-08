@@ -168,6 +168,97 @@ def _normalize_string_set(values) -> Set[str]:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+# ── Skills directory isolation ───────────────────────────────────────────
+
+
+_OPENCLAW_HOME_MARKERS = frozenset(("openclaw.json", "clawdbot.json", "moltbot.json"))
+_TRUTHY = frozenset(("1", "true", "yes", "on"))
+
+
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in _TRUTHY
+
+
+def _skills_config_allows_openclaw(skills_cfg: Dict[str, Any] | None = None) -> bool:
+    if _truthy(os.getenv("HERMES_ALLOW_OPENCLAW_SKILLS")):
+        return True
+    if skills_cfg is None:
+        skills_cfg = _load_skills_config_for_dirs()
+    if not isinstance(skills_cfg, dict):
+        return False
+    return any(
+        _truthy(skills_cfg.get(key))
+        for key in (
+            "allow_openclaw_external_dirs",
+            "allow_openclaw_skills",
+            "allow_foreign_app_skills",
+        )
+    )
+
+
+def _load_skills_config_for_dirs() -> Dict[str, Any]:
+    config_path = get_config_path()
+    if not config_path.exists():
+        return {}
+    try:
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    skills_cfg = parsed.get("skills")
+    return skills_cfg if isinstance(skills_cfg, dict) else {}
+
+
+def is_openclaw_owned_skills_dir(path: Path) -> bool:
+    """Return True when *path* is an OpenClaw-owned skills directory.
+
+    Hermes may import OpenClaw skills into ``~/.hermes/skills/openclaw-imports``,
+    but it should not directly index ``~/.openclaw``.  Direct indexing makes
+    the two apps appear to share skills and can leak OpenClaw-only instructions
+    into Hermes prompts.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        resolved = Path(path).expanduser()
+
+    if any(part.lower() == ".openclaw" for part in resolved.parts):
+        return True
+
+    # Custom OpenClaw roots are commonly named without a leading dot.  Treat a
+    # parent containing an OpenClaw config file as foreign-owned, but do not
+    # block Hermes's copied import category just because the skill names mention
+    # OpenClaw.
+    for parent in (resolved, *resolved.parents):
+        try:
+            if any((parent / marker).exists() for marker in _OPENCLAW_HOME_MARKERS):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def should_scan_skills_dir(
+    path: Path,
+    *,
+    skills_cfg: Dict[str, Any] | None = None,
+    source: str = "skills",
+) -> bool:
+    """Whether Hermes should index skills under *path*.
+
+    OpenClaw-owned directories are skipped by default to keep Hermes and
+    OpenClaw skills isolated on machines where both apps are installed.  Users
+    who intentionally share an OpenClaw skills tree can opt in with
+    ``skills.allow_openclaw_external_dirs: true`` or
+    ``HERMES_ALLOW_OPENCLAW_SKILLS=1``.
+    """
+    if is_openclaw_owned_skills_dir(path) and not _skills_config_allows_openclaw(skills_cfg):
+        logger.warning("Skipping OpenClaw-owned %s directory: %s", source, path)
+        return False
+    return True
+
+
 # ── External skills directories ──────────────────────────────────────────
 
 
@@ -178,18 +269,8 @@ def get_external_skills_dirs() -> List[Path]:
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.hermes/skills/`` are silently skipped.
     """
-    config_path = get_config_path()
-    if not config_path.exists():
-        return []
-    try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(parsed, dict):
-        return []
-
-    skills_cfg = parsed.get("skills")
-    if not isinstance(skills_cfg, dict):
+    skills_cfg = _load_skills_config_for_dirs()
+    if not skills_cfg:
         return []
 
     raw_dirs = skills_cfg.get("external_dirs")
@@ -223,6 +304,8 @@ def get_external_skills_dirs() -> List[Path]:
             continue
         if p in seen:
             continue
+        if not should_scan_skills_dir(p, skills_cfg=skills_cfg, source="external skills"):
+            continue
         if p.is_dir():
             seen.add(p)
             result.append(p)
@@ -235,10 +318,15 @@ def get_external_skills_dirs() -> List[Path]:
 def get_all_skills_dirs() -> List[Path]:
     """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    The local dir is first unless ``HERMES_HOME`` points at an OpenClaw-owned
+    tree, which is treated as a misconfiguration and skipped to prevent
+    cross-app skill pollution. External dirs follow in config order.
     """
-    dirs = [get_skills_dir()]
+    skills_cfg = _load_skills_config_for_dirs()
+    local = get_skills_dir()
+    dirs = []
+    if should_scan_skills_dir(local, skills_cfg=skills_cfg, source="local skills"):
+        dirs.append(local)
     dirs.extend(get_external_skills_dirs())
     return dirs
 

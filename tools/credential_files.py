@@ -221,7 +221,12 @@ def get_skills_directory_mount(
     mounts = []
     hermes_home = _resolve_hermes_home()
     skills_dir = hermes_home / "skills"
-    if skills_dir.is_dir():
+    try:
+        from agent.skill_utils import should_scan_skills_dir
+        local_skills_allowed = should_scan_skills_dir(skills_dir, source="local skills")
+    except ImportError:
+        local_skills_allowed = True
+    if skills_dir.is_dir() and local_skills_allowed:
         host_path = _safe_skills_path(skills_dir)
         mounts.append({
             "host_path": host_path,
@@ -304,7 +309,12 @@ def iter_skills_files(
 
     hermes_home = _resolve_hermes_home()
     skills_dir = hermes_home / "skills"
-    if skills_dir.is_dir():
+    try:
+        from agent.skill_utils import should_scan_skills_dir
+        local_skills_allowed = should_scan_skills_dir(skills_dir, source="local skills")
+    except ImportError:
+        local_skills_allowed = True
+    if skills_dir.is_dir() and local_skills_allowed:
         container_root = f"{container_base.rstrip('/')}/skills"
         for item in skills_dir.rglob("*"):
             if item.is_symlink() or not item.is_file():
