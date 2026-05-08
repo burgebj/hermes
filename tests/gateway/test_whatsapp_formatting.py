@@ -50,6 +50,7 @@ def _make_adapter():
     adapter._allow_from = set()
     adapter._group_policy = "open"
     adapter._group_allow_from = set()
+    adapter._free_response_chats = set()
     return adapter
 
 
@@ -269,6 +270,51 @@ class TestSendChunking:
         for call in calls[1:]:
             payload = call.kwargs.get("json") or call[1].get("json")
             assert "replyTo" not in payload
+
+    @pytest.mark.asyncio
+    async def test_media_send_preserves_reply_to(self, tmp_path):
+        adapter = _make_adapter()
+        media_path = tmp_path / "photo.jpg"
+        media_path.write_bytes(b"fake image")
+        resp = MagicMock(status=200)
+        resp.json = AsyncMock(return_value={"messageId": "msg1"})
+        adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
+
+        result = await adapter.send_image_file(
+            "chat1",
+            str(media_path),
+            caption="caption",
+            reply_to="orig123",
+        )
+
+        assert result.success
+        call_args = adapter._http_session.post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        assert payload["replyTo"] == "orig123"
+
+    @pytest.mark.asyncio
+    async def test_build_message_event_populates_whatsapp_quote_context(self):
+        adapter = _make_adapter()
+        data = {
+            "messageId": "reply-msg",
+            "chatId": "5215514706713@s.whatsapp.net",
+            "senderId": "5215514706713@s.whatsapp.net",
+            "senderName": "Aldo",
+            "chatName": "Aldo",
+            "isGroup": False,
+            "body": "reply body",
+            "hasMedia": False,
+            "mediaUrls": [],
+            "mentionedIds": [],
+            "quotedMessageId": "orig123",
+            "quotedText": "original text",
+        }
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.reply_to_message_id == "orig123"
+        assert event.reply_to_text == "original text"
 
     @pytest.mark.asyncio
     async def test_bridge_error_returns_failure(self):
