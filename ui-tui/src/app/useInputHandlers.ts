@@ -10,7 +10,7 @@ import type {
   SudoRespondResponse,
   VoiceRecordResponse
 } from '../gatewayTypes.js'
-import { isAction, isCopyShortcut, isMac, isVoiceToggleKey } from '../lib/platform.js'
+import { isAction, isCopyShortcut, isInterruptKey, isMac, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
@@ -44,7 +44,7 @@ export function applyVoiceRecordResponse(
 }
 
 export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
-  const { actions, composer, gateway, terminal, voice, wheelStep } = ctx
+  const { actions, composer, gateway, interruptKey, terminal, voice, wheelStep } = ctx
   const { actions: cActions, refs: cRefs, state: cState } = composer
 
   const overlay = useStore($overlayState)
@@ -363,13 +363,9 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return voiceRecordToggle()
     }
 
-    // Esc while agent is running → interrupt the turn (same as Ctrl+C in busy
-    // state, but without the clear-draft / exit fallbacks).  Guard: must not
-    // be blocked by an overlay (approval, clarify, pager, etc.) — those are
-    // handled above in the `isBlocked` branch and never reach here anyway, but
-    // the explicit check keeps the intent readable.  Also skip when completions
-    // are open so Esc can first dismiss the autocomplete list.
-    if (key.escape && live.busy && live.sid && !isBlocked && !cState.completions.length) {
+    // Configured interrupt key (default: bare Escape) while agent is busy.
+    // Guards: no overlay open, no completions showing (Esc dismisses list first).
+    if (isInterruptKey(key, ch, interruptKey) && live.busy && live.sid && !isBlocked && !cState.completions.length) {
       return turnController.interruptTurn({
         appendMessage: actions.appendMessage,
         gw: gateway.gw,
