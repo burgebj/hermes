@@ -1874,6 +1874,24 @@ class SessionDB:
         """Count CJK characters in text."""
         return sum(1 for ch in text if cls._is_cjk_codepoint(ord(ch)))
 
+    @classmethod
+    def _cjk_search_terms(cls, query: str) -> List[str]:
+        """Return non-operator CJK search terms from a simple FTS query."""
+        terms: List[str] = []
+        for tok in query.split():
+            if tok.upper() in ("AND", "OR", "NOT"):
+                continue
+            term = tok.strip('"').strip()
+            if term:
+                terms.append(term)
+        return terms
+
+    @classmethod
+    def _cjk_trigram_can_match(cls, query: str) -> bool:
+        """Whether every CJK term is long enough for SQLite trigram FTS."""
+        terms = cls._cjk_search_terms(query)
+        return bool(terms) and all(cls._count_cjk(term) >= 3 for term in terms)
+
     def search_messages(
         self,
         query: str,
@@ -1956,9 +1974,8 @@ class SessionDB:
         is_cjk = self._contains_cjk(query)
         if is_cjk:
             raw_query = query.strip('"').strip()
-            cjk_count = self._count_cjk(raw_query)
 
-            if cjk_count >= 3:
+            if self._cjk_trigram_can_match(raw_query):
                 # Trigram FTS5 path — quote each non-operator token to handle
                 # FTS5 special chars (%, *, etc.) while preserving boolean
                 # operators (AND, OR, NOT) for multi-term queries.
@@ -2010,10 +2027,22 @@ class SessionDB:
                         matches = [dict(row) for row in tri_cursor.fetchall()]
             else:
                 # Short CJK query (1-2 chars) — trigram needs ≥3 CJK chars.
-                # Fall back to LIKE substring search.
-                escaped = raw_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                like_where = ["(m.content LIKE ? ESCAPE '\\' OR m.tool_name LIKE ? ESCAPE '\\' OR m.tool_calls LIKE ? ESCAPE '\\')"]
-                like_params: list = [f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"]
+                # Fall back to LIKE substring search.  For simple OR/AND CJK
+                # queries, apply the boolean operator across each short term so
+                # natural searches such as "广西 OR 桂林" can still match.
+                terms = self._cjk_search_terms(raw_query) or [raw_query]
+                operator = " OR " if re.search(r"(?i)\bOR\b", raw_query) else " AND "
+                like_clauses = []
+                like_params: list = []
+                for term in terms:
+                    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    like_clauses.append(
+                        "(m.content LIKE ? ESCAPE '\\' "
+                        "OR m.tool_name LIKE ? ESCAPE '\\' "
+                        "OR m.tool_calls LIKE ? ESCAPE '\\')"
+                    )
+                    like_params.extend([f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"])
+                like_where = [f"({operator.join(like_clauses)})"]
                 if source_filter is not None:
                     like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                     like_params.extend(source_filter)
@@ -2038,7 +2067,7 @@ class SessionDB:
                 """
                 like_params.extend([limit, offset])
                 # instr() parameter goes first in the bound list
-                like_params = [raw_query] + like_params
+                like_params = [terms[0]] + like_params
                 with self._lock:
                     like_cursor = self._conn.execute(like_sql, like_params)
                     matches = [dict(row) for row in like_cursor.fetchall()]
@@ -2835,4 +2864,3 @@ class SessionDB:
             result["error"] = str(exc)
 
         return result
-

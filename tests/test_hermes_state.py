@@ -957,6 +957,34 @@ class TestCJKSearchFallback:
         session_ids = {r["session_id"] for r in results}
         assert session_ids == {"s1", "s2"}
 
+    def test_cjk_or_short_terms_uses_like_fallback(self, db):
+        """OR-combined 2-char CJK terms must not be routed to trigram FTS."""
+        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s3", source="cli")
+        db.append_message("s1", role="user", content="这次广西旅游安排得很好")
+        db.append_message("s2", role="user", content="桂林和漓江行程需要补充")
+        db.append_message("s3", role="user", content="无关内容")
+
+        results = db.search_messages("广西 OR 桂林 OR 漓江 OR 旅游")
+
+        session_ids = {r["session_id"] for r in results}
+        assert session_ids == {"s1", "s2"}
+
+    def test_cjk_or_short_terms_preserves_source_filter(self, db):
+        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s2", source="cli")
+        db.append_message("s1", role="user", content="广西旅游")
+        db.append_message("s2", role="user", content="桂林旅游")
+
+        results = db.search_messages(
+            "广西 OR 桂林",
+            source_filter=["telegram"],
+        )
+
+        assert len(results) == 1
+        assert results[0]["session_id"] == "s1"
+
 
 # =========================================================================
 # Session search and listing
@@ -2909,4 +2937,3 @@ class TestFTS5ToolCallMigration:
             assert version == 11
         finally:
             session_db.close()
-
