@@ -410,6 +410,26 @@ def _compute_tool_definitions(
                 filtered_tools[i] = {"type": "function", "function": dynamic_schema}
                 break
 
+    # Patch delegate_task schema to list available agent profiles from config.
+    # Uses the same config-mtime cache-busting already baked into the cache_key
+    # above, so stale profile lists are never served after a config edit.
+    if "delegate_task" in available_tool_names:
+        try:
+            from hermes_cli.config import load_config as _lc
+            _profiles = (_lc().get("agent_profiles") or {})
+        except Exception:
+            _profiles = {}
+        if _profiles:
+            try:
+                from tools.delegate_tool import build_delegate_task_schema as _bds
+                _delegate_dynamic = _bds(_profiles)
+                for _i, _td in enumerate(filtered_tools):
+                    if _td.get("function", {}).get("name") == "delegate_task":
+                        filtered_tools[_i] = {"type": "function", "function": _delegate_dynamic}
+                        break
+            except Exception as _exc:
+                logger.debug("delegate_task dynamic schema patch failed: %s", _exc)
+
     # Rebuild discord / discord_admin schemas based on the bot's privileged
     # intents (detected from GET /applications/@me) and the user's action
     # allowlist in config.  Hides actions the bot's intents don't support so

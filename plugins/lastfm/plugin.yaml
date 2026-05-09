@@ -1,0 +1,16 @@
+name: lastfm
+version: 1.0.0
+description: >
+  Last.fm music discovery and metadata — 5 tools (discover, artist, track, tag, charts)
+  using the Last.fm free API. No OAuth required: set LASTFM_API_KEY in your environment.
+  Get a free key at https://www.last.fm/api/account/create
+author: w87x
+kind: backend
+provides_tools:
+  - lastfm_discover
+  - lastfm_artist
+  - lastfm_track
+  - lastfm_tag
+  - lastfm_charts
+requires_env:
+  - LASTFM_API_KEY

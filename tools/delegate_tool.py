@@ -637,6 +637,53 @@ def _build_child_system_prompt(
     return "\n".join(parts)
 
 
+def _build_child_system_prompt_with_profiles(
+    goal: str,
+    context: Optional[str] = None,
+    *,
+    workspace_path: Optional[str] = None,
+    role: str = "leaf",
+    max_spawn_depth: int = 2,
+    child_depth: int = 1,
+    available_profiles: Optional[dict] = None,
+) -> str:
+    """Wrapper that appends an agent-profiles section to the orchestrator prompt.
+
+    When profiles are configured and the child is an orchestrator, the prompt
+    gets a section listing available profiles with their descriptions so the
+    child LLM can make informed routing decisions.
+    """
+    base = _build_child_system_prompt(
+        goal, context,
+        workspace_path=workspace_path,
+        role=role,
+        max_spawn_depth=max_spawn_depth,
+        child_depth=child_depth,
+    )
+    if role != "orchestrator" or not available_profiles:
+        return base
+
+    lines = ["\n## Available Agent Profiles", "Use these profiles in your delegate_task calls:"]
+    for name, cfg in sorted(available_profiles.items()):
+        desc = str(cfg.get("description") or "").strip()
+        model = str(cfg.get("model") or "").strip()
+        toolsets = cfg.get("toolsets") or []
+        parts = []
+        if model:
+            parts.append(f"model={model}")
+        if toolsets:
+            parts.append(f"toolsets={','.join(toolsets)}")
+        if desc:
+            parts.append(desc)
+        detail = "; ".join(parts)
+        lines.append(f"  - {name!r}" + (f": {detail}" if detail else ""))
+    lines.append(
+        "Pass the profile name via profile='<name>' in delegate_task. "
+        "Omit profile to use the default delegation settings."
+    )
+    return base + "\n" + "\n".join(lines)
+
+
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     """Best-effort local workspace hint for child prompts.
 
@@ -883,6 +930,10 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Named agent profile (from agent_profiles config). When set, profile
+    # fields (model, toolsets, max_iterations, system_prompt, delegation
+    # overrides) take precedence over the corresponding default values.
+    profile_cfg: Optional[dict] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -917,6 +968,40 @@ def _build_child_agent(
     tui_depth = max(0, child_depth - 1)  # 0 = first-level child for the UI
 
     delegation_cfg = _load_config()
+
+    # ── Agent profile overrides ──────────────────────────────────────────
+    # When a named profile is provided, its fields override the defaults:
+    #   model > delegation.model, toolsets > caller toolsets,
+    #   max_iterations > delegation.max_iterations,
+    #   delegation sub-keys > global delegation config.
+    if profile_cfg:
+        profile_model = str(profile_cfg.get("model") or "").strip()
+        if profile_model:
+            model = profile_model
+
+        profile_max_iter = profile_cfg.get("max_iterations")
+        if profile_max_iter is not None:
+            try:
+                max_iterations = int(profile_max_iter)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "agent_profiles: invalid max_iterations %r; using default",
+                    profile_max_iter,
+                )
+
+        profile_toolsets = profile_cfg.get("toolsets")
+        if profile_toolsets and isinstance(profile_toolsets, list):
+            toolsets = profile_toolsets  # intersected with parent below
+
+        # Profile-level delegation credential overrides (provider/api_key/base_url).
+        profile_delegation = profile_cfg.get("delegation") or {}
+        if isinstance(profile_delegation, dict):
+            if profile_delegation.get("provider") and not override_provider:
+                override_provider = str(profile_delegation["provider"]).strip() or None
+            if profile_delegation.get("base_url") and not override_base_url:
+                override_base_url = str(profile_delegation["base_url"]).strip() or None
+            if profile_delegation.get("api_key") and not override_api_key:
+                override_api_key = str(profile_delegation["api_key"]).strip() or None
 
     # When no explicit toolsets given, inherit from parent's enabled toolsets
     # so disabled tools (e.g. web) don't leak to subagents.
@@ -963,14 +1048,48 @@ def _build_child_agent(
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(
-        goal,
-        context,
-        workspace_path=workspace_hint,
-        role=effective_role,
-        max_spawn_depth=max_spawn,
-        child_depth=child_depth,
-    )
+    # Load profiles once for prompt injection (orchestrators need the list).
+    try:
+        _all_profiles = _load_full_config().get("agent_profiles") or {}
+    except Exception:
+        _all_profiles = {}
+
+    if profile_cfg:
+        child_prompt = _resolve_profile_system_prompt(
+            profile_cfg,
+            goal,
+            context,
+            workspace_path=workspace_hint,
+            role=effective_role,
+            max_spawn_depth=max_spawn,
+            child_depth=child_depth,
+        )
+        # Append profile list for orchestrators even when they have a profile
+        if effective_role == "orchestrator" and _all_profiles:
+            from textwrap import dedent as _dedent
+            lines = ["\n## Available Agent Profiles",
+                     "Use these profiles in your delegate_task calls:"]
+            for _pname, _pcfg in sorted(_all_profiles.items()):
+                _desc = str(_pcfg.get("description") or "").strip()
+                _model = str(_pcfg.get("model") or "").strip()
+                _ts = _pcfg.get("toolsets") or []
+                _parts = []
+                if _model: _parts.append(f"model={_model}")
+                if _ts: _parts.append(f"toolsets={','.join(_ts)}")
+                if _desc: _parts.append(_desc)
+                lines.append(f"  - {_pname!r}" + (f": {'; '.join(_parts)}" if _parts else ""))
+            lines.append("Pass profile='<name>' in delegate_task. Omit to use defaults.")
+            child_prompt = child_prompt + "\n" + "\n".join(lines)
+    else:
+        child_prompt = _build_child_system_prompt_with_profiles(
+            goal,
+            context,
+            workspace_path=workspace_hint,
+            role=effective_role,
+            max_spawn_depth=max_spawn,
+            child_depth=child_depth,
+            available_profiles=_all_profiles if effective_role == "orchestrator" else None,
+        )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -1900,18 +2019,25 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     parent_agent=None,
+    profile: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context, toolsets, role)
-      - Batch:  provide tasks array [{goal, context, toolsets, role}, ...]
+      - Single: provide goal (+ optional context, toolsets, role, profile)
+      - Batch:  provide tasks array [{goal, context, toolsets, role, profile}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The optional 'profile' parameter names an entry from ``agent_profiles``
+    in config.yaml.  Profile fields (model, toolsets, max_iterations,
+    system_prompt/_file, delegation overrides) are applied to the child.
+    Per-task profile beats the top-level one.  Omitting profile preserves
+    the existing behavior unchanged (backward compatible).
 
     Returns JSON with results array, one entry per task.
     """
@@ -1992,7 +2118,8 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role,
+             "profile": profile}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2033,6 +2160,9 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Per-task profile beats top-level profile.
+            task_profile_name = t.get("profile") or profile
+            task_profile_cfg = _load_agent_profile(task_profile_name) if task_profile_name else None
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2055,6 +2185,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                profile_cfg=task_profile_cfg,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2442,9 +2573,195 @@ def _load_config() -> dict:
         return {}
 
 
+
+# ---------------------------------------------------------------------------
+# Agent Profiles
+# ---------------------------------------------------------------------------
+
+def _load_full_config() -> dict:
+    """Load the full (non-delegation) config for agent_profiles resolution."""
+    try:
+        from cli import CLI_CONFIG
+        if CLI_CONFIG:
+            return CLI_CONFIG
+    except Exception:
+        pass
+    try:
+        from hermes_cli.config import load_config
+        return load_config()
+    except Exception:
+        return {}
+
+
+def _load_agent_profile(profile_name: str) -> Optional[dict]:
+    """Return the named profile dict from ``agent_profiles`` config, or None.
+
+    Profiles live under the top-level ``agent_profiles`` key in config.yaml:
+
+        agent_profiles:
+          explorer:
+            model: google/gemini-2.5-flash
+            toolsets: [file]
+            max_iterations: 30
+          oracle:
+            model: anthropic/claude-opus-4
+            system_prompt_file: ~/.hermes/profiles/oracle.md
+    """
+    if not profile_name:
+        return None
+    try:
+        full_cfg = _load_full_config()
+        profiles = full_cfg.get("agent_profiles") or {}
+        profile = profiles.get(profile_name)
+        if profile is None:
+            logger.warning(
+                "delegate_task: profile %r not found in agent_profiles config; "
+                "available: %s",
+                profile_name,
+                ", ".join(sorted(profiles.keys())) if profiles else "(none defined)",
+            )
+        return profile
+    except Exception as exc:
+        logger.debug("Could not load agent_profiles from config: %s", exc)
+        return None
+
+
+def _resolve_profile_system_prompt(
+    profile_cfg: dict,
+    goal: str,
+    context: Optional[str],
+    *,
+    workspace_path: Optional[str],
+    role: str,
+    max_spawn_depth: int,
+    child_depth: int,
+) -> str:
+    """Resolve a child system prompt from a profile config.
+
+    Priority (highest wins):
+      1. ``profile.system_prompt`` — inline prompt in config
+      2. ``profile.system_prompt_file`` — external .md file (~ expanded)
+      3. Fallback: ``_build_child_system_prompt(goal, context, ...)``
+
+    When using an external prompt file, the file content is used as-is
+    for the persona/behaviour section; the goal, context, and workspace
+    are always appended so the subagent knows what to do.
+    """
+    # 1. Inline system_prompt in config
+    inline = str(profile_cfg.get("system_prompt") or "").strip()
+    if inline:
+        parts = [inline, "", f"YOUR TASK:\n{goal}"]
+        if context and context.strip():
+            parts.append(f"\nCONTEXT:\n{context}")
+        if workspace_path and str(workspace_path).strip():
+            parts.append(
+                "\nWORKSPACE PATH:\n"
+                f"{workspace_path}\n"
+                "Use this exact path for local repository/workdir operations "
+                "unless the task explicitly says otherwise."
+            )
+        return "\n".join(parts)
+
+    # 2. External system_prompt_file
+    prompt_file = str(profile_cfg.get("system_prompt_file") or "").strip()
+    if prompt_file:
+        try:
+            expanded = os.path.expanduser(os.path.expandvars(prompt_file))
+            with open(expanded, "r", encoding="utf-8") as fh:
+                file_content = fh.read().strip()
+            if file_content:
+                parts = [file_content, "", f"YOUR TASK:\n{goal}"]
+                if context and context.strip():
+                    parts.append(f"\nCONTEXT:\n{context}")
+                if workspace_path and str(workspace_path).strip():
+                    parts.append(
+                        "\nWORKSPACE PATH:\n"
+                        f"{workspace_path}\n"
+                        "Use this exact path for local repository/workdir operations "
+                        "unless the task explicitly says otherwise."
+                    )
+                return "\n".join(parts)
+        except OSError as exc:
+            logger.warning(
+                "Could not read profile system_prompt_file %r: %s; "
+                "falling back to default child prompt",
+                prompt_file, exc,
+            )
+
+    # 3. Fallback to standard subagent prompt
+    return _build_child_system_prompt(
+        goal,
+        context,
+        workspace_path=workspace_path,
+        role=role,
+        max_spawn_depth=max_spawn_depth,
+        child_depth=child_depth,
+    )
+
+
 # ---------------------------------------------------------------------------
 # OpenAI Function-Calling Schema
 # ---------------------------------------------------------------------------
+
+
+def build_delegate_task_schema(available_profiles: dict) -> dict:
+    """Return a copy of DELEGATE_TASK_SCHEMA with the profile description
+    updated to list currently-configured agent profiles.
+
+    Called by model_tools.get_tool_definitions() when delegate_task is in the
+    active toolset and agent_profiles are defined in config — same pattern as
+    build_execute_code_schema().  The cache in get_tool_definitions() is keyed
+    on config mtime so stale profile lists are never served after an edit.
+
+    Args:
+        available_profiles: dict mapping profile name -> profile config dict.
+            Must be non-empty (caller should not call this with an empty dict).
+    """
+    import copy
+    schema = copy.deepcopy(DELEGATE_TASK_SCHEMA)
+
+    # Build a human-readable list of profiles with optional descriptions.
+    profile_lines = []
+    for name, cfg in sorted(available_profiles.items()):
+        desc = str(cfg.get("description") or "").strip()
+        model = str(cfg.get("model") or "").strip()
+        toolsets = cfg.get("toolsets") or []
+        detail_parts = []
+        if model:
+            detail_parts.append(f"model={model}")
+        if toolsets:
+            detail_parts.append(f"toolsets={','.join(toolsets)}")
+        if desc:
+            detail_parts.append(desc)
+        detail = "; ".join(detail_parts)
+        profile_lines.append(f"  - {name!r}" + (f": {detail}" if detail else ""))
+
+    profile_list_str = "\n".join(profile_lines)
+
+    profile_desc = (
+        "Named agent profile defined in agent_profiles (config.yaml). "
+        "Applies the profile's model, toolsets, max_iterations, and system "
+        "prompt to this subagent. Per-task profile (tasks[].profile) overrides "
+        "this top-level value.\n\n"
+        f"Currently configured profiles:\n{profile_list_str}"
+    )
+
+    # Patch top-level profile field
+    props = schema["parameters"]["properties"]
+    if "profile" in props:
+        props["profile"]["description"] = profile_desc
+
+    # Patch per-task profile field inside tasks[].properties
+    tasks_items = props.get("tasks", {}).get("items", {})
+    task_props = tasks_items.get("properties", {})
+    if "profile" in task_props:
+        task_props["profile"]["description"] = (
+            "Per-task agent profile (overrides top-level profile).\n\n"
+            f"Currently configured profiles:\n{profile_list_str}"
+        )
+
+    return schema
+
 
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
@@ -2558,6 +2875,13 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "profile": {
+                            "type": "string",
+                            "description": (
+                                "Per-task agent profile name (overrides top-level profile). "
+                                "Uses the named profile from agent_profiles in config.yaml."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2601,6 +2925,17 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set."
                 ),
             },
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Named agent profile from agent_profiles in config.yaml. "
+                    "When set, profile fields override defaults: model, toolsets, "
+                    "max_iterations, system_prompt (persona), and delegation credentials. "
+                    "Per-task profile (in tasks[].profile) beats this top-level value. "
+                    "Omitting profile preserves existing behavior (backward compatible). "
+                    "Example: profile='explorer' uses the 'explorer' profile defined in config.yaml."
+                ),
+            },
         },
         "required": [],
     },
@@ -2617,6 +2952,7 @@ registry.register(
     handler=lambda args, **kw: delegate_task(
         goal=args.get("goal"),
         context=args.get("context"),
+        profile=args.get("profile"),
         toolsets=args.get("toolsets"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
