@@ -951,6 +951,20 @@ def load_gateway_config() -> GatewayConfig:
                         extra = {}
                         plat_data["extra"] = extra
                     extra["disable_link_previews"] = telegram_cfg["disable_link_previews"]
+                if "channel_prompts" in telegram_cfg:
+                    plat_data = platforms_data.setdefault(Platform.TELEGRAM.value, {})
+                    if not isinstance(plat_data, dict):
+                        plat_data = {}
+                        platforms_data[Platform.TELEGRAM.value] = plat_data
+                    extra = plat_data.setdefault("extra", {})
+                    if not isinstance(extra, dict):
+                        extra = {}
+                        plat_data["extra"] = extra
+                    channel_prompts = telegram_cfg["channel_prompts"]
+                    if isinstance(channel_prompts, dict):
+                        extra["channel_prompts"] = {str(k): v for k, v in channel_prompts.items()}
+                    else:
+                        extra["channel_prompts"] = channel_prompts
 
             whatsapp_cfg = yaml_cfg.get("whatsapp", {})
             if isinstance(whatsapp_cfg, dict):
