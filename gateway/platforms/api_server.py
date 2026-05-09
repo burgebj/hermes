@@ -1207,8 +1207,28 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
 
         final_response = result.get("final_response", "")
+        is_failed = result.get("failed", False)
+        is_partial = result.get("partial", False)
+        agent_error = result.get("error", "")
+
+        # When the agent loop failed or produced a partial/truncated result,
+        # do not flatten the error into normal assistant content — that makes
+        # it impossible for API clients to distinguish a real answer from an
+        # agent failure (issue #22496).
+        if is_failed or (is_partial and not final_response):
+            error_msg = agent_error or "Agent run failed without producing a response"
+            return web.json_response(
+                _openai_error(error_msg, err_type="server_error"),
+                status=500,
+                headers={"X-Hermes-Session-Id": session_id},
+            )
+
         if not final_response:
-            final_response = result.get("error", "(No response generated)")
+            final_response = agent_error or "(No response generated)"
+
+        # Reflect truncation/partial state in finish_reason so clients can
+        # detect incomplete responses without parsing content text.
+        finish_reason = "length" if is_partial else "stop"
 
         response_data = {
             "id": completion_id,
@@ -1222,7 +1242,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         "role": "assistant",
                         "content": final_response,
                     },
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {
