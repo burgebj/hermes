@@ -29,15 +29,27 @@ Design constraints:
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import select
 import signal
 import struct
 import sys
-import termios
 import time
 from typing import Optional, Sequence
+
+# fcntl and termios are POSIX-only. The module guards PTY operations on
+# `_PTY_AVAILABLE` and raises `PtyUnavailableError` at instantiation time,
+# so the import just needs to succeed on Windows. Without this guard, any
+# command that triggers web_server.py (which imports pty_bridge
+# unconditionally) crashes at module-load time on native Windows Python.
+try:
+    import fcntl
+    import termios
+    _UNIX_TERMIO_AVAILABLE = True
+except ImportError:  # Windows
+    fcntl = None  # type: ignore
+    termios = None  # type: ignore
+    _UNIX_TERMIO_AVAILABLE = False
 
 try:
     import ptyprocess  # type: ignore
