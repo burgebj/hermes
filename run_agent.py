@@ -11114,7 +11114,42 @@ class AIAgent:
         # recover the todo state from the most recent todo tool response in history)
         if conversation_history and not self._todo_store.has_items():
             self._hydrate_todo_store(conversation_history)
-        
+
+        # Hydrate memory nudge counter from conversation history. The gateway
+        # builds a fresh AIAgent per inbound message while the persisted
+        # session history keeps growing; without this, _turns_since_memory
+        # restarts at 0 every turn and memory.nudge_interval may never fire.
+        # Only run on the first turn of this agent instance so manual resets
+        # mid-session (e.g. after the memory tool ran) are not undone.
+        if (
+            conversation_history
+            and self._user_turn_count == 0
+            and self._memory_nudge_interval > 0
+            and self._turns_since_memory == 0
+        ):
+            # Locate the most recent memory tool invocation; runtime resets
+            # _turns_since_memory to 0 whenever it runs, so on hydration we
+            # count user turns from that point. Falls back to total user
+            # turns when no prior memory tool call exists.
+            last_memory_idx = -1
+            for idx, msg in enumerate(conversation_history):
+                if (
+                    isinstance(msg, dict)
+                    and msg.get("role") == "tool"
+                    and msg.get("name") == "memory"
+                ):
+                    last_memory_idx = idx
+            if last_memory_idx >= 0:
+                relevant = conversation_history[last_memory_idx + 1 :]
+            else:
+                relevant = conversation_history
+            prior_user_turns = sum(
+                1
+                for msg in relevant
+                if isinstance(msg, dict) and msg.get("role") == "user"
+            )
+            self._turns_since_memory = prior_user_turns % self._memory_nudge_interval
+
         # Prefill messages (few-shot priming) are injected at API-call time only,
         # never stored in the messages list. This keeps them ephemeral: they won't
         # be saved to session DB, session logs, or batch trajectories, but they're
