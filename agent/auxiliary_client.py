@@ -3563,7 +3563,7 @@ def _build_call_kwargs(
 
     # Provider-specific extra_body
     merged_extra = dict(extra_body or {})
-    if provider == "nous" or auxiliary_is_nous:
+    if provider == "nous":
         merged_extra.setdefault("tags", []).extend(["product=hermes-agent"])
     if merged_extra:
         kwargs["extra_body"] = merged_extra

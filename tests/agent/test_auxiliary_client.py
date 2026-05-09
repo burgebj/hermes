@@ -1434,6 +1434,63 @@ class TestAnthropicCompatImageConversion:
         assert result[0]["content"][0]["source"]["media_type"] == "image/jpeg"
 
 
+# ---------------------------------------------------------------------------
+# Nous product-tag injection boundary (#12408)
+# ---------------------------------------------------------------------------
+
+
+class TestNousTagsScoping:
+    """Nous Portal 'tags' extra_body must not leak into non-Nous provider calls.
+
+    When the main provider resolves to Nous Portal, ``auxiliary_is_nous`` is
+    set globally. If an auxiliary task (e.g. vision) is explicitly routed to
+    a different provider, the Nous-specific ``tags`` field would previously
+    still be injected into that provider's request body — Gemini rejects the
+    unknown field with a 400 error. See GitHub issue #12408.
+    """
+
+    def test_tags_injected_when_provider_is_nous(self, monkeypatch):
+        import agent.auxiliary_client as mod
+
+        monkeypatch.setattr(mod, "auxiliary_is_nous", False)
+        kwargs = mod._build_call_kwargs(
+            provider="nous",
+            model="google/gemini-3-flash-preview",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert kwargs.get("extra_body", {}).get("tags") == ["product=hermes-agent"]
+
+    def test_tags_not_injected_for_gemini_when_main_is_nous(self, monkeypatch):
+        """Regression: vision routed to Gemini must not receive Nous tags
+        just because the main provider set the global flag."""
+        import agent.auxiliary_client as mod
+
+        monkeypatch.setattr(mod, "auxiliary_is_nous", True)
+        kwargs = mod._build_call_kwargs(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            messages=[{"role": "user", "content": "describe image"}],
+        )
+
+        extra = kwargs.get("extra_body", {})
+        assert "tags" not in extra
+
+    def test_tags_not_injected_for_custom_when_main_is_nous(self, monkeypatch):
+        """Same regression path for any non-Nous provider."""
+        import agent.auxiliary_client as mod
+
+        monkeypatch.setattr(mod, "auxiliary_is_nous", True)
+        kwargs = mod._build_call_kwargs(
+            provider="openrouter",
+            model="google/gemini-3-flash-preview",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        extra = kwargs.get("extra_body", {})
+        assert "tags" not in extra
+
+
 class _AuxAuth401(Exception):
     status_code = 401
 
