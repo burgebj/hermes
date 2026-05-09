@@ -18,7 +18,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from model_tools import handle_function_call
 from tools.terminal_tool import get_active_env
@@ -116,6 +116,31 @@ def _extract_reasoning_from_message(message) -> Optional[str]:
     return None
 
 
+def _tc_to_dict(tc) -> Dict[str, Any]:
+    """Normalize a tool call to a plain dict regardless of source format.
+
+    Tool calls arrive as objects (OpenAI SDK) or dicts (vLLM ToolCallTranslator).
+    Both are normalised to the same structure so downstream code is uniform.
+    """
+    if isinstance(tc, dict):
+        return {
+            "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+            "type": "function",
+            "function": {
+                "name": tc.get("function", {}).get("name", tc.get("name", "")),
+                "arguments": tc.get("function", {}).get("arguments", tc.get("arguments", "{}")),
+            },
+        }
+    return {
+        "id": tc.id,
+        "type": "function",
+        "function": {
+            "name": tc.function.name,
+            "arguments": tc.function.arguments,
+        },
+    }
+
+
 class HermesAgentLoop:
     """
     Runs hermes-agent's tool-calling loop using standard OpenAI-spec tool calling.
@@ -128,6 +153,12 @@ class HermesAgentLoop:
     Works identically with any server type -- OpenAI, VLLM, SGLang, OpenRouter,
     or ManagedServer with a parser. The server determines how tool_calls get
     populated on the response.
+
+    When a turn contains multiple tool calls, they are dispatched concurrently
+    by default (parallel_tools=True). Each call that hits run_in_executor()
+    yields the event loop, allowing the others to run in parallel inside the
+    thread pool. Synchronous tools (todo, memory) never yield and therefore
+    remain naturally serialized without any explicit locking.
     """
 
     def __init__(
@@ -141,6 +172,7 @@ class HermesAgentLoop:
         max_tokens: Optional[int] = None,
         extra_body: Optional[Dict[str, Any]] = None,
         budget_config: Optional["BudgetConfig"] = None,
+        parallel_tools: bool = True,
     ):
         """
         Initialize the agent loop.
@@ -160,6 +192,10 @@ class HermesAgentLoop:
             budget_config: Tool result persistence budget. Controls per-tool
                         thresholds, per-turn aggregate budget, and preview size.
                         If None, uses DEFAULT_BUDGET (current hardcoded values).
+            parallel_tools: When True (default), multiple tool calls in the same
+                        turn are dispatched concurrently via asyncio.gather().
+                        Set to False to restore the original sequential behaviour,
+                        e.g. when tool ordering side-effects must be preserved.
         """
         from tools.budget_config import DEFAULT_BUDGET
         self.server = server
@@ -171,6 +207,154 @@ class HermesAgentLoop:
         self.max_tokens = max_tokens
         self.extra_body = extra_body
         self.budget_config = budget_config or DEFAULT_BUDGET
+        self.parallel_tools = parallel_tools
+
+    async def _run_tool_call(
+        self,
+        tc,
+        turn: int,
+        user_task: Optional[str],
+        todo_store,
+        todo_tool_fn,
+    ) -> Tuple[str, str, str, Optional[ToolError]]:
+        """Execute a single tool call.
+
+        Handles validation, argument parsing, dispatch, and error recording.
+        Returns (tc_id, tool_name, raw_result, error_record_or_None).
+
+        Designed to be called concurrently via asyncio.gather(): the
+        run_in_executor() await yields the event loop for I/O-bound tools,
+        while synchronous tools (todo/memory) complete without yielding and
+        are therefore serialized naturally by the event loop.
+        """
+        import time as _time
+
+        tc_dict = _tc_to_dict(tc)
+        tc_id = tc_dict["id"]
+        tool_name = tc_dict["function"]["name"]
+        tool_args_raw = tc_dict["function"]["arguments"]
+
+        error_record: Optional[ToolError] = None
+
+        # Validate tool name
+        if tool_name not in self.valid_tool_names:
+            tool_result = json.dumps(
+                {
+                    "error": f"Unknown tool '{tool_name}'. "
+                    f"Available tools: {sorted(self.valid_tool_names)}"
+                }
+            )
+            error_record = ToolError(
+                turn=turn + 1, tool_name=tool_name,
+                arguments=tool_args_raw[:200],
+                error=f"Unknown tool '{tool_name}'",
+                tool_result=tool_result,
+            )
+            logger.warning(
+                "Model called unknown tool '%s' on turn %d", tool_name, turn + 1,
+            )
+            return tc_id, tool_name, tool_result, error_record
+
+        # Parse arguments
+        try:
+            args = json.loads(tool_args_raw)
+        except json.JSONDecodeError as e:
+            tool_result = json.dumps(
+                {"error": f"Invalid JSON in tool arguments: {e}. Please retry with valid JSON."}
+            )
+            error_record = ToolError(
+                turn=turn + 1, tool_name=tool_name,
+                arguments=tool_args_raw[:200],
+                error=f"Invalid JSON: {e}",
+                tool_result=tool_result,
+            )
+            logger.warning(
+                "Invalid JSON in tool call arguments for '%s': %s",
+                tool_name, tool_args_raw[:200],
+            )
+            return tc_id, tool_name, tool_result, error_record
+
+        # Dispatch
+        try:
+            if tool_name == "terminal":
+                cmd_preview = args.get("command", "")[:80]
+                logger.info("[%s] $ %s", self.task_id[:8], cmd_preview)
+
+            tool_submit_time = _time.monotonic()
+
+            # Todo tool -- handle locally (needs per-loop TodoStore).
+            # Synchronous: no await, so concurrent todo calls within the same
+            # turn are serialized by the event loop without needing a lock.
+            if tool_name == "todo":
+                tool_result = todo_tool_fn(
+                    todos=args.get("todos"),
+                    merge=args.get("merge", False),
+                    store=todo_store,
+                )
+                tool_elapsed = _time.monotonic() - tool_submit_time
+            elif tool_name == "memory":
+                tool_result = json.dumps({"error": "Memory is not available in RL environments."})
+                tool_elapsed = _time.monotonic() - tool_submit_time
+            elif tool_name == "session_search":
+                tool_result = json.dumps({"error": "Session search is not available in RL environments."})
+                tool_elapsed = _time.monotonic() - tool_submit_time
+            else:
+                # Run tool calls in a thread pool so backends that
+                # use asyncio.run() internally (modal, docker, daytona) get
+                # a clean event loop instead of deadlocking.
+                loop = asyncio.get_event_loop()
+                # Capture current tool_name/args for the lambda
+                _tn, _ta, _tid = tool_name, args, self.task_id
+                tool_result = await loop.run_in_executor(
+                    _tool_executor,
+                    lambda: handle_function_call(
+                        _tn, _ta, task_id=_tid,
+                        user_task=user_task,
+                    ),
+                )
+                tool_elapsed = _time.monotonic() - tool_submit_time
+
+            # Log slow tools and thread pool stats for debugging
+            pool_active = _tool_executor._work_queue.qsize()
+            if tool_elapsed > 30:
+                logger.warning(
+                    "[%s] turn %d: %s took %.1fs (pool queue=%d)",
+                    self.task_id[:8], turn + 1, tool_name,
+                    tool_elapsed, pool_active,
+                )
+        except Exception as e:
+            tool_result = json.dumps(
+                {"error": f"Tool execution failed: {type(e).__name__}: {str(e)}"}
+            )
+            error_record = ToolError(
+                turn=turn + 1, tool_name=tool_name,
+                arguments=tool_args_raw[:200],
+                error=f"{type(e).__name__}: {str(e)}",
+                tool_result=tool_result,
+            )
+            logger.error(
+                "Tool '%s' execution failed on turn %d: %s",
+                tool_name, turn + 1, e,
+            )
+            return tc_id, tool_name, tool_result, error_record
+
+        # Also check if the tool returned an error in its JSON result
+        try:
+            result_data = json.loads(tool_result)
+            if isinstance(result_data, dict):
+                err = result_data.get("error")
+                exit_code = result_data.get("exit_code")
+                if err and exit_code and exit_code < 0:
+                    error_record = ToolError(
+                        turn=turn + 1, tool_name=tool_name,
+                        arguments=tool_args_raw[:200],
+                        error=str(err),
+                        tool_result=tool_result[:500],
+                    )
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        return tc_id, tool_name, tool_result, error_record
 
     async def run(self, messages: List[Dict[str, Any]]) -> AgentResult:
         """
@@ -289,27 +473,6 @@ class HermesAgentLoop:
                     pass  # Fall through to no tool calls
 
             if assistant_msg.tool_calls:
-                # Normalize tool calls to dicts — they may come as objects
-                # (OpenAI API) or dicts (vLLM ToolCallTranslator).
-                def _tc_to_dict(tc):
-                    if isinstance(tc, dict):
-                        return {
-                            "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
-                            "type": "function",
-                            "function": {
-                                "name": tc.get("function", {}).get("name", tc.get("name", "")),
-                                "arguments": tc.get("function", {}).get("arguments", tc.get("arguments", "{}")),
-                            },
-                        }
-                    return {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-
                 # Build the assistant message dict for conversation history
                 msg_dict: Dict[str, Any] = {
                     "role": "assistant",
@@ -325,144 +488,40 @@ class HermesAgentLoop:
 
                 messages.append(msg_dict)
 
-                # Execute each tool call via hermes-agent's dispatch
-                for tc in assistant_msg.tool_calls:
-                    # Handle both object (OpenAI) and dict (vLLM) formats
-                    if isinstance(tc, dict):
-                        tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
-                        tool_args_raw = tc.get("function", {}).get("arguments", tc.get("arguments", "{}"))
-                    else:
-                        tool_name = tc.function.name
-                        tool_args_raw = tc.function.arguments
+                num_tcs = len(assistant_msg.tool_calls)
 
-                    # Validate tool name
-                    if tool_name not in self.valid_tool_names:
-                        tool_result = json.dumps(
-                            {
-                                "error": f"Unknown tool '{tool_name}'. "
-                                f"Available tools: {sorted(self.valid_tool_names)}"
-                            }
+                # Execute tool calls. When parallel_tools=True (default) and there
+                # are multiple calls in this turn, dispatch them all concurrently
+                # via asyncio.gather(). Each run_in_executor() call yields the event
+                # loop, so I/O-bound tools (web, terminal, browser) overlap in the
+                # thread pool. Synchronous tools (todo/memory) never yield and are
+                # therefore naturally serialized without any explicit locking.
+                if self.parallel_tools and num_tcs > 1:
+                    call_results = await asyncio.gather(*[
+                        self._run_tool_call(tc, turn, _user_task, _todo_store, _todo_tool)
+                        for tc in assistant_msg.tool_calls
+                    ])
+                else:
+                    call_results = []
+                    for tc in assistant_msg.tool_calls:
+                        call_results.append(
+                            await self._run_tool_call(tc, turn, _user_task, _todo_store, _todo_tool)
                         )
-                        tool_errors.append(ToolError(
-                            turn=turn + 1, tool_name=tool_name,
-                            arguments=tool_args_raw[:200],
-                            error=f"Unknown tool '{tool_name}'",
-                            tool_result=tool_result,
-                        ))
-                        logger.warning(
-                            "Model called unknown tool '%s' on turn %d",
-                            tool_name, turn + 1,
-                        )
-                    else:
-                        # Parse arguments
-                        try:
-                            args = json.loads(tool_args_raw)
-                        except json.JSONDecodeError as e:
-                            args = None
-                            tool_result = json.dumps(
-                                {"error": f"Invalid JSON in tool arguments: {e}. Please retry with valid JSON."}
-                            )
-                            tool_errors.append(ToolError(
-                                turn=turn + 1, tool_name=tool_name,
-                                arguments=tool_args_raw[:200],
-                                error=f"Invalid JSON: {e}",
-                                tool_result=tool_result,
-                            ))
-                            logger.warning(
-                                "Invalid JSON in tool call arguments for '%s': %s",
-                                tool_name, tool_args_raw[:200],
-                            )
 
-                        # Dispatch tool only if arguments parsed successfully
-                        if args is not None:
-                            try:
-                                if tool_name == "terminal":
-                                    backend = os.getenv("TERMINAL_ENV", "local")
-                                    cmd_preview = args.get("command", "")[:80]
-                                    logger.info(
-                                        "[%s] $ %s", self.task_id[:8], cmd_preview,
-                                    )
-
-                                tool_submit_time = _time.monotonic()
-
-                                # Todo tool -- handle locally (needs per-loop TodoStore)
-                                if tool_name == "todo":
-                                    tool_result = _todo_tool(
-                                        todos=args.get("todos"),
-                                        merge=args.get("merge", False),
-                                        store=_todo_store,
-                                    )
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-                                elif tool_name == "memory":
-                                    tool_result = json.dumps({"error": "Memory is not available in RL environments."})
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-                                elif tool_name == "session_search":
-                                    tool_result = json.dumps({"error": "Session search is not available in RL environments."})
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-                                else:
-                                    # Run tool calls in a thread pool so backends that
-                                    # use asyncio.run() internally (modal, docker, daytona) get
-                                    # a clean event loop instead of deadlocking.
-                                    loop = asyncio.get_event_loop()
-                                    # Capture current tool_name/args for the lambda
-                                    _tn, _ta, _tid = tool_name, args, self.task_id
-                                    tool_result = await loop.run_in_executor(
-                                        _tool_executor,
-                                        lambda: handle_function_call(
-                                            _tn, _ta, task_id=_tid,
-                                            user_task=_user_task,
-                                        ),
-                                    )
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-
-                                # Log slow tools and thread pool stats for debugging
-                                pool_active = _tool_executor._work_queue.qsize()
-                                if tool_elapsed > 30:
-                                    logger.warning(
-                                        "[%s] turn %d: %s took %.1fs (pool queue=%d)",
-                                        self.task_id[:8], turn + 1, tool_name,
-                                        tool_elapsed, pool_active,
-                                    )
-                            except Exception as e:
-                                tool_result = json.dumps(
-                                    {"error": f"Tool execution failed: {type(e).__name__}: {str(e)}"}
-                                )
-                                tool_errors.append(ToolError(
-                                    turn=turn + 1, tool_name=tool_name,
-                                    arguments=tool_args_raw[:200],
-                                    error=f"{type(e).__name__}: {str(e)}",
-                                    tool_result=tool_result,
-                                ))
-                                logger.error(
-                                    "Tool '%s' execution failed on turn %d: %s",
-                                    tool_name, turn + 1, e,
-                                )
-
-                        # Also check if the tool returned an error in its JSON result
-                        try:
-                            result_data = json.loads(tool_result)
-                            if isinstance(result_data, dict):
-                                err = result_data.get("error")
-                                exit_code = result_data.get("exit_code")
-                                if err and exit_code and exit_code < 0:
-                                    tool_errors.append(ToolError(
-                                        turn=turn + 1, tool_name=tool_name,
-                                        arguments=tool_args_raw[:200],
-                                        error=str(err),
-                                        tool_result=tool_result[:500],
-                                    ))
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    tc_id = tc.get("id", "") if isinstance(tc, dict) else tc.id
+                # Append tool result messages in original order. The OpenAI spec
+                # requires that each tool result's tool_call_id matches the
+                # corresponding entry in the assistant message's tool_calls list,
+                # so order must be preserved regardless of completion order.
+                for tc_id, tool_name, raw_result, err in call_results:
+                    if err:
+                        tool_errors.append(err)
                     tool_result = maybe_persist_tool_result(
-                        content=tool_result,
+                        content=raw_result,
                         tool_name=tool_name,
                         tool_use_id=tc_id,
                         env=get_active_env(self.task_id),
                         config=self.budget_config,
                     )
-
                     messages.append(
                         {
                             "role": "tool",
@@ -471,7 +530,6 @@ class HermesAgentLoop:
                         }
                     )
 
-                num_tcs = len(assistant_msg.tool_calls)
                 if num_tcs > 0:
                     enforce_turn_budget(
                         messages[-num_tcs:],
@@ -481,9 +539,11 @@ class HermesAgentLoop:
 
                 turn_elapsed = _time.monotonic() - turn_start
                 logger.info(
-                    "[%s] turn %d: api=%.1fs, %d tools, turn_total=%.1fs",
+                    "[%s] turn %d: api=%.1fs, %d tools%s, turn_total=%.1fs",
                     self.task_id[:8], turn + 1, api_elapsed,
-                    len(assistant_msg.tool_calls), turn_elapsed,
+                    num_tcs,
+                    " (parallel)" if self.parallel_tools and num_tcs > 1 else "",
+                    turn_elapsed,
                 )
 
             else:
