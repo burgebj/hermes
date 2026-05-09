@@ -14251,7 +14251,25 @@ class GatewayRunner:
                 is_tool_message = role == "tool"
                 
                 if has_tool_calls or has_tool_call_id or is_tool_message:
-                    clean_msg = {k: v for k, v in msg.items() if k != "timestamp"}
+                    # Strip Hermes-internal fields that are not part of the OpenAI API spec.
+                    # Extra fields like call_id, response_item_id, timestamp, finish_reason
+                    # cause tokenization differences vs. the in-memory agentic loop,
+                    # invalidating KV cache on local backends (llama.cpp, lemonade, etc.).
+                    _INTERNAL_FIELDS = {"timestamp", "finish_reason", "call_id",
+                                        "response_item_id"}
+                    clean_msg = {k: v for k, v in msg.items()
+                                 if k not in _INTERNAL_FIELDS}
+                    # Also strip non-standard fields from individual tool_calls entries
+                    if "tool_calls" in clean_msg:
+                        clean_msg["tool_calls"] = [
+                            {k: v for k, v in tc.items()
+                             if k in ("id", "type", "function")}
+                            for tc in (clean_msg["tool_calls"] or [])
+                            if isinstance(tc, dict)
+                        ]
+                    # Normalize content whitespace to match in-memory agentic loop
+                    if clean_msg.get("content") and isinstance(clean_msg["content"], str):
+                        clean_msg["content"] = clean_msg["content"].rstrip()
                     agent_history.append(clean_msg)
                 else:
                     # Simple text message - just need role and content
@@ -14272,6 +14290,9 @@ class GatewayRunner:
                                 _rval = msg.get(_rkey)
                                 if _rval:
                                     entry[_rkey] = _rval
+                            # Also normalize content whitespace to match agentic loop
+                            if entry.get("content") and isinstance(entry["content"], str):
+                                entry["content"] = entry["content"].rstrip()
                         agent_history.append(entry)
             
             # Collect MEDIA paths already in history so we can exclude them
