@@ -1,12 +1,16 @@
 """Tests for gateway service management helpers."""
 
 import os
-import pwd
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+pwd = pytest.importorskip(
+    "pwd",
+    reason="pwd is a UNIX-only stdlib module; the user-systemd surface this file exercises is not available on Windows",
+)
 
 import hermes_cli.gateway as gateway_cli
 from gateway import status
