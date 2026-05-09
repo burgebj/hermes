@@ -413,16 +413,25 @@ _browser_engine_resolved = False
 def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
     """Return the configured cloud browser provider, or None for local mode.
 
-    Reads ``config["browser"]["cloud_provider"]`` once and caches the result
-    for the process lifetime. An explicit ``local`` provider disables cloud
-    fallback. If unset, fall back to Browserbase when direct or managed
-    Browserbase credentials are available.
+    Reads ``config["browser"]["cloud_provider"]`` and caches the result for
+    the process lifetime. An explicit ``local`` provider disables cloud
+    routing and is cached permanently. If unset, fall back to Browser Use
+    (managed or direct) then Browserbase when credentials are available.
+
+    Cache-only-on-success semantics: a ``None`` result is NEVER cached
+    (except for the explicit ``local`` case) so a transient credential gap
+    at process startup — for example a Nous Portal access token that
+    hasn't refreshed yet, or a config-read exception that was silently
+    logged at debug level — does not pin the process to local mode for
+    its entire lifetime. Subsequent calls re-resolve and pick up cloud
+    provider once credentials become available.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
     if _cloud_provider_resolved:
         return _cached_cloud_provider
 
-    _cloud_provider_resolved = True
+    explicit_local = False
+    resolved_provider: Optional[CloudBrowserProvider] = None
     try:
         from hermes_cli.config import read_raw_config
         cfg = read_raw_config()
@@ -433,25 +442,54 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 browser_cfg.get("cloud_provider")
             )
             if provider_key == "local":
+                explicit_local = True
+        if not explicit_local and provider_key and provider_key in _PROVIDER_REGISTRY:
+            try:
+                resolved_provider = _PROVIDER_REGISTRY[provider_key]()
+            except Exception as inst_exc:
+                # Surface instantiation failures at warning level (not debug)
+                # so operators can see why an explicit cloud_provider didn't
+                # take effect. Do NOT cache the None result — retry on next call.
+                logger.warning(
+                    "Failed to instantiate explicit cloud_provider %r: %s; "
+                    "will retry on next browser call",
+                    provider_key, inst_exc, exc_info=True,
+                )
                 _cached_cloud_provider = None
                 return None
-        if provider_key and provider_key in _PROVIDER_REGISTRY:
-            _cached_cloud_provider = _PROVIDER_REGISTRY[provider_key]()
     except Exception as e:
+        # Config-read failure: don't cache, retry on next call.
         logger.debug("Could not read cloud_provider from config: %s", e)
+        _cached_cloud_provider = None
+        return None
 
-    if _cached_cloud_provider is None:
+    if explicit_local:
+        # Explicit user choice — cache permanently.
+        _cached_cloud_provider = None
+        _cloud_provider_resolved = True
+        return None
+
+    if resolved_provider is None:
+        # No explicit provider configured — try the auto-detect chain.
         # Prefer Browser Use (managed Nous gateway or direct API key),
         # fall back to Browserbase (direct credentials only).
         fallback_provider = BrowserUseProvider()
         if fallback_provider.is_configured():
-            _cached_cloud_provider = fallback_provider
+            resolved_provider = fallback_provider
         else:
             fallback_provider = BrowserbaseProvider()
             if fallback_provider.is_configured():
-                _cached_cloud_provider = fallback_provider
+                resolved_provider = fallback_provider
 
-    return _cached_cloud_provider
+    _cached_cloud_provider = resolved_provider
+    if resolved_provider is not None:
+        # Only mark resolved when we actually picked a provider. A None
+        # result means no credentials were available *yet* — re-check on
+        # the next call so transient startup races (e.g. a Nous Portal
+        # token mid-refresh) self-heal instead of pinning to local for
+        # the rest of the process lifetime.
+        _cloud_provider_resolved = True
+    return resolved_provider
 
 
 from hermes_constants import is_termux as _is_termux_environment
