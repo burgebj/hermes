@@ -95,6 +95,45 @@ def test_fetch_account_usage_codex(monkeypatch):
     assert "Credits balance: $12.50" in snapshot.details
 
 
+def test_fetch_account_usage_codex_uses_explicit_runtime_token(monkeypatch):
+    seen = {}
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            seen["url"] = url
+            seen["headers"] = dict(headers or {})
+            return _Response({
+                "rate_limit": {
+                    "primary_window": {"used_percent": 10},
+                    "secondary_window": {"used_percent": 20},
+                }
+            })
+
+    def fail_singleton(*args, **kwargs):
+        raise AssertionError("singleton Codex auth store should not be used with explicit api_key")
+
+    monkeypatch.setattr("agent.account_usage.resolve_codex_runtime_credentials", fail_singleton)
+    monkeypatch.setattr("agent.account_usage._read_codex_tokens", fail_singleton)
+    monkeypatch.setattr("agent.account_usage.httpx.Client", lambda timeout=15.0: Client())
+
+    snapshot = fetch_account_usage(
+        "openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="selected-pool-token",
+    )
+
+    assert snapshot is not None
+    assert seen["headers"]["Authorization"] == "Bearer selected-pool-token"
+    assert "ChatGPT-Account-Id" not in seen["headers"]
+    assert [w.used_percent for w in snapshot.windows] == [10.0, 20.0]
+
+
 def test_render_account_usage_lines_includes_reset_and_provider():
     snapshot = AccountUsageSnapshot(
         provider="openai-codex",
