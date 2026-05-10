@@ -2637,12 +2637,12 @@ def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
     """
     try:
         from agent.skill_utils import discover_all_skill_config_vars, SKILL_CONFIG_PREFIX
-    except Exception:
+    except ImportError:
         return []
 
     try:
         all_vars = discover_all_skill_config_vars()
-    except Exception as e:
+    except (OSError, yaml.YAMLError) as e:
         # A malformed SKILL.md, unreadable external skill dir, or similar
         # should never break `hermes update`.  Skill-config prompting is a
         # post-migration nicety, not a blocker.
@@ -2985,7 +2985,7 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
     if config is None:
         try:
             config = load_config()
-        except Exception:
+        except (OSError, yaml.YAMLError):
             return [ConfigIssue("error", "Could not load config.yaml", "Run 'hermes setup' to create a valid config")]
 
     issues: List[ConfigIssue] = []
@@ -4004,7 +4004,7 @@ def read_raw_config() -> Dict[str, Any]:
         try:
             with open(config_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-        except Exception:
+        except (OSError, yaml.YAMLError):
             return {}
 
         if not isinstance(data, dict):
@@ -4806,7 +4806,7 @@ def set_config_value(key: str, value: str):
         try:
             with open(config_path, encoding="utf-8") as f:
                 user_config = yaml.safe_load(f) or {}
-        except Exception:
+        except (OSError, yaml.YAMLError):
             user_config = {}
     
     # Handle nested keys (e.g., "tts.provider") including numeric list
