@@ -3071,6 +3071,8 @@ class DiscordAdapter(BasePlatformAdapter):
             for cmd_def in COMMAND_REGISTRY:
                 if not _is_gateway_available(cmd_def, config_overrides):
                     continue
+                if not getattr(cmd_def, 'discord_slash', True):
+                    continue
                 # Discord command names: lowercase, hyphens OK, max 32 chars.
                 discord_name = cmd_def.name.lower()[:32]
                 if discord_name in already_registered:

@@ -174,7 +174,7 @@ async def test_auto_registers_missing_gateway_commands(adapter):
 
     # These commands are gateway-available but were not in the original
     # hardcoded registration list — they should be auto-registered.
-    expected_auto = {"debug", "yolo", "profile"}
+    expected_auto = {"yolo", "agents", "footer"}
     for name in expected_auto:
         assert name in tree_names, f"/{name} should be auto-registered on Discord"
 
@@ -185,12 +185,12 @@ async def test_auto_registered_command_dispatches_correctly(adapter):
     adapter._run_simple_slash = AsyncMock()
     adapter._register_slash_commands()
 
-    # /debug has no args — test parameterless dispatch
-    debug_cmd = adapter._client.tree.commands["debug"]
+    # /yolo has no args — test parameterless dispatch
+    yolo_cmd = adapter._client.tree.commands["yolo"]
     interaction = SimpleNamespace()
     adapter._run_simple_slash.reset_mock()
-    await debug_cmd.callback(interaction)
-    adapter._run_simple_slash.assert_awaited_once_with(interaction, "/debug")
+    await yolo_cmd.callback(interaction)
+    adapter._run_simple_slash.assert_awaited_once_with(interaction, "/yolo")
 
 
 @pytest.mark.asyncio
@@ -199,13 +199,13 @@ async def test_auto_registered_command_with_args(adapter):
     adapter._run_simple_slash = AsyncMock()
     adapter._register_slash_commands()
 
-    # /branch has args_hint="[name]" — test dispatch with args
-    branch_cmd = adapter._client.tree.commands["branch"]
+    # /footer has args_hint="[on|off|status]" — test dispatch with args
+    footer_cmd = adapter._client.tree.commands["footer"]
     interaction = SimpleNamespace()
     adapter._run_simple_slash.reset_mock()
-    await branch_cmd.callback(interaction, args="my-branch")
+    await footer_cmd.callback(interaction, args="on")
     adapter._run_simple_slash.assert_awaited_once_with(
-        interaction, "/branch my-branch"
+        interaction, "/footer on"
     )
 
 

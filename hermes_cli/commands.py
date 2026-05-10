@@ -55,6 +55,7 @@ class CommandDef:
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
     gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
+    discord_slash: bool = True         # register as native Discord slash command
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +67,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("new", "Start a new session (fresh session ID + history)", "Session",
                aliases=("reset",), args_hint="[name]"),
     CommandDef("topic", "Enable or inspect Telegram DM topic sessions", "Session",
-               gateway_only=True, args_hint="[off|help|session-id]"),
+               gateway_only=True, args_hint="[off|help|session-id]",
+               discord_slash=False),
     CommandDef("clear", "Clear screen and start a new session", "Session",
                cli_only=True),
     CommandDef("redraw", "Force a full UI repaint (recovers from terminal drift)", "Session",
@@ -80,11 +82,11 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("title", "Set a title for the current session", "Session",
                args_hint="[name]"),
     CommandDef("branch", "Branch the current session (explore a different path)", "Session",
-               aliases=("fork",), args_hint="[name]"),
+               aliases=("fork",), args_hint="[name]", discord_slash=False),
     CommandDef("compress", "Manually compress conversation context", "Session",
                args_hint="[focus topic]"),
     CommandDef("rollback", "List or restore filesystem checkpoints", "Session",
-               args_hint="[number]"),
+               args_hint="[number]", discord_slash=False),
     CommandDef("snapshot", "Create or restore state snapshots of Hermes config/state", "Session",
                cli_only=True, aliases=("snap",), args_hint="[create|restore <id>|prune]"),
     CommandDef("stop", "Kill all running background processes", "Session"),
@@ -101,16 +103,18 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
                args_hint="<prompt>"),
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
-               args_hint="[text | pause | resume | clear | status]"),
+               args_hint="[text | pause | resume | clear | status]", discord_slash=False),
     CommandDef("status", "Show session info", "Session"),
-    CommandDef("profile", "Show active profile name and home directory", "Info"),
+    CommandDef("profile", "Show active profile name and home directory", "Info",
+               discord_slash=False),
     CommandDef("sethome", "Set this chat as the home channel", "Session",
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
                args_hint="[name]"),
 
     # Configuration
-    CommandDef("sessions", "Browse and resume previous sessions", "Session"),
+    CommandDef("sessions", "Browse and resume previous sessions", "Session",
+               discord_slash=False),
 
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
@@ -137,7 +141,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("none", "minimal", "low", "medium", "high", "xhigh", "show", "hide", "on", "off")),
     CommandDef("fast", "Toggle fast mode — OpenAI Priority Processing / Anthropic Fast Mode (Normal/Fast)", "Configuration",
                args_hint="[normal|fast|status]",
-               subcommands=("normal", "fast", "status", "on", "off")),
+               subcommands=("normal", "fast", "status", "on", "off"),
+               discord_slash=False),
     CommandDef("skin", "Show or change the display skin/theme", "Configuration",
                cli_only=True, args_hint="[name]"),
     CommandDef("indicator", "Pick the TUI busy-indicator style", "Configuration",
@@ -162,12 +167,14 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),
     CommandDef("curator", "Background skill maintenance (status, run, pin, archive, list-archived)",
                "Tools & Skills", args_hint="[subcommand]",
-               subcommands=("status", "run", "pause", "resume", "pin", "unpin", "restore", "list-archived")),
+               subcommands=("status", "run", "pause", "resume", "pin", "unpin", "restore", "list-archived"),
+               discord_slash=False),
     CommandDef("kanban", "Multi-profile collaboration board (tasks, links, comments)",
                "Tools & Skills", args_hint="[subcommand]",
                subcommands=("list", "ls", "show", "create", "assign", "link", "unlink",
                             "claim", "comment", "complete", "block", "unblock", "archive",
-                            "tail", "dispatch", "context", "init", "gc")),
+                            "tail", "dispatch", "context", "init", "gc"),
+               discord_slash=False),
     CommandDef("reload", "Reload .env variables into the running session", "Tools & Skills",
                cli_only=True),
     CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
@@ -182,7 +189,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
 
     # Info
     CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
-               gateway_only=True, args_hint="[page]"),
+               gateway_only=True, args_hint="[page]",
+               discord_slash=False),
     CommandDef("help", "Show available commands", "Info"),
     CommandDef("restart", "Gracefully restart the gateway after draining active runs", "Session",
                gateway_only=True),
@@ -199,7 +207,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="<path>"),
     CommandDef("update", "Update Hermes Agent to the latest version", "Info",
                gateway_only=True),
-    CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info"),
+    CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info",
+               discord_slash=False),
 
     # Exit
     CommandDef("quit", "Exit the CLI", "Exit",
