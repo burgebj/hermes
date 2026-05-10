@@ -1293,6 +1293,7 @@ def _setup_tts_provider(config: dict):
         else:
             if prompt_yes_no("Install Pocket TTS dependencies now? (requires ~500MB for model on first use)", True):
                 try:
+                    import subprocess
                     subprocess.run(
                         [sys.executable, "-m", "pip", "install", "pocket-tts", "scipy"],
                         check=True,
