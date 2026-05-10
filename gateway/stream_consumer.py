@@ -92,11 +92,13 @@ class GatewayStreamConsumer:
         config: Optional[StreamConsumerConfig] = None,
         metadata: Optional[dict] = None,
         on_new_message: Optional[callable] = None,
+        reply_to: Optional[str] = None,
     ):
         self.adapter = adapter
         self.chat_id = chat_id
         self.cfg = config or StreamConsumerConfig()
         self.metadata = metadata
+        self.reply_to = reply_to
         # Fired whenever a fresh content bubble is created on the platform
         # (first-send of a new message, commentary, overflow chunk, or
         # fallback continuation). The gateway uses this to linearize the
@@ -536,12 +538,18 @@ class GatewayStreamConsumer:
         text = self._clean_for_display(text)
         if not text.strip():
             return reply_to_id
+        # When reply_to_id is None (first chunk), fall back to the
+        # reply_to passed at construction time so that platform adapters
+        # which distinguish synthetic thread IDs from real ones (e.g.,
+        # Slack's _resolve_thread_ts) receive the original message ID
+        # even in streaming mode.
+        effective_reply_to = reply_to_id if reply_to_id is not None else self.reply_to
         try:
             meta = dict(self.metadata) if self.metadata else {}
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=text,
-                reply_to=reply_to_id,
+                reply_to=effective_reply_to,
                 metadata=meta,
             )
             if result.success and result.message_id:
