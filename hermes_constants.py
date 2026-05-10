@@ -62,7 +62,7 @@ def get_hermes_home() -> Path:
             try:
                 sys.stderr.write(msg + "\n")
                 sys.stderr.flush()
-            except Exception:
+            except OSError:
                 pass
 
     return Path.home() / ".hermes"
@@ -235,7 +235,7 @@ def is_wsl() -> bool:
     try:
         with open("/proc/version", "r", encoding="utf-8") as f:
             _wsl_detected = "microsoft" in f.read().lower()
-    except Exception:
+    except OSError:
         _wsl_detected = False
     return _wsl_detected
 

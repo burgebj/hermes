@@ -171,3 +171,55 @@ class TestParseReasoningEffort:
         """
         documented = {"minimal", "low", "medium", "high", "xhigh"}
         assert documented.issubset(set(VALID_REASONING_EFFORTS))
+
+
+class TestExceptionSpecificity:
+    """Regression tests: hermes_constants.py except Exception narrowed to specific types."""
+
+    def test_is_wsl_returns_false_on_os_error(self, monkeypatch):
+        """OSError opening /proc/version is caught and returns False."""
+        monkeypatch.setattr(hermes_constants, "_wsl_detected", None)
+        with patch("builtins.open", side_effect=OSError("no such file")):
+            result = hermes_constants.is_wsl()
+        assert result is False
+
+    def test_is_wsl_propagates_runtime_error(self, monkeypatch):
+        """RuntimeError from open() must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except Exception`` (RuntimeError
+        swallowed, returns False), passes after narrowing to ``except OSError``.
+        """
+        monkeypatch.setattr(hermes_constants, "_wsl_detected", None)
+        with patch("builtins.open", side_effect=RuntimeError("unexpected")):
+            with pytest.raises(RuntimeError):
+                hermes_constants.is_wsl()
+
+    def test_get_hermes_home_silent_on_stderr_os_error(self, monkeypatch, tmp_path):
+        """OSError from sys.stderr.write is silently ignored."""
+        import sys
+        active_profile_path = tmp_path / ".hermes" / "active_profile"
+        active_profile_path.parent.mkdir(parents=True)
+        active_profile_path.write_text("work")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", False)
+        with patch.object(sys.stderr, "write", side_effect=OSError("broken pipe")):
+            result = hermes_constants.get_hermes_home()
+        assert result == tmp_path / ".hermes"
+
+    def test_get_hermes_home_propagates_stderr_runtime_error(self, monkeypatch, tmp_path):
+        """RuntimeError from sys.stderr.write must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except Exception`` (RuntimeError
+        swallowed, returns home path), passes after narrowing to ``except OSError``.
+        """
+        import sys
+        active_profile_path = tmp_path / ".hermes" / "active_profile"
+        active_profile_path.parent.mkdir(parents=True)
+        active_profile_path.write_text("work")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", False)
+        with patch.object(sys.stderr, "write", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                hermes_constants.get_hermes_home()

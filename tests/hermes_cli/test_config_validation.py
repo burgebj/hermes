@@ -206,3 +206,64 @@ class TestConfigIssueDataclass:
         a = ConfigIssue("error", "msg", "hint")
         b = ConfigIssue("error", "msg", "hint")
         assert a == b
+
+
+class TestConfigExceptionSpecificity:
+    """Regression tests: config.py except Exception narrowed to specific types."""
+
+    def test_validate_config_structure_propagates_runtime_error(self):
+        """RuntimeError from load_config must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except Exception`` (swallows RuntimeError
+        and returns [ConfigIssue(...)]), passes after narrowing to
+        ``except (OSError, yaml.YAMLError)``.
+        """
+        from unittest.mock import patch
+
+        with patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                validate_config_structure(config=None)
+
+    def test_validate_config_structure_returns_error_issue_on_os_error(self):
+        """OSError from load_config returns a ConfigIssue with severity 'error'."""
+        from unittest.mock import patch
+
+        with patch("hermes_cli.config.load_config", side_effect=OSError("disk full")):
+            issues = validate_config_structure(config=None)
+
+        assert any(i.severity == "error" for i in issues)
+        assert any("Could not load" in i.message for i in issues)
+
+    def test_read_raw_config_returns_empty_on_malformed_yaml(self, tmp_path):
+        """YAMLError from malformed config.yaml returns {} from read_raw_config."""
+        from hermes_cli.config import read_raw_config, _RAW_CONFIG_CACHE
+        from unittest.mock import patch
+
+        _RAW_CONFIG_CACHE.clear()
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("{ bad yaml [[[")
+
+        with patch("hermes_cli.config.get_config_path", return_value=cfg):
+            result = read_raw_config()
+
+        assert result == {}
+
+    def test_read_raw_config_propagates_runtime_error(self, tmp_path):
+        """RuntimeError from yaml.safe_load must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except Exception: return {}``
+        (RuntimeError swallowed), passes after narrowing to
+        ``except (OSError, yaml.YAMLError)``.
+        """
+        import yaml
+        from hermes_cli.config import read_raw_config, _RAW_CONFIG_CACHE
+        from unittest.mock import patch
+
+        _RAW_CONFIG_CACHE.clear()
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("provider: nous")
+
+        with patch("hermes_cli.config.get_config_path", return_value=cfg), \
+             patch.object(yaml, "safe_load", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                read_raw_config()
