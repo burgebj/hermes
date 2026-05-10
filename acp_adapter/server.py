@@ -391,6 +391,30 @@ def _image_block_to_openai_part(block: ImageContentBlock) -> dict[str, Any] | No
     return {"type": "image_url", "image_url": {"url": url}}
 
 
+def _resource_block_to_openai_part(block: ResourceContentBlock) -> dict[str, Any] | None:
+    """Convert an ACP ResourceContentBlock with image mime type to OpenAI image_url."""
+    mime = str(getattr(block, "mime_type", "") or "").strip()
+    if not mime.startswith("image/"):
+        return None
+    uri = str(getattr(block, "uri", "") or "").strip()
+    if not uri:
+        return None
+    return {"type": "image_url", "image_url": {"url": uri}}
+
+def _embedded_blob_to_openai_part(block: EmbeddedResourceContentBlock) -> dict[str, Any] | None:
+    """Convert an EmbeddedResourceContentBlock with image blob to OpenAI image_url."""
+    res = getattr(block, "resource", None)
+    if res is None or not isinstance(res, BlobResourceContents):
+        return None
+    mime = str(getattr(res, "mime_type", "") or getattr(res, "mimeType", "") or "").strip()
+    if not mime.startswith("image/"):
+        return None
+    blob = getattr(res, "blob", "") or ""
+    if not blob:
+        return None
+    url = blob if blob.startswith("data:") else f"data:{mime};base64,{blob}"
+    return {"type": "image_url", "image_url": {"url": url}}
+
 def _content_blocks_to_openai_user_content(
     prompt: list[
         TextContentBlock
@@ -1067,6 +1091,139 @@ class HermesACPAgent(acp.Agent):
         return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
 
     # ---- Prompt (core) ------------------------------------------------------
+
+    async def _preprocess_acp_images(
+        self,
+        prompt: list,
+        user_text: str,
+        user_content: object,
+        state: SessionState,
+    ) -> str:
+        """Pre-analyze images via vision_analyze for text-only models.
+
+        Handles ImageContentBlock, ResourceContentBlock, and
+        EmbeddedResourceContentBlock — the three ways ACP clients send images.
+
+        Falls back to original user_text if vision processing fails.
+        """
+        import base64 as _b64, tempfile, os as _os
+        from urllib.parse import unquote as _unquote
+
+        descriptions: list[str] = []
+        for block in prompt:
+            image_url = None
+            mime_type = "image/png"
+
+            if isinstance(block, ImageContentBlock):
+                data = str(getattr(block, "data", "") or "").strip()
+                uri = str(getattr(block, "uri", "") or "").strip()
+                mime_type = str(
+                    getattr(block, "mime_type", "") or "image/png"
+                ).strip() or "image/png"
+                if uri:
+                    image_url = uri
+                elif data:
+                    image_url = data if data.startswith("data:") else f"data:{mime_type};base64,{data}"
+
+            elif isinstance(block, ResourceContentBlock):
+                mime = str(getattr(block, "mime_type", "") or "").strip()
+                if not mime.startswith("image/"):
+                    continue
+                mime_type = mime
+                uri = str(getattr(block, "uri", "") or "").strip()
+                if uri:
+                    image_url = uri
+
+            elif isinstance(block, EmbeddedResourceContentBlock):
+                res = getattr(block, "resource", None)
+                if res is None or not isinstance(res, BlobResourceContents):
+                    continue
+                mime = str(getattr(res, "mime_type", "") or getattr(res, "mimeType", "") or "").strip()
+                if not mime.startswith("image/"):
+                    continue
+                mime_type = mime
+                blob = getattr(res, "blob", "") or ""
+                if blob:
+                    image_url = blob if blob.startswith("data:") else f"data:{mime_type};base64,{blob}"
+            else:
+                continue
+
+            if not image_url:
+                continue
+
+            try:
+                suffix = ".png" if "png" in mime_type else (
+                    ".jpg" if "jpeg" in mime_type or "jpg" in mime_type
+                    else ".png"
+                )
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    if image_url.startswith("file://"):
+                        src = _unquote(image_url[len("file://"):])
+                        with open(src, "rb") as src_f:
+                            tmp.write(src_f.read())
+                    elif image_url.startswith("data:"):
+                        header, b64 = image_url.split(",", 1)
+                        tmp.write(_b64.b64decode(b64))
+                    else:
+                        # Plain URI (http://, https://, etc.) — vision_analyze_tool
+                        # will download it; pass the URL directly, skipping temp file
+                        tmp_path = None  # signal: use URL directly
+                if image_url.startswith("data:") or image_url.startswith("file://"):
+                    tmp_path = tmp.name
+
+                try:
+                    from tools.vision_tools import vision_analyze_tool
+                    # vision_analyze_tool handles local file paths (bare paths only,
+                    # NOT file:// URIs). For file:// sources we already copied to
+                    # tmp_path above; pass the bare path. For data: URIs we also
+                    # have tmp_path. For http(s) URLs, pass the URL directly.
+                    if tmp_path:
+                        target = tmp_path  # bare path, NOT file:// prefixed
+                    else:
+                        target = image_url
+                    result_raw = await vision_analyze_tool(
+                        image_url=target,
+                        user_prompt="Describe this image in detail. What do you see?",
+                    )
+                    result = json.loads(result_raw) if isinstance(
+                        result_raw, str
+                    ) else result_raw
+                    desc = (
+                        result.get("description")
+                        or result.get("analysis")
+                        or result.get("response")
+                        or str(result)
+                    )[:500]
+                    descriptions.append(
+                        f"[Image analysis]: {desc}"
+                    )
+                    logger.debug(
+                        "ACP image preprocessed (%s): %d chars description",
+                        type(block).__name__, len(desc),
+                    )
+                finally:
+                    if tmp_path:
+                        try:
+                            _os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+            except Exception as exc:
+                logger.warning(
+                    "ACP image preprocessing failed (%s): %s",
+                    type(block).__name__, exc,
+                )
+                descriptions.append("[Image: could not analyze]")
+
+        if not descriptions:
+            return user_text or "[Image attached — unable to analyze]"
+
+        # Prepend image descriptions to user text
+        combined = (
+            "\n\n".join(descriptions)
+            + ("\n\n" + user_text if user_text else "")
+        )
+        return combined
 
     async def prompt(
         self,

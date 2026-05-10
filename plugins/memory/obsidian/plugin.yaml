@@ -1,0 +1,6 @@
+name: obsidian
+version: 0.1.0
+description: "Obsidian memory — durable cross-session memory persisted as markdown notes inside an Obsidian vault. Human-readable, hand-editable, version-controllable."
+hooks:
+  - on_memory_write
+  - sync_turn
