@@ -2311,3 +2311,101 @@ class TestAnthropicExplicitApiKey:
         assert mock_build.call_args.args[0] == "explicit-fallback-key", (
             "resolve_provider_client must forward explicit_api_key to _try_anthropic()"
         )
+
+
+class TestCodexAuxiliaryStreamRecovery:
+    def test_retries_responses_stream_after_transient_transport_error(self):
+        import httpx
+        from types import SimpleNamespace
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+
+        class _Stream:
+            def __init__(self, fail=False):
+                self.fail = fail
+                self._final = SimpleNamespace(output=[])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def __iter__(self):
+                if self.fail:
+                    raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+                return iter([
+                    SimpleNamespace(type="response.output_text.delta", delta="ok"),
+                    SimpleNamespace(type="response.completed", response=self._final),
+                ])
+
+            def get_final_response(self):
+                return self._final
+
+        class _Responses:
+            def __init__(self):
+                self.calls = 0
+
+            def stream(self, **kwargs):
+                self.calls += 1
+                return _Stream(fail=self.calls == 1)
+
+        real_client = SimpleNamespace(responses=_Responses())
+        adapter = _CodexCompletionsAdapter(real_client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "hi"}])
+
+        assert real_client.responses.calls == 2
+        assert response.choices[0].message.content == "ok"
+
+    def test_falls_back_to_create_stream_after_repeated_transport_error(self):
+        import httpx
+        from types import SimpleNamespace
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+
+        class _BadStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def __iter__(self):
+                raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+
+            def get_final_response(self):
+                return SimpleNamespace(output=[])
+
+        class _FallbackStream:
+            def __iter__(self):
+                return iter([
+                    {"type": "response.output_text.delta", "delta": "fallback-ok"},
+                    {"type": "response.completed", "response": SimpleNamespace(output=[])},
+                ])
+
+            def close(self):
+                self.closed = True
+
+        class _Responses:
+            def __init__(self):
+                self.stream_calls = 0
+                self.create_calls = 0
+                self.create_kwargs = None
+
+            def stream(self, **kwargs):
+                self.stream_calls += 1
+                return _BadStream()
+
+            def create(self, **kwargs):
+                self.create_calls += 1
+                self.create_kwargs = kwargs
+                return _FallbackStream()
+
+        real_client = SimpleNamespace(responses=_Responses())
+        adapter = _CodexCompletionsAdapter(real_client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "hi"}])
+
+        assert real_client.responses.stream_calls == 2
+        assert real_client.responses.create_calls == 1
+        assert real_client.responses.create_kwargs["stream"] is True
+        assert response.choices[0].message.content == "fallback-ok"

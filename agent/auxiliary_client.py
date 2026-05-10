@@ -47,7 +47,7 @@ import threading
 import time
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
 
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
@@ -594,9 +594,189 @@ class _CodexCompletionsAdapter:
     """Drop-in shim that accepts chat.completions.create() kwargs and
     routes them through the Codex Responses streaming API."""
 
+    _MAX_STREAM_RETRIES = 1
+
     def __init__(self, real_client: OpenAI, model: str):
         self._client = real_client
         self._model = model
+
+    @staticmethod
+    def _event_type(event: Any) -> str:
+        return getattr(event, "type", None) or (event.get("type") if isinstance(event, dict) else "") or ""
+
+    @staticmethod
+    def _event_value(event: Any, key: str, default: Any = None) -> Any:
+        val = getattr(event, key, None)
+        if val is None and isinstance(event, dict):
+            val = event.get(key, default)
+        return val if val is not None else default
+
+    @staticmethod
+    def _item_get(obj: Any, key: str, default: Any = None) -> Any:
+        val = getattr(obj, key, None)
+        if val is None and isinstance(obj, dict):
+            val = obj.get(key, default)
+        return val if val is not None else default
+
+    def _backfill_empty_output(
+        self,
+        final: Any,
+        collected_output_items: List[Any],
+        collected_text_deltas: List[str],
+        has_function_calls: bool,
+        *,
+        source: str,
+    ) -> Any:
+        """Recover Codex streamed content when SDK final output is empty."""
+        _output = getattr(final, "output", None)
+        if isinstance(_output, list) and not _output:
+            if collected_output_items:
+                final.output = list(collected_output_items)
+                logger.debug(
+                    "Codex auxiliary %s: backfilled %d output items from stream events",
+                    source,
+                    len(collected_output_items),
+                )
+            elif collected_text_deltas and not has_function_calls:
+                assembled = "".join(collected_text_deltas)
+                final.output = [SimpleNamespace(
+                    type="message", role="assistant", status="completed",
+                    content=[SimpleNamespace(type="output_text", text=assembled)],
+                )]
+                logger.debug(
+                    "Codex auxiliary %s: synthesized from %d deltas (%d chars)",
+                    source,
+                    len(collected_text_deltas), len(assembled),
+                )
+        return final
+
+    def _collect_responses_stream(
+        self,
+        stream_obj: Any,
+        *,
+        source: str,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> Any:
+        collected_output_items: List[Any] = []
+        collected_text_deltas: List[str] = []
+        has_function_calls = False
+        terminal_response = None
+
+        for event in stream_obj:
+            if cancel_check is not None:
+                cancel_check()
+            etype = self._event_type(event)
+            if etype == "response.output_item.done":
+                done = self._event_value(event, "item")
+                if done is not None:
+                    collected_output_items.append(done)
+            elif "output_text.delta" in etype:
+                delta = self._event_value(event, "delta", "")
+                if delta:
+                    collected_text_deltas.append(delta)
+            elif "function_call" in etype:
+                has_function_calls = True
+            elif etype in {"response.completed", "response.incomplete", "response.failed"}:
+                terminal_response = self._event_value(event, "response") or terminal_response
+
+        if hasattr(stream_obj, "get_final_response"):
+            final = stream_obj.get_final_response()
+        elif terminal_response is not None:
+            final = terminal_response
+        else:
+            raise RuntimeError(f"Codex auxiliary {source} did not emit a terminal response")
+
+        return self._backfill_empty_output(
+            final,
+            collected_output_items,
+            collected_text_deltas,
+            has_function_calls,
+            source=source,
+        )
+
+    def _run_stream(self, resp_kwargs: Dict[str, Any], *, cancel_check: Optional[Callable[[], None]] = None) -> Any:
+        """Use responses.stream(), matching the Codex endpoint's required mode."""
+        if cancel_check is not None:
+            cancel_check()
+        with self._client.responses.stream(**resp_kwargs) as stream:
+            return self._collect_responses_stream(stream, source="responses.stream", cancel_check=cancel_check)
+
+    def _run_create_stream_fallback(
+        self,
+        resp_kwargs: Dict[str, Any],
+        *,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> Any:
+        """Fallback for chunked stream edge cases, mirroring the main agent path."""
+        fallback_kwargs = dict(resp_kwargs)
+        fallback_kwargs["stream"] = True
+        if cancel_check is not None:
+            cancel_check()
+        stream_or_response = self._client.responses.create(**fallback_kwargs)
+        if hasattr(stream_or_response, "output"):
+            return stream_or_response
+        if not hasattr(stream_or_response, "__iter__"):
+            return stream_or_response
+        try:
+            return self._collect_responses_stream(
+                stream_or_response,
+                source="responses.create(stream=True)",
+                cancel_check=cancel_check,
+            )
+        finally:
+            close_fn = getattr(stream_or_response, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+    def _run_stream_with_recovery(
+        self,
+        resp_kwargs: Dict[str, Any],
+        *,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> Any:
+        import httpx as _httpx
+
+        last_exc = None
+        for attempt in range(self._MAX_STREAM_RETRIES + 1):
+            try:
+                return self._run_stream(resp_kwargs, cancel_check=cancel_check)
+            except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+                last_exc = exc
+                if attempt < self._MAX_STREAM_RETRIES:
+                    logger.debug(
+                        "Codex auxiliary stream transport failed (attempt %s/%s); retrying: %s",
+                        attempt + 1,
+                        self._MAX_STREAM_RETRIES + 1,
+                        exc,
+                    )
+                    continue
+                logger.debug(
+                    "Codex auxiliary stream transport failed; falling back to responses.create(stream=True): %s",
+                    exc,
+                )
+                return self._run_create_stream_fallback(resp_kwargs, cancel_check=cancel_check)
+            except RuntimeError as exc:
+                last_exc = exc
+                missing_completed = "response.completed" in str(exc)
+                if missing_completed and attempt < self._MAX_STREAM_RETRIES:
+                    logger.debug(
+                        "Codex auxiliary stream closed before completion (attempt %s/%s); retrying",
+                        attempt + 1,
+                        self._MAX_STREAM_RETRIES + 1,
+                    )
+                    continue
+                if missing_completed:
+                    logger.debug(
+                        "Codex auxiliary stream did not emit response.completed; falling back to responses.create(stream=True)"
+                    )
+                    return self._run_create_stream_fallback(resp_kwargs, cancel_check=cancel_check)
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Codex auxiliary stream failed without an exception")
 
     def create(self, **kwargs) -> Any:
         messages = kwargs.get("messages", [])
@@ -708,9 +888,17 @@ class _CodexCompletionsAdapter:
                     logger.debug("Codex auxiliary: client close during timeout failed", exc_info=True)
 
         def _check_cancelled() -> None:
-            if deadline is not None and time.monotonic() >= deadline:
-                timed_out.set()
-                raise TimeoutError(_timeout_message())
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or float(total_timeout) < 0.1:
+                    timed_out.set()
+                    raise TimeoutError(_timeout_message())
+                # The interrupt hook is best-effort and can be cold-imported.
+                # When the caller sets a tight total timeout, prioritize the
+                # timeout budget instead of spending it importing optional UX
+                # plumbing before the stream even starts yielding.
+                if remaining < 0.25:
+                    return
             try:
                 from tools.interrupt import is_interrupted
                 if is_interrupted():
@@ -723,80 +911,31 @@ class _CodexCompletionsAdapter:
                 pass
 
         try:
-            # Collect output items and text deltas during streaming —
-            # the Codex backend can return empty response.output from
-            # get_final_response() even when items were streamed.
-            collected_output_items: List[Any] = []
-            collected_text_deltas: List[str] = []
-            has_function_calls = False
             if total_timeout:
                 timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
                 timeout_timer.daemon = True
                 timeout_timer.start()
             _check_cancelled()
-            with self._client.responses.stream(**resp_kwargs) as stream:
-                for _event in stream:
-                    _check_cancelled()
-                    _etype = getattr(_event, "type", "")
-                    if _etype == "response.output_item.done":
-                        _done = getattr(_event, "item", None)
-                        if _done is not None:
-                            collected_output_items.append(_done)
-                    elif "output_text.delta" in _etype:
-                        _delta = getattr(_event, "delta", "")
-                        if _delta:
-                            collected_text_deltas.append(_delta)
-                    elif "function_call" in _etype:
-                        has_function_calls = True
-                _check_cancelled()
-                final = stream.get_final_response()
-
-            # Backfill empty output from collected stream events
-            _output = getattr(final, "output", None)
-            if isinstance(_output, list) and not _output:
-                if collected_output_items:
-                    final.output = list(collected_output_items)
-                    logger.debug(
-                        "Codex auxiliary: backfilled %d output items from stream events",
-                        len(collected_output_items),
-                    )
-                elif collected_text_deltas and not has_function_calls:
-                    # Only synthesize text when no tool calls were streamed —
-                    # a function_call response with incidental text should not
-                    # be collapsed into a plain-text message.
-                    assembled = "".join(collected_text_deltas)
-                    final.output = [SimpleNamespace(
-                        type="message", role="assistant", status="completed",
-                        content=[SimpleNamespace(type="output_text", text=assembled)],
-                    )]
-                    logger.debug(
-                        "Codex auxiliary: synthesized from %d deltas (%d chars)",
-                        len(collected_text_deltas), len(assembled),
-                    )
+            final = self._run_stream_with_recovery(resp_kwargs, cancel_check=_check_cancelled)
+            _check_cancelled()
 
             # Extract text and tool calls from the Responses output.
             # Items may be SDK objects (attrs) or dicts (raw/fallback paths),
             # so use a helper that handles both shapes.
-            def _item_get(obj: Any, key: str, default: Any = None) -> Any:
-                val = getattr(obj, key, None)
-                if val is None and isinstance(obj, dict):
-                    val = obj.get(key, default)
-                return val if val is not None else default
-
             for item in getattr(final, "output", []):
-                item_type = _item_get(item, "type")
+                item_type = self._item_get(item, "type")
                 if item_type == "message":
-                    for part in (_item_get(item, "content") or []):
-                        ptype = _item_get(part, "type")
+                    for part in (self._item_get(item, "content") or []):
+                        ptype = self._item_get(part, "type")
                         if ptype in ("output_text", "text"):
-                            text_parts.append(_item_get(part, "text", ""))
+                            text_parts.append(self._item_get(part, "text", ""))
                 elif item_type == "function_call":
                     tool_calls_raw.append(SimpleNamespace(
-                        id=_item_get(item, "call_id", ""),
+                        id=self._item_get(item, "call_id", ""),
                         type="function",
                         function=SimpleNamespace(
-                            name=_item_get(item, "name", ""),
-                            arguments=_item_get(item, "arguments", "{}"),
+                            name=self._item_get(item, "name", ""),
+                            arguments=self._item_get(item, "arguments", "{}"),
                         ),
                     ))
 
