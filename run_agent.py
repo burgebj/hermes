@@ -7746,10 +7746,17 @@ class AIAgent:
                             result["partial_tool_names"] = []
                             deltas_were_sent["yes"] = False
                             first_delta_fired["done"] = False
-                            self._emit_status(
-                                f"⚠️ Connection dropped mid tool-call "
-                                f"({type(e).__name__}). Reconnecting… "
-                                f"(attempt {_stream_attempt + 2}/{_max_stream_retries + 1})"
+                            # Intermediate retry messages are logged (not emitted)
+                            # to avoid cluttering the chat thread with transient
+                            # warnings that remain even after successful retries.
+                            # See: https://github.com/NousResearch/hermes-agent/issues/5151
+                            logger.info(
+                                "⚠️ Connection dropped mid tool-call "
+                                "(%s). Reconnecting… "
+                                "(attempt %s/%s)",
+                                type(e).__name__,
+                                _stream_attempt + 2,
+                                _max_stream_retries + 1,
                             )
                             self._touch_activity(
                                 f"stream retry {_stream_attempt + 2}/{_max_stream_retries + 1} "
@@ -7812,10 +7819,17 @@ class AIAgent:
                                     type(e).__name__,
                                     e,
                                 )
-                                self._emit_status(
-                                    f"⚠️ Connection to provider dropped "
-                                    f"({type(e).__name__}). Reconnecting… "
-                                    f"(attempt {_stream_attempt + 2}/{_max_stream_retries + 1})"
+                                # Intermediate retry messages are logged (not emitted)
+                                # to avoid cluttering the chat thread with transient
+                                # warnings that remain even after successful retries.
+                                # See: https://github.com/NousResearch/hermes-agent/issues/5151
+                                logger.info(
+                                    "⚠️ Connection to provider dropped "
+                                    "(%s). Reconnecting… "
+                                    "(attempt %s/%s)",
+                                    type(e).__name__,
+                                    _stream_attempt + 2,
+                                    _max_stream_retries + 1,
                                 )
                                 self._touch_activity(
                                     f"stream retry {_stream_attempt + 2}/{_max_stream_retries + 1} "

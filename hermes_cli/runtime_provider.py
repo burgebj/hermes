@@ -531,10 +531,18 @@ def _resolve_named_custom_runtime(
             pool_result["model"] = model_name
         return pool_result
 
+    configured_api_key = str(custom_provider.get("api_key", "") or "").strip()
+    configured_key_env = str(custom_provider.get("key_env", "") or "").strip()
+    configured_api_key_env = ""
+    if configured_api_key.startswith("env:"):
+        configured_api_key_env = configured_api_key.split(":", 1)[1].strip()
+        configured_api_key = ""
+
     api_key_candidates = [
         (explicit_api_key or "").strip(),
-        str(custom_provider.get("api_key", "") or "").strip(),
-        os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
+        configured_api_key,
+        os.getenv(configured_key_env, "").strip(),
+        os.getenv(configured_api_key_env, "").strip(),
         os.getenv("OPENAI_API_KEY", "").strip(),
         os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]

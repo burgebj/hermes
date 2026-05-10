@@ -1198,6 +1198,22 @@ def list_authenticated_providers(
         curated["lmstudio"] = live
 
     # --- 1. Check Hermes-mapped providers ---
+    # Pre-scan custom_providers for base_urls so we can suppress built-in
+    # providers that would duplicate a user-defined endpoint (e.g. OpenAI
+    # native vs. user-defined OpenAI pointing at api.openai.com/v1).
+    _custom_base_urls: set[str] = set()
+    if custom_providers and isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if isinstance(entry, dict):
+                bu = (entry.get("base_url") or "").strip().rstrip("/")
+                if bu:
+                    _custom_base_urls.add(bu.lower())
+
+    def _custom_provider_has_base_url(base_url: str) -> bool:
+        """Return True if a custom provider already claims this base_url."""
+        target = base_url.strip().rstrip("/").lower()
+        return target in _custom_base_urls
+
     for hermes_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
         # Skip aliases that map to the same models.dev provider (e.g.
         # kimi-coding and kimi-coding-cn both → kimi-for-coding).
@@ -1249,6 +1265,16 @@ def list_authenticated_providers(
         slug = hermes_id
         pinfo = _mdev_pinfo(mdev_id)
         display_name = pinfo.name if pinfo else mdev_id
+
+        # Suppress built-in `openai` when a custom provider already claims
+        # the same base_url (e.g. api.openai.com/v1). The custom provider
+        # typically has a richer model list and is the intended entry.
+        if slug == "openai" and _custom_provider_has_base_url(
+            "https://api.openai.com/v1"
+        ):
+            seen_slugs.add(slug.lower())
+            seen_mdev_ids.add(mdev_id)
+            continue
 
         results.append({
             "slug": slug,
