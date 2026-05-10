@@ -112,6 +112,7 @@ DEFAULT_SPOTIFY_SCOPE = " ".join((
 ))
 SERVICE_PROVIDER_NAMES: Dict[str, str] = {
     "spotify": "Spotify",
+    "google-workspace": "Google Workspace",
 }
 
 # Google Gemini OAuth (google-gemini-cli provider, Cloud Code Assist backend)
@@ -1804,6 +1805,138 @@ def get_gemini_oauth_auth_status() -> Dict[str, Any]:
         "email": creds.email,
         "project_id": creds.project_id,
     }
+
+
+# =============================================================================
+# Google Workspace OAuth — PKCE flow for Gmail, Calendar, Drive, Sheets, Docs.
+#
+# Tokens live in ~/.hermes/google_token.json (same file the google-workspace
+# skill reads). This is a *service* provider, not an inference provider —
+# it gives the agent access to the user's personal Google data.
+# =============================================================================
+
+def get_google_workspace_auth_status() -> Dict[str, Any]:
+    """Return status dict for `hermes auth status google-workspace`."""
+    try:
+        from agent.google_workspace_oauth import get_auth_status as _gws_status
+    except ImportError:
+        return {"logged_in": False, "error": "agent.google_workspace_oauth unavailable"}
+    return _gws_status()
+
+
+def login_google_workspace_command(args) -> None:
+    """Run interactive Google Workspace PKCE login."""
+    try:
+        from agent.google_workspace_oauth import (
+            run_oauth_login,
+            run_oauth_login_headless,
+            exchange_code,
+            credentials_path,
+            get_client_credentials,
+            GoogleWorkspaceOAuthError,
+        )
+    except ImportError as exc:
+        raise SystemExit(f"Google Workspace OAuth module not available: {exc}")
+
+    open_browser = not getattr(args, "no_browser", False)
+
+    # Check if we can resolve client credentials at all
+    try:
+        client_id, _ = get_client_credentials()
+    except GoogleWorkspaceOAuthError as exc:
+        print(f"Error: {exc}")
+        print()
+        print("To use Google Workspace, provide OAuth client credentials via one of:")
+        print("  1. Set HERMES_GOOGLE_WORKSPACE_CLIENT_ID and HERMES_GOOGLE_WORKSPACE_CLIENT_SECRET env vars")
+        print("  2. Place a google_client_secret.json in ~/.hermes/")
+        print("  3. Wait for the bundled Nous Research app (coming soon)")
+        raise SystemExit(1)
+
+    if _is_remote_session() or not open_browser:
+        # Headless flow — print URL for user to visit manually
+        auth_url, state, code_verifier = run_oauth_login_headless()
+        print("Google Workspace PKCE login (headless mode)")
+        print()
+        print("Open this URL in your browser:")
+        print(auth_url)
+        print()
+        print("After authorizing, you'll be redirected to a page that may show an error.")
+        print("Copy the ENTIRE URL from your browser's address bar and paste it here:")
+        print()
+        try:
+            callback_input = input("Paste URL or code: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            raise SystemExit(1)
+        if not callback_input:
+            print("No input provided.")
+            raise SystemExit(1)
+
+        # Extract code from URL if user pasted the full redirect URL
+        code = callback_input
+        returned_state = None
+        if callback_input.startswith("http"):
+            from urllib.parse import parse_qs, urlparse
+            parsed = urlparse(callback_input)
+            params = parse_qs(parsed.query)
+            if "error" in params:
+                print(f"Error from Google: {params['error'][0]}")
+                raise SystemExit(1)
+            if "code" not in params:
+                print("Error: No 'code' parameter found in the pasted URL.")
+                raise SystemExit(1)
+            code = params["code"][0]
+            returned_state = params.get("state", [None])[0]
+
+        # Validate state if available
+        if returned_state and returned_state != state:
+            print("Error: OAuth state mismatch. This may be a code from a different session.")
+            raise SystemExit(1)
+
+        try:
+            token_data = exchange_code(code, state, code_verifier, redirect_uri="http://localhost:1")
+        except GoogleWorkspaceOAuthError as exc:
+            print(f"Error: {exc}")
+            raise SystemExit(1)
+    else:
+        # Interactive flow — opens browser, waits for callback
+        print("Starting Google Workspace PKCE login...")
+        print(f"  Client ID: {client_id[:8]}…")
+        print(f"  Token will be saved to: {credentials_path()}")
+        print()
+        try:
+            token_data = run_oauth_login()
+        except GoogleWorkspaceOAuthError as exc:
+            print(f"Error: {exc}")
+            raise SystemExit(1)
+
+    print()
+    print("✓ Google Workspace login successful!")
+    print(f"  Token saved to: {credentials_path()}")
+    scopes = token_data.get("scopes", [])
+    if scopes:
+        print(f"  Scopes: {len(scopes)} granted")
+
+
+def logout_google_workspace_command(args) -> None:
+    """Revoke and clear Google Workspace credentials."""
+    try:
+        from agent.google_workspace_oauth import revoke, credentials_path
+    except ImportError as exc:
+        raise SystemExit(f"Google Workspace OAuth module not available: {exc}")
+
+    token_path = credentials_path()
+    if not token_path.exists():
+        print("Google Workspace: not logged in (no token file).")
+        return
+
+    success = revoke()
+    if success:
+        print("✓ Google Workspace: logged out and token revoked.")
+    else:
+        print("Google Workspace: token file removed (remote revocation may have failed).")
+
+
 # Spotify auth — PKCE tokens stored in ~/.hermes/auth.json
 # =============================================================================
 
@@ -4038,6 +4171,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     target = provider_id or get_active_provider()
     if target == "spotify":
         return get_spotify_auth_status()
+    if target == "google-workspace":
+        return get_google_workspace_auth_status()
     if target == "nous":
         return get_nous_auth_status()
     if target == "openai-codex":

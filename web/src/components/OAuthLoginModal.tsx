@@ -43,7 +43,11 @@ export function OAuthLoginModal({ provider, onClose, onSuccess }: Props) {
         if (!isMounted.current) return;
         setStart(resp);
         setSecondsLeft(resp.expires_in);
-        setPhase(resp.flow === "device_code" ? "polling" : "awaiting_user");
+        // Google Workspace PKCE uses a server-side callback — poll like device_code
+        const usePolling =
+          resp.flow === "device_code" ||
+          (resp.flow === "pkce" && provider.id === "google-workspace");
+        setPhase(usePolling ? "polling" : "awaiting_user");
         if (resp.flow === "pkce") {
           window.open(resp.auth_url, "_blank", "noopener,noreferrer");
         } else {
@@ -80,9 +84,12 @@ export function OAuthLoginModal({ provider, onClose, onSuccess }: Props) {
     return () => window.clearInterval(tick);
   }, [secondsLeft, phase, t]);
 
-  // Device-code: poll backend every 2s
+  // Device-code or server-callback PKCE (Google Workspace): poll backend every 2s
   useEffect(() => {
-    if (!start || start.flow !== "device_code" || phase !== "polling") return;
+    if (!start || phase !== "polling") return;
+    const isDeviceCode = start.flow === "device_code";
+    const isCallbackPkce = start.flow === "pkce" && provider.id === "google-workspace";
+    if (!isDeviceCode && !isCallbackPkce) return;
     const sid = start.session_id;
     pollTimer.current = window.setInterval(async () => {
       try {

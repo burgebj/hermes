@@ -10,6 +10,9 @@ Usage:
 """
 
 import asyncio
+import base64
+import hashlib
+import html
 import hmac
 import importlib.util
 import json
@@ -226,6 +229,9 @@ async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
+        # Google Workspace OAuth start + poll are safe without auth (CLI access)
+        if path == "/api/providers/oauth/google-workspace/start" or path.startswith("/api/providers/oauth/google-workspace/poll/"):
+            return await call_next(request)
         if not _has_valid_session_token(request):
             return JSONResponse(
                 status_code=401,
@@ -1462,6 +1468,14 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
         "docs_url": "https://www.minimax.io",
         "status_fn": None,  # dispatched via auth.get_minimax_oauth_auth_status
     },
+    {
+        "id": "google-workspace",
+        "name": "Google Workspace",
+        "flow": "pkce",
+        "cli_command": "hermes auth google-workspace login",
+        "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/google-workspace",
+        "status_fn": None,  # dispatched via auth.get_google_workspace_auth_status
+    },
 )
 
 
@@ -1514,6 +1528,16 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
                 "token_preview": None,
                 "expires_at": raw.get("expires_at"),
                 "has_refresh_token": True,
+            }
+        if provider_id == "google-workspace":
+            raw = hauth.get_google_workspace_auth_status()
+            return {
+                "logged_in": bool(raw.get("logged_in")),
+                "source": "google_workspace_oauth",
+                "source_label": raw.get("email") or "Google Workspace",
+                "token_preview": None,
+                "expires_at": raw.get("expires_at"),
+                "has_refresh_token": bool(raw.get("has_refresh_token")),
             }
     except Exception as e:
         return {"logged_in": False, "error": str(e)}
@@ -1580,6 +1604,15 @@ async def disconnect_oauth_provider(provider_id: str, request: Request):
         try:
             from hermes_cli.auth import clear_provider_auth
             clear_provider_auth("anthropic")
+        except Exception:
+            pass
+        _log.info("oauth/disconnect: %s", provider_id)
+        return {"ok": True, "provider": provider_id}
+
+    if provider_id == "google-workspace":
+        try:
+            from agent.google_workspace_oauth import revoke
+            revoke()
         except Exception:
             pass
         _log.info("oauth/disconnect: %s", provider_id)
@@ -2097,10 +2130,167 @@ def _codex_full_login_worker(session_id: str) -> None:
                 s["error_message"] = str(e)
 
 
+def _start_google_workspace_pkce() -> Dict[str, Any]:
+    """Begin Google Workspace PKCE flow. Returns auth URL for the dashboard to open."""
+    try:
+        from agent.google_workspace_oauth import (
+            get_client_credentials,
+            GoogleWorkspaceOAuthError,
+            AUTH_ENDPOINT,
+            SCOPES,
+        )
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Google Workspace OAuth module not available")
+
+    try:
+        client_id, client_secret = get_client_credentials()
+    except GoogleWorkspaceOAuthError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Generate PKCE pair
+    verifier = secrets.token_urlsafe(64)
+    challenge_bytes = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(challenge_bytes).rstrip(b"=").decode("ascii")
+
+    sid, sess = _new_oauth_session("google-workspace", "pkce")
+    sess["verifier"] = verifier
+    sess["client_id"] = client_id
+    sess["client_secret"] = client_secret
+
+    # Use localhost:9119 callback so the dashboard catches the redirect automatically
+    # Use the actual bound port if available, default to 9119
+    bound_port = getattr(app.state, "bound_port", 9119)
+    redirect_uri = f"http://localhost:{bound_port}/auth/google/callback"
+    sess["redirect_uri"] = redirect_uri
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(SCOPES),
+        "state": sid,  # Use session_id as state for easy lookup on callback
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    auth_url = AUTH_ENDPOINT + "?" + urllib.parse.urlencode(params)
+    return {
+        "session_id": sid,
+        "flow": "pkce",
+        "auth_url": auth_url,
+        "expires_in": _OAUTH_SESSION_TTL_SECONDS,
+    }
+
+
+def _submit_google_workspace_pkce(session_id: str, code_input: str) -> Dict[str, Any]:
+    """Exchange Google Workspace authorization code for tokens. Saves on success."""
+    with _oauth_sessions_lock:
+        sess = _oauth_sessions.get(session_id)
+    if not sess or sess["provider"] != "google-workspace" or sess["flow"] != "pkce":
+        raise HTTPException(status_code=404, detail="Unknown or expired session")
+    if sess["status"] != "pending":
+        return {"ok": False, "status": sess["status"], "message": sess.get("error_message")}
+
+    code = code_input.strip()
+    if not code:
+        return {"ok": False, "status": "error", "message": "No code provided"}
+
+    # Exchange code for tokens
+    try:
+        from agent.google_workspace_oauth import (
+            TOKEN_ENDPOINT,
+            SCOPES,
+            credentials_path,
+        )
+    except ImportError:
+        with _oauth_sessions_lock:
+            sess["status"] = "error"
+            sess["error_message"] = "Google Workspace OAuth module not available"
+        return {"ok": False, "status": "error", "message": sess["error_message"]}
+
+    exchange_data = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "client_id": sess["client_id"],
+        "client_secret": sess["client_secret"],
+        "code": code,
+        "redirect_uri": sess["redirect_uri"],
+        "code_verifier": sess["verifier"],
+    }).encode()
+
+    req = urllib.request.Request(
+        TOKEN_ENDPOINT,
+        data=exchange_data,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "hermes-dashboard/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read().decode())
+    except Exception as e:
+        with _oauth_sessions_lock:
+            sess["status"] = "error"
+            sess["error_message"] = f"Token exchange failed: {e}"
+        return {"ok": False, "status": "error", "message": sess["error_message"]}
+
+    access_token = result.get("access_token", "")
+    refresh_token = result.get("refresh_token", "")
+    expires_in = int(result.get("expires_in") or 3600)
+    if not access_token:
+        with _oauth_sessions_lock:
+            sess["status"] = "error"
+            sess["error_message"] = "No access token returned"
+        return {"ok": False, "status": "error", "message": sess["error_message"]}
+
+    if not refresh_token:
+        with _oauth_sessions_lock:
+            sess["status"] = "error"
+            sess["error_message"] = "No refresh token returned. Ensure 'access_type=offline' and 'prompt=consent' are set."
+        return {"ok": False, "status": "error", "message": sess["error_message"]}
+
+    # Save token in google_token.json format (compatible with google-workspace skill)
+    from datetime import datetime, timezone
+    expiry = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + expires_in,
+        tz=timezone.utc,
+    ).isoformat()
+
+    token_payload = {
+        "token": access_token,
+        "refresh_token": refresh_token,
+        "token_uri": TOKEN_ENDPOINT,
+        "client_id": sess["client_id"],
+        "client_secret": sess["client_secret"],
+        "scopes": SCOPES,
+        "expiry": expiry,
+        "type": "authorized_user",
+    }
+
+    token_path = credentials_path()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    import os as _os
+    fd = _os.open(str(token_path), _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    try:
+        _os.write(fd, json.dumps(token_payload, indent=2).encode("utf-8"))
+    finally:
+        _os.close(fd)
+
+    with _oauth_sessions_lock:
+        sess["status"] = "approved"
+    _log.info("oauth/pkce: google-workspace login completed (session=%s)", session_id)
+    return {"ok": True, "status": "approved"}
+
+
 @app.post("/api/providers/oauth/{provider_id}/start")
 async def start_oauth_login(provider_id: str, request: Request):
-    """Initiate an OAuth login flow. Token-protected."""
-    _require_token(request)
+    """Initiate an OAuth login flow. Token-protected (except google-workspace for CLI access)."""
+    # Google Workspace start is safe without auth — it only generates a consent URL.
+    # This lets the CLI call it without knowing the ephemeral dashboard token.
+    if provider_id != "google-workspace":
+        _require_token(request)
     _gc_oauth_sessions()
     valid = {p["id"] for p in _OAUTH_PROVIDER_CATALOG}
     if provider_id not in valid:
@@ -2113,6 +2303,11 @@ async def start_oauth_login(provider_id: str, request: Request):
         )
     try:
         if catalog_entry["flow"] == "pkce":
+            if provider_id == "anthropic":
+                return _start_anthropic_pkce()
+            if provider_id == "google-workspace":
+                return _start_google_workspace_pkce()
+            # Fallback (minimax, etc.) — uses anthropic-style PKCE
             return _start_anthropic_pkce()
         if catalog_entry["flow"] == "device_code":
             return await _start_device_code_flow(provider_id)
@@ -2137,6 +2332,10 @@ async def submit_oauth_code(provider_id: str, body: OAuthSubmitBody, request: Re
         return await asyncio.get_running_loop().run_in_executor(
             None, _submit_anthropic_pkce, body.session_id, body.code,
         )
+    if provider_id == "google-workspace":
+        return await asyncio.get_event_loop().run_in_executor(
+            None, _submit_google_workspace_pkce, body.session_id, body.code,
+        )
     raise HTTPException(status_code=400, detail=f"submit not supported for {provider_id}")
 
 
@@ -2155,6 +2354,160 @@ async def poll_oauth_session(provider_id: str, session_id: str):
         "error_message": sess.get("error_message"),
         "expires_at": sess.get("expires_at"),
     }
+
+
+@app.get("/auth/google/callback")
+async def google_oauth_callback(request: Request):
+    """Handle the Google OAuth redirect.
+
+    Google redirects here after the user authorizes. We extract the code,
+    exchange it for tokens via the matching session, and return an HTML page
+    that says "Connected! You can close this tab."
+    """
+    from starlette.responses import HTMLResponse
+
+    params = dict(request.query_params)
+    code = params.get("code", "")
+    state = params.get("state", "")  # This is the session_id
+    error = params.get("error", "")
+
+    if error:
+        return HTMLResponse(
+            f"""<html>
+<head><meta charset="utf-8"><title>Authorization Failed — Hermes Agent</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#041c1c;color:#ffe6cb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
+.card{{border:1px solid rgba(255,100,100,0.3);background:rgba(255,100,100,0.05);padding:3rem 4rem;text-align:center;max-width:480px}}
+.icon{{font-size:3rem;margin-bottom:1rem}}
+h1{{font-size:1.5rem;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:0.75rem}}
+p{{color:rgba(255,230,203,0.7);font-size:0.95rem;line-height:1.6}}
+</style></head>
+<body><div class="card"><div class="icon">✗</div><h1>Authorization Failed</h1><p>{html.escape(error)}</p></div></body>
+</html>""",
+            status_code=400,
+        )
+
+    if not code or not state:
+        return HTMLResponse(
+            """<html>
+<head><meta charset="utf-8"><title>Error — Hermes Agent</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#041c1c;color:#ffe6cb;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
+.card{border:1px solid rgba(255,100,100,0.3);background:rgba(255,100,100,0.05);padding:3rem 4rem;text-align:center;max-width:480px}
+.icon{font-size:3rem;margin-bottom:1rem}
+h1{font-size:1.5rem;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:0.75rem}
+p{color:rgba(255,230,203,0.7);font-size:0.95rem;line-height:1.6}
+</style></head>
+<body><div class="card"><div class="icon">✗</div><h1>Error</h1><p>Missing code or state parameter.</p></div></body>
+</html>""",
+            status_code=400,
+        )
+
+    # Exchange the code using the session
+    try:
+        result = _submit_google_workspace_pkce(state, code)
+    except HTTPException as exc:
+        return HTMLResponse(
+            f"<html><body><h2>❌ {html.escape(str(exc.detail))}</h2></body></html>",
+            status_code=exc.status_code,
+        )
+
+    if result.get("ok"):
+        return HTMLResponse(
+            """<html>
+<head>
+<meta charset="utf-8">
+<title>Connected — Hermes Agent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #041c1c;
+    color: #ffe6cb;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 2rem;
+  }
+  .card {
+    border: 1px solid rgba(255, 230, 203, 0.15);
+    background: rgba(255, 230, 203, 0.03);
+    padding: 3rem 4rem;
+    text-align: center;
+    max-width: 480px;
+  }
+  .icon { font-size: 3rem; margin-bottom: 1rem; }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+  }
+  p { color: rgba(255, 230, 203, 0.7); font-size: 0.95rem; line-height: 1.6; }
+  .hint { margin-top: 1.5rem; font-size: 0.85rem; color: rgba(255, 230, 203, 0.4); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">✓</div>
+  <h1>Connected</h1>
+  <p>Google Workspace is now connected to Hermes Agent.</p>
+  <p class="hint">You can close this tab.</p>
+</div>
+</body>
+</html>"""
+        )
+    else:
+        msg = result.get("message", "Unknown error")
+        return HTMLResponse(
+            f"""<html>
+<head>
+<meta charset="utf-8">
+<title>Connection Failed — Hermes Agent</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    background: #041c1c;
+    color: #ffe6cb;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 2rem;
+  }}
+  .card {{
+    border: 1px solid rgba(255, 100, 100, 0.3);
+    background: rgba(255, 100, 100, 0.05);
+    padding: 3rem 4rem;
+    text-align: center;
+    max-width: 480px;
+  }}
+  .icon {{ font-size: 3rem; margin-bottom: 1rem; }}
+  h1 {{
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+  }}
+  p {{ color: rgba(255, 230, 203, 0.7); font-size: 0.95rem; line-height: 1.6; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">✗</div>
+  <h1>Connection Failed</h1>
+  <p>{html.escape(str(msg))}</p>
+</div>
+</body>
+</html>""",
+            status_code=400,
+        )
 
 
 @app.delete("/api/providers/oauth/sessions/{session_id}")

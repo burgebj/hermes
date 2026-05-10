@@ -160,6 +160,15 @@ def _format_exhausted_status(entry) -> str:
 
 def auth_add_command(args) -> None:
     provider = _normalize_provider(getattr(args, "provider", ""))
+
+    # Service providers (not inference) — redirect to their dedicated login flow
+    if provider == "google-workspace":
+        auth_mod.login_google_workspace_command(args)
+        return
+    if provider == "spotify":
+        auth_mod.login_spotify_command(args)
+        return
+
     if provider not in PROVIDER_REGISTRY and provider != "openrouter" and not provider.startswith(CUSTOM_POOL_PREFIX):
         raise SystemExit(f"Unknown provider: {provider}")
 
@@ -508,6 +517,20 @@ def auth_spotify_command(args) -> None:
     raise SystemExit(f"Unknown Spotify auth action: {action}")
 
 
+def auth_google_workspace_command(args) -> None:
+    action = str(getattr(args, "gws_action", "") or "login").strip().lower()
+    if action in {"", "login"}:
+        auth_mod.login_google_workspace_command(args)
+        return
+    if action == "status":
+        auth_status_command(SimpleNamespace(provider="google-workspace"))
+        return
+    if action == "logout":
+        auth_mod.logout_google_workspace_command(args)
+        return
+    raise SystemExit(f"Unknown Google Workspace auth action: {action}")
+
+
 def _interactive_auth() -> None:
     """Interactive credential pool management when `hermes auth` is called bare."""
     # Show current pool status first
@@ -713,6 +736,9 @@ def auth_command(args) -> None:
         return
     if action == "spotify":
         auth_spotify_command(args)
+        return
+    if action == "google-workspace":
+        auth_google_workspace_command(args)
         return
     # No subcommand — launch interactive mode
     _interactive_auth()

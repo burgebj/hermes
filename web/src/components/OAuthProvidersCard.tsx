@@ -55,6 +55,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
+  const [disconnectFor, setDisconnectFor] = useState<OAuthProvider | null>(null);
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
@@ -74,9 +75,13 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   }, [refresh]);
 
   const handleDisconnect = async (provider: OAuthProvider) => {
-    if (!confirm(`${t.oauth.disconnect} ${provider.name}?`)) {
-      return;
-    }
+    setDisconnectFor(provider);
+  };
+
+  const confirmDisconnect = async () => {
+    if (!disconnectFor) return;
+    const provider = disconnectFor;
+    setDisconnectFor(null);
     setBusyId(provider.id);
     try {
       await api.disconnectOAuthProvider(provider.id);
@@ -265,6 +270,39 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           onSuccess={(msg) => onSuccess?.(msg)}
           onError={(msg) => onError?.(msg)}
         />
+      )}
+      {disconnectFor && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-background/85 backdrop-blur-sm p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setDisconnectFor(null); }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="relative w-full max-w-sm border border-border bg-card shadow-2xl p-6">
+            <div className="flex flex-col gap-4">
+              <h2 className="text-lg font-semibold uppercase tracking-wide">
+                {t.oauth.disconnect}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Disconnect <strong>{disconnectFor.name}</strong> from Hermes Agent? You can reconnect anytime.
+              </p>
+              <div className="flex gap-3 justify-end pt-2">
+                <Button
+                  ghost
+                  onClick={() => setDisconnectFor(null)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={confirmDisconnect}
+                  className="bg-red-900/50 border-red-700/50 hover:bg-red-800/60 text-red-200"
+                >
+                  Disconnect
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </Card>
   );

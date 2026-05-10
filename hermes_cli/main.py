@@ -9628,6 +9628,22 @@ def main():
     auth_spotify.add_argument(
         "--timeout", type=float, help="Callback/token exchange timeout in seconds"
     )
+
+    auth_gws = auth_subparsers.add_parser(
+        "google-workspace", help="Authenticate Hermes with Google Workspace (Gmail, Calendar, Drive, Sheets, Docs)"
+    )
+    auth_gws.add_argument(
+        "gws_action",
+        nargs="?",
+        choices=["login", "status", "logout"],
+        default="login",
+    )
+    auth_gws.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not attempt to open the browser automatically (headless mode)",
+    )
+
     auth_parser.set_defaults(func=cmd_auth)
 
     # =========================================================================
