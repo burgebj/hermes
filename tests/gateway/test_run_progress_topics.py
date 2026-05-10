@@ -65,6 +65,102 @@ class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
         raise AssertionError("non-editable adapters should not receive edit_message calls")
 
 
+class FeishuStreamingCardCaptureAdapter(ProgressCaptureAdapter):
+    """Feishu-like adapter that exposes the native streaming-card lifecycle."""
+
+    def __init__(self, platform=Platform.FEISHU):
+        super().__init__(platform=platform)
+        self.card_started = []
+        self.card_updates = []
+        self.card_reasoning_updates = []
+        self.card_status_updates = []
+        self.card_tool_starts = []
+        self.card_tool_completions = []
+
+    def supports_streaming_card(self) -> bool:
+        return True
+
+    async def start_streaming_card(self, *, chat_id, reply_to=None, metadata=None) -> SendResult:
+        self.card_started.append(
+            {
+                "chat_id": chat_id,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id="card-1")
+
+    async def update_streaming_card(
+        self,
+        *,
+        chat_id,
+        message_id,
+        content,
+        finalize=False,
+    ) -> SendResult:
+        self.card_updates.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "finalize": finalize,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
+
+    async def update_streaming_card_reasoning(self, *, chat_id, message_id, content) -> SendResult:
+        self.card_reasoning_updates.append(
+            {"chat_id": chat_id, "message_id": message_id, "content": content}
+        )
+        return SendResult(success=True, message_id=message_id)
+
+    async def update_streaming_card_status(self, *, chat_id, message_id, content) -> SendResult:
+        self.card_status_updates.append(
+            {"chat_id": chat_id, "message_id": message_id, "content": content}
+        )
+        return SendResult(success=True, message_id=message_id)
+
+    async def update_streaming_card_tool_started(
+        self,
+        *,
+        chat_id,
+        message_id,
+        tool_name,
+        preview=None,
+        args=None,
+    ) -> SendResult:
+        self.card_tool_starts.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "tool_name": tool_name,
+                "preview": preview,
+                "args": args,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
+
+    async def update_streaming_card_tool_completed(
+        self,
+        *,
+        chat_id,
+        message_id,
+        tool_name,
+        duration=None,
+        is_error=False,
+    ) -> SendResult:
+        self.card_tool_completions.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "tool_name": tool_name,
+                "duration": duration,
+                "is_error": is_error,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         # Capture anything passed via kwargs (older code path) but don't
@@ -495,7 +591,55 @@ class StreamingRefineAgent:
             self.stream_delta_callback(" Final answer.")
         return {
             "final_response": "Continuing to refine: Final answer.",
-            "response_previewed": True,
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class FinalOnlyAgent:
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        return {
+            "final_response": "Final answer without provider token deltas.",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class ToolEventStreamingAgent:
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.tool_progress_callback:
+            self.tool_progress_callback(
+                "reasoning.available",
+                "_thinking",
+                "I need to inspect the calendar first.",
+                None,
+            )
+            self.tool_progress_callback(
+                "tool.started",
+                "feishu_calendar_list_events",
+                "next week",
+                {"calendar_id": "primary"},
+            )
+            self.tool_progress_callback(
+                "tool.completed",
+                "feishu_calendar_list_events",
+                None,
+                None,
+                duration=0.42,
+            )
+        if self.stream_delta_callback:
+            self.stream_delta_callback("Calendar summary ready.")
+        return {
+            "final_response": "Calendar summary ready.",
             "messages": [],
             "api_calls": 1,
         }
@@ -711,6 +855,146 @@ async def test_display_streaming_does_not_enable_gateway_streaming(monkeypatch, 
     assert result.get("already_sent") is not True
     assert adapter.edits == []
     assert [call["content"] for call in adapter.sent] == ["I'll inspect the repo first."]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_streaming_card_is_platform_default_even_when_global_streaming_off(
+    monkeypatch,
+    tmp_path,
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        StreamingRefineAgent,
+        session_id="sess-feishu-card-default",
+        config_data={
+            "display": {
+                "streaming": False,
+                "interim_assistant_messages": False,
+            },
+            "streaming": {
+                "enabled": False,
+                "edit_interval": 0.01,
+                "buffer_threshold": 1,
+            },
+        },
+        platform=Platform.FEISHU,
+        chat_id="oc_feishu_chat",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=FeishuStreamingCardCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent == []
+    assert adapter.edits == []
+    assert adapter.card_started == [
+        {"chat_id": "oc_feishu_chat", "reply_to": None, "metadata": None}
+    ]
+    assert adapter.card_updates[-1] == {
+        "chat_id": "oc_feishu_chat",
+        "message_id": "card-1",
+        "content": "Continuing to refine: Final answer.",
+        "finalize": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_card_delivers_final_when_provider_has_no_token_deltas(
+    monkeypatch,
+    tmp_path,
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FinalOnlyAgent,
+        session_id="sess-feishu-card-final-only",
+        config_data={
+            "streaming": {
+                "enabled": False,
+                "edit_interval": 0.01,
+                "buffer_threshold": 1,
+            },
+        },
+        platform=Platform.FEISHU,
+        chat_id="oc_feishu_chat",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=FeishuStreamingCardCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent == []
+    assert adapter.edits == []
+    assert adapter.card_started == [
+        {"chat_id": "oc_feishu_chat", "reply_to": None, "metadata": None}
+    ]
+    assert adapter.card_updates[-1] == {
+        "chat_id": "oc_feishu_chat",
+        "message_id": "card-1",
+        "content": "Final answer without provider token deltas.",
+        "finalize": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_card_keeps_reasoning_and_tool_events_in_card(
+    monkeypatch,
+    tmp_path,
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ToolEventStreamingAgent,
+        session_id="sess-feishu-card-tools",
+        config_data={
+            "streaming": {
+                "enabled": False,
+                "edit_interval": 0.01,
+                "buffer_threshold": 1,
+            },
+        },
+        platform=Platform.FEISHU,
+        chat_id="oc_feishu_chat",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=FeishuStreamingCardCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent == []
+    assert adapter.edits == []
+    assert adapter.card_reasoning_updates == [
+        {
+            "chat_id": "oc_feishu_chat",
+            "message_id": "card-1",
+            "content": "I need to inspect the calendar first.",
+        }
+    ]
+    assert adapter.card_tool_starts == [
+        {
+            "chat_id": "oc_feishu_chat",
+            "message_id": "card-1",
+            "tool_name": "feishu_calendar_list_events",
+            "preview": "next week",
+            "args": {"calendar_id": "primary"},
+        }
+    ]
+    assert adapter.card_tool_completions == [
+        {
+            "chat_id": "oc_feishu_chat",
+            "message_id": "card-1",
+            "tool_name": "feishu_calendar_list_events",
+            "duration": 0.42,
+            "is_error": False,
+        }
+    ]
+    assert adapter.card_updates[-1] == {
+        "chat_id": "oc_feishu_chat",
+        "message_id": "card-1",
+        "content": "Calendar summary ready.",
+        "finalize": True,
+    }
 
 
 @pytest.mark.asyncio

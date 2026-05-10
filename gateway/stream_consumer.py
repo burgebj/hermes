@@ -123,6 +123,8 @@ class GatewayStreamConsumer:
         self._flood_strikes = 0         # Consecutive flood-control edit failures
         self._current_edit_interval = self.cfg.edit_interval  # Adaptive backoff
         self._final_response_sent = False
+        self._streaming_card_mode = False
+        self._streaming_card_unavailable = False
         # Cache adapter lifecycle capability: only platforms that need an
         # explicit finalize call (e.g. DingTalk AI Cards) force us to make
         # a redundant final edit.  Everyone else keeps the fast path.
@@ -174,6 +176,7 @@ class GatewayStreamConsumer:
         self._last_sent_text = ""
         self._fallback_final_send = False
         self._fallback_prefix = ""
+        self._streaming_card_mode = False
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
@@ -426,6 +429,7 @@ class GatewayStreamConsumer:
                         elif (
                             current_update_visible
                             and not self._adapter_requires_finalize
+                            and not self._streaming_card_mode
                         ):
                             # Mid-stream edit above already delivered the
                             # final accumulated content.  Skip the redundant
@@ -565,6 +569,190 @@ class GatewayStreamConsumer:
         if self.cfg.cursor and prefix.endswith(self.cfg.cursor):
             prefix = prefix[:-len(self.cfg.cursor)]
         return self._clean_for_display(prefix)
+
+    def _content_without_cursor(self, text: str) -> str:
+        """Return text as card-visible content, without the transport cursor."""
+        if self.cfg.cursor:
+            text = text.replace(self.cfg.cursor, "")
+        return text
+
+    def _adapter_supports_streaming_card(self) -> bool:
+        if self._streaming_card_unavailable:
+            return False
+        supports = getattr(self.adapter, "supports_streaming_card", None)
+        if callable(supports):
+            try:
+                return supports() is True
+            except Exception as exc:
+                logger.debug("Streaming card capability check failed: %s", exc)
+                return False
+        return getattr(self.adapter, "SUPPORTS_STREAMING_CARD", False) is True
+
+    async def ensure_streaming_card_started(self) -> bool:
+        """Create the platform-native streaming card before visible text exists."""
+        if self._streaming_card_mode and self._message_id:
+            return True
+        if self._message_id is not None:
+            return False
+        if not self._adapter_supports_streaming_card():
+            return False
+        starter = getattr(self.adapter, "start_streaming_card", None)
+        updater = getattr(self.adapter, "update_streaming_card", None)
+        if not callable(starter) or not callable(updater):
+            self._streaming_card_unavailable = True
+            return False
+
+        result = await starter(
+            chat_id=self.chat_id,
+            reply_to=None,
+            metadata=self.metadata,
+        )
+        if not getattr(result, "success", False) or not getattr(result, "message_id", None):
+            self._streaming_card_unavailable = True
+            return False
+
+        self._message_id = str(result.message_id)
+        self._streaming_card_mode = True
+        self._already_sent = True
+        return True
+
+    async def _start_streaming_card_message(self, text: str, *, finalize: bool) -> Optional[bool]:
+        """Start a platform-native streaming card if the adapter supports it."""
+        if not await self.ensure_streaming_card_started():
+            return None
+        return await self._update_streaming_card_message(text, finalize=finalize)
+
+    async def _update_streaming_card_message(self, text: str, *, finalize: bool = False) -> bool:
+        """Update the active streaming card with accumulated visible text."""
+        if not self._message_id or self._message_id == "__no_edit__":
+            return False
+        content = self._content_without_cursor(text)
+        if content == self._last_sent_text and not finalize:
+            return True
+        updater = getattr(self.adapter, "update_streaming_card", None)
+        if not callable(updater):
+            self._streaming_card_unavailable = True
+            self._streaming_card_mode = False
+            return False
+        result = await updater(
+            chat_id=self.chat_id,
+            message_id=self._message_id,
+            content=content,
+            finalize=finalize,
+        )
+        if getattr(result, "success", False):
+            self._already_sent = True
+            self._last_sent_text = content
+            self._flood_strikes = 0
+            return True
+
+        self._fallback_prefix = self._visible_prefix()
+        self._fallback_final_send = True
+        self._edit_supported = False
+        self._streaming_card_mode = False
+        self._streaming_card_unavailable = True
+        self._already_sent = True
+        return False
+
+    async def update_streaming_card_reasoning(self, content: str) -> bool:
+        """Update the card's folded reasoning/status area when supported."""
+        if not str(content or "").strip():
+            return False
+        if not await self.ensure_streaming_card_started():
+            return False
+        updater = getattr(self.adapter, "update_streaming_card_reasoning", None)
+        if not callable(updater) or not self._message_id:
+            return False
+        result = await updater(
+            chat_id=self.chat_id,
+            message_id=self._message_id,
+            content=content,
+        )
+        return bool(getattr(result, "success", False))
+
+    async def update_streaming_card_status(self, content: str) -> bool:
+        """Update an ephemeral card status line when supported."""
+        if not str(content or "").strip():
+            return False
+        if not await self.ensure_streaming_card_started():
+            return False
+        updater = getattr(self.adapter, "update_streaming_card_status", None)
+        if not callable(updater) or not self._message_id:
+            return False
+        result = await updater(
+            chat_id=self.chat_id,
+            message_id=self._message_id,
+            content=content,
+        )
+        return bool(getattr(result, "success", False))
+
+    async def update_streaming_card_tool_started(
+        self,
+        tool_name: str,
+        *,
+        preview: Optional[str] = None,
+        args: Optional[dict] = None,
+    ) -> bool:
+        """Show an active tool call inside the streaming card."""
+        if not str(tool_name or "").strip():
+            return False
+        if not await self.ensure_streaming_card_started():
+            return False
+        updater = getattr(self.adapter, "update_streaming_card_tool_started", None)
+        if not callable(updater) or not self._message_id:
+            return False
+        result = await updater(
+            chat_id=self.chat_id,
+            message_id=self._message_id,
+            tool_name=str(tool_name),
+            preview=preview,
+            args=args,
+        )
+        return bool(getattr(result, "success", False))
+
+    async def update_streaming_card_tool_completed(
+        self,
+        tool_name: str,
+        *,
+        duration: Optional[float] = None,
+        is_error: bool = False,
+    ) -> bool:
+        """Mark a tool call as completed inside the streaming card."""
+        if not str(tool_name or "").strip():
+            return False
+        if not await self.ensure_streaming_card_started():
+            return False
+        updater = getattr(self.adapter, "update_streaming_card_tool_completed", None)
+        if not callable(updater) or not self._message_id:
+            return False
+        result = await updater(
+            chat_id=self.chat_id,
+            message_id=self._message_id,
+            tool_name=str(tool_name),
+            duration=duration,
+            is_error=is_error,
+        )
+        return bool(getattr(result, "success", False))
+
+    async def abort_streaming_card(self, content: Optional[str] = None) -> bool:
+        """Abort the active platform-native streaming card when supported."""
+        if not self._message_id or not self._streaming_card_mode:
+            return False
+        aborter = getattr(self.adapter, "abort_streaming_card", None)
+        if not callable(aborter):
+            return False
+        result = await aborter(
+            chat_id=self.chat_id,
+            message_id=self._message_id,
+            content=self._clean_for_display(content or ""),
+        )
+        if getattr(result, "success", False):
+            self._already_sent = True
+            self._final_response_sent = True
+            self._streaming_card_mode = False
+            self._message_id = None
+            return True
+        return False
 
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
@@ -740,6 +928,8 @@ class GatewayStreamConsumer:
         """
         if not self._message_id or self._message_id == "__no_edit__":
             return
+        if self._streaming_card_mode:
+            return
         prefix = self._visible_prefix()
         if not prefix or not prefix.strip():
             return
@@ -895,6 +1085,11 @@ class GatewayStreamConsumer:
             return True  # too short for a standalone message — accumulate more
         try:
             if self._message_id is not None:
+                if self._streaming_card_mode:
+                    return await self._update_streaming_card_message(
+                        text,
+                        finalize=finalize,
+                    )
                 if self._edit_supported:
                     # Skip if text is identical to what we last sent.
                     # Exception: adapters that require an explicit finalize
@@ -979,6 +1174,13 @@ class GatewayStreamConsumer:
                     # The final response will be sent by the fallback path.
                     return False
             else:
+                card_result = await self._start_streaming_card_message(
+                    text,
+                    finalize=finalize,
+                )
+                if card_result is not None:
+                    return card_result
+
                 # First message — send new
                 result = await self.adapter.send(
                     chat_id=self.chat_id,

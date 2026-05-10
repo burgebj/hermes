@@ -1723,6 +1723,13 @@ def cmd_setup(args):
     run_setup_wizard(args)
 
 
+def cmd_feishu_auth_setup(args):
+    """Authorize Feishu user identity via OAuth device flow."""
+    from hermes_cli.feishu_auth import cmd_feishu_auth_setup
+
+    cmd_feishu_auth_setup(args)
+
+
 def cmd_model(args):
     """Select default model — starts with provider selection, then model picker."""
     _require_tty("model")
@@ -9423,6 +9430,31 @@ def main():
         "or unset, instead of running the full reconfigure wizard.",
     )
     setup_parser.set_defaults(func=cmd_setup)
+
+    # =========================================================================
+    # feishu-auth command (feishu-uat kept as hidden backward-compat alias)
+    # =========================================================================
+    feishu_uat_parser = subparsers.add_parser(
+        "feishu-auth",
+        aliases=["feishu-uat"],
+        help="Authorize Feishu user identity via OAuth device flow",
+        description=(
+            "Run Feishu OAuth 2.0 device authorization to obtain a user "
+            "access token (UAT). Requires FEISHU_APP_ID to be configured "
+            "first (run 'hermes setup' → Feishu / Lark)."
+        ),
+    )
+    feishu_uat_parser.add_argument(
+        "--scope",
+        default=None,
+        help="Override OAuth scopes (space-separated). Defaults to core OAPI scopes.",
+    )
+    feishu_uat_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-authorize even if a valid token already exists.",
+    )
+    feishu_uat_parser.set_defaults(func=cmd_feishu_auth_setup)
 
     # =========================================================================
     # whatsapp command

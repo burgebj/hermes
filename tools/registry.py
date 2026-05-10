@@ -40,10 +40,11 @@ def _is_registry_register_call(node: ast.AST) -> bool:
 
 
 def _module_registers_tools(module_path: Path) -> bool:
-    """Return True when the module contains a top-level ``registry.register(...)`` call.
+    """Return True when the module contains a ``registry.register(...)`` call.
 
-    Only inspects module-body statements so that helper modules which happen
-    to call ``registry.register()`` inside a function are not picked up.
+    Most tool files register explicitly at module scope. Declarative tool
+    families may register in a top-level loop, so inspect the AST recursively
+    while keeping known helper modules excluded in ``discover_builtin_tools``.
     """
     try:
         source = module_path.read_text(encoding="utf-8")
@@ -51,7 +52,18 @@ def _module_registers_tools(module_path: Path) -> bool:
     except (OSError, SyntaxError):
         return False
 
-    return any(_is_registry_register_call(stmt) for stmt in tree.body)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "register"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "registry"
+        ):
+            return True
+    return False
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:

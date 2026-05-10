@@ -9,6 +9,58 @@ import pytest
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
+class _StreamingCardAdapter:
+    MAX_MESSAGE_LENGTH = 4096
+    REQUIRES_EDIT_FINALIZE = False
+
+    def __init__(self):
+        self.started = []
+        self.updated = []
+        self.sent = []
+        self.edited = []
+
+    def supports_streaming_card(self):
+        return True
+
+    async def start_streaming_card(self, *, chat_id, reply_to=None, metadata=None):
+        self.started.append({
+            "chat_id": chat_id,
+            "reply_to": reply_to,
+            "metadata": metadata,
+        })
+        return SimpleNamespace(success=True, message_id="card_1")
+
+    async def update_streaming_card(self, *, chat_id, message_id, content, finalize=False):
+        self.updated.append({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "content": content,
+            "finalize": finalize,
+        })
+        return SimpleNamespace(success=True, message_id=message_id)
+
+    async def send(self, *, chat_id, content, metadata=None, reply_to=None):
+        self.sent.append({
+            "chat_id": chat_id,
+            "content": content,
+            "metadata": metadata,
+            "reply_to": reply_to,
+        })
+        return SimpleNamespace(success=True, message_id="text_1")
+
+    async def edit_message(self, *, chat_id, message_id, content, finalize=False):
+        self.edited.append({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "content": content,
+            "finalize": finalize,
+        })
+        return SimpleNamespace(success=True, message_id=message_id)
+
+    def truncate_message(self, text, _limit):
+        return [text]
+
+
 # ── _clean_for_display unit tests ────────────────────────────────────────
 
 
@@ -132,6 +184,73 @@ class TestFinalizeCapabilityGate:
         picky.edit_message.assert_called_once()
         assert picky.edit_message.call_args[1]["finalize"] is True
 
+
+class TestStreamingCardTransport:
+    def test_streaming_card_adapter_uses_card_lifecycle_instead_of_text_edit(self):
+        async def _run():
+            adapter = _StreamingCardAdapter()
+            consumer = GatewayStreamConsumer(
+                adapter,
+                "oc_chat",
+                StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉"),
+                metadata={"thread_id": "om_parent"},
+            )
+
+            consumer.on_delta("Hello")
+            task = asyncio.create_task(consumer.run())
+            await asyncio.sleep(0.08)
+            consumer.on_delta(" world")
+            await asyncio.sleep(0.08)
+            consumer.finish()
+            await task
+
+            return adapter, consumer
+
+        adapter, consumer = asyncio.run(_run())
+
+        assert adapter.started == [{
+            "chat_id": "oc_chat",
+            "reply_to": None,
+            "metadata": {"thread_id": "om_parent"},
+        }]
+        assert adapter.sent == []
+        assert adapter.edited == []
+        assert adapter.updated[-1] == {
+            "chat_id": "oc_chat",
+            "message_id": "card_1",
+            "content": "Hello world",
+            "finalize": True,
+        }
+        assert all("▉" not in update["content"] for update in adapter.updated)
+        assert consumer.final_response_sent is True
+
+    def test_streaming_card_start_failure_falls_back_to_text_send(self):
+        class _FailingCardAdapter(_StreamingCardAdapter):
+            async def start_streaming_card(self, *, chat_id, reply_to=None, metadata=None):
+                self.started.append({
+                    "chat_id": chat_id,
+                    "reply_to": reply_to,
+                    "metadata": metadata,
+                })
+                return SimpleNamespace(success=False, error="card unavailable")
+
+        async def _run():
+            adapter = _FailingCardAdapter()
+            consumer = GatewayStreamConsumer(
+                adapter,
+                "oc_chat",
+                StreamConsumerConfig(cursor=""),
+            )
+            delivered = await consumer._send_or_edit("fallback text")
+            return adapter, delivered
+
+        adapter, delivered = asyncio.run(_run())
+
+        assert delivered is True
+        assert len(adapter.started) == 1
+        assert len(adapter.sent) == 1
+        assert adapter.sent[0]["content"] == "fallback text"
+        assert adapter.updated == []
 
 class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.

@@ -415,6 +415,349 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_streaming_card_lifecycle_accumulates_deltas_and_finalizes(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={
+            "streaming_card": {"enabled": True},
+        }))
+        adapter._client = SimpleNamespace()
+        send_calls = []
+        controllers = []
+
+        async def _fake_send_with_retry(**kwargs):
+            send_calls.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_card"),
+            )
+
+        class _FakeStreamingController:
+            def __init__(self, message_id, client):
+                self.message_id = message_id
+                self.client = client
+                self.chunks = []
+                self.reasoning_chunks = []
+                self.tool_starts = []
+                self.tool_completions = []
+                self.completed = False
+                controllers.append(self)
+
+            async def add_text_chunk(self, chunk):
+                self.chunks.append(chunk)
+
+            async def add_reasoning_chunk(self, chunk):
+                self.reasoning_chunks.append(chunk)
+
+            async def mark_tool_started(self, tool_name, args=None):
+                self.tool_starts.append((tool_name, args))
+
+            async def mark_tool_completed(self, result=None):
+                self.tool_completions.append(result)
+
+            async def mark_completed(self):
+                self.completed = True
+
+        adapter._feishu_send_with_retry = AsyncMock(side_effect=_fake_send_with_retry)
+
+        with patch("gateway.platforms.feishu.StreamingCardController", _FakeStreamingController):
+            started = asyncio.run(
+                adapter.start_streaming_card(
+                    chat_id="oc_chat",
+                    metadata={"thread_id": "om_parent"},
+                )
+            )
+            first = asyncio.run(
+                adapter.update_streaming_card(
+                    chat_id="oc_chat",
+                    message_id="om_card",
+                    content="Hello",
+                )
+            )
+            reasoning = asyncio.run(
+                adapter.update_streaming_card_reasoning(
+                    chat_id="oc_chat",
+                    message_id="om_card",
+                    content="正在调用工具",
+                )
+            )
+            tool_start = asyncio.run(
+                adapter.update_streaming_card_tool_started(
+                    chat_id="oc_chat",
+                    message_id="om_card",
+                    tool_name="feishu_task_tasklist",
+                    preview="rename",
+                    args={"action": "patch"},
+                )
+            )
+            tool_complete = asyncio.run(
+                adapter.update_streaming_card_tool_completed(
+                    chat_id="oc_chat",
+                    message_id="om_card",
+                    tool_name="feishu_task_tasklist",
+                    duration=1.2,
+                    is_error=False,
+                )
+            )
+            final = asyncio.run(
+                adapter.update_streaming_card(
+                    chat_id="oc_chat",
+                    message_id="om_card",
+                    content="Hello world",
+                    finalize=True,
+                )
+            )
+
+        self.assertTrue(started.success)
+        self.assertTrue(first.success)
+        self.assertTrue(reasoning.success)
+        self.assertTrue(tool_start.success)
+        self.assertTrue(tool_complete.success)
+        self.assertTrue(final.success)
+        self.assertEqual(started.message_id, "om_card")
+        self.assertEqual(send_calls[0]["msg_type"], "interactive")
+        self.assertEqual(send_calls[0]["chat_id"], "oc_chat")
+        self.assertEqual(send_calls[0]["metadata"], {"thread_id": "om_parent"})
+        self.assertEqual(len(controllers), 1)
+        self.assertEqual(controllers[0].message_id, "om_card")
+        self.assertIs(controllers[0].client, adapter._client)
+        self.assertEqual(controllers[0].chunks, ["Hello", " world"])
+        self.assertEqual(controllers[0].reasoning_chunks, ["正在调用工具"])
+        self.assertEqual(
+            controllers[0].tool_starts,
+            [("feishu_task_tasklist", {"action": "patch"})],
+        )
+        self.assertEqual(
+            controllers[0].tool_completions,
+            [{"name": "feishu_task_tasklist", "duration": 1.2, "is_error": False}],
+        )
+        self.assertTrue(controllers[0].completed)
+        self.assertNotIn("om_card", adapter._streaming_card_controllers)
+
+    def test_streaming_card_reasoning_replaces_status_when_content_resets(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={
+            "streaming_card": {"enabled": True},
+        }))
+        adapter._client = SimpleNamespace()
+
+        class _FakeStreamingController:
+            def __init__(self):
+                self.reasoning = SimpleNamespace(accumulated_reasoning_text="")
+
+            async def add_reasoning_chunk(self, chunk):
+                self.reasoning.accumulated_reasoning_text += chunk
+
+        controller = _FakeStreamingController()
+        adapter._streaming_card_controllers["om_card"] = controller
+
+        first = asyncio.run(
+            adapter.update_streaming_card_reasoning(
+                chat_id="oc_chat",
+                message_id="om_card",
+                content="Hermes 正在准备响应...",
+            )
+        )
+        second = asyncio.run(
+            adapter.update_streaming_card_reasoning(
+                chat_id="oc_chat",
+                message_id="om_card",
+                content="The user wants to update a Feishu record.",
+            )
+        )
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(
+            controller.reasoning.accumulated_reasoning_text,
+            "The user wants to update a Feishu record.",
+        )
+
+    def test_streaming_card_finalize_preserves_reasoning_for_collapsed_panel(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={
+            "streaming_card": {"enabled": True},
+        }))
+        adapter._client = SimpleNamespace()
+
+        class _FakeStreamingController:
+            def __init__(self):
+                self.text = SimpleNamespace(accumulated_text="")
+                self.reasoning = SimpleNamespace(
+                    accumulated_reasoning_text="The user wants to update a Feishu record.",
+                    reasoning_start_time=1.0,
+                    reasoning_elapsed_ms=1200.0,
+                    is_reasoning_phase=True,
+                )
+                self.completed_reasoning = None
+
+            async def add_text_chunk(self, chunk):
+                self.text.accumulated_text += chunk
+
+            async def mark_completed(self):
+                self.completed_reasoning = self.reasoning.accumulated_reasoning_text
+
+        controller = _FakeStreamingController()
+        adapter._streaming_card_controllers["om_card"] = controller
+
+        result = asyncio.run(
+            adapter.update_streaming_card(
+                chat_id="oc_chat",
+                message_id="om_card",
+                content="done",
+                finalize=True,
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            controller.completed_reasoning,
+            "The user wants to update a Feishu record.",
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streaming_card_abort_marks_controller_aborted_and_clears_cache(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={
+            "streaming_card": {"enabled": True},
+        }))
+        adapter._client = Mock()
+
+        controllers = []
+
+        class _FakeStreamingController:
+            def __init__(self, message_id, client):
+                self.message_id = message_id
+                self.client = client
+                self.text = SimpleNamespace(accumulated_text="")
+                self.aborted = False
+                controllers.append(self)
+
+            async def abort(self):
+                self.aborted = True
+
+        adapter._streaming_card_text_by_message_id["om_card"] = "partial"
+        adapter._streaming_card_reasoning_by_message_id["om_card"] = "thinking"
+
+        with patch("gateway.platforms.feishu.StreamingCardController", _FakeStreamingController):
+            result = asyncio.run(
+                adapter.abort_streaming_card(
+                    chat_id="oc_chat",
+                    message_id="om_card",
+                    content="partial",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_card")
+        self.assertEqual(len(controllers), 1)
+        self.assertEqual(controllers[0].text.accumulated_text, "partial")
+        self.assertTrue(controllers[0].aborted)
+        self.assertNotIn("om_card", adapter._streaming_card_controllers)
+        self.assertNotIn("om_card", adapter._streaming_card_text_by_message_id)
+        self.assertNotIn("om_card", adapter._streaming_card_reasoning_by_message_id)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_disconnect_aborts_active_streaming_cards(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={
+            "streaming_card": {"enabled": True},
+        }))
+        adapter._client = Mock()
+
+        class _FakeStreamingController:
+            def __init__(self):
+                self.aborted = False
+
+            async def abort(self):
+                self.aborted = True
+
+        controller = _FakeStreamingController()
+        adapter._streaming_card_controllers["om_card"] = controller
+        adapter._streaming_card_text_by_message_id["om_card"] = "partial"
+        adapter._streaming_card_reasoning_by_message_id["om_card"] = "thinking"
+
+        asyncio.run(adapter.disconnect())
+
+        self.assertTrue(controller.aborted)
+        self.assertEqual(adapter._streaming_card_controllers, {})
+        self.assertEqual(adapter._streaming_card_text_by_message_id, {})
+        self.assertEqual(adapter._streaming_card_reasoning_by_message_id, {})
+
+    @unittest.skipUnless(_HAS_LARK_OAPI, "lark_oapi required")
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streaming_card_starts_cardkit_entity_when_available(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={
+            "streaming_card": {"enabled": True},
+        }))
+        send_calls = []
+
+        class _CardAPI:
+            def __init__(self):
+                self.create_requests = []
+
+            def create(self, request):
+                self.create_requests.append(request)
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(card_id="card_123"),
+                )
+
+        card_api = _CardAPI()
+        adapter._client = SimpleNamespace(
+            cardkit=SimpleNamespace(v1=SimpleNamespace(card=card_api)),
+        )
+
+        async def _fake_send_with_retry(**kwargs):
+            send_calls.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_cardkit"),
+            )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        adapter._feishu_send_with_retry = AsyncMock(side_effect=_fake_send_with_retry)
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            started = asyncio.run(
+                adapter.start_streaming_card(
+                    chat_id="oc_chat",
+                    metadata={"thread_id": "om_parent"},
+                )
+            )
+
+        self.assertTrue(started.success)
+        self.assertEqual(started.message_id, "om_cardkit")
+        self.assertEqual(len(card_api.create_requests), 1)
+        create_body = card_api.create_requests[0].request_body
+        self.assertEqual(create_body.type, "card_json")
+        initial_card = json.loads(create_body.data)
+        self.assertTrue(initial_card["config"]["streaming_mode"])
+        self.assertEqual(
+            initial_card["body"]["elements"][0]["element_id"],
+            "streaming_content",
+        )
+        self.assertEqual(
+            json.loads(send_calls[0]["payload"]),
+            {"type": "card", "data": {"card_id": "card_123"}},
+        )
+        controller = adapter._streaming_card_controllers["om_cardkit"]
+        self.assertEqual(controller.card_kit.card_id, "card_123")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_get_chat_info_uses_real_feishu_chat_api(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -1480,6 +1823,26 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertIn("[Content of", text)
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_extract_markdown_octet_stream_injects_content(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tmp:
+            tmp.write("marker from feishu markdown attachment")
+            path = tmp.name
+
+        try:
+            text = asyncio.run(
+                adapter._maybe_extract_text_document(path, "application/octet-stream")
+            )
+        finally:
+            os.unlink(path)
+
+        self.assertIn("marker from feishu markdown attachment", text)
+        self.assertIn("[Content of", text)
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_message_event_submits_to_adapter_loop(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -1673,6 +2036,50 @@ class TestAdapterBehavior(unittest.TestCase):
         second = adapter.handle_message.await_args_list[1].args[0]
         self.assertEqual(first.text, "A\nB")
         self.assertEqual(second.text, "C")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_get_chat_info_times_out_optional_lookup(self):
+        from types import SimpleNamespace
+
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(chat=SimpleNamespace(get=object()))))
+        adapter._optional_lookup_timeout_seconds = 0.01
+
+        async def _never_returns(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        async def _run() -> None:
+            with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_never_returns):
+                info = await asyncio.wait_for(adapter.get_chat_info("oc_slow"), timeout=0.1)
+            self.assertEqual(info["chat_id"], "oc_slow")
+            self.assertEqual(info["name"], "oc_slow")
+            self.assertEqual(info["type"], "dm")
+
+        asyncio.run(_run())
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_sender_name_lookup_times_out_without_blocking_dispatch(self):
+        from types import SimpleNamespace
+
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._client = SimpleNamespace(contact=SimpleNamespace(v3=SimpleNamespace(user=SimpleNamespace(get=object()))))
+        adapter._optional_lookup_timeout_seconds = 0.01
+
+        async def _never_returns(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        async def _run() -> None:
+            with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_never_returns):
+                name = await asyncio.wait_for(adapter._resolve_sender_name_from_api("ou_slow"), timeout=0.1)
+            self.assertIsNone(name)
+
+        asyncio.run(_run())
 
     @patch.dict(os.environ, {}, clear=True)
     def test_media_batch_merges_rapid_photo_messages(self):
@@ -3692,6 +4099,38 @@ class TestProcessingReactions(unittest.TestCase):
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.CANCELLED)
             )
         self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.delete_calls, ["r_typing"])
+        self.assertNotIn("om_msg", adapter._pending_processing_reactions)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_deferred_complete_keeps_typing_until_background_finishes(self):
+        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+        event = self._event()
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(event))
+            adapter.defer_processing_complete(event)
+            self._run(adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS))
+
+            self.assertEqual(tracker.delete_calls, [])
+            self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_typing")
+
+            self._run(adapter.complete_deferred_processing(event, ProcessingOutcome.SUCCESS))
+
+        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.delete_calls, ["r_typing"])
+        self.assertNotIn("om_msg", adapter._pending_processing_reactions)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_deferred_failure_removes_typing_then_adds_cross_mark(self):
+        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+        event = self._event()
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(event))
+            adapter.defer_processing_complete(event)
+            self._run(adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS))
+            self._run(adapter.complete_deferred_processing(event, ProcessingOutcome.FAILURE))
+
+        self.assertEqual(tracker.create_calls, ["Typing", "CrossMark"])
         self.assertEqual(tracker.delete_calls, ["r_typing"])
         self.assertNotIn("om_msg", adapter._pending_processing_reactions)
 

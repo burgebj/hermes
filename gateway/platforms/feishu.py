@@ -102,6 +102,10 @@ try:
         UpdateMessageRequest,
         UpdateMessageRequestBody,
     )
+    from lark_oapi.api.cardkit.v1 import (
+        CreateCardRequest as CardKitCreateCardRequest,
+        CreateCardRequestBody as CardKitCreateCardRequestBody,
+    )
     from lark_oapi.core import AccessTokenType, HttpMethod
     from lark_oapi.core.const import FEISHU_DOMAIN, LARK_DOMAIN
     from lark_oapi.core.model import BaseRequest
@@ -122,11 +126,19 @@ except ImportError:
     FeishuWSClient = None  # type: ignore[assignment]
     FEISHU_DOMAIN = None  # type: ignore[assignment]
     LARK_DOMAIN = None  # type: ignore[assignment]
+    CardKitCreateCardRequest = None  # type: ignore[assignment]
+    CardKitCreateCardRequestBody = None  # type: ignore[assignment]
 
 FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms.cards import (
+    StreamingCardController,
+    build_streaming_cardkit_initial_card,
+    build_error_card,
+    build_error_card_for_exception,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -195,6 +207,7 @@ _DEFAULT_TEXT_BATCH_DELAY_SECONDS = 0.6
 _DEFAULT_TEXT_BATCH_MAX_MESSAGES = 8
 _DEFAULT_TEXT_BATCH_MAX_CHARS = 4000
 _DEFAULT_MEDIA_BATCH_DELAY_SECONDS = 0.8
+_FEISHU_OPTIONAL_LOOKUP_TIMEOUT_SECONDS = 0.8
 _DEFAULT_DEDUP_CACHE_SIZE = 2048
 _DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 _DEFAULT_WEBHOOK_PORT = 8765
@@ -381,6 +394,7 @@ class FeishuAdapterSettings:
     text_batch_max_messages: int
     text_batch_max_chars: int
     media_batch_delay_seconds: float
+    optional_lookup_timeout_seconds: float
     webhook_host: str
     webhook_port: int
     webhook_path: str
@@ -391,6 +405,7 @@ class FeishuAdapterSettings:
     admins: frozenset[str] = frozenset()
     default_group_policy: str = ""
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
+    streaming_card_enabled: bool = False
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
 
@@ -1410,6 +1425,10 @@ class FeishuAdapter(BasePlatformAdapter):
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
+        self._deferred_processing_completions: set[str] = set()
+        self._streaming_card_controllers: Dict[str, StreamingCardController] = {}
+        self._streaming_card_text_by_message_id: Dict[str, str] = {}
+        self._streaming_card_reasoning_by_message_id: Dict[str, str] = {}
         self._load_seen_message_ids()
 
     @staticmethod
@@ -1489,6 +1508,15 @@ class FeishuAdapter(BasePlatformAdapter):
             media_batch_delay_seconds=float(
                 os.getenv("HERMES_FEISHU_MEDIA_BATCH_DELAY_SECONDS", str(_DEFAULT_MEDIA_BATCH_DELAY_SECONDS))
             ),
+            optional_lookup_timeout_seconds=max(
+                0.05,
+                float(
+                    os.getenv(
+                        "HERMES_FEISHU_OPTIONAL_LOOKUP_TIMEOUT_SECONDS",
+                        str(_FEISHU_OPTIONAL_LOOKUP_TIMEOUT_SECONDS),
+                    )
+                ),
+            ),
             webhook_host=str(
                 extra.get("webhook_host") or os.getenv("FEISHU_WEBHOOK_HOST", _DEFAULT_WEBHOOK_HOST)
             ).strip(),
@@ -1506,6 +1534,9 @@ class FeishuAdapter(BasePlatformAdapter):
             admins=admins,
             default_group_policy=default_group_policy,
             group_rules=group_rules,
+            streaming_card_enabled=bool(
+                (extra.get("streaming_card") or {}).get("enabled", False)
+            ),
             allow_bots=allow_bots,
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
@@ -1533,6 +1564,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._text_batch_max_messages = settings.text_batch_max_messages
         self._text_batch_max_chars = settings.text_batch_max_chars
         self._media_batch_delay_seconds = settings.media_batch_delay_seconds
+        self._optional_lookup_timeout_seconds = settings.optional_lookup_timeout_seconds
         self._webhook_host = settings.webhook_host
         self._webhook_port = settings.webhook_port
         self._webhook_path = settings.webhook_path
@@ -1540,6 +1572,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_reconnect_interval = settings.ws_reconnect_interval
         self._ws_ping_interval = settings.ws_ping_interval
         self._ws_ping_timeout = settings.ws_ping_timeout
+        self._streaming_card_enabled = settings.streaming_card_enabled
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
 
@@ -1608,6 +1641,10 @@ class FeishuAdapter(BasePlatformAdapter):
             await self._connect_with_retry()
             self._mark_connected()
             logger.info("[Feishu] Connected in %s mode (%s)", self._connection_mode, self._domain_name)
+            # US-007: kick off the per-user UAT refresh daemon. Best-effort —
+            # missing creds or daemon import errors are logged and ignored
+            # so the adapter still works for tenant-only message handling.
+            self._start_refresh_daemon_if_creds()
             return True
         except Exception as exc:
             await self._release_app_lock()
@@ -1619,6 +1656,24 @@ class FeishuAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Disconnect from Feishu/Lark."""
         self._running = False
+        # US-007: cancel the refresh daemon, if it was started.
+        try:
+            stop_event = getattr(self, "_refresh_daemon_stop", None)
+            if stop_event is not None:
+                stop_event.set()
+            task = getattr(self, "_refresh_daemon_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+        except Exception:
+            logger.debug("[Feishu] refresh daemon shutdown encountered an error", exc_info=True)
+        finally:
+            self._refresh_daemon_task = None
+            self._refresh_daemon_stop = None
+        await self._abort_active_streaming_cards_on_disconnect()
         await self._cancel_pending_tasks(self._pending_text_batch_tasks)
         await self._cancel_pending_tasks(self._pending_media_batch_tasks)
         self._reset_batch_buffers()
@@ -1660,6 +1715,49 @@ class FeishuAdapter(BasePlatformAdapter):
 
         self._mark_disconnected()
         logger.info("[Feishu] Disconnected")
+
+    async def _abort_active_streaming_cards_on_disconnect(self) -> None:
+        """Best-effort close for in-flight CardKit cards during gateway shutdown."""
+        active = list(self._streaming_card_controllers.items())
+        if not active:
+            return
+        logger.info("[Feishu] streaming_card: aborting %d active card(s) on disconnect", len(active))
+        for message_id, controller in active:
+            try:
+                await asyncio.wait_for(asyncio.shield(controller.abort()), timeout=5.0)
+                logger.info("[Feishu] streaming_card: disconnect abort completed message_id=%s", message_id)
+            except Exception as exc:
+                logger.warning(
+                    "[Feishu] streaming_card: disconnect abort failed message_id=%s error=%s",
+                    message_id,
+                    exc,
+                )
+            finally:
+                self._streaming_card_controllers.pop(message_id, None)
+                self._streaming_card_text_by_message_id.pop(message_id, None)
+                self._streaming_card_reasoning_by_message_id.pop(message_id, None)
+
+    def _start_refresh_daemon_if_creds(self) -> None:
+        """Best-effort start of the per-user UAT refresh daemon (US-007).
+
+        Extracted from ``connect()`` so it can be unit-tested in isolation:
+        callers don't need to mock the full lark.Client / WS bring-up to
+        verify the daemon-startup wiring. Idempotent — silently skips when
+        creds are missing, the loop is None, or the daemon module fails to
+        import.
+        """
+        if not self._loop:
+            return
+        try:
+            from hermes_cli.feishu_refresh_daemon import start_refresh_daemon
+            app_id = (self._settings.app_id or "").strip()
+            app_secret = (self._settings.app_secret or "").strip()
+            if app_id and app_secret:
+                self._refresh_daemon_task, self._refresh_daemon_stop = (
+                    start_refresh_daemon(self._loop, app_id, app_secret)
+                )
+        except Exception as exc:
+            logger.debug("[Feishu] refresh daemon not started: %s", exc)
 
     async def _cancel_pending_tasks(self, tasks: Dict[str, asyncio.Task]) -> None:
         pending = [task for task in tasks.values() if task and not task.done()]
@@ -1788,6 +1886,421 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
+
+    def supports_streaming_card(self) -> bool:
+        """Return True when Feishu card streaming is configured and connected."""
+        return bool(self._streaming_card_enabled and self._client)
+
+    def _supports_cardkit_streaming(self) -> bool:
+        """Return True when the SDK exposes CardKit APIs for native streaming."""
+        return bool(
+            self._client
+            and getattr(self._client, "cardkit", None)
+            and CardKitCreateCardRequest is not None
+            and CardKitCreateCardRequestBody is not None
+        )
+
+    async def _create_cardkit_card(self, card_payload: Dict[str, Any]) -> Optional[str]:
+        """Create a CardKit card entity and return its ``card_id``."""
+        if not self._supports_cardkit_streaming():
+            return None
+        body = (
+            CardKitCreateCardRequestBody.builder()
+            .type("card_json")
+            .data(json.dumps(card_payload, ensure_ascii=False))
+            .build()
+        )
+        request = (
+            CardKitCreateCardRequest.builder()
+            .request_body(body)
+            .build()
+        )
+        response = await asyncio.to_thread(self._client.cardkit.v1.card.create, request)
+        if not self._response_succeeded(response):
+            code = getattr(response, "code", "unknown")
+            msg = getattr(response, "msg", "card.create failed")
+            raise RuntimeError(f"card.create failed code={code} msg={msg}")
+        card_id = self._extract_response_field(response, "card_id")
+        logger.info("[Feishu] streaming_card: card entity created card_id=%s", card_id)
+        return str(card_id) if card_id else None
+
+    async def start_streaming_card(
+        self,
+        *,
+        chat_id: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Create the initial interactive card for a streaming reply."""
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+
+        if self._supports_cardkit_streaming():
+            try:
+                card_id = await self._create_cardkit_card(build_streaming_cardkit_initial_card())
+                if card_id:
+                    response = await self._feishu_send_with_retry(
+                        chat_id=chat_id,
+                        msg_type="interactive",
+                        payload=json.dumps(
+                            {"type": "card", "data": {"card_id": card_id}},
+                            ensure_ascii=False,
+                        ),
+                        reply_to=reply_to,
+                        metadata=metadata,
+                    )
+                    if self._response_succeeded(response):
+                        message_id = self._extract_response_field(response, "message_id")
+                        if message_id:
+                            message_id = str(message_id)
+                            self._streaming_card_controllers[message_id] = StreamingCardController(
+                                message_id=message_id,
+                                client=self._client,
+                                card_id=card_id,
+                            )
+                            self._streaming_card_text_by_message_id[message_id] = ""
+                            self._streaming_card_reasoning_by_message_id[message_id] = ""
+                            logger.info(
+                                "[Feishu] streaming_card: CardKit message sent message_id=%s card_id=%s",
+                                message_id,
+                                card_id,
+                            )
+                            return SendResult(success=True, message_id=message_id, raw_response=response)
+                        logger.warning("[Feishu] streaming_card: CardKit send returned no message_id")
+                    else:
+                        result = self._finalize_send_result(response, "streaming_card CardKit send failed")
+                        logger.warning("[Feishu] streaming_card: CardKit send failed: %s", result.error)
+            except Exception as exc:
+                logger.warning("[Feishu] streaming_card: CardKit flow failed, falling back to IM patch: %s", exc)
+
+        initial_card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": "▌"}]}}
+        try:
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=json.dumps(initial_card, ensure_ascii=False),
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to send initial card: %s", exc)
+            return SendResult(success=False, error=str(exc))
+
+        if not self._response_succeeded(response):
+            return self._finalize_send_result(response, "streaming_card initial send failed")
+
+        message_id = self._extract_response_field(response, "message_id")
+        if not message_id:
+            return SendResult(success=False, error="streaming_card: no message_id from initial card")
+
+        message_id = str(message_id)
+        self._streaming_card_controllers[message_id] = StreamingCardController(
+            message_id=message_id,
+            client=self._client,
+        )
+        self._streaming_card_text_by_message_id[message_id] = ""
+        self._streaming_card_reasoning_by_message_id[message_id] = ""
+        return SendResult(success=True, message_id=message_id, raw_response=response)
+
+    def _get_streaming_card_controller(self, message_id: str) -> StreamingCardController:
+        message_id = str(message_id)
+        controller = self._streaming_card_controllers.get(message_id)
+        if controller is None:
+            controller = StreamingCardController(message_id=message_id, client=self._client)
+            self._streaming_card_controllers[message_id] = controller
+        return controller
+
+    async def update_streaming_card(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Push accumulated reply text into an existing streaming card."""
+        del chat_id  # The Feishu PATCH target is the card message_id.
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+        if not message_id:
+            return SendResult(success=False, error="missing message_id")
+
+        message_id = str(message_id)
+        controller = self._get_streaming_card_controller(message_id)
+
+        content = self.format_message(content)
+        previous = self._streaming_card_text_by_message_id.get(message_id, "")
+        if content.startswith(previous):
+            chunk = content[len(previous):]
+        else:
+            chunk = content
+
+        try:
+            if chunk:
+                await controller.add_text_chunk(chunk)
+            self._streaming_card_text_by_message_id[message_id] = content
+            if finalize:
+                await controller.mark_completed()
+                logger.info("[Feishu] streaming_card.finalized message_id=%s", message_id)
+                self._streaming_card_controllers.pop(message_id, None)
+                self._streaming_card_text_by_message_id.pop(message_id, None)
+                self._streaming_card_reasoning_by_message_id.pop(message_id, None)
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to update %s: %s", message_id, exc, exc_info=True)
+            return SendResult(success=False, error=str(exc), message_id=message_id)
+
+    async def abort_streaming_card(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        content: Optional[str] = None,
+    ) -> SendResult:
+        """Finalize an in-flight streaming card as aborted/interrupted."""
+        del chat_id
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+        if not message_id:
+            return SendResult(success=False, error="missing message_id")
+
+        message_id = str(message_id)
+        controller = self._get_streaming_card_controller(message_id)
+        try:
+            if content:
+                formatted = self.format_message(content)
+                text_block = getattr(controller, "text", None)
+                if text_block is not None and hasattr(text_block, "accumulated_text"):
+                    text_block.accumulated_text = formatted
+                self._streaming_card_text_by_message_id[message_id] = formatted
+            await controller.abort()
+            self._streaming_card_controllers.pop(message_id, None)
+            self._streaming_card_text_by_message_id.pop(message_id, None)
+            self._streaming_card_reasoning_by_message_id.pop(message_id, None)
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to abort %s: %s", message_id, exc, exc_info=True)
+            return SendResult(success=False, error=str(exc), message_id=message_id)
+
+    async def update_streaming_card_reasoning(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        content: str,
+    ) -> SendResult:
+        """Push accumulated reasoning/status text into an existing streaming card."""
+        del chat_id
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+        if not message_id:
+            return SendResult(success=False, error="missing message_id")
+
+        message_id = str(message_id)
+        controller = self._get_streaming_card_controller(message_id)
+        content = self.format_message(content)
+        previous = self._streaming_card_reasoning_by_message_id.get(message_id, "")
+        if content.startswith(previous):
+            chunk = content[len(previous):]
+        else:
+            if previous:
+                self._clear_streaming_card_reasoning(controller)
+            chunk = content
+
+        try:
+            if chunk:
+                await controller.add_reasoning_chunk(chunk)
+            self._streaming_card_reasoning_by_message_id[message_id] = content
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to update reasoning %s: %s", message_id, exc, exc_info=True)
+            return SendResult(success=False, error=str(exc), message_id=message_id)
+
+    async def update_streaming_card_status(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        content: str,
+    ) -> SendResult:
+        """Push an ephemeral CardKit status without storing it as final reasoning."""
+        del chat_id
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+        if not message_id:
+            return SendResult(success=False, error="missing message_id")
+
+        message_id = str(message_id)
+        controller = self._get_streaming_card_controller(message_id)
+        try:
+            await controller.set_status(self.format_message(content))
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to update status %s: %s", message_id, exc, exc_info=True)
+            return SendResult(success=False, error=str(exc), message_id=message_id)
+
+    @staticmethod
+    def _clear_streaming_card_reasoning(controller: Any) -> None:
+        reasoning = getattr(controller, "reasoning", None)
+        if reasoning is None:
+            return
+        if hasattr(reasoning, "accumulated_reasoning_text"):
+            reasoning.accumulated_reasoning_text = ""
+        if hasattr(reasoning, "reasoning_start_time"):
+            reasoning.reasoning_start_time = None
+        if hasattr(reasoning, "reasoning_elapsed_ms"):
+            reasoning.reasoning_elapsed_ms = 0.0
+        if hasattr(reasoning, "is_reasoning_phase"):
+            reasoning.is_reasoning_phase = False
+
+    async def update_streaming_card_tool_started(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        tool_name: str,
+        preview: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Show an active tool step in the streaming card."""
+        del chat_id, preview
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+        if not message_id:
+            return SendResult(success=False, error="missing message_id")
+
+        try:
+            controller = self._get_streaming_card_controller(str(message_id))
+            await controller.mark_tool_started(tool_name, args=args)
+            return SendResult(success=True, message_id=str(message_id))
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to mark tool start %s: %s", message_id, exc, exc_info=True)
+            return SendResult(success=False, error=str(exc), message_id=str(message_id))
+
+    async def update_streaming_card_tool_completed(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        tool_name: str,
+        duration: Optional[float] = None,
+        is_error: bool = False,
+    ) -> SendResult:
+        """Show a completed tool step in the streaming card."""
+        del chat_id
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if not self._streaming_card_enabled:
+            return SendResult(success=False, error="streaming card disabled")
+        if not message_id:
+            return SendResult(success=False, error="missing message_id")
+
+        try:
+            controller = self._get_streaming_card_controller(str(message_id))
+            await controller.mark_tool_completed({
+                "name": tool_name,
+                "duration": duration,
+                "is_error": is_error,
+            })
+            return SendResult(success=True, message_id=str(message_id))
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to mark tool complete %s: %s", message_id, exc, exc_info=True)
+            return SendResult(success=False, error=str(exc), message_id=str(message_id))
+
+    async def _send_streaming_card(
+        self,
+        chat_id: str,
+        llm_stream: Any,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a streaming interactive card that updates as the LLM generates text.
+
+        Creates an initial placeholder card, then uses StreamingCardController
+        to push throttled incremental PATCH updates as the LLM generates text.
+        On error, sends a build_error_card to the chat.
+
+        Args:
+            chat_id: Feishu chat_id to send to.
+            llm_stream: Async iterator yielding str chunks from the LLM.
+            reply_to: Optional message_id to reply to.
+            metadata: Optional metadata dict (e.g. thread_id).
+
+        Returns:
+            SendResult with the message_id of the sent card.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        # Send initial placeholder card
+        initial_card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": "▌"}]}}
+        initial_payload = json.dumps(initial_card, ensure_ascii=False)
+        try:
+            init_response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=initial_payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: failed to send initial card: %s", exc)
+            return SendResult(success=False, error=str(exc))
+
+        if not self._response_succeeded(init_response):
+            return self._finalize_send_result(init_response, "streaming_card initial send failed")
+
+        message_id = self._extract_response_field(init_response, "message_id")
+        if not message_id:
+            return SendResult(success=False, error="streaming_card: no message_id from initial card")
+
+        # Stream LLM chunks into the card controller
+        ctrl = StreamingCardController(message_id=message_id, client=self._client)
+        try:
+            async for chunk in llm_stream:
+                if isinstance(chunk, str):
+                    await ctrl.add_text_chunk(chunk)
+            await ctrl.mark_completed()
+        except Exception as exc:
+            logger.error("[Feishu] streaming_card: stream error message_id=%s: %s", message_id, exc)
+            # PATCH the placeholder card to an error terminal state so it is
+            # not left showing "▌" forever (orphaned placeholder).
+            try:
+                await ctrl._flush_final(is_aborted=False, is_error=True)
+            except Exception as patch_exc:
+                logger.warning(
+                    "[Feishu] streaming_card: failed to patch placeholder to error state: %s",
+                    patch_exc,
+                )
+            # Optionally send a separate error reply card.
+            try:
+                error_card_payload = json.dumps(
+                    build_error_card_for_exception(exc), ensure_ascii=False
+                )
+                await self._feishu_send_with_retry(
+                    chat_id=chat_id,
+                    msg_type="interactive",
+                    payload=error_card_payload,
+                    reply_to=reply_to,
+                    metadata=metadata,
+                )
+            except Exception as send_exc:
+                logger.warning("[Feishu] streaming_card: error card send failed: %s", send_exc)
+            return SendResult(success=False, error=str(exc))
+
+        return SendResult(success=True, message_id=message_id)
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,
@@ -2169,7 +2682,11 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             request = self._build_get_chat_request(chat_id)
-            response = await asyncio.to_thread(self._client.im.v1.chat.get, request)
+            response = await self._run_optional_oapi_lookup(
+                "chat.get",
+                self._client.im.v1.chat.get,
+                request,
+            )
             if not response or getattr(response, "success", lambda: False)() is False:
                 code = getattr(response, "code", "unknown")
                 msg = getattr(response, "msg", "chat lookup failed")
@@ -2189,6 +2706,15 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception:
             logger.warning("[Feishu] Failed to get chat info for %s", chat_id, exc_info=True)
             return fallback
+
+    async def _run_optional_oapi_lookup(self, label: str, func: Any, *args: Any) -> Any:
+        """Run non-critical Feishu lookups without letting them block inbound UX."""
+        timeout = getattr(self, "_optional_lookup_timeout_seconds", _FEISHU_OPTIONAL_LOOKUP_TIMEOUT_SECONDS)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(func, *args), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("[Feishu] Optional lookup %s timed out after %.2fs; using event fallback", label, timeout)
+            return None
 
     def format_message(self, content: str) -> str:
         """Feishu text messages are plain text by default."""
@@ -2382,6 +2908,84 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = str(getattr(event, "chat_id", "") or "")
         logger.info("[Feishu] Bot added to chat: %s", chat_id)
         self._chat_info_cache.pop(chat_id, None)
+        # US-006: send onboarding hint when joining a chat. Best-effort —
+        # if the loop is not ready yet we silently skip; the first inbound
+        # message will trigger the per-sender onboarding instead.
+        loop = self._loop
+        if chat_id and self._loop_accepts_callbacks(loop):
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._send_chat_added_onboarding(chat_id),
+                    loop,
+                )
+            except Exception as exc:
+                logger.debug("[Feishu] Could not schedule chat-added onboarding: %s", exc)
+
+    async def _send_chat_added_onboarding(self, chat_id: str) -> None:
+        """Send a one-line welcome + /feishu_auth hint when the bot joins a chat."""
+        try:
+            await self.send(
+                chat_id,
+                (
+                    "👋 已加入此群。需要使用我访问你的飞书日历 / 文档 / 多维表等"
+                    "请先发送 `/feishu_auth` 完成用户身份授权。"
+                ),
+            )
+        except Exception as exc:
+            logger.debug("[Feishu] chat-added onboarding send failed: %s", exc)
+
+    async def _maybe_send_onboarding_card(
+        self,
+        chat_id: str,
+        sender_open_id: str,
+        message_id: Optional[str] = None,
+    ) -> bool:
+        """Send onboarding hint to a sender who has no per-user UAT yet.
+
+        Idempotent within the process (each (chat_id, sender_open_id) pair
+        triggers at most once). Senders who already have a UAT file are
+        silently skipped — they do not need onboarding. Returns True if a
+        card was sent.
+        """
+        if not chat_id or not sender_open_id:
+            return False
+
+        # In-memory dedup so users don't get spammed across messages.
+        if not hasattr(self, "_onboarding_sent"):
+            self._onboarding_sent: set = set()
+        key = (chat_id, sender_open_id)
+        if key in self._onboarding_sent:
+            return False
+
+        # If the sender already has a per-user UAT, skip onboarding entirely
+        # (and remember so we don't re-check the filesystem on every message).
+        from tools.feishu_oapi_client import _per_user_uat_path_oapi
+        try:
+            uat_path = _per_user_uat_path_oapi(sender_open_id)
+        except (ValueError, TypeError):
+            return False
+        if uat_path.exists():
+            self._onboarding_sent.add(key)
+            return False
+
+        self._onboarding_sent.add(key)
+        try:
+            await self.send(
+                chat_id,
+                (
+                    "👋 你好!我注意到你还没有授权我使用你的飞书身份。\n\n"
+                    "我可以帮你查日历、读写文档、管理多维表、操作任务等,"
+                    "但这些都需要使用你本人的权限。\n\n"
+                    "请发送 `/feishu_auth` 启动授权(扫码 1 次后续都可用)。"
+                ),
+                reply_to=message_id,
+            )
+        except Exception as exc:
+            logger.debug("[Feishu] onboarding send failed: %s", exc)
+            # Roll back the sent-marker so we can retry next time
+            self._onboarding_sent.discard(key)
+            return False
+        return True
 
     def _on_bot_removed_from_chat(self, data: Any) -> None:
         """Handle bot being removed from a group chat."""
@@ -2470,6 +3074,10 @@ class FeishuAdapter(BasePlatformAdapter):
             if isinstance(action_value, dict) else None
         )
 
+        if hermes_action == "feishu_auth":
+            # US-006/US-008 follow-up: card button → synthetic /feishu_auth COMMAND
+            return self._handle_feishu_auth_card_action(event=event, action_value=action_value, loop=loop)
+
         if hermes_action:
             return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
         if update_prompt_action:
@@ -2509,6 +3117,55 @@ class FeishuAdapter(BasePlatformAdapter):
         if not allowed_ids:
             return True
         return "*" in allowed_ids or normalized in allowed_ids
+
+    def _handle_feishu_auth_card_action(
+        self,
+        *,
+        event: Any,
+        action_value: Dict[str, Any],
+        loop: Any,
+    ) -> Any:
+        """Handle a click on the onboarding / scope-manager card's auth button.
+
+        The button payload carries ``hermes_action == "feishu_auth"`` plus an
+        optional ``scope`` string. We synthesize a ``/feishu_auth [scope]``
+        slash command on behalf of the clicker and dispatch it through the
+        existing :meth:`_handle_feishu_auth_command` pipeline so the user
+        gets the same verification card / success / error replies as if
+        they had typed the command themselves.
+        """
+        operator = getattr(event, "operator", None)
+        sender_open_id = str(getattr(operator, "open_id", "") or "")
+
+        context = getattr(event, "context", None)
+        chat_id = ""
+        message_id = ""
+        if context is not None:
+            chat_id = str(getattr(context, "open_chat_id", "") or "")
+            message_id = str(getattr(context, "open_message_id", "") or "")
+
+        scope = (action_value.get("scope") or "").strip()
+        synthetic_text = "/feishu_auth"
+        if scope:
+            synthetic_text = f"/feishu_auth {scope}"
+
+        if sender_open_id and chat_id:
+            self._submit_on_loop(
+                loop,
+                self._handle_feishu_auth_command(
+                    text=synthetic_text,
+                    sender_open_id=sender_open_id,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                ),
+            )
+        else:
+            logger.debug(
+                "[Feishu] feishu_auth button click missing sender or chat (open_id=%r, chat_id=%r)",
+                sender_open_id, chat_id,
+            )
+
+        return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""
@@ -2834,6 +3491,32 @@ class FeishuAdapter(BasePlatformAdapter):
     def _pop_processing_reaction(self, message_id: str) -> Optional[str]:
         return self._pending_processing_reactions.pop(message_id, None)
 
+    @staticmethod
+    def _processing_message_id(event_or_message_id: Any) -> str:
+        if isinstance(event_or_message_id, str):
+            return event_or_message_id
+        return str(getattr(event_or_message_id, "message_id", "") or "")
+
+    def defer_processing_complete(self, event_or_message_id: Any) -> None:
+        """Suppress the gateway's early completion hook for delegated work.
+
+        pre_gateway_dispatch hooks return before their background task has
+        finished, but BasePlatformAdapter still runs on_processing_complete for
+        the skipped main flow. Holding the message id here keeps the Typing
+        reaction visible until the delegate explicitly completes it.
+        """
+        message_id = self._processing_message_id(event_or_message_id)
+        if message_id:
+            self._deferred_processing_completions.add(message_id)
+
+    async def complete_deferred_processing(
+        self, event_or_message_id: Any, outcome: ProcessingOutcome
+    ) -> None:
+        message_id = self._processing_message_id(event_or_message_id)
+        if message_id:
+            self._deferred_processing_completions.discard(message_id)
+        await self.on_processing_complete(event_or_message_id, outcome)
+
     async def on_processing_start(self, event: MessageEvent) -> None:
         if not self._reactions_enabled():
             return
@@ -2851,6 +3534,9 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         message_id = event.message_id
         if not message_id:
+            return
+        if message_id in self._deferred_processing_completions:
+            logger.debug("[Feishu] Keeping Typing reaction for deferred processing: %s", message_id)
             return
 
         start_reaction_id = self._pending_processing_reactions.get(message_id)
@@ -2900,6 +3586,195 @@ class FeishuAdapter(BasePlatformAdapter):
         self._webhook_anomaly_counts.pop(remote_ip, None)
 
     # =========================================================================
+    # Chat-driven /feishu_auth command handler (US-003)
+    # =========================================================================
+
+    async def _send_auth_card(
+        self,
+        chat_id: str,
+        card: dict,
+        reply_to: Optional[str] = None,
+    ) -> Optional[str]:
+        """Send an interactive auth card and return its message_id (None on failure)."""
+        if not self._client:
+            return None
+        try:
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=json.dumps(card, ensure_ascii=False),
+                reply_to=reply_to,
+                metadata=None,
+            )
+            result = self._finalize_send_result(response, "send auth card failed")
+            return result.message_id if result.success else None
+        except Exception as exc:
+            logger.warning("[Feishu] _send_auth_card failed: %s", exc)
+            return None
+
+    async def _patch_auth_card(self, message_id: str, card: dict) -> bool:
+        """PATCH an existing interactive card to a new state (mirrors openclaw-lark).
+
+        Uses Feishu's `im.v1.message.patch` endpoint, which is the only one
+        that accepts interactive card content for in-place updates. The
+        sibling `update` endpoint rejects msg_type=interactive with errcode
+        230001.
+        """
+        if not self._client:
+            logger.warning("[Feishu] _patch_auth_card: no client")
+            return False
+        if not message_id:
+            logger.warning("[Feishu] _patch_auth_card: empty message_id, skipping")
+            return False
+        try:
+            from lark_oapi.api.im.v1 import (
+                PatchMessageRequest,
+                PatchMessageRequestBody,
+            )
+            request = (
+                PatchMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    PatchMessageRequestBody.builder()
+                    .content(json.dumps(card, ensure_ascii=False))
+                    .build()
+                )
+                .build()
+            )
+            response = await asyncio.to_thread(self._client.im.v1.message.patch, request)
+            result = self._finalize_send_result(response, "patch auth card failed")
+            if not result.success:
+                logger.warning(
+                    "[Feishu] _patch_auth_card %s returned non-success: %s",
+                    message_id, result.error,
+                )
+            else:
+                logger.info("[Feishu] _patch_auth_card %s success", message_id)
+            return result.success
+        except Exception as exc:
+            logger.warning("[Feishu] _patch_auth_card %s exception: %s", message_id, exc, exc_info=True)
+            return False
+
+    async def _handle_feishu_auth_command(
+        self,
+        text: str,
+        sender_open_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> None:
+        """Handle ``/feishu_auth [scope...]`` slash command from a Feishu chat.
+
+        Mirrors the openclaw-lark interaction model: one interactive card whose
+        state PATCHes through pending → success / error in place (instead of
+        sending three separate messages). Spawns the device flow on a
+        background task so the inbound WS read is not blocked.
+
+        The command is consumed at the platform layer; the slash text is never
+        forwarded to the LLM agent.
+        """
+        from hermes_cli.feishu_auth import chat_mode_device_flow
+        from hermes_cli.config import get_env_value
+        from tools.feishu_scope_mapping import (
+            build_auth_pending_card,
+            build_auth_success_card,
+            build_auth_error_card,
+        )
+
+        client_id = (get_env_value("FEISHU_APP_ID") or "").strip()
+        client_secret = (get_env_value("FEISHU_APP_SECRET") or "").strip()
+        if not client_id or not client_secret:
+            await self.send(
+                chat_id,
+                "❌ Feishu app credentials not configured. The bot operator "
+                "needs to set FEISHU_APP_ID/FEISHU_APP_SECRET (env, "
+                "~/.hermes/.env, or platforms.feishu.extra in config.yaml).",
+                reply_to=message_id,
+            )
+            return
+
+        scope_arg = text.partition(" ")[2].strip() or None
+        # Mutable holder so the closures below can share the card message_id
+        # without using nonlocal (helps when this method is stubbed in tests).
+        state: Dict[str, Optional[str]] = {"card_message_id": None}
+
+        def _friendly_scope_error(raw: str) -> str:
+            """Translate raw Feishu OAuth error into a Chinese hint."""
+            if "invalid_scope" in raw or "invalid or malformed scopes" in raw:
+                return (
+                    "应用未通过审核任何用户身份权限,飞书拒绝授权请求。\n"
+                    "请管理员到飞书开放平台 → 权限管理 → 申请并通过 user 维度的"
+                    "calendar / drive / docs 等权限后再试。"
+                )
+            if "missing a required parameter" in raw:
+                return f"飞书拒绝请求(缺少必填参数): {raw[:160]}"
+            if "invalid_grant" in raw or "device_code is invalid" in raw:
+                return (
+                    "device_code 已失效。可能是应用没开启「网页」能力,"
+                    "或扫码后授权页选择了「拒绝」。请到飞书开放平台 → 应用功能 → 网页 启用此能力,"
+                    "再重新发送 /feishu_auth。"
+                )
+            return raw[:200]
+
+        async def on_url(uri: str, user_code: str, expires_in: int) -> None:
+            card = build_auth_pending_card(
+                verification_uri=uri,
+                user_code=user_code,
+                expires_in_s=expires_in,
+                scope=scope_arg or "",
+            )
+            sent_id = await self._send_auth_card(chat_id, card, reply_to=message_id)
+            state["card_message_id"] = sent_id
+            if sent_id is None:
+                # Fallback to text if interactive card send failed
+                await self.send(
+                    chat_id,
+                    f"🔐 飞书授权: {uri}\nUser code: {user_code}",
+                    reply_to=message_id,
+                )
+
+        async def on_success(open_id: str, scope: str) -> None:
+            success_card = build_auth_success_card(open_id=open_id, scope=scope)
+            patched = await self._patch_auth_card(state["card_message_id"] or "", success_card)
+            if not patched:
+                await self.send(
+                    chat_id,
+                    f"✅ 授权成功 (open_id={open_id})",
+                    reply_to=message_id,
+                )
+
+        async def on_error(reason: str) -> None:
+            error_card = build_auth_error_card(
+                reason=_friendly_scope_error(reason),
+                scope=scope_arg or "",
+            )
+            # Try patch first (covers post-pending-card failures)
+            if state["card_message_id"]:
+                if await self._patch_auth_card(state["card_message_id"], error_card):
+                    return
+            # No pending card yet OR patch failed → send a fresh red card
+            sent_id = await self._send_auth_card(chat_id, error_card, reply_to=message_id)
+            if sent_id is None:
+                # Last-resort plain text fallback
+                await self.send(
+                    chat_id,
+                    f"❌ 授权失败: {reason}\n请重新发送 /feishu_auth 重试",
+                    reply_to=message_id,
+                )
+
+        task_name = f"feishu-auth:{sender_open_id or message_id}"
+        asyncio.create_task(
+            chat_mode_device_flow(
+                client_id=client_id,
+                client_secret=client_secret,
+                scope=scope_arg,
+                on_verification_url=on_url,
+                on_success=on_success,
+                on_error=on_error,
+            ),
+            name=task_name,
+        )
+
+    # =========================================================================
     # Inbound processing pipeline
     # =========================================================================
 
@@ -2919,6 +3794,21 @@ class FeishuAdapter(BasePlatformAdapter):
             text = _strip_edge_self_mentions(text, mentions)
             if text.startswith("/"):
                 inbound_type = MessageType.COMMAND
+                # US-003: /feishu_auth is owned by the platform layer.
+                # Intercept before the message ever reaches the LLM agent so
+                # users in group/DM chats can run the device flow with a
+                # verification card reply, instead of having the slash text
+                # passed to the LLM.
+                if text == "/feishu_auth" or text.startswith("/feishu_auth "):
+                    sender_open_id = getattr(sender_id, "open_id", "") or ""
+                    chat_id_for_auth = getattr(message, "chat_id", "") or ""
+                    await self._handle_feishu_auth_command(
+                        text=text,
+                        sender_open_id=sender_open_id,
+                        chat_id=chat_id_for_auth,
+                        message_id=message_id,
+                    )
+                    return
 
         # Guard runs post-strip so a pure "@Bot" message (stripped to "") is dropped.
         if inbound_type == MessageType.TEXT and not text and not media_urls:
@@ -2960,6 +3850,27 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = getattr(message, "chat_id", "") or ""
         chat_info = await self.get_chat_info(chat_id)
         sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
+
+        # US-006: send onboarding hint to senders without per-user UAT.
+        # Best-effort and idempotent (in-memory dedup); does not block the
+        # main message dispatch — user can still chat with the bot, but the
+        # next time they ask for calendar/docs/etc. the tool layer will hit
+        # NeedAuthorizationError and prompt them via the scope manager (US-008).
+        sender_open_id_for_onboarding = getattr(sender_id, "open_id", "") or ""
+        if (
+            inbound_type != MessageType.COMMAND
+            and sender_open_id_for_onboarding
+            and chat_id
+        ):
+            try:
+                await self._maybe_send_onboarding_card(
+                    chat_id=chat_id,
+                    sender_open_id=sender_open_id_for_onboarding,
+                    message_id=message_id,
+                )
+            except Exception as exc:
+                logger.debug("[Feishu] onboarding check failed: %s", exc)
+
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
@@ -2982,7 +3893,14 @@ class FeishuAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
             timestamp=datetime.now(),
         )
-        await self._dispatch_inbound_event(normalized)
+        # US-004 wire-up: thread the sender's open_id through downstream tool
+        # handlers via the contextvar. Tools that omit ``user_open_id=`` will
+        # now load the per-user UAT for the inbound sender instead of falling
+        # back to the legacy single-file path.
+        sender_oid_for_dispatch = getattr(sender_id, "open_id", "") or ""
+        from tools.feishu_oapi_client import sender_open_id_scope
+        with sender_open_id_scope(sender_oid_for_dispatch or None):
+            await self._dispatch_inbound_event(normalized)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
         """Apply Feishu-specific burst protection before entering the base adapter."""
@@ -3492,13 +4410,17 @@ class FeishuAdapter(BasePlatformAdapter):
         return MessageType.TEXT
 
     async def _maybe_extract_text_document(self, cached_path: str, media_type: str) -> str:
-        if not cached_path or not media_type.startswith("text/"):
+        if not cached_path:
             return ""
         try:
             if os.path.getsize(cached_path) > _MAX_TEXT_INJECT_BYTES:
                 return ""
             ext = Path(cached_path).suffix.lower()
-            if ext not in {".txt", ".md"} and media_type not in {"text/plain", "text/markdown"}:
+            if (
+                ext not in {".txt", ".md"}
+                and not media_type.startswith("text/")
+                and media_type not in {"text/plain", "text/markdown"}
+            ):
                 return ""
             content = Path(cached_path).read_text(encoding="utf-8")
             display_name = self._display_name_from_cached_path(cached_path)
@@ -3778,7 +4700,11 @@ class FeishuAdapter(BasePlatformAdapter):
             else:
                 id_type = "user_id"
             request = GetUserRequest.builder().user_id(trimmed).user_id_type(id_type).build()
-            response = await asyncio.to_thread(self._client.contact.v3.user.get, request)
+            response = await self._run_optional_oapi_lookup(
+                "contact.user.get",
+                self._client.contact.v3.user.get,
+                request,
+            )
             if not response or not response.success():
                 return None
             user = getattr(getattr(response, "data", None), "user", None)
@@ -4403,6 +5329,51 @@ class FeishuAdapter(BasePlatformAdapter):
             .log_level(lark.LogLevel.WARNING)
             .build()
         )
+
+    def _build_lark_client_for_user(self, domain: Any) -> Optional[Any]:
+        """Build a lark Client pre-loaded with the stored user access token (UAT).
+
+        The returned client's ``sdk`` attribute is the same TAT-capable
+        ``lark.Client`` as ``_build_lark_client()``.  The UAT is exposed via
+        the returned ``FeishuClient`` wrapper's ``access_token`` attribute and
+        ``build_user_request_option()`` helper so callers can inject it into
+        SDK requests or raw ``BaseRequest`` calls.
+
+        The TENANT path (``self._client``) is **not touched** by this method.
+        Only call this when you need to make a UAT-authenticated API call.
+
+        Returns:
+            ``tools.feishu_oapi_client.FeishuClient`` with UAT set, or None if
+            the UAT file is missing / expired (caller should surface
+            NeedAuthorizationError to the user).
+
+        Raises:
+            tools.feishu_oapi_client.NeedAuthorizationError: If the token file
+                is absent or the access_token is expiring within 60 seconds.
+        """
+        try:
+            from tools.feishu_oapi_client import FeishuClient, NeedAuthorizationError  # noqa: F401
+        except ImportError:
+            logger.warning(
+                "[Feishu] tools.feishu_oapi_client not available; "
+                "_build_lark_client_for_user returning None"
+            )
+            return None
+
+        # for_user() reads ~/.hermes/feishu_uat.json and raises
+        # NeedAuthorizationError if the token is missing/expired.
+        # We let the exception propagate to the caller.
+        client = FeishuClient.for_user()
+
+        # Attach the same underlying lark SDK domain so the client uses the
+        # correct endpoint (feishu vs lark international).
+        client.domain = self._domain_name
+        client.sdk = self._build_lark_client(domain)
+
+        logger.debug(
+            "[Feishu] Built UAT lark client for user %s", client.user_open_id
+        )
+        return client
 
     async def _feishu_send_with_retry(
         self,

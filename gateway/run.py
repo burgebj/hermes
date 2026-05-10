@@ -13851,10 +13851,56 @@ class GatewayRunner:
         # several tools exceed the threshold.
         long_tool_hint_fired = [False]
         _LONG_TOOL_THRESHOLD_S = 30.0
+        feishu_card_streaming_enabled = [False]
+
+        def _emit_feishu_card_progress(
+            event_type: str,
+            tool_name: str = None,
+            preview: str = None,
+            args: dict = None,
+            **kwargs,
+        ) -> bool:
+            """Route Feishu reasoning/tool progress into the active card."""
+            if not feishu_card_streaming_enabled[0]:
+                return False
+            consumer = stream_consumer_holder[0] if stream_consumer_holder else None
+            if consumer is None:
+                return False
+
+            coro = None
+            if event_type == "reasoning.available" and preview:
+                updater = getattr(consumer, "update_streaming_card_reasoning", None)
+                if callable(updater):
+                    coro = updater(str(preview))
+            elif event_type == "tool.started" and tool_name:
+                updater = getattr(consumer, "update_streaming_card_tool_started", None)
+                if callable(updater):
+                    coro = updater(str(tool_name), preview=preview, args=args)
+            elif event_type == "tool.completed" and tool_name:
+                updater = getattr(consumer, "update_streaming_card_tool_completed", None)
+                if callable(updater):
+                    coro = updater(
+                        str(tool_name),
+                        duration=kwargs.get("duration"),
+                        is_error=bool(kwargs.get("is_error")),
+                    )
+
+            if coro is None:
+                return False
+            try:
+                future = asyncio.run_coroutine_threadsafe(coro, _loop_for_step)
+                return bool(future.result(timeout=5.0))
+            except Exception as exc:
+                logger.debug("Feishu streaming-card progress update failed: %s", exc)
+                return False
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
-            if not progress_queue or not _run_still_current():
+            if not _run_still_current():
+                return
+            if _emit_feishu_card_progress(event_type, tool_name, preview, args, **kwargs):
+                return
+            if not progress_queue:
                 return
 
             # First-touch onboarding: the first time a tool takes longer than
@@ -14329,6 +14375,7 @@ class GatewayRunner:
             # Set up stream consumer for token streaming or interim commentary.
             _stream_consumer = None
             _stream_delta_cb = None
+            _stream_delta_seen = [False]
             _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
             if _scfg is None:
                 from gateway.config import StreamingConfig
@@ -14341,18 +14388,33 @@ class GatewayRunner:
                 user_config, platform_key, "streaming"
             )
             # None = no per-platform override → follow global config
+            _adapter_for_stream = self.adapters.get(source.platform)
+            _force_streaming_card = False
+            if source.platform == Platform.FEISHU and _adapter_for_stream is not None:
+                _supports_streaming_card = getattr(_adapter_for_stream, "supports_streaming_card", None)
+                try:
+                    _force_streaming_card = (
+                        _plat_streaming is not False
+                        and callable(_supports_streaming_card)
+                        and bool(_supports_streaming_card())
+                    )
+                except Exception as _card_cap_err:
+                    logger.debug("Could not check Feishu streaming card capability: %s", _card_cap_err)
+            feishu_card_streaming_enabled[0] = _force_streaming_card
             _streaming_enabled = (
                 _scfg.enabled and _scfg.transport != "off"
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
+            if _force_streaming_card:
+                _streaming_enabled = True
             _want_stream_deltas = _streaming_enabled
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
                 try:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                    _adapter = self.adapters.get(source.platform)
+                    _adapter = _adapter_for_stream
                     if _adapter:
                         # Platforms that don't support editing sent messages
                         # (e.g. QQ, WeChat) should skip streaming entirely —
@@ -14400,6 +14462,8 @@ class GatewayRunner:
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
                                 if _run_still_current():
+                                    if text:
+                                        _stream_delta_seen[0] = True
                                     _stream_consumer.on_delta(text)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
@@ -14834,10 +14898,6 @@ class GatewayRunner:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
-
-            # Signal the stream consumer that the agent is done
-            if _stream_consumer is not None:
-                _stream_consumer.finish()
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
@@ -14856,6 +14916,8 @@ class GatewayRunner:
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
             if not final_response:
+                if _stream_consumer is not None:
+                    _stream_consumer.finish()
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
                 return {
                     "final_response": error_msg,
@@ -14976,6 +15038,18 @@ class GatewayRunner:
                     )
                 except Exception:
                     pass
+
+            # Feishu card streaming is platform-native and should be the
+            # default Feishu delivery surface even when the provider did not
+            # emit token deltas.  In that no-delta case, hand the completed
+            # answer to the stream consumer so it can create/finalize the card
+            # instead of letting the normal send() path post a plain text
+            # bubble.  When deltas did arrive, finish() alone performs the
+            # final cursor-free update.
+            if _stream_consumer is not None:
+                if _want_stream_deltas and final_response and not _stream_delta_seen[0]:
+                    _stream_consumer.on_delta(final_response)
+                _stream_consumer.finish()
 
             return {
                 "final_response": final_response,

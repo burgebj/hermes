@@ -4540,14 +4540,53 @@ def reload_env() -> int:
 
 
 def get_env_value(key: str) -> Optional[str]:
-    """Get a value from ~/.hermes/.env or environment."""
+    """Get a value from ~/.hermes/.env, environment, or platforms.feishu.extra (yaml).
+
+    The platforms.feishu.extra fallback only applies to FEISHU_APP_ID /
+    FEISHU_APP_SECRET / FEISHU_DOMAIN, mirroring the env→yaml lookup that
+    gateway/platforms/feishu.py performs at adapter init. This lets CLI
+    commands and UAT tools reuse credentials already configured in
+    config.yaml without requiring users to duplicate them in .env.
+    """
     # Check environment first
     if key in os.environ:
         return os.environ[key]
-    
+
     # Then check .env file
     env_vars = load_env()
-    return env_vars.get(key)
+    if key in env_vars:
+        return env_vars[key]
+
+    # Last-resort: platforms.feishu.extra in ~/.hermes/config.yaml
+    return _get_feishu_yaml_fallback(key)
+
+
+_FEISHU_YAML_KEY_MAP = {
+    "FEISHU_APP_ID": "app_id",
+    "FEISHU_APP_SECRET": "app_secret",
+    "FEISHU_DOMAIN": "domain",
+}
+
+
+def _get_feishu_yaml_fallback(key: str) -> Optional[str]:
+    """Resolve FEISHU_* env keys against platforms.feishu.extra in config.yaml."""
+    yaml_key = _FEISHU_YAML_KEY_MAP.get(key)
+    if yaml_key is None:
+        return None
+    config_path = get_config_path()
+    if not config_path.exists():
+        return None
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception:
+        return None
+    extra = ((cfg.get("platforms") or {}).get("feishu") or {}).get("extra") or {}
+    value = extra.get(yaml_key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 # =============================================================================

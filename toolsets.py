@@ -286,6 +286,115 @@ TOOLSETS = {
         "includes": []
     },
 
+    # PR-added UAT toolsets — read sender open_id from contextvar →
+    # ~/.hermes/feishu_uat/<open_id>.json → real user_access_token.
+    "feishu_calendar": {
+        "description": "Feishu/Lark calendar operations (list/get/create events, freebusy, attendees, calendar metadata)",
+        "tools": [
+            "feishu_calendar_list_events", "feishu_calendar_get_event",
+            "feishu_calendar_create_event", "feishu_calendar_freebusy",
+            "feishu_calendar_event_attendee_create",
+            "feishu_calendar_event_attendee_list",
+            "feishu_calendar_event_attendee_delete",
+            "feishu_calendar_list_calendars",
+        ],
+        "includes": []
+    },
+
+    "feishu_docx": {
+        "description": "Feishu/Lark new-API docx documents (create/update/get blocks)",
+        "tools": [
+            "feishu_docx_create", "feishu_docx_update", "feishu_docx_get_blocks",
+        ],
+        "includes": []
+    },
+
+    "feishu_drive_file": {
+        "description": "Feishu/Lark drive file operations (list/upload/download) + doc-media attachments (upload/download)",
+        "tools": [
+            "feishu_drive_list_files", "feishu_drive_upload_file", "feishu_drive_download_file",
+            "feishu_doc_media_upload", "feishu_doc_media_download",
+        ],
+        "includes": []
+    },
+
+    "feishu_sheets": {
+        "description": "Feishu/Lark spreadsheet read/write/append operations",
+        "tools": [
+            "feishu_sheets_read_range", "feishu_sheets_write_range",
+            "feishu_sheets_append_rows",
+        ],
+        "includes": []
+    },
+
+    "feishu_wiki": {
+        "description": "Feishu/Lark wiki search, node read, node create/move, space listing",
+        "tools": [
+            "feishu_wiki_search", "feishu_wiki_get_node",
+            "feishu_wiki_create_node", "feishu_wiki_move_node", "feishu_wiki_list_spaces",
+        ],
+        "includes": []
+    },
+
+    "feishu_task": {
+        "description": "Feishu/Lark task list/get/create/update/comment + tasklist/section/subtask hierarchy",
+        "tools": [
+            "feishu_task_list", "feishu_task_get", "feishu_task_create",
+            "feishu_task_update", "feishu_task_add_comment",
+            "feishu_task_list_tasklists", "feishu_task_create_tasklist",
+            "feishu_task_list_sections", "feishu_task_create_subtask",
+        ],
+        "includes": []
+    },
+
+    "feishu_chat": {
+        "description": "Feishu/Lark chat group info, member listing, and group management (create/add_members/remove_members)",
+        "tools": [
+            "feishu_chat_get_info", "feishu_chat_list_members",
+            "feishu_chat_create", "feishu_chat_add_members", "feishu_chat_remove_members",
+        ],
+        "includes": []
+    },
+
+    "feishu_im_user": {
+        "description": "Feishu/Lark IM send/reply as user (UAT) + history (chat/thread messages, fetch_resource)",
+        "tools": [
+            "feishu_im_send_message_as_user", "feishu_im_reply_message_as_user",
+            "feishu_im_get_messages", "feishu_im_get_thread_messages", "feishu_im_fetch_resource",
+        ],
+        "includes": []
+    },
+
+    "feishu_search": {
+        "description": "Feishu/Lark search (messages and global)",
+        "tools": ["feishu_search_message", "feishu_search_global"],
+        "includes": []
+    },
+
+    "feishu_user_info": {
+        "description": "Feishu/Lark current user's profile info (UAT) + user lookup (search/get by id)",
+        "tools": [
+            "feishu_get_my_user_info",
+            "feishu_search_user", "feishu_get_user",
+        ],
+        "includes": []
+    },
+
+    "feishu_bitable": {
+        "description": "Feishu/Lark bitable (multi-dim table) — records (list/search/create/update/delete) + fields (list/create/update/delete) + views (list/create/delete)",
+        "tools": [
+            "feishu_bitable_list_apps", "feishu_bitable_list_tables",
+            "feishu_bitable_list_records", "feishu_bitable_search_records",
+            "feishu_bitable_create_record", "feishu_bitable_update_record",
+            "feishu_bitable_delete_record", "feishu_bitable_list_fields",
+            "feishu_bitable_create_field", "feishu_bitable_update_field",
+            "feishu_bitable_delete_field",
+            "feishu_bitable_list_views", "feishu_bitable_create_view",
+            "feishu_bitable_delete_view",
+        ],
+        "includes": []
+    },
+
     "spotify": {
         "description": "Native Spotify playback, search, playlist, album, and library tools",
         "tools": [
@@ -458,11 +567,80 @@ TOOLSETS = {
     "hermes-feishu": {
         "description": "Feishu/Lark bot toolset - enterprise messaging via Feishu/Lark (full access)",
         "tools": _HERMES_CORE_TOOLS + [
+            # Pre-PR Feishu tools (TAT only)
             "feishu_doc_read",
             "feishu_drive_list_comments",
             "feishu_drive_list_comment_replies",
             "feishu_drive_reply_comment",
             "feishu_drive_add_comment",
+            # PR-added UAT tools (read sender open_id from contextvar →
+            # ~/.hermes/feishu_uat/<open_id>.json → real user_access_token).
+            "feishu_calendar_list_events",
+            "feishu_calendar_get_event",
+            "feishu_calendar_create_event",
+            "feishu_calendar_freebusy",
+            "feishu_sheets_read_range",
+            "feishu_sheets_write_range",
+            "feishu_sheets_append_rows",
+            "feishu_wiki_search",
+            "feishu_wiki_get_node",
+            "feishu_task_list",
+            "feishu_task_get",
+            "feishu_task_create",
+            "feishu_task_update",
+            "feishu_task_add_comment",
+            "feishu_chat_get_info",
+            "feishu_chat_list_members",
+            "feishu_im_send_message_as_user",
+            "feishu_im_reply_message_as_user",
+            "feishu_search_message",
+            "feishu_search_global",
+            "feishu_get_my_user_info",
+            "feishu_bitable_list_apps",
+            "feishu_bitable_list_tables",
+            "feishu_bitable_list_records",
+            "feishu_bitable_search_records",
+            "feishu_bitable_create_record",
+            "feishu_bitable_update_record",
+            # PR §4 backlog implementation (2026-05-03 ralph): docx + calendar
+            # attendee + drive_file + user lookup + wiki node mgmt + im history +
+            # task hierarchy + bitable schema + chat group management.
+            "feishu_docx_create",
+            "feishu_docx_update",
+            "feishu_docx_get_blocks",
+            "feishu_calendar_event_attendee_create",
+            "feishu_calendar_event_attendee_list",
+            "feishu_calendar_event_attendee_delete",
+            "feishu_calendar_list_calendars",
+            "feishu_drive_list_files",
+            "feishu_drive_upload_file",
+            "feishu_drive_download_file",
+            "feishu_search_user",
+            "feishu_get_user",
+            "feishu_wiki_create_node",
+            "feishu_wiki_move_node",
+            "feishu_wiki_list_spaces",
+            "feishu_im_get_messages",
+            "feishu_im_get_thread_messages",
+            "feishu_im_fetch_resource",
+            "feishu_task_list_tasklists",
+            "feishu_task_create_tasklist",
+            "feishu_task_list_sections",
+            "feishu_task_create_subtask",
+            "feishu_bitable_delete_record",
+            "feishu_bitable_list_fields",
+            "feishu_chat_create",
+            "feishu_chat_add_members",
+            "feishu_chat_remove_members",
+            # Second-batch补丁 (bitable view+field full CRUD + doc media):
+            "feishu_bitable_create_field",
+            "feishu_bitable_update_field",
+            "feishu_bitable_delete_field",
+            "feishu_bitable_list_views",
+            "feishu_bitable_create_view",
+            "feishu_bitable_delete_view",
+            "feishu_doc_media_upload",
+            "feishu_doc_media_download",
         ],
         "includes": []
     },
