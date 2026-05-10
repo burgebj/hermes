@@ -10,6 +10,7 @@ Uses slack-bolt (Python) with Socket Mode for:
 
 import asyncio
 import contextvars
+import inspect
 import json
 import logging
 import os
@@ -623,9 +624,21 @@ class SlackAdapter(BasePlatformAdapter):
             # manifest's request URL, but it will not deliver an event for
             # a slash command the manifest doesn't declare.
             from hermes_cli.commands import slack_native_slashes
+            from hermes_cli.plugins import (
+                get_slack_extension_action_handlers,
+                get_slack_extension_slash_commands,
+                get_slack_extension_view_handlers,
+            )
             import re as _re
 
-            _slash_names = [name for name, _d, _h in slack_native_slashes()]
+            _slack_extension_slashes = get_slack_extension_slash_commands()
+            _slack_extension_slash_names = {
+                command.name for command in _slack_extension_slashes
+            }
+            _slash_names = [
+                name for name, _d, _h in slack_native_slashes()
+                if name not in _slack_extension_slash_names
+            ]
             if _slash_names:
                 _slash_pattern = _re.compile(
                     r"^/(?:" + "|".join(_re.escape(n) for n in _slash_names) + r")$"
@@ -642,7 +655,38 @@ class SlackAdapter(BasePlatformAdapter):
                 )
                 await self._handle_slash_command(command)
 
+            for _extension_command in _slack_extension_slashes:
+                async def handle_slack_extension_command(
+                    ack,
+                    command,
+                    _extension_command=_extension_command,
+                ):
+                    if _extension_command.ack_text is not None:
+                        await ack(
+                            response_type="ephemeral",
+                            text=_extension_command.ack_text,
+                        )
+                    await self._invoke_slack_extension_handler(
+                        _extension_command.handler,
+                        adapter=self,
+                        ack=ack,
+                        command=command,
+                    )
+
+                self._app.command(f"/{_extension_command.name}")(
+                    handle_slack_extension_command
+                )
+
             # Register Block Kit action handlers for approval buttons
+            _reserved_action_ids = {
+                "hermes_approve_once",
+                "hermes_approve_session",
+                "hermes_approve_always",
+                "hermes_deny",
+                "hermes_confirm_once",
+                "hermes_confirm_always",
+                "hermes_confirm_cancel",
+            }
             for _action_id in (
                 "hermes_approve_once",
                 "hermes_approve_session",
@@ -659,6 +703,57 @@ class SlackAdapter(BasePlatformAdapter):
                 "hermes_confirm_cancel",
             ):
                 self._app.action(_action_id)(self._handle_slash_confirm_action)
+
+            for _extension_action in get_slack_extension_action_handlers():
+                _extension_action_key = getattr(
+                    _extension_action.action_id,
+                    "pattern",
+                    _extension_action.action_id,
+                )
+                if _extension_action_key in _reserved_action_ids:
+                    logger.warning(
+                        "[Slack] Skipping plugin action handler '%s' because it "
+                        "conflicts with a built-in Slack action.",
+                        _extension_action_key,
+                    )
+                    continue
+
+                async def handle_slack_extension_action(
+                    ack,
+                    body,
+                    action,
+                    _extension_action=_extension_action,
+                ):
+                    await self._invoke_slack_extension_handler(
+                        _extension_action.handler,
+                        adapter=self,
+                        ack=ack,
+                        body=body,
+                        action=action,
+                    )
+
+                self._app.action(_extension_action.action_id)(
+                    handle_slack_extension_action
+                )
+
+            for _extension_view in get_slack_extension_view_handlers():
+                async def handle_slack_extension_view(
+                    ack,
+                    body,
+                    view,
+                    _extension_view=_extension_view,
+                ):
+                    await self._invoke_slack_extension_handler(
+                        _extension_view.handler,
+                        adapter=self,
+                        ack=ack,
+                        body=body,
+                        view=view,
+                    )
+
+                self._app.view(_extension_view.callback_id)(
+                    handle_slack_extension_view
+                )
 
             # Start Socket Mode handler in background
             self._handler = AsyncSocketModeHandler(self._app, app_token, proxy=proxy_url)
@@ -678,6 +773,29 @@ class SlackAdapter(BasePlatformAdapter):
         finally:
             if lock_acquired and not self._running:
                 self._release_platform_lock()
+
+    async def _invoke_slack_extension_handler(self, handler, **kwargs):
+        """Invoke a plugin-provided Slack handler with compatible kwargs."""
+        call_kwargs = kwargs
+        try:
+            sig = inspect.signature(handler)
+            accepts_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in sig.parameters.values()
+            )
+            if not accepts_kwargs:
+                call_kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in sig.parameters
+                }
+        except (TypeError, ValueError):
+            pass
+
+        result = handler(**call_kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     async def disconnect(self) -> None:
         """Disconnect from Slack."""

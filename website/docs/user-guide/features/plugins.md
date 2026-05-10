@@ -100,6 +100,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Add tools | `ctx.register_tool(name=..., toolset=..., schema=..., handler=...)` |
 | Add hooks | `ctx.register_hook("post_tool_call", callback)` |
 | Add slash commands | `ctx.register_command(name, handler, description)` — adds `/name` in CLI and gateway sessions |
+| Add Slack-native UI hooks | `ctx.register_slack_extension(...)` — registers Slack slash commands, Block Kit actions, and modal submissions for Slack-only interactive flows |
 | Dispatch tools from commands | `ctx.dispatch_tool(name, args)` — invokes a registered tool with parent-agent context auto-wired |
 | Add CLI commands | `ctx.register_cli_command(name, help, setup_fn, handler_fn)` — adds `hermes <plugin> <subcommand>` |
 | Inject messages | `ctx.inject_message(content, role="user")` — see [Injecting Messages](#injecting-messages) |
@@ -223,6 +224,7 @@ The table above shows the four plugin categories, but within "General plugins" t
 | A **tool** the LLM can call | Python plugin — `ctx.register_tool()` | [Build a Hermes Plugin](/docs/guides/build-a-hermes-plugin) · [Adding Tools](/docs/developer-guide/adding-tools) |
 | A **lifecycle hook** (pre/post LLM, session start/end, tool filter) | Python plugin — `ctx.register_hook()` | [Hooks reference](/docs/user-guide/features/hooks) · [Build a Hermes Plugin](/docs/guides/build-a-hermes-plugin) |
 | A **slash command** for the CLI / gateway | Python plugin — `ctx.register_command()` | [Build a Hermes Plugin](/docs/guides/build-a-hermes-plugin) · [Extending the CLI](/docs/developer-guide/extending-the-cli) |
+| A **Slack Block Kit UI** | Python plugin — `ctx.register_slack_extension()` | [Build a Hermes Plugin](/docs/guides/build-a-hermes-plugin#register-slack-native-ui-hooks) |
 | A **subcommand** for `hermes <thing>` | Python plugin — `ctx.register_cli_command()` | [Extending the CLI](/docs/developer-guide/extending-the-cli) |
 | A bundled **skill** that your plugin ships | Python plugin — `ctx.register_skill()` | [Creating Skills](/docs/developer-guide/creating-skills) |
 | An **inference backend** (LLM provider: OpenAI-compat, Codex, Anthropic-Messages, Bedrock) | Provider plugin — `register_provider(ProviderProfile(...))` in `plugins/model-providers/<name>/` | **[Model Provider Plugins](/docs/developer-guide/model-provider-plugin)** · [Adding Providers](/docs/developer-guide/adding-providers) |

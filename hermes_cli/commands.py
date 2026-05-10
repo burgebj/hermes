@@ -995,7 +995,18 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             continue
         _add(cmd.name, cmd.description, cmd.args_hint or "")
 
-    # Second pass: aliases.
+    # Second pass: Slack-native extension commands. These need their own
+    # manifest entries and have priority over aliases because Slack's manifest
+    # is capped at 50 slash commands.
+    try:
+        from hermes_cli.plugins import get_slack_extension_slash_commands
+
+        for command in get_slack_extension_slash_commands():
+            _add(command.name, command.description or f"Run /{command.name}", command.usage_hint or "")
+    except Exception:
+        pass
+
+    # Third pass: aliases.
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
@@ -1004,7 +1015,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             # normalization (already covered by _add dedup).
             _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
 
-    # Third pass: plugin commands.
+    # Fourth pass: cross-platform plugin commands.
     for name, description, args_hint in _iter_plugin_command_entries():
         _add(name, description, args_hint or "")
 

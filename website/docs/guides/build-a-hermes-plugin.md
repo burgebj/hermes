@@ -265,6 +265,7 @@ def register(ctx):
 - `ctx.register_hook()` subscribes to lifecycle events
 - `ctx.register_cli_command()` registers a CLI subcommand (e.g. `hermes my-plugin <subcommand>`)
 - `ctx.register_command()` registers an in-session slash command (e.g. `/myplugin <args>` inside CLI / gateway chat) — see [Register slash commands](#register-slash-commands) below
+- `ctx.register_slack_extension()` registers Slack-native Block Kit slash/action/view handlers for Slack-only interactive UI — see [Register Slack-native UI hooks](#register-slack-native-ui-hooks) below
 - `ctx.dispatch_tool(name, arguments)` — call any other tool (built-in or from another plugin) with the parent agent's context (approvals, credentials, task_id) wired up automatically. Useful from slash-command handlers that need to invoke `terminal`, `read_file`, or any other tool as if the model had called it directly.
 - If this function crashes, the plugin is disabled but Hermes continues fine
 
@@ -679,6 +680,65 @@ async def _handle_check(raw_args: str) -> str:
 def register(ctx):
     ctx.register_command("check", handler=_handle_check, description="Run async check")
 ```
+
+### Register Slack-native UI hooks
+
+Use `ctx.register_slack_extension()` when a plugin needs Slack-only Block Kit interactivity instead of a cross-platform text command. This is the right surface for workflows that need:
+
+- immediate native slash-command ACKs;
+- `chat.postMessage` or `chat.update` with custom blocks;
+- Block Kit button/select actions;
+- modal `view_submission` handlers.
+
+Text-only commands should still use `ctx.register_command()` so they work in CLI and every gateway. Slack extensions are intentionally Slack-specific.
+
+```python
+from hermes_cli.plugins import (
+    SlackActionHandler,
+    SlackSlashCommand,
+    SlackViewHandler,
+)
+
+
+async def open_workflow(adapter, command):
+    channel_id = command["channel_id"]
+    await adapter._get_client(channel_id).chat_postMessage(
+        channel=channel_id,
+        text="Interactive workflow opened.",
+    )
+
+
+async def handle_workflow_action(ack, body, action, adapter):
+    await ack()
+    # Update a task, open a modal, or repaint a message.
+
+
+async def handle_workflow_view(ack, body, view, adapter):
+    await ack()
+    # Read modal state and persist changes.
+
+
+def register(ctx):
+    ctx.register_slack_extension(
+        slash_commands=[
+            SlackSlashCommand(
+                name="workflow",
+                description="Open an interactive Slack workflow",
+                usage_hint="[filters]",
+                ack_text="Opening workflow...",
+                handler=open_workflow,
+            ),
+        ],
+        actions=[
+            SlackActionHandler("my_plugin_workflow_action", handle_workflow_action),
+        ],
+        views=[
+            SlackViewHandler("my_plugin_workflow_view", handle_workflow_view),
+        ],
+    )
+```
+
+Slack extension slash commands are included in `hermes slack manifest --write`. After adding or removing one, regenerate the manifest and reinstall the Slack app so Slack delivers the command over Socket Mode.
 
 ### Dispatch tools from slash commands
 

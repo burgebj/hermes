@@ -40,12 +40,13 @@ import importlib.util
 import inspect
 import logging
 import os
+import re
 import sys
 import threading
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Pattern, Sequence, Set, Union
 
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled
@@ -276,8 +277,56 @@ class LoadedPlugin:
     tools_registered: List[str] = field(default_factory=list)
     hooks_registered: List[str] = field(default_factory=list)
     commands_registered: List[str] = field(default_factory=list)
+    slack_extensions_registered: int = 0
     enabled: bool = False
     error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SlackSlashCommand:
+    """Native Slack slash command contributed by a plugin.
+
+    This is for Slack-native UI flows that need direct Socket Mode handling,
+    immediate ACKs, and access to Slack Block Kit APIs. Text-only plugin
+    commands should continue to use :meth:`PluginContext.register_command`.
+    """
+
+    name: str
+    handler: Callable
+    description: str = ""
+    usage_hint: str = ""
+    ack_text: str | None = "Working..."
+
+
+@dataclass(frozen=True)
+class SlackActionHandler:
+    """Slack Block Kit action handler contributed by a plugin."""
+
+    action_id: str | Pattern[str]
+    handler: Callable
+
+
+@dataclass(frozen=True)
+class SlackViewHandler:
+    """Slack modal view submission handler contributed by a plugin."""
+
+    callback_id: str
+    handler: Callable
+
+
+_SLACK_COMMAND_NAME_RE = re.compile(r"[^a-z0-9_-]")
+_SLACK_COMMAND_NAME_LIMIT = 32
+
+
+def _normalize_slack_command_name(raw: str) -> str:
+    """Return a Slack-compatible command name without the leading slash."""
+    name = (raw or "").lower().strip().lstrip("/").replace(" ", "-")
+    name = _SLACK_COMMAND_NAME_RE.sub("", name)
+    return name.strip("-_")[:_SLACK_COMMAND_NAME_LIMIT]
+
+
+def _slack_handler_key(value: str | Pattern[str]) -> str:
+    return getattr(value, "pattern", value)
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +500,118 @@ class PluginContext:
             "args_hint": (args_hint or "").strip(),
         }
         logger.debug("Plugin %s registered command: /%s", self.manifest.name, clean)
+
+    # -- Slack native UI extension registration ------------------------------
+
+    def register_slack_extension(
+        self,
+        *,
+        slash_commands: Sequence[SlackSlashCommand] = (),
+        actions: Sequence[SlackActionHandler] = (),
+        views: Sequence[SlackViewHandler] = (),
+    ) -> None:
+        """Register Slack-native UI handlers for this plugin.
+
+        Use this only for Slack Block Kit flows that need direct Bolt
+        registrations (native command ACKs, ``app.action`` handlers, or modal
+        ``app.view`` handlers). Plain text slash commands should use
+        :meth:`register_command` so they work across all gateway platforms.
+        """
+        registered = 0
+
+        for command in slash_commands:
+            name = _normalize_slack_command_name(command.name)
+            if not name:
+                logger.warning(
+                    "Plugin '%s' tried to register an empty Slack slash command.",
+                    self.manifest.name,
+                )
+                continue
+            try:
+                from hermes_cli.commands import resolve_command
+                if resolve_command(name) is not None:
+                    logger.warning(
+                        "Plugin '%s' tried to register Slack command '/%s' "
+                        "which conflicts with a built-in command. Skipping.",
+                        self.manifest.name,
+                        name,
+                    )
+                    continue
+            except Exception:
+                pass
+            if name in self._manager._slack_slash_commands:
+                existing = self._manager._slack_slash_commands[name]
+                logger.warning(
+                    "Plugin '%s' tried to register duplicate Slack command '/%s' "
+                    "(already registered by '%s'). Skipping.",
+                    self.manifest.name,
+                    name,
+                    existing["plugin"],
+                )
+                continue
+            self._manager._slack_slash_commands[name] = {
+                "plugin": self.manifest.name,
+                "command": SlackSlashCommand(
+                    name=name,
+                    handler=command.handler,
+                    description=command.description,
+                    usage_hint=command.usage_hint,
+                    ack_text=command.ack_text,
+                ),
+            }
+            registered += 1
+
+        for action in actions:
+            key = _slack_handler_key(action.action_id)
+            if not key:
+                logger.warning(
+                    "Plugin '%s' tried to register an empty Slack action handler.",
+                    self.manifest.name,
+                )
+                continue
+            if key in self._manager._slack_action_keys:
+                logger.warning(
+                    "Plugin '%s' tried to register duplicate Slack action '%s'. Skipping.",
+                    self.manifest.name,
+                    key,
+                )
+                continue
+            self._manager._slack_action_keys.add(key)
+            self._manager._slack_action_handlers.append(
+                {"plugin": self.manifest.name, "handler": action}
+            )
+            registered += 1
+
+        for view in views:
+            callback_id = (view.callback_id or "").strip()
+            if not callback_id:
+                logger.warning(
+                    "Plugin '%s' tried to register an empty Slack view handler.",
+                    self.manifest.name,
+                )
+                continue
+            if callback_id in self._manager._slack_view_handlers:
+                existing = self._manager._slack_view_handlers[callback_id]
+                logger.warning(
+                    "Plugin '%s' tried to register duplicate Slack view '%s' "
+                    "(already registered by '%s'). Skipping.",
+                    self.manifest.name,
+                    callback_id,
+                    existing["plugin"],
+                )
+                continue
+            self._manager._slack_view_handlers[callback_id] = {
+                "plugin": self.manifest.name,
+                "handler": view,
+            }
+            registered += 1
+
+        if registered:
+            logger.debug(
+                "Plugin %s registered %d Slack extension handler(s)",
+                self.manifest.name,
+                registered,
+            )
 
     # -- tool dispatch -------------------------------------------------------
 
@@ -680,6 +841,10 @@ class PluginManager:
         self._cli_commands: Dict[str, dict] = {}
         self._context_engine = None  # Set by a plugin via register_context_engine()
         self._plugin_commands: Dict[str, dict] = {}  # Slash commands registered by plugins
+        self._slack_slash_commands: Dict[str, dict] = {}
+        self._slack_action_handlers: List[dict] = []
+        self._slack_action_keys: Set[str] = set()
+        self._slack_view_handlers: Dict[str, dict] = {}
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
         # Plugin skill registry: qualified name → metadata dict.
@@ -704,6 +869,10 @@ class PluginManager:
             self._plugin_tool_names.clear()
             self._cli_commands.clear()
             self._plugin_commands.clear()
+            self._slack_slash_commands.clear()
+            self._slack_action_handlers.clear()
+            self._slack_action_keys.clear()
+            self._slack_view_handlers.clear()
             self._plugin_skills.clear()
             self._context_engine = None
         self._discovered = True
@@ -1114,6 +1283,20 @@ class PluginManager:
                     c for c in self._plugin_commands
                     if self._plugin_commands[c].get("plugin") == manifest.name
                 ]
+                loaded.slack_extensions_registered = (
+                    sum(
+                        1 for entry in self._slack_slash_commands.values()
+                        if entry.get("plugin") == manifest.name
+                    )
+                    + sum(
+                        1 for entry in self._slack_action_handlers
+                        if entry.get("plugin") == manifest.name
+                    )
+                    + sum(
+                        1 for entry in self._slack_view_handlers.values()
+                        if entry.get("plugin") == manifest.name
+                    )
+                )
                 loaded.enabled = True
                 logger.debug(
                     "  registered: %d tool(s), %d hook(s), %d slash command(s), %d CLI command(s)",
@@ -1251,6 +1434,7 @@ class PluginManager:
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
                     "commands": len(loaded.commands_registered),
+                    "slack_extensions": loaded.slack_extensions_registered,
                     "error": loaded.error,
                 }
             )
@@ -1428,6 +1612,30 @@ def get_plugin_commands() -> Dict[str, dict]:
     before any explicit discover_plugins() call.
     """
     return _ensure_plugins_discovered()._plugin_commands
+
+
+def get_slack_extension_slash_commands() -> List[SlackSlashCommand]:
+    """Return plugin-provided native Slack slash commands."""
+    manager = _ensure_plugins_discovered()
+    return [
+        entry["command"]
+        for _name, entry in sorted(manager._slack_slash_commands.items())
+    ]
+
+
+def get_slack_extension_action_handlers() -> List[SlackActionHandler]:
+    """Return plugin-provided Slack Block Kit action handlers."""
+    manager = _ensure_plugins_discovered()
+    return [entry["handler"] for entry in manager._slack_action_handlers]
+
+
+def get_slack_extension_view_handlers() -> List[SlackViewHandler]:
+    """Return plugin-provided Slack modal view handlers."""
+    manager = _ensure_plugins_discovered()
+    return [
+        entry["handler"]
+        for _callback_id, entry in sorted(manager._slack_view_handlers.items())
+    ]
 
 
 def get_plugin_toolsets() -> List[tuple]:
