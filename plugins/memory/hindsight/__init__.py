@@ -1506,10 +1506,19 @@ class HindsightMemoryProvider(MemoryProvider):
                     content,
                     context=context,
                     tags=args.get("tags"),
+                    retain_async=self._retain_async,
                 )
-                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                             self._bank_id, len(content), context)
-                self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
+                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s, async=%s",
+                             self._bank_id, len(content), context, self._retain_async)
+                bank_id = retain_kwargs.pop("bank_id")
+                retain_async = retain_kwargs.pop("retain_async", self._retain_async)
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(
+                        bank_id=bank_id,
+                        items=[retain_kwargs],
+                        retain_async=retain_async,
+                    )
+                )
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
             except Exception as e:

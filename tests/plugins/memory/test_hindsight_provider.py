@@ -56,7 +56,6 @@ def _make_mock_client():
         entities=None,
         tags=None,
         update_mode=None,
-        retain_async=None,
     ):
         return SimpleNamespace(ok=True)
 
@@ -73,7 +72,7 @@ def _make_mock_client():
     client.areflect = AsyncMock(
         return_value=SimpleNamespace(text="Synthesized answer")
     )
-    client.aretain_batch = AsyncMock()
+    client.aretain_batch = AsyncMock(return_value=SimpleNamespace(ok=True))
     client.aclose = AsyncMock()
     return client
 
@@ -444,16 +443,25 @@ class TestToolHandlers:
             "hindsight_retain", {"content": "user likes dark mode"}
         ))
         assert result["result"] == "Memory stored successfully."
-        provider._client.aretain.assert_called_once()
-        call_kwargs = provider._client.aretain.call_args.kwargs
+        provider._client.aretain.assert_not_called()
+        provider._client.aretain_batch.assert_called_once()
+        call_kwargs = provider._client.aretain_batch.call_args.kwargs
         assert call_kwargs["bank_id"] == "test-bank"
-        assert call_kwargs["content"] == "user likes dark mode"
+        assert call_kwargs["items"][0]["content"] == "user likes dark mode"
+        assert call_kwargs["retain_async"] is True
+
+    def test_retain_tool_respects_sync_config(self, provider_with_config):
+        p = provider_with_config(retain_async=False)
+        p.handle_tool_call("hindsight_retain", {"content": "sync retain"})
+        p._client.aretain.assert_not_called()
+        call_kwargs = p._client.aretain_batch.call_args.kwargs
+        assert call_kwargs["retain_async"] is False
 
     def test_retain_with_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
         p.handle_tool_call("hindsight_retain", {"content": "likes dark mode"})
-        call_kwargs = p._client.aretain.call_args.kwargs
-        assert call_kwargs["tags"] == ["pref", "ui"]
+        call_kwargs = p._client.aretain_batch.call_args.kwargs
+        assert call_kwargs["items"][0]["tags"] == ["pref", "ui"]
 
     def test_retain_merges_per_call_tags_with_config_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
@@ -461,13 +469,13 @@ class TestToolHandlers:
             "hindsight_retain",
             {"content": "likes dark mode", "tags": ["client:x", "ui"]},
         )
-        call_kwargs = p._client.aretain.call_args.kwargs
-        assert call_kwargs["tags"] == ["pref", "ui", "client:x"]
+        call_kwargs = p._client.aretain_batch.call_args.kwargs
+        assert call_kwargs["items"][0]["tags"] == ["pref", "ui", "client:x"]
 
     def test_retain_without_tags(self, provider):
         provider.handle_tool_call("hindsight_retain", {"content": "hello"})
-        call_kwargs = provider._client.aretain.call_args.kwargs
-        assert "tags" not in call_kwargs
+        call_kwargs = provider._client.aretain_batch.call_args.kwargs
+        assert "tags" not in call_kwargs["items"][0]
 
     def test_retain_missing_content(self, provider):
         result = json.loads(provider.handle_tool_call(
@@ -533,7 +541,7 @@ class TestToolHandlers:
         assert "error" in result
 
     def test_retain_error_handling(self, provider):
-        provider._client.aretain.side_effect = RuntimeError("connection failed")
+        provider._client.aretain_batch.side_effect = RuntimeError("connection failed")
         result = json.loads(provider.handle_tool_call(
             "hindsight_retain", {"content": "test"}
         ))
