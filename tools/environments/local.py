@@ -245,6 +245,10 @@ def _make_run_env(env: dict) -> dict:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
+    try:
+        from gateway.session_context import get_session_env as _get_session_env
+    except Exception:
+        _get_session_env = None
 
     merged = dict(os.environ | env)
     run_env = {}
@@ -273,6 +277,20 @@ def _make_run_env(env: dict) -> dict:
     _profile_home = get_subprocess_home()
     if _profile_home:
         run_env["HOME"] = _profile_home
+
+    if _get_session_env is not None:
+        for name in (
+            "HERMES_SESSION_PLATFORM",
+            "HERMES_SESSION_CHAT_ID",
+            "HERMES_SESSION_CHAT_NAME",
+            "HERMES_SESSION_THREAD_ID",
+            "HERMES_SESSION_USER_ID",
+            "HERMES_SESSION_USER_NAME",
+            "HERMES_SESSION_KEY",
+        ):
+            value = _get_session_env(name, "")
+            if value:
+                run_env[name] = value
 
     return run_env
 

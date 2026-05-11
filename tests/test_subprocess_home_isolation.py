@@ -116,6 +116,45 @@ class TestMakeRunEnvHomeInjection:
 
         assert result["HOME"] == "/home/user"
 
+    def test_injects_gateway_session_context(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/user")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        for key in (
+            "HERMES_SESSION_PLATFORM",
+            "HERMES_SESSION_CHAT_ID",
+            "HERMES_SESSION_CHAT_NAME",
+            "HERMES_SESSION_THREAD_ID",
+            "HERMES_SESSION_USER_ID",
+            "HERMES_SESSION_USER_NAME",
+            "HERMES_SESSION_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.environments.local import _make_run_env
+
+        tokens = set_session_vars(
+            platform="discord",
+            chat_id="1493236260880519238",
+            chat_name="Home",
+            thread_id="1499608576682102925",
+            user_id="123456789",
+            user_name="cristo",
+            session_key="discord:1493236260880519238:1499608576682102925",
+        )
+        try:
+            result = _make_run_env({})
+        finally:
+            clear_session_vars(tokens)
+
+        assert result["HERMES_SESSION_PLATFORM"] == "discord"
+        assert result["HERMES_SESSION_CHAT_ID"] == "1493236260880519238"
+        assert result["HERMES_SESSION_CHAT_NAME"] == "Home"
+        assert result["HERMES_SESSION_THREAD_ID"] == "1499608576682102925"
+        assert result["HERMES_SESSION_USER_ID"] == "123456789"
+        assert result["HERMES_SESSION_USER_NAME"] == "cristo"
+        assert result["HERMES_SESSION_KEY"] == "discord:1493236260880519238:1499608576682102925"
+
 
 # ---------------------------------------------------------------------------
 # _sanitize_subprocess_env() injection
