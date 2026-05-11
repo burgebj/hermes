@@ -91,7 +91,16 @@ Use HTTP servers when:
 
 ## Basic configuration reference
 
-Hermes reads MCP config from `~/.hermes/config.yaml` under `mcp_servers`.
+Hermes reads MCP config from the active profile's `config.yaml` under `mcp_servers`. For the default profile this is `~/.hermes/config.yaml`; for a named profile it is `~/.hermes/profiles/<name>/config.yaml`.
+
+Profiles do not inherit MCP servers from each other. To maintain common MCP servers once and copy them into selected profiles, put shared definitions in `~/.hermes/shared/mcp_servers.yaml` and sync them:
+
+```bash
+hermes mcp sync --all --dry-run
+hermes mcp sync --profile main --profile therapy --servers prism,qmd,shmem
+```
+
+`hermes mcp sync` only merges the selected `mcp_servers` entries. It preserves other profile settings and skips conflicting same-name entries unless you pass `--force`. After syncing, run `/reload-mcp`, `/reset`, or restart affected gateways.
 
 ### Common keys
 

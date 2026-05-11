@@ -137,6 +137,27 @@ class TestReloadSkillsHelper:
         assert result["added"] == []
         assert result["removed"] == []
 
+    def test_reload_preserves_command_map_object_for_cli_references(self, hermes_home):
+        """The CLI imports a module-level command map at startup.
+
+        Reloading skills must update that existing dict in place so a running
+        CLI process can see newly installed slash skills without restart.
+        """
+        import agent.skill_commands as skill_commands
+
+        command_map = skill_commands.get_skill_commands()
+        assert command_map is skill_commands._skill_commands
+        assert command_map == {}
+
+        _write_skill(hermes_home / "skills", "demo", "newly installed skill")
+        result = skill_commands.reload_skills()
+
+        assert result["added"] == [
+            {"name": "demo", "description": "newly installed skill"}
+        ]
+        assert command_map is skill_commands._skill_commands
+        assert "/demo" in command_map
+
     def test_does_not_invalidate_prompt_cache_snapshot(self, hermes_home):
         """reload_skills must NOT delete the skills prompt-cache snapshot.
 
