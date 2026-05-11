@@ -4086,6 +4086,27 @@ class TestBuildApiKwargsAnthropicMaxTokens:
 
 
 class TestAnthropicImageFallback:
+    def test_build_api_kwargs_provider_profile_applies_non_vision_fallback(self, agent):
+        agent.api_mode = "chat_completions"
+        agent.provider = "openrouter"
+        agent.model = "qwen/qwen3-235b-a22b"
+        agent.reasoning_config = None
+
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+            ],
+        }]
+        transformed = [{"role": "user", "content": "[Image description: a cat] Describe this image"}]
+
+        with patch.object(agent, "_prepare_messages_for_non_vision_model", return_value=transformed) as mock_prepare:
+            kwargs = agent._build_api_kwargs(api_messages)
+
+        mock_prepare.assert_called_once_with(api_messages)
+        assert kwargs["messages"] == transformed
+
     def test_build_api_kwargs_converts_multimodal_user_image_to_text(self, agent):
         agent.api_mode = "anthropic_messages"
         agent.reasoning_config = None

@@ -9356,9 +9356,13 @@ class AIAgent:
             if _ephemeral_out is not None:
                 self._ephemeral_max_output_tokens = None
 
+            # Provider-profile transports still need the shared non-vision
+            # image fallback before chat-completions kwargs are built.
+            _msgs_for_chat = self._prepare_messages_for_non_vision_model(api_messages)
+
             return _ct.build_kwargs(
                 model=self.model,
-                messages=api_messages,
+                messages=_msgs_for_chat,
                 tools=self.tools,
                 base_url=self.base_url,
                 timeout=self._resolved_api_call_timeout(),
