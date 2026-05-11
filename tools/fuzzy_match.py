@@ -504,9 +504,17 @@ def _calculate_line_positions(content_lines: List[str], start_line: int,
         Tuple of (start_pos, end_pos) in the original content
     """
     start_pos = sum(len(line) + 1 for line in content_lines[:start_line])
-    end_pos = sum(len(line) + 1 for line in content_lines[:end_line]) - 1
-    if end_pos >= content_length:
+    # Compute position *after* the last character of the last matched line.
+    # sum(...) gives the start of the line *after* end_line, so subtract 1
+    # to exclude that trailing newline -- but only when we are not already at
+    # the very last line of the file (where there may be no trailing newline).
+    raw_end = sum(len(line) + 1 for line in content_lines[:end_line])
+    if raw_end > content_length:
         end_pos = content_length
+    else:
+        # Back off the newline *between* the last matched line and the next;
+        # don't back off if we're already at EOF.
+        end_pos = raw_end - 1 if raw_end <= content_length else content_length
     return start_pos, end_pos
 
 
