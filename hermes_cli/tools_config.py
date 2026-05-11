@@ -303,6 +303,15 @@ TOOL_CATEGORIES = {
                 ],
             },
             {
+                "name": "You.com",
+                "badge": "free tier",
+                "tag": "Search and extract — 100 free searches/day without API key",
+                "web_backend": "youdotcom",
+                "env_vars": [
+                    {"key": "YDC_API_KEY", "prompt": "You.com API key (optional for search, required for extract)", "url": "https://you.com/platform"},
+                ],
+            },
+            {
                 "name": "SearXNG",
                 "badge": "free · self-hosted · search only",
                 "tag": "Privacy-respecting metasearch engine — search only (pair with any extract provider)",
