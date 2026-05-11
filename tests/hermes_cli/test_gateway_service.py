@@ -554,6 +554,54 @@ class TestLaunchdServiceRecovery:
             ["launchctl", "kickstart", target],
         ]
 
+    def test_launchd_install_exits_cleanly_when_gui_domain_rejects_bootstrap(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+
+        def fake_run(cmd, check=False, **kwargs):
+            raise gateway_cli.subprocess.CalledProcessError(
+                5, cmd, stderr="Input/output error"
+            )
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        with pytest.raises(SystemExit) as excinfo:
+            gateway_cli.launchd_install()
+
+        assert excinfo.value.code == 1
+        output = capsys.readouterr().out
+        assert "nohup hermes gateway run" in output
+        assert "launchd plist was written" in output
+        assert plist_path.exists()
+
+    def test_launchd_start_exits_cleanly_when_gui_domain_rejects_kickstart(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text(gateway_cli.generate_launchd_plist(), encoding="utf-8")
+        label = gateway_cli.get_launchd_label()
+        target = f"{gateway_cli._launchd_domain()}/{label}"
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd == ["launchctl", "kickstart", target]:
+                raise gateway_cli.subprocess.CalledProcessError(
+                    125, cmd, stderr="Domain does not support specified action"
+                )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        with pytest.raises(SystemExit) as excinfo:
+            gateway_cli.launchd_start()
+
+        assert excinfo.value.code == 1
+        output = capsys.readouterr().out
+        assert "Domain does not support specified action" in output
+        assert "hermes gateway run" in output
+
     def test_launchd_restart_drains_running_gateway_before_kickstart(self, monkeypatch):
         calls = []
         target = f"{gateway_cli._launchd_domain()}/{gateway_cli.get_launchd_label()}"
