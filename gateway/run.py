@@ -1068,6 +1068,11 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
+# Providers that can render an Account limits section without a live agent.
+# Used by /usage when the agent cache and persisted billing row cannot identify
+# the provider yet, such as immediately after auth in a fresh Telegram session.
+_USAGE_ACCOUNT_PROVIDERS = ("openai-codex", "anthropic")
+
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
@@ -13476,6 +13481,17 @@ class GatewayRunner:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")
             base_url = base_url or persisted.get("billing_base_url")
+
+        if not provider:
+            try:
+                from hermes_cli.auth import read_credential_pool
+
+                for candidate in _USAGE_ACCOUNT_PROVIDERS:
+                    if read_credential_pool(candidate):
+                        provider = candidate
+                        break
+            except Exception:
+                pass
 
         # Fetch account usage off the event loop so slow provider APIs don't
         # block the gateway. Failures are non-fatal -- account_lines stays [].
