@@ -1015,6 +1015,23 @@ def _hermes_ink_bundle_stale(tui_dir: Path) -> bool:
     return False
 
 
+def _refresh_local_hermes_ink_dependency(npm: str, tui_dir: Path) -> Optional[subprocess.CompletedProcess]:
+    """Re-copy the local file: dependency after rebuilding packages/hermes-ink."""
+    ink_root = tui_dir / "packages" / "hermes-ink" / "package.json"
+    installed_ink = tui_dir / "node_modules" / "@hermes" / "ink"
+    if not ink_root.exists() or not installed_ink.exists():
+        return None
+    shutil.rmtree(installed_ink, ignore_errors=True)
+    return subprocess.run(
+        [npm, "install", "--silent", "--no-fund", "--no-audit", "--progress=false"],
+        cwd=str(tui_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "CI": "1"},
+    )
+
+
 def _ensure_tui_node() -> None:
     """Make sure `node` + `npm` are on PATH for the TUI.
 
@@ -1135,6 +1152,14 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
                 if preview:
                     print(preview)
                 sys.exit(1)
+            refresh = _refresh_local_hermes_ink_dependency(npm, tui_dir)
+            if refresh and refresh.returncode != 0:
+                err = (refresh.stderr or "").strip()
+                preview = "\n".join(err.splitlines()[-30:])
+                print("Refreshing @hermes/ink failed.")
+                if preview:
+                    print(preview)
+                sys.exit(1)
         tsx = tui_dir / "node_modules" / ".bin" / "tsx"
         if tsx.exists():
             return [str(tsx), "src/entry.tsx"], tui_dir
@@ -1151,6 +1176,14 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             combined = f"{result.stdout or ''}{result.stderr or ''}".strip()
             preview = "\n".join(combined.splitlines()[-30:])
             print("TUI build failed.")
+            if preview:
+                print(preview)
+            sys.exit(1)
+        refresh = _refresh_local_hermes_ink_dependency(npm, tui_dir)
+        if refresh and refresh.returncode != 0:
+            err = (refresh.stderr or "").strip()
+            preview = "\n".join(err.splitlines()[-30:])
+            print("Refreshing @hermes/ink failed.")
             if preview:
                 print(preview)
             sys.exit(1)
@@ -6861,6 +6894,26 @@ def _update_node_dependencies() -> None:
             extra_args=("--silent", "--no-fund", "--no-audit", "--progress=false"),
         )
         if result.returncode == 0:
+            if label == "ui-tui" and (path / "packages" / "hermes-ink" / "package.json").exists():
+                build = subprocess.run(
+                    [npm, "run", "build", "--prefix", "packages/hermes-ink"],
+                    cwd=str(path),
+                    capture_output=True,
+                    text=True,
+                )
+                if build.returncode != 0:
+                    print("  ⚠ @hermes/ink build failed in ui-tui")
+                    combined = f"{build.stdout or ''}{build.stderr or ''}".strip()
+                    if combined:
+                        print(f"    {combined.splitlines()[-1]}")
+                    continue
+                refresh = _refresh_local_hermes_ink_dependency(npm, path)
+                if refresh and refresh.returncode != 0:
+                    print("  ⚠ refreshing @hermes/ink copy failed in ui-tui")
+                    stderr = (refresh.stderr or "").strip()
+                    if stderr:
+                        print(f"    {stderr.splitlines()[-1]}")
+                    continue
             print(f"  ✓ {label}")
             continue
 

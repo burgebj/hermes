@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,12 @@ def _touch_ink_bundle(root: Path) -> None:
     bundle = root / "packages" / "hermes-ink" / "dist" / "ink-bundle.js"
     bundle.parent.mkdir(parents=True, exist_ok=True)
     bundle.write_text("export {}")
+
+
+def _touch_local_ink_package(root: Path) -> None:
+    pkg = root / "packages" / "hermes-ink" / "package.json"
+    pkg.parent.mkdir(parents=True, exist_ok=True)
+    pkg.write_text("{}")
 
 
 def test_need_install_when_ink_missing(tmp_path: Path, main_mod) -> None:
@@ -136,3 +143,62 @@ def test_build_not_needed_when_entry_and_ink_bundle_present(tmp_path: Path, main
     _touch_ink_bundle(tmp_path)
 
     assert main_mod._tui_build_needed(tmp_path) is False
+
+
+def test_make_tui_argv_refreshes_hermes_ink_after_build(tmp_path: Path, main_mod, monkeypatch) -> None:
+    _touch_tui_entry(tmp_path)
+    _touch_local_ink_package(tmp_path)
+    _touch_ink(tmp_path)
+    calls = []
+
+    monkeypatch.setattr(main_mod, "_ensure_tui_node", lambda: None)
+    monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda path: False)
+    monkeypatch.setattr(main_mod, "_tui_build_needed", lambda path: True)
+    monkeypatch.setattr(main_mod, "_find_bundled_tui", lambda path: path)
+    monkeypatch.setattr(main_mod.shutil, "which", lambda bin: f"/usr/bin/{bin}")
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    argv, root = main_mod._make_tui_argv(tmp_path, tui_dev=False)
+
+    assert argv == ["/usr/bin/node", str(tmp_path / "dist" / "entry.js")]
+    assert root == tmp_path
+    assert calls == [
+        ["/usr/bin/npm", "run", "build"],
+        ["/usr/bin/npm", "install", "--silent", "--no-fund", "--no-audit", "--progress=false"],
+    ]
+
+
+def test_update_node_dependencies_rebuilds_and_refreshes_ui_tui(tmp_path: Path, main_mod, monkeypatch) -> None:
+    (tmp_path / "package.json").write_text("{}")
+    ui_tui = tmp_path / "ui-tui"
+    (ui_tui / "package.json").parent.mkdir(parents=True, exist_ok=True)
+    (ui_tui / "package.json").write_text("{}")
+    _touch_local_ink_package(ui_tui)
+    _touch_ink(ui_tui)
+    installs = []
+    builds = []
+
+    monkeypatch.setattr(main_mod, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(main_mod.shutil, "which", lambda bin: "/usr/bin/npm")
+
+    def fake_install(npm, path, extra_args=()):
+        installs.append((npm, path, extra_args))
+        return SimpleNamespace(returncode=0, stderr="")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["/usr/bin/npm", "run", "build", "--prefix"]:
+            builds.append((cmd, kwargs.get("cwd")))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(main_mod, "_run_npm_install_deterministic", fake_install)
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    main_mod._update_node_dependencies()
+
+    assert [path for _, path, _ in installs] == [tmp_path, ui_tui]
+    assert builds == [(["/usr/bin/npm", "run", "build", "--prefix", "packages/hermes-ink"], str(ui_tui))]
