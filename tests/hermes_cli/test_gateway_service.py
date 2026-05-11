@@ -678,6 +678,120 @@ class TestLaunchdServiceRecovery:
         assert "stale" in output.lower()
         assert "not loaded" in output.lower()
 
+    # --- macOS 26.4.1 launchd domain unsupported (error 5 / 125) ---
+
+    def test_launchd_start_handles_error_125_gracefully(self, tmp_path, monkeypatch, capsys):
+        """kickstart error 125 (domain unsupported) should print guidance, not crash."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text(gateway_cli.generate_launchd_plist(), encoding="utf-8")
+        label = gateway_cli.get_launchd_label()
+        domain = gateway_cli._launchd_domain()
+        target = f"{domain}/{label}"
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd == ["launchctl", "kickstart", target]:
+                raise gateway_cli.subprocess.CalledProcessError(125, cmd, stderr="Domain does not support specified action")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        gateway_cli.launchd_start()  # must not raise
+
+        output = capsys.readouterr().out
+        assert "launchd" in output.lower() or "workaround" in output.lower()
+
+    def test_launchd_start_handles_error_5_in_self_heal(self, tmp_path, monkeypatch, capsys):
+        """bootstrap error 5 (I/O error) in self-heal path should print guidance, not crash."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        # Plist does NOT exist — triggers self-heal path
+        domain = gateway_cli._launchd_domain()
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd and cmd[0] == "launchctl" and cmd[1] == "bootstrap":
+                raise gateway_cli.subprocess.CalledProcessError(5, cmd, stderr="Input/output error")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        gateway_cli.launchd_start()  # must not raise
+
+        output = capsys.readouterr().out
+        assert "workaround" in output.lower() or "nohup" in output.lower()
+
+    def test_launchd_install_handles_error_5_gracefully(self, tmp_path, monkeypatch, capsys):
+        """bootstrap error 5 during install should print guidance, not crash."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        domain = gateway_cli._launchd_domain()
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd and cmd[0] == "launchctl" and cmd[1] == "bootstrap":
+                raise gateway_cli.subprocess.CalledProcessError(5, cmd, stderr="Input/output error")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        gateway_cli.launchd_install()  # must not raise
+
+        output = capsys.readouterr().out
+        assert "workaround" in output.lower() or "nohup" in output.lower()
+
+    def test_launchd_stop_handles_error_125_gracefully(self, monkeypatch, capsys):
+        """bootout error 125 should print guidance, not crash."""
+        label = gateway_cli.get_launchd_label()
+        domain = gateway_cli._launchd_domain()
+        target = f"{domain}/{label}"
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd and cmd[0] == "launchctl" and cmd[1] == "bootout":
+                raise gateway_cli.subprocess.CalledProcessError(125, cmd, stderr="Domain does not support specified action")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+        monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda **kw: True)
+
+        gateway_cli.launchd_stop()  # must not raise
+
+        output = capsys.readouterr().out
+        assert "workaround" in output.lower() or "nohup" in output.lower()
+
+    def test_launchd_restart_handles_error_125_gracefully(self, monkeypatch, capsys):
+        """kickstart error 125 during restart should print guidance, not crash."""
+        label = gateway_cli.get_launchd_label()
+        domain = gateway_cli._launchd_domain()
+        target = f"{domain}/{label}"
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd and cmd[0] == "launchctl":
+                raise gateway_cli.subprocess.CalledProcessError(125, cmd, stderr="Domain does not support specified action")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            "gateway.status.get_running_pid",
+            lambda **kw: None,
+            raising=False,
+        )
+
+        gateway_cli.launchd_restart()  # must not raise
+
+        output = capsys.readouterr().out
+        assert "workaround" in output.lower() or "nohup" in output.lower()
+
+    def test_is_launchd_unsupported_domain_error(self):
+        """Helper correctly identifies error codes 5 and 125."""
+        exc5 = gateway_cli.subprocess.CalledProcessError(5, ["launchctl"])
+        exc125 = gateway_cli.subprocess.CalledProcessError(125, ["launchctl"])
+        exc3 = gateway_cli.subprocess.CalledProcessError(3, ["launchctl"])
+        exc113 = gateway_cli.subprocess.CalledProcessError(113, ["launchctl"])
+
+        assert gateway_cli._is_launchd_unsupported_domain_error(exc5) is True
+        assert gateway_cli._is_launchd_unsupported_domain_error(exc125) is True
+        assert gateway_cli._is_launchd_unsupported_domain_error(exc3) is False
+        assert gateway_cli._is_launchd_unsupported_domain_error(exc113) is False
+
 
 class TestGatewayServiceDetection:
     def test_supports_systemd_services_requires_systemctl_binary(self, monkeypatch):

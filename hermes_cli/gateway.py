@@ -2740,6 +2740,33 @@ def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
 
 
+# On macOS 26.4.1+ the gui/<uid> launchd domain no longer supports
+# kickstart/bootstrap/bootout operations (error 125: "Domain does not
+# support specified action").  bootstrap also fails with error 5
+# ("Input/output error").  These codes signal that the launchd domain
+# itself is broken — not a transient service issue.
+_LAUNCHD_UNSUPPORTED_DOMAIN_CODES = (5, 125)
+
+
+def _is_launchd_unsupported_domain_error(exc: subprocess.CalledProcessError) -> bool:
+    """Return True if *exc* indicates a broken launchd domain (macOS 26.4.1+)."""
+    return exc.returncode in _LAUNCHD_UNSUPPORTED_DOMAIN_CODES
+
+
+def _print_launchd_domain_guidance() -> None:
+    """Print actionable guidance when the launchd domain is unsupported."""
+    print()
+    print("✗ The launchd gui/ domain does not support service management on this")
+    print("  macOS version (error 5 or 125).  This is a known macOS 26.x issue.")
+    print()
+    print("  Workaround — run the gateway directly:")
+    print("    nohup python -m hermes_cli.main gateway run --replace \\")
+    print("      > ~/.hermes/logs/gateway.log 2>&1 &")
+    print()
+    print("  Or use: hermes gateway run  (foreground, Ctrl-C to stop)")
+    print()
+
+
 def generate_launchd_plist() -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
@@ -2876,8 +2903,14 @@ def launchd_install(force: bool = False):
     print(f"Installing launchd service to: {plist_path}")
     plist_path.write_text(generate_launchd_plist())
     
-    subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
-    
+    try:
+        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+    except subprocess.CalledProcessError as e:
+        if _is_launchd_unsupported_domain_error(e):
+            _print_launchd_domain_guidance()
+            return
+        raise
+
     print()
     print("✓ Service installed and loaded!")
     print()
@@ -2906,8 +2939,14 @@ def launchd_start():
         print("↻ launchd plist missing; regenerating service definition")
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
-        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
-        subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+        try:
+            subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+            subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+        except subprocess.CalledProcessError as e:
+            if _is_launchd_unsupported_domain_error(e):
+                _print_launchd_domain_guidance()
+                return
+            raise
         print("✓ Service started")
         return
 
@@ -2915,11 +2954,20 @@ def launchd_start():
     try:
         subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
     except subprocess.CalledProcessError as e:
+        if _is_launchd_unsupported_domain_error(e):
+            _print_launchd_domain_guidance()
+            return
         if e.returncode not in (3, 113):
             raise
         print("↻ launchd job was unloaded; reloading service definition")
-        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
-        subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+        try:
+            subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+            subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+        except subprocess.CalledProcessError as e2:
+            if _is_launchd_unsupported_domain_error(e2):
+                _print_launchd_domain_guidance()
+                return
+            raise
     print("✓ Service started")
 
 def launchd_stop():
@@ -2939,6 +2987,9 @@ def launchd_stop():
     try:
         subprocess.run(["launchctl", "bootout", target], check=True, timeout=90)
     except subprocess.CalledProcessError as e:
+        if _is_launchd_unsupported_domain_error(e):
+            _print_launchd_domain_guidance()
+            return
         if e.returncode in (3, 113):
             pass  # Already unloaded — nothing to stop.
         else:
@@ -3011,13 +3062,22 @@ def launchd_restart():
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
         print("✓ Service restarted")
     except subprocess.CalledProcessError as e:
+        if _is_launchd_unsupported_domain_error(e):
+            _print_launchd_domain_guidance()
+            return
         if e.returncode not in (3, 113):
             raise
         # Job not loaded — bootstrap and start fresh
         print("↻ launchd job was unloaded; reloading")
         plist_path = get_launchd_plist_path()
-        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
-        subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
+        try:
+            subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+            subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
+        except subprocess.CalledProcessError as e2:
+            if _is_launchd_unsupported_domain_error(e2):
+                _print_launchd_domain_guidance()
+                return
+            raise
         print("✓ Service restarted")
 
 def launchd_status(deep: bool = False):
