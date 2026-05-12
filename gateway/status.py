@@ -115,6 +115,28 @@ def _get_process_start_time(pid: int) -> Optional[int]:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text(encoding="utf-8").split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        pass
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(datetime.strptime(" ".join(raw.split()), "%a %b %d %H:%M:%S %Y").timestamp())
+    except ValueError:
         return None
 
 
@@ -129,11 +151,25 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     try:
         raw = cmdline_path.read_bytes()
     except (FileNotFoundError, PermissionError, OSError):
+        raw = b""
+
+    if raw:
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip() or None
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
 
-    if not raw:
+    if result.returncode != 0:
         return None
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+    return (result.stdout or "").strip() or None
 
 
 def _looks_like_gateway_process(pid: int) -> bool:
@@ -594,6 +630,14 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     and current_start != existing.get("start_time")
                 ):
                     stale = True
+                if (
+                    not stale
+                    and existing.get("kind") == _GATEWAY_KIND
+                    and current_start is None
+                ):
+                    cmdline = _read_process_cmdline(existing_pid)
+                    if cmdline and not _looks_like_gateway_process(existing_pid):
+                        stale = True
                 # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
                 # processes still appear alive to _pid_exists but are not
                 # actually running. Treat them as stale so --replace works.

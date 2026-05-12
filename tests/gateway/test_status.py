@@ -8,6 +8,56 @@ from types import SimpleNamespace
 from gateway import status
 
 
+class TestProcessInspection:
+    def test_get_process_start_time_uses_ps_fallback_when_proc_unavailable(self, monkeypatch):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(returncode=0, stdout="Thu May  7 12:34:56 2026\n")
+
+        monkeypatch.setattr(status.subprocess, "run", fake_run)
+
+        value = status._get_process_start_time(42424242)
+
+        expected = int(status.datetime.strptime("Thu May 7 12:34:56 2026", "%a %b %d %H:%M:%S %Y").timestamp())
+        assert value == expected
+        assert calls[0][0] == ["ps", "-p", "42424242", "-o", "lstart="]
+        assert calls[0][1]["env"]["LC_ALL"] == "C"
+        assert calls[0][1]["timeout"] == 2
+
+    def test_get_process_start_time_returns_none_when_ps_date_unparseable(self, monkeypatch):
+        monkeypatch.setattr(
+            status.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="not a date\n"),
+        )
+
+        assert status._get_process_start_time(42424242) is None
+
+    def test_read_process_cmdline_uses_ps_fallback_when_proc_unavailable(self, monkeypatch):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(returncode=0, stdout="/usr/bin/python -m hermes_cli.main gateway\n")
+
+        monkeypatch.setattr(status.subprocess, "run", fake_run)
+
+        assert status._read_process_cmdline(42424242) == "/usr/bin/python -m hermes_cli.main gateway"
+        assert calls[0][0] == ["ps", "-p", "42424242", "-o", "command="]
+        assert calls[0][1]["env"]["LC_ALL"] == "C"
+
+    def test_read_process_cmdline_returns_none_when_ps_has_no_process(self, monkeypatch):
+        monkeypatch.setattr(
+            status.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
+        )
+
+        assert status._read_process_cmdline(42424242) is None
+
+
 class TestGatewayPidState:
     def test_write_pid_file_records_gateway_metadata(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -456,6 +506,27 @@ class TestScopedLocks:
 
         # Post-#21561: simulate "PID gone" via _pid_exists returning False.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: False)
+
+        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+
+        assert acquired is True
+        payload = json.loads(lock_path.read_text())
+        assert payload["pid"] == os.getpid()
+        assert payload["metadata"]["platform"] == "telegram"
+
+    def test_acquire_scoped_lock_replaces_recycled_non_gateway_pid(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "/System/Library/FamilyControlsAgent")
 
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
 
