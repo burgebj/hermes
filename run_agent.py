@@ -3245,6 +3245,21 @@ class AIAgent:
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
 
+            # Resolve custom_providers so per-model context_length overrides
+            # (set in config.yaml) are honoured for the compression model.
+            # The main-model resolution path already passes custom_providers
+            # (see __init__ ~line 2222); this path was missing it, causing
+            # correctly-configured custom endpoints to fall back to 256K.
+            _aux_custom_providers = None
+            try:
+                from hermes_cli.config import load_config, get_compatible_custom_providers
+                _cfg = load_config()
+                _aux_custom_providers = get_compatible_custom_providers(_cfg)
+            except Exception:
+                pass
+            if _aux_custom_providers is None:
+                _aux_custom_providers = []
+
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
@@ -3254,6 +3269,7 @@ class AIAgent:
                 # provider-specific paths (e.g. Bedrock static table, OpenRouter API)
                 # are invoked for the correct client, not inherited from the main model.
                 provider=(_aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(self, "provider", "")),
+                custom_providers=_aux_custom_providers,
             )
 
             # Hard floor: the auxiliary compression model must have at least
