@@ -14,7 +14,7 @@ import os
 import tempfile
 import html as _html
 import re
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +424,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self._model_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
+        # Clarify-button state: clarify_id -> (session_key, list-of-choice-labels).
+        # Mirrors _approval_state; a counter picks short ints for callback_data.
+        self._clarify_state: Dict[int, Tuple[str, List[str]]] = {}
         # Slash-confirm button state: confirm_id → session_key (for /reload-mcp
         # and any other slash-confirm prompts; see GatewayRunner._request_slash_confirm).
         self._slash_confirm_state: Dict[str, str] = {}
@@ -2166,6 +2169,89 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[str]],
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a clarify prompt with inline-keyboard buttons (one per choice).
+
+        Mirrors :meth:`send_exec_approval`. Buttons resolve the clarify via
+        ``tools.clarify_bridge.resolve_gateway_clarify`` so the blocked agent
+        thread wakes with the chosen answer. Open-ended clarifies (no choices)
+        fall back to plain text because a keyboard with no buttons is useless.
+        """
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        # No choices → no buttons make sense. Signal fallback so the gateway
+        # uses plain text + "Reply with your answer." prompt.
+        if not choices:
+            return SendResult(success=False, error="no_choices")
+
+        try:
+            q_preview = question[:3800] + "..." if len(question) > 3800 else question
+            text = (
+                f"🤔 <b>{_html.escape(q_preview)}</b>"
+            )
+
+            thread_id = self._metadata_thread_id(metadata)
+
+            import itertools
+            if not hasattr(self, "_clarify_counter"):
+                self._clarify_counter = itertools.count(1)
+            clarify_id = next(self._clarify_counter)
+
+            # One button per choice, one choice per row (labels are often long
+            # enough that two-per-row wraps badly on mobile). Each button's
+            # callback_data is just the choice index — the text label lives in
+            # _clarify_state so callback_data stays short (Telegram caps it at
+            # 64 bytes).
+            keyboard_rows = []
+            for idx, choice in enumerate(choices):
+                # Truncate button text to keep Telegram happy (hard limit is
+                # large, but mobile rendering gets ugly past ~40 chars).
+                label = (choice[:40] + "…") if len(choice) > 40 else choice
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        label,
+                        callback_data=f"cq:{clarify_id}:{idx}",
+                    )
+                ])
+            # Also offer a cancel button so the user isn't forced to pick one.
+            # Cancel is modelled as "no answer" — the agent sees
+            # ClarifyUnavailable and can react accordingly.
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    "✗ Cancel",
+                    callback_data=f"cq:{clarify_id}:cancel",
+                )
+            ])
+            keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+            kwargs: Dict[str, Any] = {
+                "chat_id": int(chat_id),
+                "text": text,
+                "parse_mode": ParseMode.HTML,
+                "reply_markup": keyboard,
+                **self._link_preview_kwargs(),
+            }
+            message_thread_id = self._message_thread_id_for_send(thread_id)
+            if message_thread_id is not None:
+                kwargs["message_thread_id"] = message_thread_id
+
+            msg = await self._bot.send_message(**kwargs)
+
+            self._clarify_state[clarify_id] = (session_key, list(choices))
+
+            return SendResult(success=True, message_id=str(msg.message_id))
+        except Exception as e:
+            logger.warning("[%s] send_clarify failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,
         confirm_id: str, metadata: Optional[Dict[str, Any]] = None,
@@ -2600,6 +2686,93 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                 except Exception as exc:
                     logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+            return
+
+        # --- Clarify callbacks (cq:clarify_id:idx-or-cancel) ---
+        if data.startswith("cq:"):
+            parts = data.split(":", 2)
+            if len(parts) == 3:
+                try:
+                    clarify_id = int(parts[1])
+                except (ValueError, IndexError):
+                    await query.answer(text="Invalid clarify data.")
+                    return
+                choice_token = parts[2]  # either an int string or "cancel"
+
+                # Only authorized users may answer clarify questions.
+                caller_id = str(getattr(query.from_user, "id", ""))
+                if not self._is_callback_user_authorized(
+                    caller_id,
+                    chat_id=query_chat_id,
+                    chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                    thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                    user_name=query_user_name,
+                ):
+                    await query.answer(text="⛔ You are not authorized to answer this clarify.")
+                    return
+
+                state = self._clarify_state.pop(clarify_id, None)
+                if not state:
+                    await query.answer(text="This clarify has already been resolved.")
+                    return
+                session_key, choices = state
+
+                user_display = getattr(query.from_user, "first_name", "User")
+
+                # Cancel → clear the pending clarify so the agent thread wakes
+                # with ClarifyUnavailable. No answer is sent.
+                if choice_token == "cancel":
+                    await query.answer(text="✗ Cancelled")
+                    try:
+                        await query.edit_message_text(
+                            text=f"✗ Clarify cancelled by {user_display}",
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from tools.clarify_bridge import clear_session_clarifies
+                        clear_session_clarifies(session_key)
+                        logger.info(
+                            "Telegram button cancelled clarify for session %s (user=%s)",
+                            session_key, user_display,
+                        )
+                    except Exception as exc:
+                        logger.error("Failed to cancel gateway clarify from Telegram button: %s", exc)
+                    return
+
+                # Numeric choice → look up the label and resolve with the text.
+                try:
+                    choice_idx = int(choice_token)
+                except ValueError:
+                    await query.answer(text="Invalid clarify choice.")
+                    return
+                if choice_idx < 0 or choice_idx >= len(choices):
+                    await query.answer(text="Choice out of range.")
+                    return
+
+                chosen_label = choices[choice_idx]
+                await query.answer(text=f"✓ {chosen_label[:40]}")
+
+                try:
+                    await query.edit_message_text(
+                        text=f"✓ Answered by {user_display}: **{_html.escape(chosen_label)}**",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    from tools.clarify_bridge import resolve_gateway_clarify
+                    count = resolve_gateway_clarify(session_key, chosen_label)
+                    logger.info(
+                        "Telegram button resolved %d clarify(ies) for session %s (choice='%s', user=%s)",
+                        count, session_key, chosen_label, user_display,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to resolve gateway clarify from Telegram button: %s", exc)
             return
 
         # --- Slash-confirm callbacks (sc:choice:confirm_id) ---
