@@ -468,6 +468,64 @@ async def test_send_uses_metadata_reply_fallback_for_streaming_dm_topics():
 
 
 @pytest.mark.asyncio
+async def test_send_prefers_numeric_metadata_anchor_over_non_numeric_reply_to():
+    """Synthetic Hermes reply ids must not break Telegram DM-topic routing."""
+    adapter = _make_adapter()
+    call_log = []
+
+    async def mock_send_message(**kwargs):
+        call_log.append(kwargs)
+        return SimpleNamespace(message_id=778)
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+
+    result = await adapter.send(
+        chat_id="123",
+        content="keep me in lane",
+        reply_to="msg-ab9f1c76",
+        metadata={
+            "thread_id": "20197",
+            "telegram_dm_topic_reply_fallback": True,
+            "telegram_reply_to_message_id": "462",
+        },
+    )
+
+    assert result.success is True
+    assert call_log[0]["reply_to_message_id"] == 462
+    assert call_log[0]["message_thread_id"] == 20197
+    assert "direct_messages_topic_id" not in call_log[0]
+
+
+@pytest.mark.asyncio
+async def test_send_ignores_non_numeric_metadata_anchor_without_crashing():
+    """Non-numeric DM-topic reply anchors should degrade safely to no thread route."""
+    adapter = _make_adapter()
+    call_log = []
+
+    async def mock_send_message(**kwargs):
+        call_log.append(dict(kwargs))
+        return SimpleNamespace(message_id=778)
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+
+    result = await adapter.send(
+        chat_id="123",
+        content="safe fallback",
+        reply_to="msg-ab9f1c76",
+        metadata={
+            "thread_id": "20197",
+            "telegram_dm_topic_reply_fallback": True,
+            "telegram_reply_to_message_id": "msg-ab9f1c76",
+        },
+    )
+
+    assert result.success is True
+    assert call_log[0]["reply_to_message_id"] is None
+    assert "message_thread_id" not in call_log[0]
+    assert "direct_messages_topic_id" not in call_log[0]
+
+
+@pytest.mark.asyncio
 async def test_send_reply_fallback_applies_to_every_chunk_for_dm_topics():
     """Long Telegram DM-topic fallback sends must anchor every chunk."""
     adapter = _make_adapter()

@@ -6096,6 +6096,13 @@ class GatewayRunner:
                 if _cmd_def_inner.name == "footer":
                     return await self._handle_footer_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name == "morning":
+                return await self._handle_morning_command(event)
+            if _cmd_def_inner and _cmd_def_inner.name == "midday":
+                return await self._handle_midday_command(event)
+            if _cmd_def_inner and _cmd_def_inner.name == "night":
+                return await self._handle_night_command(event)
+
             # Gateway-handled info/control commands with dedicated
             # running-agent handlers.
             if _cmd_def_inner and _cmd_def_inner.name in _DEDICATED_HANDLERS:
@@ -6347,6 +6354,15 @@ class GatewayRunner:
 
         if canonical == "status":
             return await self._handle_status_command(event)
+
+        if canonical == "morning":
+            return await self._handle_morning_command(event)
+
+        if canonical == "midday":
+            return await self._handle_midday_command(event)
+
+        if canonical == "night":
+            return await self._handle_night_command(event)
 
         if canonical == "agents":
             return await self._handle_agents_command(event)
@@ -8453,6 +8469,98 @@ class GatewayRunner:
         ])
 
         return "\n".join(lines)
+
+    async def _handle_brief_command(self, event: MessageEvent, *, mode: str, title: str) -> str:
+        """Generate a live brief, synthesize voice, and fall back to text on failure."""
+        import subprocess
+        import uuid as _uuid
+
+        runner_path = Path.home() / ".hermes" / "scripts" / "r2_brief_runner.py"
+        if not runner_path.exists():
+            return f"{title} brief unavailable: missing runner at {runner_path}."
+
+        try:
+            runner_proc = subprocess.run(
+                [sys.executable, str(runner_path), "--mode", mode],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except Exception as exc:
+            return f"{title} brief unavailable: failed to start live runner ({exc})."
+
+        if runner_proc.returncode != 0:
+            err = (runner_proc.stderr or runner_proc.stdout or "").strip()
+            if len(err) > 800:
+                err = err[:800] + "..."
+            return f"{title} brief unavailable: live runner failed ({err or 'unknown error'})."
+
+        try:
+            payload = json.loads(runner_proc.stdout)
+        except Exception as exc:
+            return f"{title} brief unavailable: could not parse live runner output ({exc})."
+
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            return f"{title} brief unavailable: live runner did not produce a prompt."
+
+        try:
+            brief_proc = subprocess.run(
+                ["hermes", "chat", "-q", prompt],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+        except Exception as exc:
+            return f"{title} brief unavailable: failed to generate brief ({exc})."
+
+        brief_text = (brief_proc.stdout or brief_proc.stderr or "").strip()
+        if not brief_text:
+            return f"{title} brief unavailable: live brief generator returned no text."
+
+        # Try to synthesize a Telegram-friendly voice note. On success, return
+        # only the media directive so the send pipeline emits a voice message.
+        try:
+            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
+
+            tts_text = _strip_markdown_for_tts(brief_text[:4000]).strip()
+            if not tts_text:
+                raise ValueError("empty text after markdown cleanup")
+
+            audio_dir = Path.home() / ".hermes" / "cache" / "audio" / "briefs"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = audio_dir / f"brief_{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_uuid.uuid4().hex[:8]}.ogg"
+
+            tts_result = await asyncio.to_thread(
+                text_to_speech_tool,
+                text=tts_text,
+                output_path=str(audio_path),
+            )
+            tts_data = json.loads(tts_result)
+            media_tag = str(tts_data.get("media_tag") or "").strip()
+            file_path = str(tts_data.get("file_path") or "").strip()
+            if tts_data.get("success") and media_tag:
+                return media_tag
+            if not media_tag and file_path and Path(file_path).exists():
+                media_tag = f"[[audio_as_voice]]\nMEDIA:{file_path}"
+                return media_tag
+            raise RuntimeError(str(tts_data.get("error") or "unknown TTS failure"))
+        except Exception as exc:
+            fallback = brief_text
+            if len(fallback) > 3800:
+                fallback = fallback[:3800].rstrip() + "\n…"
+            return f"{title} brief voice failed: {exc}\n\n{fallback}"
+
+    async def _handle_morning_command(self, event: MessageEvent) -> str:
+        return await self._handle_brief_command(event, mode="morning", title="Morning")
+
+    async def _handle_midday_command(self, event: MessageEvent) -> str:
+        return await self._handle_brief_command(event, mode="midday", title="Midday")
+
+    async def _handle_night_command(self, event: MessageEvent) -> str:
+        return await self._handle_brief_command(event, mode="night", title="Night")
 
     async def _handle_agents_command(self, event: MessageEvent) -> str:
         """Handle /agents command - list active agents and running tasks."""

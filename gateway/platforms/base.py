@@ -998,6 +998,20 @@ _PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:please\s+)?restart\s+hermes[.!?\s]*$", re.IGNORECASE),
 )
 
+_PLAINTEXT_GATEWAY_MORNING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^good\s+morning[.!?\s]*$", re.IGNORECASE),
+)
+
+_PLAINTEXT_GATEWAY_MIDDAY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^midday\s+brief[.!?\s]*$", re.IGNORECASE),
+    re.compile(r"^check\s+in[.!?\s]*$", re.IGNORECASE),
+)
+
+_PLAINTEXT_GATEWAY_NIGHT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^night\s+brief[.!?\s]*$", re.IGNORECASE),
+    re.compile(r"^good\s+night[.!?\s]*$", re.IGNORECASE),
+)
+
 
 def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
     """Rewrite a tiny set of DM plaintext admin phrases into slash commands.
@@ -1008,7 +1022,8 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
     waits for that same agent to finish.
 
     Scope is intentionally narrow: DM text messages only, exact restart-style
-    phrases only. Group chats keep natural-language semantics.
+    phrases only, plus the Telegram morning trigger phrase used for the live
+    brief path. Group chats keep natural-language semantics.
     """
     try:
         if event is None or event.message_type != MessageType.TEXT:
@@ -1022,6 +1037,22 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
         for pattern in _PLAINTEXT_GATEWAY_RESTART_PATTERNS:
             if pattern.match(text):
                 event.text = "/restart"
+                return
+        source_platform = getattr(source, "platform", None)
+        platform_value = getattr(source_platform, "value", source_platform)
+        if platform_value != "telegram":
+            return
+        for pattern in _PLAINTEXT_GATEWAY_MORNING_PATTERNS:
+            if pattern.match(text):
+                event.text = "/morning"
+                return
+        for pattern in _PLAINTEXT_GATEWAY_MIDDAY_PATTERNS:
+            if pattern.match(text):
+                event.text = "/midday"
+                return
+        for pattern in _PLAINTEXT_GATEWAY_NIGHT_PATTERNS:
+            if pattern.match(text):
+                event.text = "/night"
                 return
     except Exception:
         return

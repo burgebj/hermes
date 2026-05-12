@@ -464,12 +464,20 @@ class TelegramAdapter(BasePlatformAdapter):
         topic_id = metadata.get("direct_messages_topic_id") or metadata.get("telegram_direct_messages_topic_id")
         return str(topic_id) if topic_id is not None else None
 
+    @staticmethod
+    def _coerce_message_id(value: Optional[str]) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     @classmethod
     def _metadata_reply_to_message_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[int]:
         if not metadata:
             return None
-        reply_to = metadata.get("telegram_reply_to_message_id")
-        return int(reply_to) if reply_to is not None else None
+        return cls._coerce_message_id(metadata.get("telegram_reply_to_message_id"))
 
     @classmethod
     def _reply_to_message_id_for_send(
@@ -477,8 +485,9 @@ class TelegramAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
-        if reply_to:
-            return int(reply_to)
+        reply_to_id = cls._coerce_message_id(reply_to)
+        if reply_to_id is not None:
+            return reply_to_id
         if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
             return cls._metadata_reply_to_message_id(metadata)
         return None
@@ -1489,11 +1498,11 @@ class TelegramAdapter(BasePlatformAdapter):
                     str(metadata_reply_to)
                     if metadata and metadata.get("telegram_dm_topic_reply_fallback") and metadata_reply_to is not None else None
                 )
+                reply_to_id = self._reply_to_message_id_for_send(reply_to_source, metadata)
                 if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
-                    should_thread = reply_to_source is not None
+                    should_thread = reply_to_id is not None
                 else:
-                    should_thread = self._should_thread_reply(reply_to_source, i)
-                reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
+                    should_thread = self._should_thread_reply(reply_to_source if reply_to_id is not None else None, i)
                 thread_kwargs = self._thread_kwargs_for_send(
                     chat_id,
                     thread_id,

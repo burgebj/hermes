@@ -2,8 +2,8 @@
 
 Each test drives a message through the full async pipeline:
     adapter.handle_message(event)
-        → BasePlatformAdapter._process_message_background()
-        → GatewayRunner._handle_message() (command dispatch)
+        → background task
+        → GatewayRunner._handle_message (command dispatch)
         → adapter.send() (captured for assertions)
 
 No LLM involved — only gateway-level commands are tested.
@@ -11,6 +11,10 @@ Tests are parametrized over platforms via the ``platform`` fixture in conftest.
 """
 
 import asyncio
+import json
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +22,59 @@ import pytest
 from gateway.config import Platform
 from gateway.platforms.base import SendResult
 from tests.e2e.conftest import make_event, send_and_capture
+
+
+def _mock_brief_pipeline(monkeypatch, tmp_path, *, mode: str, brief_text: str, tts_success: bool = True, tts_error: str = "TTS failed"):
+    """Mock the runner + TTS path for brief command tests."""
+    runner_path = Path.home() / ".hermes" / "scripts" / "r2_brief_runner.py"
+    calls: list = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if isinstance(cmd, (list, tuple)) and len(cmd) >= 4 and Path(str(cmd[1])) == runner_path:
+            if cmd[-1] != mode:
+                raise AssertionError(f"Expected runner mode {mode!r}, got {cmd!r}")
+            prompt = {
+                "morning": (
+                    "Morning prompt for Ottawa, K2J5X8. Telegram voice-first. "
+                    "OpenWhoop physical state: Sleep: 6h04, HRV: 123.0 ms, RHR: 57.4 bpm, Recovery: 54, source: OpenWhoop. "
+                    "Morning order: Fajr / SNMC, physical state / recovery, weather / driving / clothing, hard commitments, main priority, open loops / decisions, filtered news / events."
+                ),
+                "midday": (
+                    "Midday prompt for Ottawa, K2J5X8. Telegram voice-first. "
+                    "OpenWhoop pacing context: Sleep: 6h04, HRV: 123.0 ms, RHR: 57.4 bpm, Recovery: 54, source: OpenWhoop. "
+                    "Midday order: post-nap state or current state, morning plan check, rest-of-day priority, action required, commitments remaining, training status, breaking updates only, work cutoff + bedtime target."
+                ),
+                "night": (
+                    "Night prompt for Ottawa, K2J5X8. Telegram voice-first. "
+                    "OpenWhoop wind-down context: Sleep: 6h04, HRV: 123.0 ms, RHR: 57.4 bpm, Recovery: 54, source: OpenWhoop. "
+                    "Night order: sleep target check, day completion review, open loops to carry forward, tomorrow setup, recovery / body note, final note capture, final shutdown instruction. Do not use OpenWhoop for tomorrow's Fajr."
+                ),
+            }[mode]
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"prompt": prompt, "context": prompt}), stderr="")
+        if isinstance(cmd, (list, tuple)) and cmd[:2] == ["hermes", "chat"]:
+            return SimpleNamespace(returncode=0, stdout=brief_text, stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {cmd!r}")
+
+    def fake_tts(text, output_path=None):
+        if not tts_success:
+            return json.dumps({"success": False, "error": tts_error})
+        audio_path = Path(output_path or tmp_path / f"brief-{mode}.ogg")
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"OggSbrief")
+        return json.dumps(
+            {
+                "success": True,
+                "file_path": str(audio_path),
+                "media_tag": f"[[audio_as_voice]]\nMEDIA:{audio_path}",
+                "provider": "edge",
+                "voice_compatible": True,
+            }
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("tools.tts_tool.text_to_speech_tool", fake_tts)
+    return calls
 
 
 class TestSlashCommands:
@@ -113,6 +170,74 @@ class TestSlashCommands:
         response_text = send.call_args[1].get("content") or send.call_args[0][1]
         assert response_text == "agent-handled"
         runner.request_restart.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "plaintext,mode,expected_phrase",
+        [
+            ("good morning", "morning", "OpenWhoop physical state:"),
+            ("midday brief", "midday", "OpenWhoop pacing context:"),
+            ("check in", "midday", "OpenWhoop pacing context:"),
+            ("night brief", "night", "OpenWhoop wind-down context:"),
+            ("good night", "night", "OpenWhoop wind-down context:"),
+        ],
+    )
+    async def test_plaintext_brief_triggers_voice_delivery(self, adapter, runner, platform, monkeypatch, tmp_path, plaintext, mode, expected_phrase):
+        if platform != Platform.TELEGRAM:
+            pytest.skip("Brief shortcuts are intentionally DM/Telegram-focused")
+
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="e2e-resp-1"))
+        adapter.send_voice = AsyncMock(return_value=SendResult(success=True, message_id="e2e-voice-1"))
+        runner_path = Path.home() / ".hermes" / "scripts" / "r2_brief_runner.py"
+        calls = _mock_brief_pipeline(
+            monkeypatch,
+            tmp_path,
+            mode=mode,
+            brief_text=f"## {mode.title()} brief\n- {expected_phrase}\n- Keep the day steady.",
+        )
+
+        send = await send_and_capture(adapter, plaintext, platform)
+
+        send.assert_not_called()
+        adapter.send_voice.assert_called_once()
+        voice_kwargs = adapter.send_voice.call_args.kwargs
+        assert voice_kwargs["audio_path"].endswith(".ogg")
+        assert runner_path.as_posix() in str(calls[0])
+        assert any(isinstance(cmd, (list, tuple)) and cmd[:2] == ["hermes", "chat"] for cmd in calls)
+        chat_cmd = next(cmd for cmd in calls if isinstance(cmd, (list, tuple)) and cmd[:2] == ["hermes", "chat"])
+        chat_prompt = chat_cmd[-1]
+        assert "Ottawa, K2J5X8" in chat_prompt
+        assert "Telegram voice-first" in chat_prompt
+        assert any(isinstance(cmd, (list, tuple)) and cmd[-1] == mode for cmd in calls if len(cmd) >= 4)
+        # Clean up the synthesized test file so the managed cache doesn't accumulate.
+        try:
+            Path(voice_kwargs["audio_path"]).unlink()
+        except OSError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_plaintext_brief_voice_fallback_returns_text(self, adapter, runner, platform, monkeypatch):
+        if platform != Platform.TELEGRAM:
+            pytest.skip("Brief shortcuts are intentionally DM/Telegram-focused")
+
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="e2e-resp-1"))
+        adapter.send_voice = AsyncMock(return_value=SendResult(success=True, message_id="e2e-voice-1"))
+        _mock_brief_pipeline(
+            monkeypatch,
+            Path(tempfile.gettempdir()) / "hermes-brief-tests",
+            mode="night",
+            brief_text="Night brief text that will fall back.",
+            tts_success=False,
+            tts_error="simulated TTS failure",
+        )
+
+        send = await send_and_capture(adapter, "good night", platform)
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert "voice failed" in response_text.lower()
+        assert "Night brief text" in response_text
+        adapter.send_voice.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_personality_lists_options(self, adapter, platform):

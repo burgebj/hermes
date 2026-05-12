@@ -1,6 +1,8 @@
 """Tests for TTS speed configuration across providers."""
 
 import asyncio
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -57,6 +59,31 @@ class TestEdgeTtsSpeed:
         comm_cls = self._run({"speed": 1.0}, tmp_path)
         kwargs = comm_cls.call_args[1]
         assert "rate" not in kwargs
+
+    def test_edge_timeout_reads_provider_override(self):
+        from tools.tts_tool import _get_edge_tts_timeout
+        assert _get_edge_tts_timeout({"edge": {"timeout": 77}}) == 77.0
+        assert _get_edge_tts_timeout({"edge": {"timeout_seconds": 88}}) == 88.0
+        assert _get_edge_tts_timeout({"edge": {"timeout": 0}}) > 0
+
+    def test_edge_ogg_output_marks_voice_compatible(self, tmp_path):
+        async def fake_generate(text, output_path, tts_config):
+            Path(output_path).write_bytes(b"OggS")
+            return output_path
+
+        cfg = {"provider": "edge", "edge": {"timeout": 5}}
+        mock_edge = MagicMock()
+        mock_edge.Communicate = MagicMock(return_value=MagicMock(save=AsyncMock()))
+
+        with patch("tools.tts_tool._load_tts_config", return_value=cfg), \
+             patch("tools.tts_tool._import_edge_tts", return_value=mock_edge), \
+             patch("tools.tts_tool._generate_edge_tts", side_effect=fake_generate):
+            from tools.tts_tool import text_to_speech_tool
+            result = json.loads(text_to_speech_tool(text="hello", output_path=str(tmp_path / "clip.ogg")))
+
+        assert result["success"] is True
+        assert result["voice_compatible"] is True
+        assert result["media_tag"].startswith("[[audio_as_voice]]")
 
 
 # ---------------------------------------------------------------------------

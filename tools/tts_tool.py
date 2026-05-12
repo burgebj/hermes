@@ -743,6 +743,22 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
 # ===========================================================================
 # Provider: Edge TTS (free)
 # ===========================================================================
+DEFAULT_EDGE_TTS_TIMEOUT_SECONDS = 180.0
+
+
+def _get_edge_tts_timeout(tts_config: Dict[str, Any]) -> float:
+    """Return the Edge TTS timeout in seconds, falling back when invalid."""
+    edge_config = tts_config.get("edge", {})
+    raw = edge_config.get("timeout", edge_config.get("timeout_seconds", DEFAULT_EDGE_TTS_TIMEOUT_SECONDS))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_EDGE_TTS_TIMEOUT_SECONDS)
+    if value <= 0:
+        return float(DEFAULT_EDGE_TTS_TIMEOUT_SECONDS)
+    return value
+
+
 async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """
     Generate audio using Edge TTS.
@@ -1723,12 +1739,16 @@ def text_to_speech_tool(
 
             if edge_available:
                 logger.info("Generating speech with Edge TTS...")
+                edge_timeout = _get_edge_tts_timeout(tts_config)
                 try:
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        pool.submit(
+                        future = pool.submit(
                             lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))
-                        ).result(timeout=60)
+                        )
+                        future.result(timeout=edge_timeout)
+                except concurrent.futures.TimeoutError as exc:
+                    raise TimeoutError(f"Edge TTS timed out after {edge_timeout:g}s") from exc
                 except RuntimeError:
                     asyncio.run(_generate_edge_tts(text, file_str, tts_config))
             elif _check_neutts_available():
@@ -1762,11 +1782,12 @@ def text_to_speech_tool(
                     if opus_path:
                         file_str = opus_path
                 voice_compatible = file_str.endswith(".ogg")
-        elif provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"} and not file_str.endswith(".ogg"):
-            opus_path = _convert_to_opus(file_str)
-            if opus_path:
-                file_str = opus_path
-                voice_compatible = True
+        elif provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"}:
+            if not file_str.endswith(".ogg"):
+                opus_path = _convert_to_opus(file_str)
+                if opus_path:
+                    file_str = opus_path
+            voice_compatible = file_str.endswith(".ogg")
         elif provider in {"elevenlabs", "openai", "mistral", "gemini"}:
             voice_compatible = file_str.endswith(".ogg")
 
