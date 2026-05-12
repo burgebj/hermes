@@ -10573,6 +10573,14 @@ class GatewayRunner:
                 "chat_id": event.source.chat_id,
                 "chat_type": event.source.chat_type,
             }
+            # Persist the requester identity as well as the delivery target.
+            # The restart-complete notification is sent by the *next* gateway
+            # process; re-checking auth there prevents stale/corrupt marker
+            # files from trying to message arbitrary platform targets.
+            if event.source.user_id:
+                notify_data["user_id"] = event.source.user_id
+            if event.source.chat_type:
+                notify_data["chat_type"] = event.source.chat_type
             if event.source.thread_id:
                 notify_data["thread_id"] = event.source.thread_id
             if event.message_id:
@@ -15177,9 +15185,10 @@ class GatewayRunner:
             data = json.loads(notify_path.read_text())
             platform_str = data.get("platform")
             chat_id = data.get("chat_id")
-            chat_type = data.get("chat_type")
+            chat_type = data.get("chat_type") or "dm"
             thread_id = data.get("thread_id")
             message_id = data.get("message_id")
+            user_id = data.get("user_id") or chat_id
 
             if not platform_str or not chat_id:
                 return None
@@ -15198,6 +15207,35 @@ class GatewayRunner:
                 logger.info(
                     "Restart notification suppressed: %s has gateway_restart_notification=false",
                     platform_str,
+                )
+                return None
+
+            # Re-check authorization in the fresh gateway process before
+            # sending the completion ping. This is intentionally best-effort:
+            # if a marker is stale, hand-written, or left behind from an old
+            # open-gateway configuration, skip it instead of attempting to send
+            # to an arbitrary target and logging provider-level errors.
+            try:
+                source = SessionSource(
+                    platform=platform,
+                    chat_id=str(chat_id),
+                    chat_type=str(chat_type),
+                    user_id=str(user_id) if user_id else "",
+                    thread_id=str(thread_id) if thread_id else None,
+                )
+                if not self._is_user_authorized(source):
+                    logger.info(
+                        "Restart notification skipped: %s:%s is not authorized",
+                        platform_str,
+                        chat_id,
+                    )
+                    return None
+            except Exception as e:
+                logger.debug(
+                    "Restart notification authorization check failed for %s:%s: %s",
+                    platform_str,
+                    chat_id,
+                    e,
                 )
                 return None
 

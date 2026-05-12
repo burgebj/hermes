@@ -73,6 +73,7 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
     assert data["platform"] == "telegram"
     assert data["chat_id"] == "42"
     assert data["chat_type"] == "dm"
+    assert data["user_id"] == "u1"
     assert data["message_id"] == "m1"
     assert "thread_id" not in data  # no thread → omitted
 
@@ -421,6 +422,29 @@ async def test_send_restart_notification_with_thread(tmp_path, monkeypatch):
         "direct_messages_topic_id": "777",
         "telegram_reply_to_message_id": "m2",
     }
+    assert not notify_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_send_restart_notification_skips_unauthorized_stale_marker(tmp_path, monkeypatch):
+    """Stale/corrupt restart markers are cleaned up without provider send attempts."""
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    notify_path = tmp_path / ".restart_notify.json"
+    notify_path.write_text(json.dumps({
+        "platform": "telegram",
+        "chat_id": "123456",
+        # Deliberately no user_id/chat_type: old marker format.
+    }))
+
+    runner, adapter = make_restart_runner()
+    runner._is_user_authorized = MagicMock(return_value=False)
+    adapter.send = AsyncMock()
+
+    delivered_target = await runner._send_restart_notification()
+
+    assert delivered_target is None
+    adapter.send.assert_not_called()
     assert not notify_path.exists()
 
 
