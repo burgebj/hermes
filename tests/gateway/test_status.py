@@ -438,6 +438,7 @@ class TestScopedLocks:
         # ``gateway.status._pid_exists`` (psutil-first, safe on Windows).
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "python -m hermes_cli.main gateway run")
 
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
 
@@ -456,6 +457,34 @@ class TestScopedLocks:
 
         # Post-#21561: simulate "PID gone" via _pid_exists returning False.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: False)
+
+        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+
+        assert acquired is True
+        payload = json.loads(lock_path.read_text())
+        assert payload["pid"] == os.getpid()
+        assert payload["metadata"]["platform"] == "telegram"
+
+    def test_acquire_scoped_lock_replaces_reused_non_gateway_pid_without_start_time(self, tmp_path, monkeypatch):
+        """macOS has no /proc start_time; PID reuse must not preserve stale locks.
+
+        Regression: a crash/reboot left token lock files with start_time=None.
+        If macOS later reused that PID for an unrelated app, the next gateway
+        startup treated the lock as live and refused to connect Discord.
+        """
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": None,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run", "--replace"],
+        }))
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "/System/Applications/Stocks.app/StocksWidget")
 
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
 

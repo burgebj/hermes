@@ -129,11 +129,27 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     try:
         raw = cmdline_path.read_bytes()
     except (FileNotFoundError, PermissionError, OSError):
-        return None
+        raw = b""
 
-    if not raw:
+    if raw:
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+
+    # macOS and some BSD-like systems do not expose /proc/<pid>/cmdline.
+    # Fall back to ps so stale scoped-lock detection can distinguish a real
+    # Hermes gateway from an unrelated process that reused the same PID.
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+    if result.returncode != 0:
+        return None
+    cmdline = result.stdout.strip()
+    return cmdline or None
 
 
 def _looks_like_gateway_process(pid: int) -> bool:
@@ -585,6 +601,12 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         stale = existing_pid is None
         if not stale:
             if not _pid_exists(existing_pid):
+                stale = True
+            elif not _looks_like_gateway_process(existing_pid):
+                # macOS has no /proc start_time, so token locks written there
+                # commonly carry start_time=None. After a crash or reboot the
+                # PID can be reused by an unrelated process; without checking
+                # the live command line, that stale lock blocks gateway startup.
                 stale = True
             else:
                 current_start = _get_process_start_time(existing_pid)
