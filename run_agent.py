@@ -161,6 +161,11 @@ from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.stable_context import (
+    ContextSegment,
+    ContextSegmentKind,
+    StableContextBuilder,
+)
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -2098,6 +2103,15 @@ class AIAgent:
         if not isinstance(_agent_section, dict):
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+        _stable_context_cfg = _agent_section.get("stable_context_prefix", {})
+        if not isinstance(_stable_context_cfg, dict):
+            _stable_context_cfg = {}
+        self._stable_context_prefix_enabled = bool(_stable_context_cfg.get("enabled", False))
+        self._stable_context_include_hashes = bool(_stable_context_cfg.get("include_segment_hashes", True))
+        self._stable_context_render_segments = bool(_stable_context_cfg.get("render_segments", False))
+        self._stable_context_builder = StableContextBuilder(
+            include_hashes=self._stable_context_include_hashes,
+        )
 
         # App-level API retry count (wraps each model API call).  Default 3,
         # overridable via agent.api_max_retries in config.yaml.  See #11616.
@@ -5897,52 +5911,49 @@ class AIAgent:
 
 
 
-    def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
-        """Assemble the system prompt as three ordered parts.
+    def _build_system_prompt_segments(self, system_message: str = None) -> List[ContextSegment]:
+        """Build ordered system-prompt segments for stable-prefix rendering.
 
-        Returns a dict with three keys:
-          * ``stable``  — content that is byte-stable across sessions for a
-            given user config: identity, tool guidance, skills prompt,
-            environment hints, platform hints, model-family operational
-            guidance.  Eligible for cross-session 1h prompt caching when
-            placed as a separate Anthropic content block (see
-            ``apply_anthropic_cache_control_long_lived``).
-          * ``context`` — context files (AGENTS.md, .cursorrules, etc.) and
-            caller-supplied system_message.  Stable within a session but may
-            change between sessions when files are edited or the cwd
-            differs.  Cached within-session via the rolling messages
-            breakpoint (5m TTL); not promoted to the long-lived tier so
-            edits don't poison the cross-session cache.
-          * ``volatile`` — content that changes on most turns/sessions:
-            memory snapshot, user profile, external memory provider block,
-            timestamp line.  Never marked for caching.
-
-        Joined ``stable\\n\\ncontext\\n\\nvolatile`` produces the same
-        logical content the old single-string builder produced, with the
-        guarantee that volatile content is at the end (cache-friendly
-        ordering for any provider that does prefix caching).
+        The returned order is cache-friendly: stable identity/guidance first,
+        then session-stable context files, then volatile content (memory,
+        timestamp). This preserves the stable-context-prefix feature from this
+        branch while also giving ``_build_system_prompt_parts()`` enough
+        structure to split the prompt for Anthropic long-lived prefix caching.
         """
-        # ── Stable tier ────────────────────────────────────────────────
-        stable_parts: List[str] = []
+        stable_segments: List[ContextSegment] = []
+        context_segments: List[ContextSegment] = []
+        volatile_segments: List[ContextSegment] = []
 
-        # Try SOUL.md as primary identity unless the caller explicitly skipped it.
-        # Some execution modes (cron) still want HERMES_HOME persona while keeping
-        # cwd project instructions disabled.
         _soul_loaded = False
         if self.load_soul_identity or not self.skip_context_files:
             _soul_content = load_soul_md()
             if _soul_content:
-                stable_parts.append(_soul_content)
+                stable_segments.append(
+                    ContextSegment(
+                        name="agent_identity",
+                        kind=ContextSegmentKind.AGENT_IDENTITY,
+                        content=_soul_content,
+                    )
+                )
                 _soul_loaded = True
 
         if not _soul_loaded:
-            # Fallback to hardcoded identity
-            stable_parts.append(DEFAULT_AGENT_IDENTITY)
+            stable_segments.append(
+                ContextSegment(
+                    name="agent_identity",
+                    kind=ContextSegmentKind.AGENT_IDENTITY,
+                    content=DEFAULT_AGENT_IDENTITY,
+                )
+            )
 
-        # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-        stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+        stable_segments.append(
+            ContextSegment(
+                name="hermes_help_guidance",
+                kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                content=HERMES_AGENT_HELP_GUIDANCE,
+            )
+        )
 
-        # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
         if "memory" in self.valid_tool_names:
             tool_guidance.append(MEMORY_GUIDANCE)
@@ -5950,26 +5961,40 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
-        # Kanban worker/orchestrator lifecycle — only present when the
-        # dispatcher spawned this process (kanban_show check_fn gates on
-        # HERMES_KANBAN_TASK env var). Normal chat sessions never see
-        # this block.
         if "kanban_show" in self.valid_tool_names:
             tool_guidance.append(KANBAN_GUIDANCE)
         if tool_guidance:
-            stable_parts.append(" ".join(tool_guidance))
+            stable_segments.append(
+                ContextSegment(
+                    name="tool_guidance",
+                    kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                    content=" ".join(tool_guidance),
+                )
+            )
 
-        # Computer-use (macOS) — goes in as its own block rather than being
-        # merged into tool_guidance because the content is multi-paragraph.
         if "computer_use" in self.valid_tool_names:
             from agent.prompt_builder import COMPUTER_USE_GUIDANCE
-            stable_parts.append(COMPUTER_USE_GUIDANCE)
+
+            stable_segments.append(
+                ContextSegment(
+                    name="computer_use_guidance",
+                    kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                    content=COMPUTER_USE_GUIDANCE,
+                )
+            )
 
         nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
         if nous_subscription_prompt:
-            stable_parts.append(nous_subscription_prompt)
+            stable_segments.append(
+                ContextSegment(
+                    name="nous_subscription_prompt",
+                    kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                    content=nous_subscription_prompt,
+                )
+            )
+
         # Tool-use enforcement: tells the model to actually call tools instead
-        # of describing intended actions.  Controlled by config.yaml
+        # of describing intended actions. Controlled by config.yaml
         # agent.tool_use_enforcement:
         #   "auto" (default) — matches TOOL_USE_ENFORCEMENT_MODELS
         #   true  — always inject (all models)
@@ -5986,22 +6011,37 @@ class AIAgent:
                 model_lower = (self.model or "").lower()
                 _inject = any(p.lower() in model_lower for p in _enforce if isinstance(p, str))
             else:
-                # "auto" or any unrecognised value — use hardcoded defaults
                 model_lower = (self.model or "").lower()
                 _inject = any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
             if _inject:
-                stable_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
+                stable_segments.append(
+                    ContextSegment(
+                        name="tool_use_enforcement",
+                        kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                        content=TOOL_USE_ENFORCEMENT_GUIDANCE,
+                    )
+                )
                 _model_lower = (self.model or "").lower()
-                # Google model operational guidance (conciseness, absolute
-                # paths, parallel tool calls, verify-before-edit, etc.)
                 if "gemini" in _model_lower or "gemma" in _model_lower:
-                    stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+                    stable_segments.append(
+                        ContextSegment(
+                            name="google_model_operational_guidance",
+                            kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                            content=GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+                        )
+                    )
                 # OpenAI GPT/Codex execution discipline (tool persistence,
                 # prerequisite checks, verification, anti-hallucination).
                 if "gpt" in _model_lower or "codex" in _model_lower:
-                    stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                    stable_segments.append(
+                        ContextSegment(
+                            name="openai_model_execution_guidance",
+                            kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                            content=OPENAI_MODEL_EXECUTION_GUIDANCE,
+                        )
+                    )
 
-        has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+        has_skills_tools = any(name in self.valid_tool_names for name in ["skills_list", "skill_view", "skill_manage"])
         if has_skills_tools:
             avail_toolsets = {
                 toolset
@@ -6017,7 +6057,13 @@ class AIAgent:
         else:
             skills_prompt = ""
         if skills_prompt:
-            stable_parts.append(skills_prompt)
+            stable_segments.append(
+                ContextSegment(
+                    name="skills",
+                    kind=ContextSegmentKind.SKILLS,
+                    content=skills_prompt,
+                )
+            )
 
         # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
         # of the requested model. Inject explicit model identity into the system prompt
@@ -6026,72 +6072,107 @@ class AIAgent:
         # at construction time.
         if self.provider == "alibaba":
             _model_short = self.model.split("/")[-1] if "/" in self.model else self.model
-            stable_parts.append(
-                f"You are powered by the model named {_model_short}. "
-                f"The exact model ID is {self.model}. "
-                f"When asked what model you are, always answer based on this information, "
-                f"not on any model name returned by the API."
+            stable_segments.append(
+                ContextSegment(
+                    name="alibaba_model_identity",
+                    kind=ContextSegmentKind.AGENT_INSTRUCTIONS,
+                    content=(
+                        f"You are powered by the model named {_model_short}. "
+                        f"The exact model ID is {self.model}. "
+                        f"When asked what model you are, always answer based on this information, "
+                        f"not on any model name returned by the API."
+                    ),
+                )
             )
 
-        # Environment hints (WSL, Termux, etc.) — tell the agent about the
-        # execution environment so it can translate paths and adapt behavior.
-        # Stable for the lifetime of the process.
         _env_hints = build_environment_hints()
         if _env_hints:
-            stable_parts.append(_env_hints)
+            stable_segments.append(
+                ContextSegment(
+                    name="environment_hints",
+                    kind=ContextSegmentKind.ENVIRONMENT,
+                    content=_env_hints,
+                )
+            )
 
         platform_key = (self.platform or "").lower().strip()
+        platform_hint = None
         if platform_key in PLATFORM_HINTS:
-            stable_parts.append(PLATFORM_HINTS[platform_key])
+            platform_hint = PLATFORM_HINTS[platform_key]
         elif platform_key:
-            # Check plugin registry for platform-specific LLM guidance
             try:
                 from gateway.platform_registry import platform_registry
                 _entry = platform_registry.get(platform_key)
                 if _entry and _entry.platform_hint:
-                    stable_parts.append(_entry.platform_hint)
+                    platform_hint = _entry.platform_hint
             except Exception:
                 pass
+        if platform_hint:
+            stable_segments.append(
+                ContextSegment(
+                    name="platform_hint",
+                    kind=ContextSegmentKind.PLATFORM,
+                    content=platform_hint,
+                )
+            )
 
-        # ── Context tier (cwd-dependent, may change between sessions) ─
-        context_parts: List[str] = []
-
-        # Note: ephemeral_system_prompt is NOT included here. It's injected at
-        # API-call time only so it stays out of the cached/stored system prompt.
         if system_message is not None:
-            context_parts.append(system_message)
+            context_segments.append(
+                ContextSegment(
+                    name="system_message",
+                    kind=ContextSegmentKind.SYSTEM,
+                    content=system_message,
+                )
+            )
 
         if not self.skip_context_files:
-            # Use TERMINAL_CWD for context file discovery when set (gateway
-            # mode).  The gateway process runs from the hermes-agent install
-            # dir, so os.getcwd() would pick up the repo's AGENTS.md and
-            # other dev files — inflating token usage by ~10k for no benefit.
             _context_cwd = os.getenv("TERMINAL_CWD") or None
-            context_files_prompt = build_context_files_prompt(
-                cwd=_context_cwd, skip_soul=_soul_loaded)
+            context_files_prompt = build_context_files_prompt(cwd=_context_cwd, skip_soul=_soul_loaded)
             if context_files_prompt:
-                context_parts.append(context_files_prompt)
-
-        # ── Volatile tier (changes per session/turn — never cached) ───
-        volatile_parts: List[str] = []
+                context_segments.append(
+                    ContextSegment(
+                        name="context_files",
+                        kind=ContextSegmentKind.CONTEXT_FILES,
+                        content=context_files_prompt,
+                    )
+                )
 
         if self._memory_store:
             if self._memory_enabled:
                 mem_block = self._memory_store.format_for_system_prompt("memory")
                 if mem_block:
-                    volatile_parts.append(mem_block)
-            # USER.md is always included when enabled.
+                    volatile_segments.append(
+                        ContextSegment(
+                            name="memory",
+                            kind=ContextSegmentKind.MEMORY,
+                            content=mem_block,
+                            stable=False,
+                        )
+                    )
             if self._user_profile_enabled:
                 user_block = self._memory_store.format_for_system_prompt("user")
                 if user_block:
-                    volatile_parts.append(user_block)
+                    volatile_segments.append(
+                        ContextSegment(
+                            name="user_profile",
+                            kind=ContextSegmentKind.MEMORY,
+                            content=user_block,
+                            stable=False,
+                        )
+                    )
 
-        # External memory provider system prompt block (additive to built-in)
         if self._memory_manager:
             try:
                 _ext_mem_block = self._memory_manager.build_system_prompt()
                 if _ext_mem_block:
-                    volatile_parts.append(_ext_mem_block)
+                    volatile_segments.append(
+                        ContextSegment(
+                            name="external_memory",
+                            kind=ContextSegmentKind.MEMORY,
+                            content=_ext_mem_block,
+                            stable=False,
+                        )
+                    )
             except Exception:
                 pass
 
@@ -6104,13 +6185,60 @@ class AIAgent:
             timestamp_line += f"\nModel: {self.model}"
         if self.provider:
             timestamp_line += f"\nProvider: {self.provider}"
-        volatile_parts.append(timestamp_line)
+        volatile_segments.append(
+            ContextSegment(
+                name="timestamp",
+                kind=ContextSegmentKind.TIMESTAMP,
+                content=timestamp_line,
+                stable=False,
+            )
+        )
+
+        return stable_segments + context_segments + volatile_segments
+
+    @staticmethod
+    def _split_system_prompt_segments(segments: List[ContextSegment]) -> Dict[str, str]:
+        """Collapse prompt segments into stable/context/volatile text blocks."""
+        stable_parts: List[str] = []
+        context_parts: List[str] = []
+        volatile_parts: List[str] = []
+
+        for segment in segments:
+            content = (segment.content or "").strip()
+            if not content:
+                continue
+            if segment.kind in {ContextSegmentKind.SYSTEM, ContextSegmentKind.CONTEXT_FILES}:
+                context_parts.append(content)
+            elif segment.kind in {ContextSegmentKind.MEMORY, ContextSegmentKind.TIMESTAMP}:
+                volatile_parts.append(content)
+            else:
+                stable_parts.append(content)
 
         return {
-            "stable":   "\n\n".join(p.strip() for p in stable_parts   if p and p.strip()),
-            "context":  "\n\n".join(p.strip() for p in context_parts  if p and p.strip()),
-            "volatile": "\n\n".join(p.strip() for p in volatile_parts if p and p.strip()),
+            "stable": "\n\n".join(stable_parts),
+            "context": "\n\n".join(context_parts),
+            "volatile": "\n\n".join(volatile_parts),
         }
+
+    def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
+        """Assemble the system prompt as three ordered parts.
+
+        Returns a dict with three keys:
+          * ``stable``  — content that is byte-stable across sessions for a
+            given user config: identity, tool guidance, skills prompt,
+            environment hints, platform hints, model-family operational
+            guidance. Eligible for cross-session 1h prompt caching when
+            placed as a separate Anthropic content block (see
+            ``apply_anthropic_cache_control_long_lived``).
+          * ``context`` — context files (AGENTS.md, .cursorrules, etc.) and
+            caller-supplied system_message. Stable within a session but may
+            change between sessions when files are edited or the cwd differs.
+          * ``volatile`` — content that changes on most turns/sessions:
+            memory snapshot, user profile, external memory provider block,
+            timestamp line. Never marked for caching.
+        """
+        segments = self._build_system_prompt_segments(system_message=system_message)
+        return self._split_system_prompt_segments(segments)
 
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
@@ -6126,9 +6254,14 @@ class AIAgent:
         ``_build_system_prompt_parts`` for the long-lived prompt-caching
         path (Claude on Anthropic / OpenRouter / Nous Portal).
         """
-        parts = self._build_system_prompt_parts(system_message=system_message)
-        joined = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
-        return joined
+        segments = self._build_system_prompt_segments(system_message=system_message)
+        if self._stable_context_prefix_enabled:
+            if self._stable_context_render_segments:
+                return self._stable_context_builder.build(segments)
+            return self._stable_context_builder.build_plain(segments)
+
+        parts = self._split_system_prompt_segments(segments)
+        return "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
