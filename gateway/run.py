@@ -15121,7 +15121,7 @@ class GatewayRunner:
                     _hc = _hm.get("content", "")
                     if "MEDIA:" in _hc:
                         for _match in re.finditer(r'MEDIA:(\S+)', _hc):
-                            _p = _match.group(1).strip().rstrip('",}')
+                            _p = _match.group(1).strip().rstrip('\",}')
                             if _p:
                                 _history_media_paths.add(_p)
             
@@ -15399,9 +15399,15 @@ class GatewayRunner:
                 for msg in result.get("messages", []):
                     if msg.get("role") in {"tool", "function"}:
                         content = msg.get("content", "")
+                        # Handle list-structured content blocks
+                        if isinstance(content, list):
+                            content = " ".join(
+                                block.get("text", "") if isinstance(block, dict) else str(block)
+                                for block in content
+                            )
                         if "MEDIA:" in content:
                             for match in re.finditer(r'MEDIA:(\S+)', content):
-                                path = match.group(1).strip().rstrip('",}')
+                                path = match.group(1).strip().rstrip('\",}')
                                 if path and path not in _history_media_paths:
                                     media_tags.append(f"MEDIA:{path}")
                             if "[[audio_as_voice]]" in content:
