@@ -646,7 +646,14 @@ def check_command_security(command: str) -> dict:
             timeout=timeout,
         )
     except OSError as exc:
-        # Covers FileNotFoundError, PermissionError, exec format error
+        # Covers FileNotFoundError, PermissionError, exec format error.
+        # On Windows with MSYS/Git Bash in PATH, shutil.which("tirith") may
+        # return a MSYS-style path (/mingw64/bin/tirith) that exists on disk
+        # but cannot be executed by Windows subprocess.  Cache this failure
+        # so we don't retry and re-log on every subsequent command.
+        global _resolved_path, _install_failure_reason
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "spawn_failed"
         logger.warning("tirith spawn failed: %s", exc)
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
