@@ -2657,11 +2657,26 @@ def _profile_attr(info, name: str, default: Any = None) -> Any:
         return default
 
 
+def _active_profile_path_str() -> str:
+    """Resolved HERMES_HOME of the running dashboard process, for is_active comparison."""
+    from hermes_constants import get_hermes_home
+    try:
+        return str(get_hermes_home().resolve())
+    except Exception:
+        return ""
+
+
 def _profile_to_dict(info) -> Dict[str, Any]:
+    path_str = str(_profile_attr(info, "path", ""))
+    try:
+        resolved = str(Path(path_str).resolve()) if path_str else ""
+    except Exception:
+        resolved = path_str
     return {
         "name": _profile_attr(info, "name", ""),
-        "path": str(_profile_attr(info, "path", "")),
+        "path": path_str,
         "is_default": bool(_profile_attr(info, "is_default", False)),
+        "is_active": bool(resolved) and resolved == _active_profile_path_str(),
         "model": _profile_attr(info, "model"),
         "provider": _profile_attr(info, "provider"),
         "has_env": bool(_profile_attr(info, "has_env", False)),
@@ -2676,6 +2691,14 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
         except Exception:
             return default
 
+    active_path_str = _active_profile_path_str()
+
+    def _is_active(path: Path) -> bool:
+        try:
+            return bool(active_path_str) and str(path.resolve()) == active_path_str
+        except Exception:
+            return False
+
     profiles: List[Dict[str, Any]] = []
     default_home = profiles_mod._get_default_hermes_home()
     if default_home.is_dir():
@@ -2684,6 +2707,7 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
             "name": "default",
             "path": str(default_home),
             "is_default": True,
+            "is_active": _is_active(default_home),
             "model": model,
             "provider": provider,
             "has_env": (default_home / ".env").exists(),
@@ -2700,6 +2724,7 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
                 "name": entry.name,
                 "path": str(entry),
                 "is_default": False,
+                "is_active": _is_active(entry),
                 "model": model,
                 "provider": provider,
                 "has_env": (entry / ".env").exists(),
@@ -2915,6 +2940,158 @@ async def toggle_skill(body: SkillToggle):
         disabled.add(body.name)
     save_disabled_skills(config, disabled)
     return {"ok": True, "name": body.name, "enabled": body.enabled}
+
+
+# ---------------------------------------------------------------------------
+# Per-profile skills endpoints
+#
+# The legacy /api/skills routes above operate on the active profile
+# (whichever HERMES_HOME the dashboard process was launched under). The
+# routes below let the UI list and toggle skills for any installed profile
+# without spawning a second dashboard daemon per profile.
+#
+# Reads/writes go directly against the profile's config.yaml (skills.disabled
+# key) rather than through load_config / save_config — those helpers are
+# bound to the process-level HERMES_HOME via get_config_path().
+# ---------------------------------------------------------------------------
+
+
+def _profile_config_path(profile_dir: Path) -> Path:
+    return profile_dir / "config.yaml"
+
+
+def _load_profile_raw_config(profile_dir: Path) -> Dict[str, Any]:
+    """Read a profile's config.yaml as raw YAML. Returns {} if missing/empty."""
+    config_path = _profile_config_path(profile_dir)
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml as _yaml
+        with open(config_path, encoding="utf-8") as f:
+            data = _yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not read config.yaml: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not parse config.yaml: {e}")
+
+
+def _save_profile_raw_config(profile_dir: Path, config: Dict[str, Any]) -> None:
+    from utils import atomic_yaml_write
+    try:
+        atomic_yaml_write(_profile_config_path(profile_dir), config)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not write config.yaml: {e}")
+
+
+def _find_skills_in_profile(profile_dir: Path) -> List[Dict[str, Any]]:
+    """Scan profile_dir/skills/ for SKILL.md files and return the same shape
+    as ``tools.skills_tool._find_all_skills`` (without external_dirs).
+
+    External-dir scanning is intentionally omitted for v1 — the dropdown is
+    aimed at toggling profile-installed skills. Skills loaded via
+    ``skills.external_dirs`` are still respected at gateway runtime.
+
+    Category is derived from the directory layout under the profile's own
+    skills/ root (matching the convention used by
+    ``tools.skills_tool._get_category_from_path``, which is hardcoded to the
+    process-level SKILLS_DIR and therefore can't be reused here).
+    """
+    from tools.skills_tool import (
+        MAX_DESCRIPTION_LENGTH,
+        MAX_NAME_LENGTH,
+        _EXCLUDED_SKILL_DIRS,
+        _parse_frontmatter,
+        skill_matches_platform,
+    )
+    from agent.skill_utils import iter_skill_index_files
+
+    skills_dir = profile_dir / "skills"
+    if not skills_dir.is_dir():
+        return []
+
+    def _category(skill_md_path: Path) -> Optional[str]:
+        try:
+            rel = skill_md_path.relative_to(skills_dir)
+        except ValueError:
+            return None
+        # rel like "mlops/axolotl/SKILL.md" → "mlops"; "airtable/SKILL.md" → None
+        return rel.parts[0] if len(rel.parts) >= 3 else None
+
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            continue
+        try:
+            content = skill_md.read_text(encoding="utf-8")[:4000]
+            frontmatter, body = _parse_frontmatter(content)
+            if not skill_matches_platform(frontmatter):
+                continue
+            name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]
+            if name in seen:
+                continue
+            description = frontmatter.get("description", "")
+            if not description:
+                for line in body.strip().split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        description = line
+                        break
+            if len(description) > MAX_DESCRIPTION_LENGTH:
+                description = description[:MAX_DESCRIPTION_LENGTH - 3] + "..."
+            seen.add(name)
+            out.append({
+                "name": name,
+                "description": description,
+                "category": _category(skill_md),
+                "path": str(skill_md.parent),
+            })
+        except (OSError, UnicodeDecodeError):
+            continue
+    out.sort(key=lambda s: s["name"].lower())
+    return out
+
+
+def _profile_disabled_skills(config: Dict[str, Any]) -> set:
+    skills_cfg = config.get("skills") if isinstance(config, dict) else None
+    if not isinstance(skills_cfg, dict):
+        return set()
+    disabled = skills_cfg.get("disabled", [])
+    if not isinstance(disabled, list):
+        return set()
+    return {str(x) for x in disabled}
+
+
+@app.get("/api/profiles/{name}/skills")
+async def get_profile_skills(name: str):
+    profile_dir = _resolve_profile_dir(name)
+    config = _load_profile_raw_config(profile_dir)
+    disabled = _profile_disabled_skills(config)
+    skills = _find_skills_in_profile(profile_dir)
+    for s in skills:
+        s["enabled"] = s["name"] not in disabled
+    return skills
+
+
+@app.put("/api/profiles/{name}/skills/toggle")
+async def toggle_profile_skill(name: str, body: SkillToggle):
+    profile_dir = _resolve_profile_dir(name)
+    config = _load_profile_raw_config(profile_dir)
+    skills_cfg = config.setdefault("skills", {}) if isinstance(config, dict) else None
+    if not isinstance(skills_cfg, dict):
+        # The skills key existed but wasn't a dict — overwrite with a fresh mapping.
+        config["skills"] = {}
+        skills_cfg = config["skills"]
+    raw_disabled = skills_cfg.get("disabled", [])
+    disabled = {str(x) for x in raw_disabled} if isinstance(raw_disabled, list) else set()
+    if body.enabled:
+        disabled.discard(body.name)
+    else:
+        disabled.add(body.name)
+    skills_cfg["disabled"] = sorted(disabled)
+    _save_profile_raw_config(profile_dir, config)
+    return {"ok": True, "name": body.name, "enabled": body.enabled, "profile": name}
 
 
 @app.get("/api/tools/toolsets")

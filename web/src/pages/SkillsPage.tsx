@@ -16,13 +16,14 @@ import {
   Filter,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { SkillInfo, ToolsetInfo } from "@/lib/api";
+import type { ProfileInfo, SkillInfo, ToolsetInfo } from "@/lib/api";
 import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { ListItem } from "@nous-research/ui/ui/components/list-item";
+import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Switch } from "@nous-research/ui/ui/components/switch";
 import { cn } from "@/lib/utils";
@@ -96,7 +97,10 @@ function toolsetIcon(
 export default function SkillsPage() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [toolsets, setToolsets] = useState<ToolsetInfo[]>([]);
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
+  const [selectedProfile, setSelectedProfile] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [skillsLoading, setSkillsLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"skills" | "toolsets">("skills");
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
@@ -105,21 +109,76 @@ export default function SkillsPage() {
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
 
+  // Treat the profile flagged is_active by the gateway as "the dashboard's
+  // own profile". Older gateways don't emit is_active; fall back to the
+  // is_default profile so the dropdown still reflects whichever profile the
+  // legacy /api/skills routes actually edit.
+  const activeProfileName = useMemo(() => {
+    const active = profiles.find((p) => p.is_active);
+    if (active) return active.name;
+    const dflt = profiles.find((p) => p.is_default);
+    return dflt?.name ?? profiles[0]?.name ?? "";
+  }, [profiles]);
+
+  const isOnActiveProfile =
+    !selectedProfile || selectedProfile === activeProfileName;
+
+  /* ---- Initial load: profiles, toolsets, and the active profile's skills ---- */
   useEffect(() => {
-    Promise.all([api.getSkills(), api.getToolsets()])
-      .then(([s, tsets]) => {
-        setSkills(s);
+    Promise.all([api.getProfiles(), api.getToolsets(), api.getSkills()])
+      .then(([{ profiles: profileList }, tsets, s]) => {
+        setProfiles(profileList);
         setToolsets(tsets);
+        setSkills(s);
+        const active =
+          profileList.find((p) => p.is_active) ??
+          profileList.find((p) => p.is_default) ??
+          profileList[0];
+        setSelectedProfile(active?.name ?? "");
       })
       .catch(() => showToast(t.common.loading, "error"))
       .finally(() => setLoading(false));
   }, []);
 
+  /* ---- Refetch skills when the selected profile changes ----
+   *
+   * Skipped on initial mount: the load effect above already fetched the
+   * active profile's skills via the legacy /api/skills route, which is
+   * cheaper than the profile-scoped scan and stays in sync with the
+   * gateway-resident skill index.
+   */
+  useEffect(() => {
+    if (loading || !selectedProfile) return;
+    if (selectedProfile === activeProfileName) {
+      setSkillsLoading(true);
+      api
+        .getSkills()
+        .then(setSkills)
+        .catch(() => showToast(t.common.loading, "error"))
+        .finally(() => setSkillsLoading(false));
+      return;
+    }
+    setSkillsLoading(true);
+    api
+      .getProfileSkills(selectedProfile)
+      .then(setSkills)
+      .catch(() => showToast(t.common.loading, "error"))
+      .finally(() => setSkillsLoading(false));
+  }, [selectedProfile, activeProfileName, loading]);
+
   /* ---- Toggle skill ---- */
   const handleToggleSkill = async (skill: SkillInfo) => {
     setTogglingSkills((prev) => new Set(prev).add(skill.name));
     try {
-      await api.toggleSkill(skill.name, !skill.enabled);
+      if (isOnActiveProfile) {
+        await api.toggleSkill(skill.name, !skill.enabled);
+      } else {
+        await api.toggleProfileSkill(
+          selectedProfile,
+          skill.name,
+          !skill.enabled,
+        );
+      }
       setSkills((prev) =>
         prev.map((s) =>
           s.name === skill.name ? { ...s, enabled: !s.enabled } : s,
@@ -255,7 +314,33 @@ export default function SkillsPage() {
 
       <div className="flex flex-col sm:flex-row sm:items-start gap-4">
         <aside aria-label={t.skills.title} className="sm:w-56 sm:shrink-0">
-          <div className="sm:sticky sm:top-0">
+          <div className="sm:sticky sm:top-0 flex flex-col gap-2">
+            {profiles.length > 1 ? (
+              <div className="flex flex-col gap-1 border border-border bg-muted/20 px-3 pt-2 pb-1.5">
+                <span className="font-mondwest text-[0.65rem] tracking-[0.12em] uppercase text-muted-foreground">
+                  Profile
+                </span>
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={selectedProfile}
+                    onValueChange={(v) => setSelectedProfile(v)}
+                    aria-label="Profile"
+                    className="w-full text-xs [&>button]:h-7 [&>button]:py-0"
+                  >
+                    {profiles.map((p) => (
+                      <SelectOption key={p.name} value={p.name}>
+                        {p.name === activeProfileName
+                          ? `${p.name} (active)`
+                          : p.name}
+                      </SelectOption>
+                    ))}
+                  </Select>
+                  {skillsLoading ? (
+                    <Spinner className="text-xs text-muted-foreground" />
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <div
               className={`
                 flex flex-col
