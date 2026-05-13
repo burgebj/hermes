@@ -896,11 +896,12 @@ from tools.registry import registry, tool_error
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
     "description": (
-        "Generate high-quality images from text prompts. The underlying "
-        "backend (FAL, OpenAI, etc.) and model are user-configured and not "
-        "selectable by the agent. Returns either a URL or an absolute file "
-        "path in the `image` field; display it with markdown "
-        "![description](url-or-path) and the gateway will deliver it."
+        "Generate high-quality images from text prompts, optionally "
+        "conditioned on one or more reference images for image-to-image "
+        "edits. The underlying backend (FAL, OpenAI, etc.) and model are "
+        "user-configured and not selectable by the agent. Returns either a "
+        "URL or an absolute file path in the `image` field; display it with "
+        "markdown ![description](url-or-path) and the gateway will deliver it."
     ),
     "parameters": {
         "type": "object",
@@ -914,6 +915,19 @@ IMAGE_GENERATE_SCHEMA = {
                 "enum": list(VALID_ASPECT_RATIOS),
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
+            },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional reference images to condition generation on, "
+                    "for image-to-image edits or refinements. Each entry may "
+                    "be an absolute file path, a data: URL, or an http(s) URL. "
+                    "Pass when modifying or extending an existing image; omit "
+                    "for plain text-to-image. Support depends on the active "
+                    "image_gen.provider — currently honored by 'openai-codex'; "
+                    "providers without reference-image support ignore it."
+                ),
             },
         },
         "required": ["prompt"],
@@ -957,7 +971,12 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(
+    prompt: str,
+    aspect_ratio: str,
+    *,
+    reference_images: Optional[list] = None,
+):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -967,6 +986,12 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     it does not point to ``fal`` (FAL still lives in-tree in this PR;
     a later PR ports it into ``plugins/image_gen/fal/``). Any other value
     that matches a registered plugin provider wins.
+
+    ``reference_images`` is forwarded to the provider as a kwarg when
+    non-empty. Providers that do not implement reference-image support
+    will silently ignore it (the kwarg is absorbed by ``**kwargs`` on the
+    base class) — callers can probe support via the provider's docstring
+    or a future capability flag.
     """
     configured = _read_configured_image_provider()
     if not configured or configured == "fal":
@@ -1010,9 +1035,11 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         })
 
     try:
-        kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+        kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
         if configured_model:
             kwargs["model"] = configured_model
+        if reference_images:
+            kwargs["reference_images"] = reference_images
         result = provider.generate(**kwargs)
     except Exception as exc:
         logger.warning(
@@ -1035,17 +1062,80 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     return json.dumps(result)
 
 
+def _resolve_session_auto_reference_images() -> list:
+    """Look up image paths attached to the most recent inbound message on the
+    active gateway session, for auto-injection into ``image_generate`` calls.
+
+    Returns an empty list if the active session is unknown (e.g. CLI
+    invocation outside of a gateway context), if no attachments have been
+    registered for it, or if the lookup raises for any reason. Auto-inject
+    is a UX convenience — never let it block a generate call.
+    """
+    try:
+        from tools.approval import get_current_session_key
+        from agent.image_routing import get_recent_attached_image_paths
+
+        session_key = get_current_session_key(default="")
+        if not session_key:
+            return []
+        return get_recent_attached_image_paths(session_key)
+    except Exception as exc:
+        logger.debug("auto-resolve reference_images skipped: %s", exc)
+        return []
+
+
+def _merge_reference_images(explicit: list, auto: list) -> list:
+    """Combine explicit reference_images (from the model's tool call) with
+    auto-resolved session attachments. Explicit entries come first and win
+    duplicates, so the model can deliberately point to a different source
+    while still benefiting from auto-attachment when it doesn't.
+    """
+    merged = list(explicit or [])
+    seen = {str(x) for x in merged}
+    for p in auto or []:
+        key = str(p)
+        if key not in seen:
+            merged.append(p)
+            seen.add(key)
+    return merged
+
+
 def _handle_image_generate(args, **kw):
     prompt = args.get("prompt", "")
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    explicit_refs = list(args.get("reference_images") or [])
+
+    # Auto-inject the most recent session attachment paths so "edit this"
+    # works without the model needing to know on-disk paths. Explicit
+    # reference_images from the model take precedence over auto-resolved
+    # ones (no overwrite, no shadowing — auto entries are appended).
+    auto_refs = _resolve_session_auto_reference_images()
+    reference_images = _merge_reference_images(explicit_refs, auto_refs)
+    if auto_refs and not explicit_refs:
+        logger.info(
+            "image_generate: auto-attaching %d session reference image(s)",
+            len(auto_refs),
+        )
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(
+        prompt,
+        aspect_ratio,
+        reference_images=reference_images,
+    )
     if dispatched is not None:
         return dispatched
+
+    if reference_images:
+        logger.warning(
+            "image_generate received %d reference_images but the active "
+            "backend (FAL in-tree) does not support image-to-image; "
+            "ignoring them and falling back to text-to-image.",
+            len(reference_images),
+        )
 
     return image_generate_tool(
         prompt=prompt,
