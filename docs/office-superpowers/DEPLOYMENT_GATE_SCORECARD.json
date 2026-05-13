@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "task_id": "t_fa88ec6a",
+  "gates": [
+    {
+      "gate": "Deployment runbook delivered",
+      "command_or_check": "test -f docs/office-superpowers/DEPLOYMENT.md",
+      "exit_code_or_artifact": "artifact exists: docs/office-superpowers/DEPLOYMENT.md",
+      "artifact_paths": ["docs/office-superpowers/DEPLOYMENT.md"],
+      "verdict": "PASS",
+      "rationale": "Runbook includes install, enable, disable, cron mode recommendation, Telegram smoke test, rollback, and no-npm verification."
+    },
+    {
+      "gate": "Safe install/enable/disable scripts delivered",
+      "command_or_check": "python3 -m py_compile scripts/office_watchdog_cron.py scripts/office_watchdog_cron_install.py && python3 scripts/office_watchdog_cron_install.py status",
+      "exit_code_or_artifact": "py_compile exit 0; status exit 0; /tmp/office_watchdog_verify_status.json",
+      "artifact_paths": ["scripts/office_watchdog_cron.py", "scripts/office_watchdog_cron_install.py", "/tmp/office_watchdog_verify_status.json"],
+      "verdict": "PASS",
+      "rationale": "Scripts compile, use no-agent/dry-run behavior, and status reports the copied runner plus matching cron job without secrets."
+    },
+    {
+      "gate": "Persistent watchdog enabled safely and reversibly",
+      "command_or_check": "python3 scripts/office_watchdog_cron_install.py install --schedule 'every 30m' --deliver local; python3 scripts/office_watchdog_cron_install.py status",
+      "exit_code_or_artifact": "install exit 0; status exit 0; job c8638b67326b scheduled every 30m, no_agent=true, deliver=local",
+      "artifact_paths": ["/tmp/office_watchdog_install.json", "/tmp/office_watchdog_post_install_status.json"],
+      "verdict": "PASS_WITH_CAVEAT",
+      "rationale": "The cron job was actually created and is reversible via disable/remove. It uses local delivery rather than Telegram because current board findings would generate repeated external alerts until smoke-tested."
+    },
+    {
+      "gate": "Cron no-agent vs LLM-driven recommendation documented",
+      "command_or_check": "manual content check in docs/office-superpowers/DEPLOYMENT.md section 'Recommended cron mode'",
+      "exit_code_or_artifact": "artifact section present",
+      "artifact_paths": ["docs/office-superpowers/DEPLOYMENT.md"],
+      "verdict": "PASS",
+      "rationale": "Runbook recommends no-agent for high-frequency watchdog and reserves LLM-driven cron for lower-frequency digest/summarization."
+    },
+    {
+      "gate": "Telegram smoke-test instructions documented without secrets",
+      "command_or_check": "manual content check in docs/office-superpowers/DEPLOYMENT.md section 'Telegram smoke-test instructions'",
+      "exit_code_or_artifact": "artifact section present; Doctor reports telegram_configured=false without printing credentials",
+      "artifact_paths": ["docs/office-superpowers/DEPLOYMENT.md", "/tmp/office_doctor_deploy_verify.json"],
+      "verdict": "PASS_WITH_CAVEAT",
+      "rationale": "Instructions are present and redact-sensitive. Live Telegram delivery was not enabled because Telegram is not configured for this devops profile and current board alert volume would spam."
+    },
+    {
+      "gate": "Rollback steps documented and executable",
+      "command_or_check": "python3 scripts/office_watchdog_cron_install.py status plus runbook rollback section",
+      "exit_code_or_artifact": "status exit 0; rollback commands documented: disable/remove",
+      "artifact_paths": ["docs/office-superpowers/DEPLOYMENT.md", "/tmp/office_watchdog_verify_status.json"],
+      "verdict": "PASS",
+      "rationale": "Rollback path is pause-first and full removal is explicit."
+    },
+    {
+      "gate": "No npm installs / package mutation",
+      "command_or_check": "git status --short -- docs/office-superpowers/DEPLOYMENT.md scripts/office_watchdog_cron.py scripts/office_watchdog_cron_install.py package.json package-lock.json pnpm-lock.yaml yarn.lock",
+      "exit_code_or_artifact": "exit 0; only the new docs/scripts are untracked in scoped status; no package/lockfile changes",
+      "artifact_paths": ["/tmp/office_deploy_pytest.log"],
+      "verdict": "PASS",
+      "rationale": "Only Python/file tooling was used for implementation and verification; no npm/pnpm/yarn/npx commands or JS package mutations were required."
+    },
+    {
+      "gate": "Regression tests for related Office/Cron behavior pass",
+      "command_or_check": "python3 -m pytest tests/hermes_cli/test_office_superpowers.py tests/cron/test_cron_no_agent.py tests/tools/test_cronjob_tools.py -q -o 'addopts='",
+      "exit_code_or_artifact": "exit 0; 58 passed in 1.10s; /tmp/office_deploy_pytest.log",
+      "artifact_paths": ["/tmp/office_deploy_pytest.log"],
+      "verdict": "PASS",
+      "rationale": "Targeted tests cover Office superpowers helpers and no-agent cron/tool behavior."
+    }
+  ]
+}

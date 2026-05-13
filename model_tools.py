@@ -23,9 +23,11 @@ Public API (signatures preserved from the original 2,400-line version):
 import json
 import asyncio
 import logging
+import os
 import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 from tools.registry import discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
@@ -493,6 +495,161 @@ def _compute_tool_definitions(
 _AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
+_OFFICE_BROWSER_OUTPUT_TOOLS = {
+    "browser_snapshot",
+    "browser_vision",
+    "browser_console",
+    "browser_get_images",
+}
+
+
+def _office_boundary_enabled() -> bool:
+    """Return True when a dispatched Kanban/Office worker has a scoped workspace."""
+    return bool(os.getenv("HERMES_KANBAN_TASK") and os.getenv("HERMES_KANBAN_WORKSPACE"))
+
+
+def _office_boundary_workspace() -> str | None:
+    return os.getenv("HERMES_KANBAN_WORKSPACE") or os.getenv("TERMINAL_CWD") or None
+
+
+def _office_boundary_memory_target_path(args: Dict[str, Any]) -> str:
+    target = str((args or {}).get("target") or "memory").strip().lower()
+    filename = "USER.md" if target == "user" else "MEMORY.md"
+    try:
+        from tools.memory_tool import get_memory_dir
+        return str(get_memory_dir() / filename)
+    except Exception:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home() / "memories" / filename)
+
+
+def _office_boundary_patch_targets(args: Dict[str, Any]) -> list[str]:
+    if not isinstance(args, dict):
+        return []
+    if args.get("path"):
+        return [str(args["path"])]
+
+    patch_text = str(args.get("patch") or "")
+    targets: list[str] = []
+    for line in patch_text.splitlines():
+        stripped = line.strip()
+        for marker in ("*** Update File:", "*** Add File:", "*** Delete File:"):
+            if stripped.startswith(marker):
+                candidate = stripped[len(marker):].strip()
+                if candidate:
+                    targets.append(candidate)
+    return targets
+
+
+def _office_boundary_file_targets(function_name: str, args: Dict[str, Any]) -> list[tuple[str, str]]:
+    """Return (action, target) pairs that the Office boundary policy must check."""
+    if not isinstance(args, dict):
+        return []
+    if function_name == "read_file":
+        return [("read", str(args.get("path") or ""))]
+    if function_name == "write_file":
+        return [("write", str(args.get("path") or ""))]
+    if function_name == "patch":
+        return [("patch", target) for target in _office_boundary_patch_targets(args)]
+    if function_name == "search_files":
+        return [("list", str(args.get("path") or "."))]
+    return []
+
+
+def _office_boundary_browser_targets(function_name: str, args: Dict[str, Any]) -> list[tuple[str, str]]:
+    """Classify local browser-profile paths without treating remote pages as profile access."""
+    if function_name != "browser_navigate" or not isinstance(args, dict):
+        return []
+    raw_url = str(args.get("url") or "").strip()
+    if not raw_url:
+        return []
+    parsed = urlparse(raw_url)
+    if parsed.scheme.lower() != "file":
+        return []
+    return [("read", unquote(parsed.path))]
+
+
+def office_boundary_preflight(function_name: str, function_args: Dict[str, Any]) -> str | None:
+    """Enforce Office protected-boundary policy before executing sensitive tools.
+
+    This is wired at the dispatcher/agent-loop seam so protected path, browser
+    profile, and memory operations fail closed before any tool handler can read
+    or mutate state.  Normal workspace file operations remain allowed.
+    """
+    if not _office_boundary_enabled():
+        return None
+
+    args = function_args if isinstance(function_args, dict) else {}
+    checks: list[tuple[str, str]] = []
+    checks.extend(_office_boundary_file_targets(function_name, args))
+    checks.extend(_office_boundary_browser_targets(function_name, args))
+
+    if function_name == "memory":
+        action = str(args.get("action") or "").strip().lower()
+        boundary_action = "write" if action in {"add", "replace", "remove"} else "read"
+        checks.append((boundary_action, _office_boundary_memory_target_path(args)))
+
+    if not checks:
+        return None
+
+    try:
+        from hermes_cli.office_superpowers import evaluate_office_boundary_decision
+        from hermes_constants import get_hermes_home
+    except Exception as exc:
+        return f"Office boundary policy unavailable; failing closed before {function_name}: {exc}"
+
+    workspace = _office_boundary_workspace()
+    hermes_home = get_hermes_home()
+    for action, target in checks:
+        if not target:
+            return f"Office boundary policy denied {function_name}: empty target fails closed"
+        decision = evaluate_office_boundary_decision(
+            action=action,
+            target=target,
+            workspace=workspace,
+            hermes_home=hermes_home,
+        )
+        if decision.decision == "allow":
+            continue
+        if decision.decision == "allow_read_only" and action in {"read", "list", "inspect", "stat"}:
+            continue
+        prefix = "requires approval" if decision.decision == "requires_approval" else "denied"
+        return (
+            f"Office boundary policy {prefix} {function_name} before execution: "
+            f"action={action}, target={target}, category={decision.category}, "
+            f"rule={decision.matched_rule_id}, risk={decision.risk_level}. {decision.reason}"
+        )
+    return None
+
+
+def tag_office_browser_output(function_name: str, result: str) -> str:
+    """Tag remote browser page outputs as sensitive without blocking page access."""
+    if not _office_boundary_enabled() or function_name not in _OFFICE_BROWSER_OUTPUT_TOOLS:
+        return result
+    try:
+        payload = json.loads(result)
+    except Exception:
+        return json.dumps({
+            "sensitive": True,
+            "sensitivity_category": "remote_browser_page_output",
+            "sensitivity_note": "Remote browser page text/screenshots can contain PII or account data; this is not local cookie/profile file access.",
+            "content": result,
+        }, ensure_ascii=False)
+    if isinstance(payload, dict):
+        payload.setdefault("sensitive", True)
+        payload.setdefault("sensitivity_category", "remote_browser_page_output")
+        payload.setdefault(
+            "sensitivity_note",
+            "Remote browser page text/screenshots can contain PII or account data; this is not local cookie/profile file access.",
+        )
+        return json.dumps(payload, ensure_ascii=False)
+    return json.dumps({
+        "sensitive": True,
+        "sensitivity_category": "remote_browser_page_output",
+        "sensitivity_note": "Remote browser page text/screenshots can contain PII or account data; this is not local cookie/profile file access.",
+        "content": payload,
+    }, ensure_ascii=False)
+
 
 # =========================================================================
 # Tool argument type coercion
@@ -727,6 +884,10 @@ def handle_function_call(
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
+        office_block_message = office_boundary_preflight(function_name, function_args)
+        if office_block_message is not None:
+            return json.dumps({"error": office_block_message}, ensure_ascii=False)
+
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to
         # avoid double-firing the hook).
@@ -787,6 +948,7 @@ def handle_function_call(
                 user_task=user_task,
             )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
+        result = tag_office_browser_output(function_name, result)
 
         try:
             from hermes_cli.plugins import invoke_hook

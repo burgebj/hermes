@@ -124,6 +124,7 @@ from model_tools import (
     get_toolset_for_tool,
     handle_function_call,
     check_toolset_requirements,
+    office_boundary_preflight,
 )
 from tools.terminal_tool import cleanup_vm, get_active_env, is_persistent_env
 from tools.terminal_tool import (
@@ -10514,6 +10515,10 @@ class AIAgent:
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        office_block_message = office_boundary_preflight(function_name, function_args)
+        if office_block_message is not None:
+            return json.dumps({"error": office_block_message}, ensure_ascii=False)
+
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
             return _todo_tool(
@@ -10682,6 +10687,10 @@ class AIAgent:
                 if not guardrail_decision.allows_execution:
                     block_result = self._guardrail_block_result(guardrail_decision)
                     blocked_by_guardrail = True
+                else:
+                    office_block_message = office_boundary_preflight(function_name, function_args)
+                    if office_block_message is not None:
+                        block_result = json.dumps({"error": office_block_message}, ensure_ascii=False)
 
             parsed_calls.append((tool_call, function_name, function_args, block_result, blocked_by_guardrail))
 
@@ -11063,7 +11072,15 @@ class AIAgent:
                 if not guardrail_decision.allows_execution:
                     _guardrail_block_decision = guardrail_decision
 
-            _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+            _office_boundary_block_msg: Optional[str] = None
+            if _block_msg is None and _guardrail_block_decision is None:
+                _office_boundary_block_msg = office_boundary_preflight(function_name, function_args)
+
+            _execution_blocked = (
+                _block_msg is not None
+                or _guardrail_block_decision is not None
+                or _office_boundary_block_msg is not None
+            )
 
             if _execution_blocked:
                 # Tool blocked by plugin or guardrail policy — skip counters,
@@ -11145,6 +11162,10 @@ class AIAgent:
                 # Tool blocked by tool-loop guardrail — synthesize exactly one
                 # tool result for the original tool_call_id without executing.
                 function_result = self._guardrail_block_result(_guardrail_block_decision)
+                tool_duration = 0.0
+            elif _office_boundary_block_msg is not None:
+                # Tool blocked by Office protected-boundary policy before execution.
+                function_result = json.dumps({"error": _office_boundary_block_msg}, ensure_ascii=False)
                 tool_duration = 0.0
             elif function_name == "todo":
                 from tools.todo_tool import todo_tool as _todo_tool
@@ -14199,6 +14220,11 @@ class AIAgent:
                             "completed": False,
                             "failed": True,
                             "error": str(api_error),
+                            "failure_type": classified.reason.value,
+                            "failure_retryable": bool(classified.retryable),
+                            "failure_status_code": status_code,
+                            "failure_provider": _provider,
+                            "failure_model": _model,
                         }
 
                     if retry_count >= max_retries:
@@ -14282,6 +14308,11 @@ class AIAgent:
                             "completed": False,
                             "failed": True,
                             "error": _final_summary,
+                            "failure_type": classified.reason.value,
+                            "failure_retryable": bool(classified.retryable),
+                            "failure_status_code": status_code,
+                            "failure_provider": _provider,
+                            "failure_model": _model,
                         }
 
                     # For rate limits, respect the Retry-After header if present

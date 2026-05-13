@@ -1155,11 +1155,17 @@ def _cmd_show(args: argparse.Namespace) -> int:
         # ``result=``. Surfacing the latest summary here keeps ``show`` from
         # looking like a no-op when the worker actually did real work.
         latest_summary = kb.latest_summary(conn, args.task_id)
+        try:
+            from hermes_cli.office_verifier import latest_verification_summary
+            verification = latest_verification_summary(conn, args.task_id)
+        except Exception:
+            verification = None
 
     if getattr(args, "json", False):
         payload = {
             "task": _task_to_dict(task),
             "latest_summary": latest_summary,
+            "verification": verification,
             "parents": parents,
             "children": children,
             "comments": [
@@ -1249,6 +1255,19 @@ def _cmd_show(args: argparse.Namespace) -> int:
                     print(f"       → {a.label}")
     if task.started_at:
         print(f"  started:   {_fmt_ts(task.started_at)}")
+    if verification:
+        print("\n  Verification:")
+        print(f"    status: {verification.get('overall_status')}")
+        print(
+            "    gates:  "
+            f"pass={verification.get('passed', 0)} "
+            f"fail={verification.get('failed', 0)} "
+            f"partial={verification.get('partial', 0)} "
+            f"blocked={verification.get('blocked', 0)} "
+            f"total={verification.get('total', 0)}"
+        )
+        if verification.get("report_path"):
+            print(f"    report: {verification.get('report_path')}")
     if task.completed_at:
         print(f"  completed: {_fmt_ts(task.completed_at)}")
     if parents:
@@ -1678,15 +1697,27 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
-    with kb.connect() as conn:
-        res = kb.dispatch_once(
+    from hermes_cli import agent_office
+    with kb.connect(board=getattr(args, "board", None)) as conn:
+        office_res = agent_office.tick(
             conn,
+            board=getattr(args, "board", None),
             dry_run=args.dry_run,
             max_spawn=args.max,
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
         )
+        res = office_res.dispatched
     if getattr(args, "json", False):
         print(json.dumps({
+            "office": {
+                "specified": office_res.specified,
+                "specify_failed": office_res.specify_failed,
+                "routed": [
+                    {"task_id": tid, "assignee": who}
+                    for (tid, who) in office_res.routed
+                ],
+                "supervised": office_res.supervised,
+            },
             "reclaimed": res.reclaimed,
             "crashed": res.crashed,
             "timed_out": res.timed_out,
@@ -1700,6 +1731,14 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "skipped_nonspawnable": res.skipped_nonspawnable,
         }, indent=2))
         return 0
+    print(f"Office specified: {len(office_res.specified)}")
+    if office_res.specify_failed:
+        print(f"Office specify failed: {len(office_res.specify_failed)}")
+    print(f"Office routed:    {len(office_res.routed)}")
+    for tid, who in office_res.routed:
+        print(f"  - {tid}  ->  {who}")
+    if office_res.supervised:
+        print(f"Office supervised: {', '.join(office_res.supervised)}")
     print(f"Reclaimed:    {res.reclaimed}")
     print(f"Crashed:      {len(res.crashed)}")
     if res.crashed:

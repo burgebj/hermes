@@ -15,6 +15,18 @@ from model_tools import (
 )
 
 
+@pytest.fixture()
+def office_boundary_env(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    hermes_home = tmp_path / ".hermes" / "profiles" / "coder"
+    workspace.mkdir(parents=True)
+    hermes_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_test")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    return workspace, hermes_home
+
+
 # =========================================================================
 # handle_function_call
 # =========================================================================
@@ -111,6 +123,89 @@ class TestHandleFunctionCall:
         assert post_duration == transform_duration
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
+
+    def test_office_boundary_gates_protected_file_before_dispatch(self, office_boundary_env):
+        _workspace, hermes_home = office_boundary_env
+        protected = hermes_home / "profiles" / "reviewer" / "SOUL.md"
+
+        with patch("model_tools.registry.dispatch", side_effect=AssertionError("should not dispatch")):
+            result = json.loads(handle_function_call("write_file", {"path": str(protected), "content": "x"}))
+
+        assert "error" in result
+        assert "Office boundary policy requires approval" in result["error"]
+        assert "protected_profile_artifact" in result["error"]
+
+    def test_office_boundary_approval_gates_secret_reads_before_dispatch(self, office_boundary_env):
+        _workspace, hermes_home = office_boundary_env
+        secret = hermes_home / ".env"
+
+        with patch("model_tools.registry.dispatch", side_effect=AssertionError("should not dispatch")):
+            result = json.loads(handle_function_call("read_file", {"path": str(secret)}))
+
+        assert "error" in result
+        assert "requires approval" in result["error"]
+        assert "secret_bearing_artifact" in result["error"]
+
+    def test_office_boundary_preserves_workspace_file_operations(self, office_boundary_env):
+        workspace, _hermes_home = office_boundary_env
+        allowed = workspace / "notes.txt"
+
+        with patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch:
+            result = json.loads(handle_function_call("write_file", {"path": str(allowed), "content": "ok"}))
+
+        assert result == {"ok": True}
+        mock_dispatch.assert_called_once()
+
+    def test_office_boundary_checks_paths_inside_v4a_patch_before_dispatch(self, office_boundary_env):
+        _workspace, hermes_home = office_boundary_env
+        policy_path = hermes_home / "policies" / "office.yaml"
+        patch_text = f"""*** Begin Patch
+*** Update File: {policy_path}
+@@
+-old
++new
+*** End Patch
+"""
+
+        with patch("model_tools.registry.dispatch", side_effect=AssertionError("should not dispatch")):
+            result = json.loads(handle_function_call("patch", {"mode": "patch", "patch": patch_text}))
+
+        assert "error" in result
+        assert "permission_policy" in result["error"]
+
+    def test_office_boundary_blocks_protected_evidence_record_writes_before_dispatch(self, office_boundary_env):
+        _workspace, hermes_home = office_boundary_env
+        protected_targets = [
+            (hermes_home / "approvals" / "records.jsonl", "approval_records"),
+            (hermes_home / "audit" / "events.jsonl", "audit_logs"),
+            (hermes_home / "production" / "state.json", "production_state"),
+        ]
+
+        with patch("model_tools.registry.dispatch", side_effect=AssertionError("should not dispatch")):
+            for target, category in protected_targets:
+                result = json.loads(handle_function_call("write_file", {"path": str(target), "content": "{}"}))
+                assert "error" in result
+                assert "Office boundary policy" in result["error"]
+                assert category in result["error"]
+
+    def test_office_boundary_browser_profile_file_url_is_approval_gated(self, office_boundary_env):
+        cookie_path = "/Users/example/Library/Application Support/Google/Chrome/Default/Cookies"
+
+        with patch("model_tools.registry.dispatch", side_effect=AssertionError("should not dispatch")):
+            result = json.loads(handle_function_call("browser_navigate", {"url": f"file://{cookie_path}"}))
+
+        assert "error" in result
+        assert "requires approval" in result["error"]
+        assert "browser_profile_state" in result["error"]
+
+    def test_office_boundary_tags_remote_browser_output_without_profile_block(self, office_boundary_env):
+        with patch("model_tools.registry.dispatch", return_value='{"snapshot":"visible page text"}') as mock_dispatch:
+            result = json.loads(handle_function_call("browser_snapshot", {"full": True}))
+
+        assert result["snapshot"] == "visible page text"
+        assert result["sensitive"] is True
+        assert result["sensitivity_category"] == "remote_browser_page_output"
+        mock_dispatch.assert_called_once()
 
 
 # =========================================================================

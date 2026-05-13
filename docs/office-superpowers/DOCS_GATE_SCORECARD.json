@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "task_id": "t_5ea2ca6c",
+  "policy_version": "office-superpowers-v1",
+  "created_at": "2026-05-13T01:12:55Z",
+  "gates": [
+    {
+      "gate": "Task orientation and parent evidence reviewed",
+      "command_or_check": "kanban_show(t_5ea2ca6c) plus reads of PRD, ARCHITECTURE, DEPLOYMENT, research artifacts, and implementation entrypoints",
+      "exit_code_or_artifact": "worker_context loaded; parent results reviewed; files read successfully",
+      "artifact_paths": [
+        "docs/office-superpowers/PRD.md",
+        "docs/office-superpowers/ARCHITECTURE.md",
+        "docs/office-superpowers/DEPLOYMENT.md",
+        "docs/office-superpowers/research/OPS_AGENT_TEMPLATE_RESEARCH.md",
+        "docs/office-superpowers/research/ML_TEMPLATE_RESEARCH.md",
+        "hermes_cli/office_superpowers.py"
+      ],
+      "verdict": "PASS",
+      "rationale": "Acceptance gates, constraints, parent caveats, and current implementation boundaries were inspected before drafting."
+    },
+    {
+      "gate": "Required documentation deliverables exist",
+      "command_or_check": "python3 inline file existence/size/fence check over README, OPERATOR_RUNBOOK, TEMPLATE_LIBRARY, COLAB_GPU_GUIDE, BROWSER_ACCESS",
+      "exit_code_or_artifact": "exit 0; all five docs non-empty and code fences balanced",
+      "artifact_paths": [
+        "docs/office-superpowers/README.md",
+        "docs/office-superpowers/OPERATOR_RUNBOOK.md",
+        "docs/office-superpowers/TEMPLATE_LIBRARY.md",
+        "docs/office-superpowers/COLAB_GPU_GUIDE.md",
+        "docs/office-superpowers/BROWSER_ACCESS.md"
+      ],
+      "verdict": "PASS",
+      "rationale": "All requested files were created in the required directory and passed basic structural validation."
+    },
+    {
+      "gate": "Docs match current implementation and do not invent features",
+      "command_or_check": "manual/source-backed content check against hermes_cli/office_superpowers.py and scripts/office_*.py; Doctor/Watchdog/Outbox JSON smoke",
+      "exit_code_or_artifact": "doctor=0; watchdog=1 with current-board findings; outbox=0; valid JSON artifacts under /tmp/office_docs_*.json",
+      "artifact_paths": [
+        "/tmp/office_docs_doctor.json",
+        "/tmp/office_docs_watchdog.json",
+        "/tmp/office_docs_outbox_status.json",
+        "scripts/office_doctor.py",
+        "scripts/office_watchdog.py",
+        "scripts/office_report_outbox.py"
+      ],
+      "verdict": "PASS_WITH_CAVEAT",
+      "rationale": "Docs label live Telegram sending and automatic destructive repair as not implemented in the MVP; Watchdog nonzero exit reflects actionable current-board findings, not invalid JSON."
+    },
+    {
+      "gate": "Template library synthesizes FAANG/open-source research safely",
+      "command_or_check": "python3 required-term verification over TEMPLATE_LIBRARY.md",
+      "exit_code_or_artifact": "exit 0; required terms present for SRE/transactional outbox/Cookiecutter/DVC/MLflow/Hugging Face/MLCommons/Colab/license cautions",
+      "artifact_paths": [
+        "docs/office-superpowers/TEMPLATE_LIBRARY.md",
+        "docs/office-superpowers/research/OPS_AGENT_TEMPLATE_RESEARCH.md",
+        "docs/office-superpowers/research/ML_TEMPLATE_RESEARCH.md"
+      ],
+      "verdict": "PASS",
+      "rationale": "The library cites research-derived patterns and explicitly rejects unsafe copying or license-ambiguous imports."
+    },
+    {
+      "gate": "Colab/GPU guidance preserves no-local-GPU constraint",
+      "command_or_check": "content verification for no local GPU, optional Colab, SCOPE_CHANGE_REQUEST, secrets, and artifact evidence",
+      "exit_code_or_artifact": "exit 0; required terms present",
+      "artifact_paths": [
+        "docs/office-superpowers/COLAB_GPU_GUIDE.md",
+        "docs/office-superpowers/templates/COLAB_GPU_POLICY_TEMPLATE.md"
+      ],
+      "verdict": "PASS",
+      "rationale": "The guide forbids local GPU claims and requires Colab/runtime artifacts or an honest scope-change request."
+    },
+    {
+      "gate": "Browser/dashboard/log access boundary documented",
+      "command_or_check": "content verification for browser boundary, cookies/profile limits, dashboard checks, logs, and blockers",
+      "exit_code_or_artifact": "exit 0; required terms present",
+      "artifact_paths": [
+        "docs/office-superpowers/BROWSER_ACCESS.md",
+        "docs/office-superpowers/references/BROWSER_DASHBOARD_LOG_ACCESS.md"
+      ],
+      "verdict": "PASS",
+      "rationale": "The guide separates safe browser/dashboard/log inspection from unavailable logged-in profile, cookie, credential, and human-login access."
+    },
+    {
+      "gate": "Secret hygiene",
+      "command_or_check": "python3 regex scan for private keys, bearer tokens, token/secret/password assignments, and common API token prefixes over touched docs",
+      "exit_code_or_artifact": "exit 0; secret_findings=[]",
+      "artifact_paths": [
+        "docs/office-superpowers/README.md",
+        "docs/office-superpowers/OPERATOR_RUNBOOK.md",
+        "docs/office-superpowers/TEMPLATE_LIBRARY.md",
+        "docs/office-superpowers/COLAB_GPU_GUIDE.md",
+        "docs/office-superpowers/BROWSER_ACCESS.md"
+      ],
+      "verdict": "PASS",
+      "rationale": "No obvious raw secret/token/private-key patterns were found in the new docs."
+    },
+    {
+      "gate": "No npm installs or package mutations",
+      "command_or_check": "session command review plus git status scoped to package lockfiles",
+      "exit_code_or_artifact": "no npm/pnpm/yarn/npx commands executed; no package/lockfile changes in scoped status",
+      "artifact_paths": [
+        "docs/office-superpowers/DOCS_GATE_SCORECARD.json"
+      ],
+      "verdict": "PASS",
+      "rationale": "Only file, Python, shell, and Kanban tools were used; no JavaScript package install or lockfile mutation was performed."
+    }
+  ],
+  "scope_change_requests": []
+}

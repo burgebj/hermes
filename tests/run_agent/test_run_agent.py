@@ -2203,6 +2203,27 @@ class TestConcurrentToolExecution:
         assert json.loads(result) == {"error": "Blocked"}
         assert agent._turns_since_memory == 5
 
+    def test_office_boundary_blocks_memory_write_before_agent_level_tool(self, agent, tmp_path, monkeypatch):
+        workspace = tmp_path / "workspace"
+        hermes_home = tmp_path / ".hermes" / "profiles" / "coder"
+        workspace.mkdir(parents=True)
+        hermes_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_test")
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        agent._turns_since_memory = 5
+
+        with patch("tools.memory_tool.memory_tool", side_effect=AssertionError("should not run")):
+            result = agent._invoke_tool(
+                "memory", {"action": "add", "target": "memory", "content": "durable fact"}, "task-1",
+            )
+
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "Office boundary policy" in parsed["error"]
+        assert "active_memory" in parsed["error"]
+        assert agent._turns_since_memory == 5
+
 
 class TestPathsOverlap:
     """Unit tests for the _paths_overlap helper."""
