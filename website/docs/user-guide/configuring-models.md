@@ -37,7 +37,25 @@ Type in the filter box to narrow by provider name, slug, or model ID.
 
 Pick a model, hit **Switch**, and Hermes writes it to `~/.hermes/config.yaml` under the `model` section. **This applies to new sessions only** — any chat tab you already have open keeps running whatever model it started with. To hot-swap the current chat, use the `/model` slash command inside it.
 
-## Setting auxiliary models
+## Provider-aware routing profiles
+
+Hermes now treats model choice as two named routing profiles:
+
+- **main** — the cheap/ordinary path for chat, brainstorming, triage, docs, summaries, and first-pass planning.
+- **escalate** — the senior path for code edits, review, architecture, CI/deploy, auth, database work, migrations, security, and other irreversible changes.
+
+The profiles live in config as `model.main` and `model.escalate`. The `main` profile also continues to drive the default model for new sessions.
+
+Slash commands:
+
+- `/model main <provider/model>` — set the main profile and switch the current session to it.
+- `/model escalate <provider/model>` — set the senior profile and switch the current session to it.
+- `/think cheap` — route the current session to the main profile.
+- `/think senior` — route the current session to the senior profile.
+- `/review-with-openai` — route the current session to the senior OpenAI/Codex review profile.
+- `/quota` — show provider-aware quota/limit information for the currently active provider/model.
+
+If a profile is missing, Hermes now says so explicitly instead of guessing a fallback.
 
 Click **Show auxiliary** to reveal the eight task slots:
 

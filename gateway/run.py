@@ -6160,6 +6160,8 @@ class GatewayRunner:
                     return await self._handle_commands_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
+                if _cmd_def_inner.name == "quota":
+                    return await self._handle_quota_command(event)
                 if _cmd_def_inner.name == "update":
                     return await self._handle_update_command(event)
 
@@ -6430,6 +6432,12 @@ class GatewayRunner:
         if canonical == "model":
             return await self._handle_model_command(event)
 
+        if canonical == "think":
+            return await self._handle_think_command(event)
+
+        if canonical == "review-with-openai":
+            return await self._handle_review_with_openai_command(event)
+
         if canonical == "personality":
             return await self._handle_personality_command(event)
 
@@ -6458,6 +6466,9 @@ class GatewayRunner:
 
         if canonical == "usage":
             return await self._handle_usage_command(event)
+
+        if canonical == "quota":
+            return await self._handle_quota_command(event)
 
         if canonical == "insights":
             return await self._handle_insights_command(event)
@@ -8872,6 +8883,15 @@ class GatewayRunner:
 
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
+
+        first_token = raw_args.split(None, 1)[0].lower() if raw_args else ""
+        if first_token in {"main", "escalate"}:
+            return await self._handle_named_profile_command(
+                event,
+                first_token,
+                persist_profile=True,
+                announce="Model profile",
+            )
 
         # Read current model/provider from config
         current_model = ""
@@ -11668,6 +11688,273 @@ class GatewayRunner:
         if account_lines:
             return "\n".join(account_lines)
         return t("gateway.usage.no_data")
+
+    async def _handle_named_profile_command(
+        self,
+        event: MessageEvent,
+        profile_name: str,
+        *,
+        persist_profile: bool = False,
+        announce: str = "Routing profile",
+    ) -> Optional[str]:
+        """Switch to or update a named routing profile."""
+        from cli import save_config_value
+        from hermes_cli.config import get_compatible_custom_providers
+        from hermes_cli.model_profiles import (
+            load_model_profile,
+            normalize_profile_name,
+            profile_missing_message,
+            profile_title,
+        )
+        from hermes_cli.model_switch import parse_model_flags, switch_model as _switch_model
+
+        normalized = normalize_profile_name(profile_name)
+        if normalized not in {"main", "escalate"}:
+            return f"Error: unknown routing profile '{profile_name}'"
+
+        raw_args = event.get_command_args().strip()
+        source = event.source
+        session_key = self._session_key_for_source(source)
+
+        current_model = ""
+        current_provider = "openrouter"
+        current_base_url = ""
+        current_api_key = ""
+        user_provs = None
+        custom_provs = None
+        config_path = _hermes_home / "config.yaml"
+        try:
+            cfg = self._load_gateway_config()
+            if cfg:
+                model_cfg = cfg.get("model", {})
+                if isinstance(model_cfg, dict):
+                    current_model = model_cfg.get("default", "")
+                    current_provider = model_cfg.get("provider", current_provider)
+                    current_base_url = model_cfg.get("base_url", "")
+                user_provs = cfg.get("providers")
+                custom_provs = get_compatible_custom_providers(cfg)
+        except Exception:
+            cfg = {}
+
+        override = self._session_model_overrides.get(session_key, {})
+        if override:
+            current_model = override.get("model", current_model)
+            current_provider = override.get("provider", current_provider)
+            current_base_url = override.get("base_url", current_base_url)
+            current_api_key = override.get("api_key", current_api_key)
+
+        def _apply_result(result, note: str) -> str:
+            cached_entry = None
+            _cache_lock = getattr(self, "_agent_cache_lock", None)
+            _cache = getattr(self, "_agent_cache", None)
+            if _cache_lock and _cache is not None:
+                with _cache_lock:
+                    cached_entry = _cache.get(session_key)
+
+            if cached_entry and cached_entry[0] is not None:
+                try:
+                    cached_entry[0].switch_model(
+                        new_model=result.new_model,
+                        new_provider=result.target_provider,
+                        api_key=result.api_key,
+                        base_url=result.base_url,
+                        api_mode=result.api_mode,
+                    )
+                except Exception as exc:
+                    logger.warning("Profile model switch failed for cached agent: %s", exc)
+
+            if not hasattr(self, "_pending_model_notes"):
+                self._pending_model_notes = {}
+            self._pending_model_notes[session_key] = (
+                f"[Note: model was just switched from {current_model} to {result.new_model} "
+                f"via {result.provider_label or result.target_provider}. "
+                f"Adjust your self-identification accordingly.]"
+            )
+            self._session_model_overrides[session_key] = {
+                "model": result.new_model,
+                "provider": result.target_provider,
+                "api_key": result.api_key,
+                "base_url": result.base_url,
+                "api_mode": result.api_mode,
+            }
+            self._evict_cached_agent(session_key)
+            return note
+
+        if not persist_profile:
+            profile = load_model_profile(cfg, normalized)
+            if not profile:
+                return f"Error: {profile_missing_message(normalized)}"
+
+            result = _switch_model(
+                raw_input=profile.model,
+                current_provider=current_provider,
+                current_model=current_model,
+                current_base_url=current_base_url,
+                current_api_key=current_api_key,
+                is_global=False,
+                explicit_provider=profile.provider,
+                user_providers=user_provs,
+                custom_providers=custom_provs,
+            )
+            if not result.success:
+                return f"Error: {result.error_message}"
+            return _apply_result(
+                result,
+                f"{announce}: {profile_title(normalized)} -> {profile.short_target()} ({profile.source})",
+            )
+
+        model_input, explicit_provider, _ = parse_model_flags(raw_args)
+        if not model_input and not explicit_provider:
+            profile = load_model_profile(cfg, normalized)
+            if not profile:
+                return f"Error: {profile_missing_message(normalized)}"
+            result = _switch_model(
+                raw_input=profile.model,
+                current_provider=current_provider,
+                current_model=current_model,
+                current_base_url=current_base_url,
+                current_api_key=current_api_key,
+                is_global=False,
+                explicit_provider=profile.provider,
+                user_providers=user_provs,
+                custom_providers=custom_provs,
+            )
+            if not result.success:
+                return f"Error: {result.error_message}"
+            return _apply_result(
+                result,
+                f"{announce}: {profile_title(normalized)} -> {profile.short_target()} ({profile.source})",
+            )
+
+        result = _switch_model(
+            raw_input=model_input,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_base_url=current_base_url,
+            current_api_key=current_api_key,
+            is_global=False,
+            explicit_provider=explicit_provider,
+            user_providers=user_provs,
+            custom_providers=custom_provs,
+        )
+        if not result.success:
+            return f"Error: {result.error_message}"
+
+        profile_data = {
+            "provider": result.target_provider,
+            "model": result.new_model,
+            "base_url": result.base_url or "",
+            "api_mode": result.api_mode or "",
+        }
+        save_config_value(f"model.{normalized}", profile_data)
+        if normalized == "main":
+            save_config_value("model.default", result.new_model)
+            save_config_value("model.provider", result.target_provider)
+            save_config_value("model.base_url", result.base_url or "")
+            save_config_value("model.api_mode", result.api_mode or "")
+
+        return _apply_result(
+            result,
+            f"Saved routing profile `{profile_title(normalized)}` to config.yaml\n"
+            f"{announce}: {result.target_provider}/{result.new_model}",
+        )
+
+    async def _handle_think_command(self, event: MessageEvent) -> Optional[str]:
+        args = event.get_command_args().strip().split(None, 1)
+        choice = args[0].lower() if args else ""
+        if choice in {"cheap", "main", "default"}:
+            return await self._handle_named_profile_command(event, "main", persist_profile=False, announce="Think route")
+        if choice in {"senior", "escalate", "review", "openai"}:
+            return await self._handle_named_profile_command(event, "escalate", persist_profile=False, announce="Think route")
+        return "Usage: /think cheap | /think senior"
+
+    async def _handle_review_with_openai_command(self, event: MessageEvent) -> Optional[str]:
+        return await self._handle_named_profile_command(event, "escalate", persist_profile=False, announce="Review route")
+
+    async def _handle_quota_command(self, event: MessageEvent) -> str:
+        """Handle /quota -- show account limits without starting an agent."""
+        try:
+            from hermes_cli.model_profiles import (
+                current_runtime_profile,
+                detect_openrouter_free_model,
+                load_model_profile,
+            )
+
+            cfg = self._load_gateway_config()
+            source = event.source
+            session_key = self._session_key_for_source(source)
+            current_model = ""
+            current_provider = ""
+            current_base_url = ""
+            current_api_key = ""
+            current_api_mode = ""
+            if isinstance(cfg, dict):
+                model_cfg = cfg.get("model", {})
+                if isinstance(model_cfg, dict):
+                    current_model = model_cfg.get("default", "") or current_model
+                    current_provider = model_cfg.get("provider", "") or current_provider
+                    current_base_url = model_cfg.get("base_url", "") or current_base_url
+                    current_api_mode = model_cfg.get("api_mode", "") or current_api_mode
+            override = self._session_model_overrides.get(session_key, {})
+            if override:
+                current_model = override.get("model", current_model)
+                current_provider = override.get("provider", current_provider)
+                current_base_url = override.get("base_url", current_base_url)
+                current_api_key = override.get("api_key", current_api_key)
+                current_api_mode = override.get("api_mode", current_api_mode)
+            runtime = current_runtime_profile(
+                current_provider,
+                current_model,
+                base_url=current_base_url,
+                api_key=current_api_key,
+                api_mode=current_api_mode,
+            )
+            if not runtime.provider or not runtime.model:
+                main_profile = load_model_profile(cfg, "main") if isinstance(cfg, dict) else None
+                if main_profile:
+                    runtime = main_profile
+            if not runtime.provider or not runtime.model:
+                return "Quota information is unavailable: no active provider/model could be resolved."
+
+            snapshot = await asyncio.to_thread(
+                fetch_account_usage,
+                runtime.provider,
+                base_url=runtime.base_url or None,
+                api_key=runtime.api_key or None,
+            )
+        except Exception as e:
+            logger.error("Quota command error: %s", e, exc_info=True)
+            return f"Quota check failed: {e}"
+
+        if not snapshot:
+            if runtime.provider == "openrouter":
+                return (
+                    f"OpenRouter quota information is unavailable for `{runtime.model}`. "
+                    "No API key or usage endpoint response was available."
+                )
+            if runtime.provider == "openai-codex":
+                return (
+                    f"OpenAI Codex quota information is unavailable for `{runtime.model}`. "
+                    "Hermes does not currently have local quota data for this session."
+                )
+            return f"Quota information is unavailable for provider `{runtime.provider}`."
+
+        lines = [f"Active model: `{runtime.short_target()}`"]
+        if runtime.base_url:
+            lines.append(f"Base URL: `{runtime.base_url}`")
+        if runtime.provider == "openrouter" and detect_openrouter_free_model(runtime.model):
+            lines.append("Free model: detected from model slug")
+        lines.append("")
+        lines.extend(render_account_usage_lines(snapshot, markdown=True))
+        if runtime.provider == "openrouter":
+            lines.append("")
+            lines.append(
+                "_OpenRouter does not always expose an exact remaining-daily quota; "
+                "Hermes only reports the limits returned by the usage API._"
+            )
+        lines.append("")
+        lines.append("_Fetched directly from the provider usage API; no agent/model call was started._")
+        return "\n".join(lines)
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights command -- show usage insights and analytics."""

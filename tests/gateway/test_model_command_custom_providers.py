@@ -2,6 +2,7 @@
 
 import yaml
 import pytest
+from unittest.mock import MagicMock
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
@@ -23,6 +24,66 @@ def _make_event(text="/model"):
         message_type=MessageType.TEXT,
         source=SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm"),
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_model_command_routes_main_profile(monkeypatch):
+    runner = _make_runner()
+    runner._load_gateway_config = MagicMock(return_value={"model": {"default": "owl-alpha", "provider": "openrouter"}})
+    save_calls = []
+
+    def fake_save_config_value(key, value):
+        save_calls.append((key, value))
+
+    def fake_switch_model(**kwargs):
+        return MagicMock(
+            success=True,
+            target_provider="openrouter",
+            new_model="owl-alpha",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="chat_completions",
+            warning_message=None,
+            error_message=None,
+        )
+
+    monkeypatch.setattr("cli.save_config_value", fake_save_config_value)
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", fake_switch_model)
+
+    result = await runner._handle_model_command(_make_event("/model main openrouter/owl-alpha"))
+
+    assert result is not None
+    assert any(key == "model.main" for key, _ in save_calls)
+    assert any(key == "model.default" for key, _ in save_calls)
+
+
+@pytest.mark.asyncio
+async def test_handle_model_command_routes_escalate_profile(monkeypatch):
+    runner = _make_runner()
+    runner._load_gateway_config = MagicMock(return_value={"model": {"default": "owl-alpha", "provider": "openrouter"}})
+    save_calls = []
+
+    def fake_save_config_value(key, value):
+        save_calls.append((key, value))
+
+    def fake_switch_model(**kwargs):
+        return MagicMock(
+            success=True,
+            target_provider="openai-codex",
+            new_model="gpt-5.4-mini",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="chat_completions",
+            warning_message=None,
+            error_message=None,
+        )
+
+    monkeypatch.setattr("cli.save_config_value", fake_save_config_value)
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", fake_switch_model)
+
+    result = await runner._handle_model_command(_make_event("/model escalate openai/gpt-5.4-mini"))
+
+    assert result is not None
+    assert any(key == "model.escalate" for key, _ in save_calls)
+    assert not any(key == "model.default" for key, _ in save_calls)
 
 
 @pytest.mark.asyncio

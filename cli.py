@@ -6439,7 +6439,12 @@ class HermesCLI:
         scroll_offset = max(0, min(scroll_offset, n - visible))
         return scroll_offset, visible
 
-    def _apply_model_switch_result(self, result, persist_global: bool) -> None:
+    def _apply_model_switch_result(
+        self,
+        result,
+        persist_global: bool,
+        post_save_message: str | None = None,
+    ) -> None:
         if not result.success:
             _cprint(f"  ✗ {result.error_message}")
             return
@@ -6515,7 +6520,9 @@ class HermesCLI:
             _cprint("    Prompt caching: enabled")
         if result.warning_message:
             _cprint(f"    ⚠ {result.warning_message}")
-        if persist_global:
+        if post_save_message is not None:
+            _cprint(post_save_message)
+        elif persist_global:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
@@ -6605,6 +6612,16 @@ class HermesCLI:
 
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
+
+        first_token = raw_args.split(None, 1)[0].lower() if raw_args else ""
+        if first_token in {"main", "escalate"}:
+            self._handle_named_profile_route(
+                cmd_original,
+                first_token,
+                persist_profile=True,
+                announce="Model profile",
+            )
+            return
 
         # Load providers for switch_model (picker path needs them below)
         user_provs = None
@@ -6755,6 +6772,142 @@ class HermesCLI:
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
+
+    def _handle_named_profile_route(
+        self,
+        cmd_original: str,
+        profile_name: str,
+        *,
+        persist_profile: bool = False,
+        announce: str = "Routing profile",
+    ) -> None:
+        from hermes_cli.config import get_compatible_custom_providers, load_config
+        from hermes_cli.model_profiles import (
+            load_model_profile,
+            normalize_profile_name,
+            profile_missing_message,
+            profile_title,
+        )
+        from hermes_cli.model_switch import parse_model_flags, switch_model
+
+        normalized = normalize_profile_name(profile_name)
+        if normalized not in {"main", "escalate"}:
+            _cprint(f"  ✗ Unknown routing profile: {profile_name}")
+            return
+
+        parts = cmd_original.split(None, 1)
+        raw_args = parts[1].strip() if len(parts) > 1 else ""
+        cfg = load_config()
+        profile = load_model_profile(cfg, normalized)
+
+        def _apply_and_note(result, note: str) -> None:
+            self._apply_model_switch_result(result, False, post_save_message=note)
+
+        if not persist_profile:
+            if not profile:
+                _cprint(f"  ✗ {profile_missing_message(normalized)}")
+                return
+
+            result = switch_model(
+                raw_input=profile.model,
+                current_provider=self.provider or "",
+                current_model=self.model or "",
+                current_base_url=self.base_url or "",
+                current_api_key=self.api_key or "",
+                is_global=False,
+                explicit_provider=profile.provider,
+                user_providers=None,
+                custom_providers=None,
+            )
+            if not result.success:
+                _cprint(f"  ✗ {result.error_message}")
+                return
+
+            _apply_and_note(
+                result,
+                f"    {announce}: {profile_title(normalized)} -> {profile.short_target()} ({profile.source})",
+            )
+            return
+
+        model_input, explicit_provider, _persist_global = parse_model_flags(raw_args)
+        if not model_input and not explicit_provider:
+            if profile:
+                result = switch_model(
+                    raw_input=profile.model,
+                    current_provider=self.provider or "",
+                    current_model=self.model or "",
+                    current_base_url=self.base_url or "",
+                    current_api_key=self.api_key or "",
+                    is_global=False,
+                    explicit_provider=profile.provider,
+                    user_providers=None,
+                    custom_providers=None,
+                )
+                if not result.success:
+                    _cprint(f"  ✗ {result.error_message}")
+                    return
+                _apply_and_note(
+                    result,
+                    f"    {announce}: {profile_title(normalized)} -> {profile.short_target()} ({profile.source})",
+                )
+                return
+            _cprint(f"  ✗ {profile_missing_message(normalized)}")
+            return
+
+        user_provs = cfg.get("providers")
+        custom_provs = None
+        try:
+            custom_provs = get_compatible_custom_providers(cfg)
+        except Exception:
+            pass
+
+        result = switch_model(
+            raw_input=model_input,
+            current_provider=self.provider or "",
+            current_model=self.model or "",
+            current_base_url=self.base_url or "",
+            current_api_key=self.api_key or "",
+            is_global=False,
+            explicit_provider=explicit_provider,
+            user_providers=user_provs,
+            custom_providers=custom_provs,
+        )
+        if not result.success:
+            _cprint(f"  ✗ {result.error_message}")
+            return
+
+        profile_data = {
+            "provider": result.target_provider,
+            "model": result.new_model,
+            "base_url": result.base_url or "",
+            "api_mode": result.api_mode or "",
+        }
+        save_config_value(f"model.{normalized}", profile_data)
+        if normalized == "main":
+            save_config_value("model.default", result.new_model)
+            save_config_value("model.provider", result.target_provider)
+            save_config_value("model.base_url", result.base_url or "")
+            save_config_value("model.api_mode", result.api_mode or "")
+
+        _apply_and_note(
+            result,
+            f"    Saved routing profile `{profile_title(normalized)}` to config.yaml\n"
+            f"    {announce}: {result.target_provider}/{result.new_model}",
+        )
+
+    def _handle_think_command(self, cmd_original: str) -> None:
+        raw_args = cmd_original.split(None, 1)[1].strip() if " " in cmd_original else ""
+        choice = raw_args.split(None, 1)[0].lower() if raw_args else ""
+        if choice in {"cheap", "main", "default"}:
+            self._handle_named_profile_route(cmd_original, "main", persist_profile=False, announce="Think route")
+            return
+        if choice in {"senior", "escalate", "review", "openai"}:
+            self._handle_named_profile_route(cmd_original, "escalate", persist_profile=False, announce="Think route")
+            return
+        _cprint("  Usage: /think cheap | /think senior")
+
+    def _handle_review_with_openai_command(self, cmd_original: str) -> None:
+        self._handle_named_profile_route(cmd_original, "escalate", persist_profile=False, announce="Review route")
 
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
         """Return True when /model should be handled immediately on the UI thread."""
@@ -7436,6 +7589,10 @@ class HermesCLI:
             self._handle_resume_command(cmd_original)
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
+        elif canonical == "think":
+            self._handle_think_command(cmd_original)
+        elif canonical == "review-with-openai":
+            self._handle_review_with_openai_command(cmd_original)
         elif canonical == "gquota":
             self._handle_gquota_command(cmd_original)
 

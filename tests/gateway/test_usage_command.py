@@ -177,6 +177,101 @@ class TestUsageCachedAgent:
         assert "Cost: included" in result
 
 
+class TestQuotaCommand:
+    """/quota returns account limits without requiring a live agent."""
+
+    @pytest.mark.asyncio
+    async def test_quota_command_fetches_codex_limits(self, monkeypatch):
+        runner = _make_runner(SK)
+        runner._load_gateway_config = MagicMock(
+            return_value={
+                "model": {
+                    "default": "gpt-5.4-mini",
+                    "provider": "openai-codex",
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "api_mode": "",
+                }
+            }
+        )
+        event = MagicMock()
+        calls = {}
+
+        async def _fake_to_thread(fn, *args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("gateway.run.asyncio.to_thread", _fake_to_thread)
+        monkeypatch.setattr(
+            "gateway.run.fetch_account_usage",
+            lambda provider, base_url=None, api_key=None: object(),
+        )
+        monkeypatch.setattr(
+            "gateway.run.render_account_usage_lines",
+            lambda snapshot, markdown=False: [
+                "📈 **Account limits**",
+                "Provider: openai-codex (Plus)",
+                "Session: 98% remaining (2% used)",
+            ],
+        )
+
+        result = await runner._handle_quota_command(event)
+
+        assert calls["args"] == ("openai-codex",)
+        assert calls["kwargs"] == {"base_url": "https://chatgpt.com/backend-api/codex", "api_key": None}
+        assert "Session: 98% remaining" in result
+        assert "no agent/model call" in result
+
+    @pytest.mark.asyncio
+    async def test_quota_command_handles_openrouter_no_exact_remaining(self, monkeypatch):
+        runner = _make_runner(SK)
+        runner._load_gateway_config = MagicMock(
+            return_value={
+                "model": {
+                    "default": "owl-alpha",
+                    "provider": "openrouter",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "api_mode": "openrouter",
+                }
+            }
+        )
+        event = MagicMock()
+
+        async def _fake_to_thread(fn, *args, **kwargs):
+            return object()
+
+        monkeypatch.setattr("gateway.run.asyncio.to_thread", _fake_to_thread)
+        monkeypatch.setattr(
+            "gateway.run.render_account_usage_lines",
+            lambda snapshot, markdown=False: [
+                "📈 **Account limits**",
+                "Provider: openrouter",
+                "Rate limit: present",
+            ],
+        )
+
+        result = await runner._handle_quota_command(event)
+
+        assert "Active model: `openrouter/owl-alpha`" in result
+        assert "OpenRouter does not always expose an exact remaining-daily quota" in result
+        assert "remaining free prompts" not in result
+
+    @pytest.mark.asyncio
+    async def test_quota_command_unavailable(self, monkeypatch):
+        runner = _make_runner(SK)
+        runner._load_gateway_config = MagicMock(return_value={})
+        event = MagicMock()
+
+        async def _fake_to_thread(fn, *args, **kwargs):
+            return None
+
+        monkeypatch.setattr("gateway.run.asyncio.to_thread", _fake_to_thread)
+
+        result = await runner._handle_quota_command(event)
+
+        assert "Quota information is unavailable" in result
+
+
 class TestUsageAccountSection:
     """Account-limits section appended to /usage output (PR #2486)."""
 
