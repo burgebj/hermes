@@ -2201,7 +2201,8 @@ class TelegramAdapter(BasePlatformAdapter):
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
         """Apply Telegram group trigger rules.
 
-        DMs remain unrestricted. Group/supergroup messages are accepted when:
+        DMs remain unrestricted unless TELEGRAM_ALLOWED_USERS is set.
+        Group/supergroup messages are accepted when:
         - the chat is explicitly allowlisted in ``free_response_chats``
         - ``require_mention`` is disabled
         - the message is a command
@@ -2210,6 +2211,12 @@ class TelegramAdapter(BasePlatformAdapter):
         - the text/caption matches a configured regex wake-word pattern
         """
         if not self._is_group_chat(message):
+            allowed = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
+            if allowed and message.from_user:
+                uid = str(message.from_user.id)
+                allowed_ids = {uid.strip() for uid in allowed.split(",") if uid.strip()}
+                if uid not in allowed_ids:
+                    return False
             return True
         thread_id = getattr(message, "message_thread_id", None)
         if thread_id is not None:

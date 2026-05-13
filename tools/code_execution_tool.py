@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 SANDBOX_AVAILABLE = sys.platform != "win32"
 
-# The 7 tools allowed inside the sandbox. The intersection of this list
+# The tools allowed inside the sandbox. The intersection of this list
 # and the session's enabled tools determines which stubs are generated.
 SANDBOX_ALLOWED_TOOLS = frozenset([
     "web_search",
@@ -60,7 +60,6 @@ SANDBOX_ALLOWED_TOOLS = frozenset([
     "write_file",
     "search_files",
     "patch",
-    "terminal",
 ])
 
 # Resource limit defaults (overridable via config.yaml → code_execution.*)

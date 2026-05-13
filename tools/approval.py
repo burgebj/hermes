@@ -599,9 +599,6 @@ def check_dangerous_command(command: str, env_type: str,
     Returns:
         {"approved": True/False, "message": str or None, ...}
     """
-    if env_type in ("docker", "singularity", "modal", "daytona"):
-        return {"approved": True, "message": None}
-
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
     if os.getenv("HERMES_YOLO_MODE") or is_current_session_yolo_enabled():
