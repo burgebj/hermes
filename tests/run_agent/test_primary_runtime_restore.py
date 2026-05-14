@@ -168,6 +168,80 @@ class TestRestorePrimaryRuntime:
 
         assert agent._fallback_index == 0  # reset for next turn
 
+    def test_resets_fallback_index_after_failed_activation(self):
+        """Regression for #17446 — when a previous turn exhausted the chain
+        without ever successfully activating (e.g. all fallback entries had
+        ``fb_client is None`` or invalid provider/model), ``_fallback_index``
+        is left past the chain end while ``_fallback_activated`` stays False.
+        Without resetting here, every subsequent turn's fallback short-circuits
+        at the bounds check and the session is permanently pinned to the broken
+        primary model — even though a perfectly valid ``fallback_model`` is
+        configured.
+        """
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "google/gemini-2.0-flash-001"},
+        )
+        # Simulate a turn where activation failed for every chain entry:
+        # ``_try_activate_fallback`` advanced the index past the end without
+        # ever flipping ``_fallback_activated`` to True.
+        agent._fallback_activated = False
+        agent._fallback_index = len(agent._fallback_chain)
+        assert agent._fallback_index >= 1
+
+        # Without the fix, _restore_primary_runtime returned early at the
+        # ``if not self._fallback_activated`` guard, leaving the index stuck.
+        result = agent._restore_primary_runtime()
+
+        # Returns False (no actual restoration happened — never activated)
+        assert result is False
+        # …but the index MUST be reset so the next turn can retry the chain.
+        assert agent._fallback_index == 0
+
+    def test_does_not_disturb_index_when_already_zero(self):
+        """When _fallback_activated=False AND the index is already 0
+        (typical first turn / clean state), _restore_primary_runtime is a
+        pure no-op — no spurious writes.
+        """
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "model-a"},
+        )
+        agent._fallback_activated = False
+        agent._fallback_index = 0
+
+        result = agent._restore_primary_runtime()
+
+        assert result is False
+        assert agent._fallback_index == 0
+
+    def test_subsequent_fallback_attempt_succeeds_after_reset(self):
+        """End-to-end regression for #17446: simulate the buggy state
+        (chain exhausted, never activated), then verify that the next turn
+        can successfully activate the same fallback chain.
+        """
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "model-a"},
+        )
+        # Buggy state from the previous turn
+        agent._fallback_activated = False
+        agent._fallback_index = len(agent._fallback_chain)
+
+        # New turn boundary
+        agent._restore_primary_runtime()
+
+        # Now a fresh fallback attempt should reach the chain entry, not
+        # short-circuit at the bounds check.
+        mock_client = _mock_resolve()
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(mock_client, None),
+        ):
+            activated = agent._try_activate_fallback()
+
+        assert activated is True
+        assert agent._fallback_activated is True
+        assert agent.model == "model-a"
+
+
     def test_restores_compressor_state(self):
         agent = _make_agent(
             fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},

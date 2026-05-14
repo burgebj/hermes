@@ -8937,6 +8937,19 @@ class AIAgent:
         ``gateway/run.py``), so this restoration IS needed there too.
         """
         if not self._fallback_activated:
+            # ``_try_activate_fallback`` increments ``_fallback_index`` *before*
+            # each activation attempt so chain recursion can advance through
+            # invalid entries.  If a previous turn exhausted the chain without
+            # ever successfully activating (e.g. misconfigured fallback
+            # credentials, all entries returning ``fb_client is None``), the
+            # index is left at ``len(_fallback_chain)`` while
+            # ``_fallback_activated`` stays ``False``.  Without resetting here,
+            # every subsequent turn's ``_try_activate_fallback()`` short-
+            # circuits at the bounds check, the user sees ``trying fallback...``
+            # but nothing actually happens on the wire, and the session is
+            # permanently pinned to the broken primary.  See #17446.
+            if getattr(self, "_fallback_index", 0) > 0:
+                self._fallback_index = 0
             return False
 
         if getattr(self, "_rate_limited_until", 0) > time.monotonic():
