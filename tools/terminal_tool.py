@@ -1544,7 +1544,10 @@ def _command_requires_pipe_stdin(command: str) -> bool:
     )
 
 
-_SHELL_LEVEL_BACKGROUND_RE = re.compile(r"\b(?:nohup|disown|setsid)\b", re.IGNORECASE)
+_SHELL_LEVEL_BACKGROUND_RE = re.compile(
+    r"(?:^|[;&|]\s*|&&\s*|\|\|\s*|\(\s*)(?:nohup|disown|setsid)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _INLINE_BACKGROUND_AMP_RE = re.compile(r"\s&\s")
 _TRAILING_BACKGROUND_AMP_RE = re.compile(r"\s&\s*(?:#.*)?$")
 _LONG_LIVED_FOREGROUND_PATTERNS = (

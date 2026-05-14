@@ -63,6 +63,94 @@ class TestForegroundTimeoutCap:
         assert "background=true" in result["error"]
         assert "nohup" in result["error"].lower()
 
+    def test_foreground_allows_setsid_mentioned_in_string(self):
+        """Commands mentioning setsid inside quotes should NOT be blocked."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            mock_env = MagicMock()
+            mock_env.execute.return_value = {"output": "done", "returncode": 0}
+
+            with patch("tools.terminal_tool._active_environments", {"default": mock_env}), \
+                 patch("tools.terminal_tool._last_activity", {"default": 0}), \
+                 patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}):
+                result = json.loads(terminal_tool(
+                    command="git commit -m 'fix: replace setsid with process_group'",
+                ))
+
+        assert result.get("error") is None
+        assert mock_env.execute.called
+
+    def test_foreground_allows_setsid_in_python_code(self):
+        """Python code mentioning setsid in a string should NOT be blocked."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            mock_env = MagicMock()
+            mock_env.execute.return_value = {"output": "done", "returncode": 0}
+
+            with patch("tools.terminal_tool._active_environments", {"default": mock_env}), \
+                 patch("tools.terminal_tool._last_activity", {"default": 0}), \
+                 patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}):
+                result = json.loads(terminal_tool(
+                    command="python3 -c \"x = 'preexec_fn=os.setsid'\"",
+                ))
+
+        assert result.get("error") is None
+        assert mock_env.execute.called
+
+    def test_foreground_allows_setsid_in_echo(self):
+        """echo/grep mentioning setsid should NOT be blocked."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            mock_env = MagicMock()
+            mock_env.execute.return_value = {"output": "done", "returncode": 0}
+
+            with patch("tools.terminal_tool._active_environments", {"default": mock_env}), \
+                 patch("tools.terminal_tool._last_activity", {"default": 0}), \
+                 patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}):
+                result = json.loads(terminal_tool(
+                    command="echo 'The function os.setsid() creates a new session'",
+                ))
+
+        assert result.get("error") is None
+        assert mock_env.execute.called
+
+    def test_foreground_rejects_setsid_after_semicolon(self):
+        """setsid used as a command after ; should still be blocked."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            result = json.loads(terminal_tool(
+                command="cd /tmp; setsid my_server",
+            ))
+
+        assert result["exit_code"] == -1
+        assert "background=true" in result["error"]
+
+    def test_foreground_rejects_setsid_after_pipe(self):
+        """setsid used as a command after | should still be blocked."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            result = json.loads(terminal_tool(
+                command="echo config | setsid my_server",
+            ))
+
+        assert result["exit_code"] == -1
+        assert "background=true" in result["error"]
+
     def test_foreground_rejects_long_lived_server_command(self):
         """Foreground dev server commands should be redirected to background mode."""
         from tools.terminal_tool import terminal_tool
