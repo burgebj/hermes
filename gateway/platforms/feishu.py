@@ -1300,12 +1300,29 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
         except Exception:
             logger.debug("[Feishu] Failed to apply websocket runtime overrides", exc_info=True)
 
-    async def _connect_with_overrides(*args: Any, **kwargs: Any) -> Any:
+    def _connect_with_overrides(*args: Any, **kwargs: Any) -> Any:
+        """Wrapper that preserves the original connect() interface (context manager).
+
+        The original ``websockets.connect()`` returns a context manager object
+        (not a coroutine).  Replacing it with an ``async def`` breaks other
+        consumers (e.g. ``dingtalk_stream``) that also ``import websockets``
+        and use ``async with websockets.connect(...)`` — because Python
+        modules are singletons, our monkey-patch would replace the class-based
+        connect with a plain coroutine function, causing:
+
+            TypeError: 'coroutine' object does not support the asynchronous
+            context manager protocol
+
+        By returning ``original_connect(*args, **kwargs)`` (which is itself a
+        context manager), we inject our overrides while keeping the return type
+        identical to the original.  This is compatible with all websockets
+        versions (13.x through 16.x).
+        """
         if adapter._ws_ping_interval is not None and "ping_interval" not in kwargs:
             kwargs["ping_interval"] = adapter._ws_ping_interval
         if adapter._ws_ping_timeout is not None and "ping_timeout" not in kwargs:
             kwargs["ping_timeout"] = adapter._ws_ping_timeout
-        return await original_connect(*args, **kwargs)
+        return original_connect(*args, **kwargs)
 
     def _configure_with_overrides(conf: Any) -> Any:
         if original_configure is None:
