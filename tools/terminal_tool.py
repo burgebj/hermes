@@ -1544,7 +1544,19 @@ def _command_requires_pipe_stdin(command: str) -> bool:
     )
 
 
-_SHELL_LEVEL_BACKGROUND_RE = re.compile(r"\b(?:nohup|disown|setsid)\b", re.IGNORECASE)
+# Match shell-level background wrappers only when they appear in a
+# *command position* — at the start of the line, after a separator
+# (`;`, `&`, `&&`, `||`, `|`, newline) or inside a subshell. This avoids
+# firing on the same word when it appears inside a quoted argument such as
+# a commit message, `echo` text, or Python code passed via `-c`.
+#
+# We also strip out single-/double-quoted spans before matching so things
+# like `git commit -m "replace preexec_fn=os.setsid with ..."` no longer
+# trip the filter. See `_strip_shell_quoted_spans` below.
+_SHELL_LEVEL_BACKGROUND_RE = re.compile(
+    r"(?:^|[;&|\n]\s*|&&\s*|\|\|\s*|\(\s*)(?:nohup|disown|setsid)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _INLINE_BACKGROUND_AMP_RE = re.compile(r"\s&\s")
 _TRAILING_BACKGROUND_AMP_RE = re.compile(r"\s&\s*(?:#.*)?$")
 _LONG_LIVED_FOREGROUND_PATTERNS = (
@@ -1557,6 +1569,45 @@ _LONG_LIVED_FOREGROUND_PATTERNS = (
     re.compile(r"\bgunicorn\b", re.IGNORECASE),
     re.compile(r"\bpython(?:3)?\s+-m\s+http\.server\b", re.IGNORECASE),
 )
+
+
+_SHELL_QUOTED_SPAN_RE = re.compile(
+    r"""
+    '(?:\\.|[^'\\])*'      # single-quoted span (no escape processing in sh,
+                            # but we accept \' here as a courtesy)
+    |
+    "(?:\\.|[^"\\])*"      # double-quoted span with backslash escapes
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def _strip_shell_quoted_spans(command: str) -> str:
+    """Replace single-/double-quoted spans with whitespace placeholders.
+
+    The goal is to neutralise the *contents* of quoted arguments before we
+    scan for shell-level background wrappers, while preserving overall
+    string length and surrounding token boundaries so a regex with `^`,
+    `$`, or `\b` still matches the same positions in the unquoted parts.
+
+    Examples:
+        >>> _strip_shell_quoted_spans("git commit -m 'fix: os.setsid'")
+        "git commit -m '              '"
+        >>> _strip_shell_quoted_spans('echo "setsid"')
+        'echo "      "'
+
+    Heredocs and ANSI-C `$'...'` strings are not handled specially; they
+    fall through unchanged. That's fine — the boundary regex still
+    requires a command-position prefix, so plain occurrences inside an
+    unquoted heredoc body would not be in command position anyway.
+    """
+    def _blank(match: re.Match) -> str:
+        span = match.group(0)
+        # Keep the surrounding quote characters so token boundaries are
+        # preserved, but blank out the interior.
+        return span[0] + (" " * (len(span) - 2)) + span[-1]
+
+    return _SHELL_QUOTED_SPAN_RE.sub(_blank, command)
 
 
 def _looks_like_help_or_version_command(command: str) -> bool:
@@ -1579,7 +1630,10 @@ def _foreground_background_guidance(command: str) -> str | None:
     if _looks_like_help_or_version_command(command):
         return None
 
-    if _SHELL_LEVEL_BACKGROUND_RE.search(command):
+    # Strip quoted content before scanning so the keyword inside a commit
+    # message, `echo` argument, or `-c "..."` snippet doesn't false-positive.
+    scannable = _strip_shell_quoted_spans(command)
+    if _SHELL_LEVEL_BACKGROUND_RE.search(scannable):
         return (
             "Foreground command uses shell-level background wrappers (nohup/disown/setsid). "
             "Use terminal(background=true) so Hermes can track the process, then run "
