@@ -690,6 +690,15 @@ platform_toolsets:
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
 #
+# Signal settings for group-specific authorizations:
+#
+# platforms:
+#   signal:
+#     extra:
+#       groups:
+#         "SIGNAL-GROUP-ID":
+#           allow_users: "+123456789,+987654321"
+#
 # Discord-specific settings (config.yaml top-level, not under platforms:):
 #
 # discord:
