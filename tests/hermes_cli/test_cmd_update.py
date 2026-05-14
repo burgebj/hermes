@@ -1,4 +1,4 @@
-"""Tests for cmd_update — branch fallback when remote branch doesn't exist."""
+"""Tests for cmd_update branch safety and update flow."""
 
 import subprocess
 from types import SimpleNamespace
@@ -39,36 +39,35 @@ def mock_args():
     return SimpleNamespace()
 
 
-class TestCmdUpdateBranchFallback:
-    """cmd_update falls back to main when current branch has no remote counterpart."""
+class TestCmdUpdateBranchSafety:
+    """cmd_update refuses to switch the installed checkout between branches."""
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
-    def test_update_falls_back_to_main_when_branch_not_on_remote(
+    def test_update_refuses_non_main_branch_without_switching(
         self, mock_run, _mock_which, mock_args, capsys
     ):
         mock_run.side_effect = _make_run_side_effect(
             branch="fix/stoicneko", verify_ok=False, commit_count="3"
         )
 
-        cmd_update(mock_args)
+        with pytest.raises(SystemExit) as exc:
+            cmd_update(mock_args)
+
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "Refusing to update while on branch 'fix/stoicneko'" in captured.out
+        assert "would affect all running Hermes sessions" in captured.out
 
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
-
-        # rev-list should use origin/main, not origin/fix/stoicneko
-        rev_list_cmds = [c for c in commands if "rev-list" in c]
-        assert len(rev_list_cmds) == 1
-        assert "origin/main" in rev_list_cmds[0]
-        assert "origin/fix/stoicneko" not in rev_list_cmds[0]
-
-        # pull should use main, not fix/stoicneko
-        pull_cmds = [c for c in commands if "pull" in c]
-        assert len(pull_cmds) == 1
-        assert "main" in pull_cmds[0]
+        assert not any("checkout" in c for c in commands)
+        assert not any("pull" in c for c in commands)
+        assert not any("rev-list" in c for c in commands)
+        assert not any("status --porcelain" in c for c in commands)
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
-    def test_update_uses_current_branch_when_on_remote(
+    def test_update_uses_main_when_on_main(
         self, mock_run, _mock_which, mock_args, capsys
     ):
         mock_run.side_effect = _make_run_side_effect(
@@ -76,7 +75,6 @@ class TestCmdUpdateBranchFallback:
         )
 
         cmd_update(mock_args)
-
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
         rev_list_cmds = [c for c in commands if "rev-list" in c]
@@ -85,6 +83,7 @@ class TestCmdUpdateBranchFallback:
 
         pull_cmds = [c for c in commands if "pull" in c]
         assert len(pull_cmds) == 1
+        assert "main" in pull_cmds[0]
         assert "main" in pull_cmds[0]
 
     @patch("shutil.which", return_value=None)

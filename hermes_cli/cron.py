@@ -13,6 +13,8 @@ from typing import Iterable, List, Optional
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from cron.jobs import get_job, save_job_output
+from cron.scheduler import run_job
 from hermes_cli.colors import Colors, color
 
 
@@ -253,6 +255,24 @@ def cron_edit(args):
     return 0
 
 
+def cron_test_run(job_id: str) -> int:
+    job = get_job(job_id)
+    if not job:
+        print(color(f"Job not found: {job_id}", Colors.RED))
+        return 1
+
+    success, output, _final_response, error = run_job(job)
+    output_path = save_job_output(job_id, output)
+    status = "success" if success else "failure"
+
+    print(color(f"Test run {status}: {job_id}", Colors.GREEN if success else Colors.RED))
+    print(f"  Output: {output_path}")
+    print(f"  Output length: {len(output)}")
+    if error:
+        print(f"  Error: {error}")
+    return 0 if success else 1
+
+
 def _job_action(action: str, job_id: str, success_verb: str) -> int:
     result = _cron_api(action=action, job_id=job_id)
     if not result.get("success"):
@@ -298,6 +318,9 @@ def cron_command(args):
 
     if subcmd == "run":
         return _job_action("run", args.job_id, "Triggered")
+
+    if subcmd == "test-run":
+        return cron_test_run(args.job_id)
 
     if subcmd in {"remove", "rm", "delete"}:
         return _job_action("remove", args.job_id, "Removed")

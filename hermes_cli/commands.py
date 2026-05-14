@@ -166,7 +166,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("search", "browse", "inspect", "install")),
     CommandDef("cron", "Manage scheduled tasks", "Tools & Skills",
                cli_only=True, args_hint="[subcommand]",
-               subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),
+               subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "test-run", "remove")),
     CommandDef("curator", "Background skill maintenance (status, run, pin, archive, list-archived)",
                "Tools & Skills", args_hint="[subcommand]",
                subcommands=("status", "run", "pause", "resume", "pin", "unpin", "restore", "list-archived")),

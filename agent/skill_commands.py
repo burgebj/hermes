@@ -246,7 +246,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     """
     global _skill_commands, _skill_commands_platform
     _skill_commands_platform = _resolve_skill_commands_platform()
-    _skill_commands = {}
+    new_commands: Dict[str, Dict[str, Any]] = {}
     try:
         from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, _get_disabled_skill_names
         from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
@@ -291,7 +291,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
                     if not cmd_name:
                         continue
-                    _skill_commands[f"/{cmd_name}"] = {
+                    new_commands[f"/{cmd_name}"] = {
                         "name": name,
                         "description": description or f"Invoke the {name} skill",
                         "skill_md_path": str(skill_md),
@@ -301,6 +301,12 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     continue
     except Exception:
         pass
+
+    # Preserve object identity: cli.py imports this dict once at process start
+    # and dispatches skill slash commands through that reference.  Rebinding the
+    # module global here leaves running CLI processes with a stale command map.
+    _skill_commands.clear()
+    _skill_commands.update(new_commands)
     return _skill_commands
 
 

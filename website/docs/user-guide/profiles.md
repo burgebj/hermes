@@ -183,6 +183,19 @@ If you want this profile to work in a specific project by default, also set its 
 coder config set terminal.cwd /absolute/path/to/project
 ```
 
+### MCP servers in profiles
+
+MCP servers are profile-scoped because each profile has its own `config.yaml`. A server configured in `~/.hermes/config.yaml` is not automatically available in `~/.hermes/profiles/coder/config.yaml`.
+
+For common servers that should be copied into several profiles, keep the canonical definitions in `~/.hermes/shared/mcp_servers.yaml` and sync them explicitly:
+
+```bash
+hermes mcp sync --all --dry-run
+hermes mcp sync --profile coder --servers github,docs
+```
+
+The sync command merges only `mcp_servers` entries and leaves the rest of each profile config alone. Existing same-name profile entries are treated as conflicts and skipped unless `--force` is provided. Restart/reset the affected profile after syncing so its MCP connections are rediscovered.
+
 ## Updating
 
 `hermes update` pulls code once (shared) and syncs new bundled skills to **all** profiles automatically:

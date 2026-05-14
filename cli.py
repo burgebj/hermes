@@ -4244,6 +4244,12 @@ class HermesCLI:
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
             )
+            # This is the foreground interactive CLI agent for the current
+            # cmux surface. AIAgent itself defaults this off because background
+            # tasks/subagents inherit CMUX_* env vars and must not steal the
+            # focused-surface session mapping.
+            self.agent._publish_cmux_surface_sidecar = True
+            self.agent._write_current_session_sidecar()
             # Store reference for atexit memory provider shutdown
             global _active_agent_ref
             _active_agent_ref = self.agent

@@ -116,6 +116,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # The flag is stripped from sys.argv so argparse never sees it.
 # Falls back to ~/.hermes/active_profile for sticky default.
 # ---------------------------------------------------------------------------
+def _is_mcp_sync_local_profile_flag(argv: list[str], index: int, arg: str) -> bool:
+    """Return True when --profile belongs to `hermes mcp sync`, not HERMES_HOME."""
+    if arg != "--profile" and not arg.startswith("--profile="):
+        return False
+    try:
+        mcp_index = argv.index("mcp")
+        sync_index = argv.index("sync", mcp_index + 1)
+    except ValueError:
+        return False
+    return index > sync_index
+
+
 def _apply_profile_override() -> None:
     """Pre-parse --profile/-p and set HERMES_HOME before module imports."""
     argv = sys.argv[1:]
@@ -124,6 +136,8 @@ def _apply_profile_override() -> None:
 
     # 1. Check for explicit -p / --profile flag
     for i, arg in enumerate(argv):
+        if _is_mcp_sync_local_profile_flag(argv, i, arg):
+            continue
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]
             consume = 2
@@ -7665,28 +7679,31 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         current_branch = result.stdout.strip()
 
-        # Always update against main
+        # ``hermes update`` mutates the installed source checkout.  Never switch
+        # branches from inside the updater: this checkout may be shared by
+        # multiple live Hermes sessions, so a hidden checkout changes the code
+        # under every session, not just the caller that asked for an update.
         branch = "main"
-
-        # If user is on a non-main branch or detached HEAD, switch to main
-        if current_branch != "main":
+        if current_branch != branch:
             label = (
                 "detached HEAD"
                 if current_branch == "HEAD"
                 else f"branch '{current_branch}'"
             )
-            print(f"  ⚠ Currently on {label} — switching to main for update...")
-            # Stash before checkout so uncommitted work isn't lost
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
-            subprocess.run(
-                git_cmd + ["checkout", "main"],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
+            print(f"✗ Refusing to update while on {label}.")
+            print(
+                "  hermes update changes the installed checkout; switching "
+                "branches here would affect all running Hermes sessions."
             )
-        else:
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            print("  Switch explicitly when you are ready, then run hermes update:")
+            print(f"  git -C {PROJECT_ROOT} checkout main && hermes update")
+            print(
+                "  For feature work, use hermes -w or a separate git worktree "
+                "so updates do not disturb active branches."
+            )
+            sys.exit(1)
+
+        auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
 
         prompt_for_restore = (
             auto_stash_ref is not None
@@ -10222,6 +10239,11 @@ def main():
     cron_run.add_argument("job_id", help="Job ID to trigger")
     _add_accept_hooks_flag(cron_run)
 
+    cron_test_run = cron_subparsers.add_parser(
+        "test-run", help="Run one job immediately and save local output"
+    )
+    cron_test_run.add_argument("job_id", help="Job ID to test")
+
     cron_remove = cron_subparsers.add_parser(
         "remove", aliases=["rm", "delete"], help="Remove a scheduled job"
     )
@@ -11245,6 +11267,41 @@ Examples:
 
     mcp_test_p = mcp_sub.add_parser("test", help="Test MCP server connection")
     mcp_test_p.add_argument("name", help="Server name to test")
+
+    mcp_sync_p = mcp_sub.add_parser(
+        "sync",
+        help="Sync shared MCP server definitions into profile configs",
+    )
+    mcp_sync_p.add_argument(
+        "--shared",
+        help="Shared MCP YAML path (default: ~/.hermes/shared/mcp_servers.yaml)",
+    )
+    mcp_sync_p.add_argument(
+        "--profile",
+        action="append",
+        default=[],
+        help="Target profile name; repeatable. Supports 'default'.",
+    )
+    mcp_sync_p.add_argument(
+        "--all",
+        action="store_true",
+        help="Target default and all named profiles",
+    )
+    mcp_sync_p.add_argument(
+        "--servers",
+        action="append",
+        help="Comma-separated shared server names to sync; repeatable",
+    )
+    mcp_sync_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show changes without writing profile configs",
+    )
+    mcp_sync_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite conflicting same-name MCP entries",
+    )
 
     mcp_cfg_p = mcp_sub.add_parser(
         "configure", aliases=["config"], help="Toggle tool selection"

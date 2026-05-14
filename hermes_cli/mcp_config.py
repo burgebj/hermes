@@ -9,11 +9,16 @@ configuration in ~/.hermes/config.yaml under the ``mcp_servers`` key.
 """
 
 import asyncio
+import copy
 import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import yaml
 
 from hermes_cli.config import (
     cfg_get,
@@ -24,7 +29,7 @@ from hermes_cli.config import (
     get_hermes_home,  # noqa: F401 — used by test mocks
 )
 from hermes_cli.colors import Colors, color
-from hermes_constants import display_hermes_home
+from hermes_constants import display_hermes_home, get_default_hermes_root
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +130,173 @@ def _parse_env_assignments(raw_env: Optional[List[str]]) -> Dict[str, str]:
             raise ValueError(f"Invalid --env variable name '{key}'")
         parsed[key] = value
     return parsed
+
+
+@dataclass
+class McpSyncPlan:
+    """Pure merge result for syncing shared MCP servers into one profile."""
+
+    merged_servers: Dict[str, dict]
+    added: List[str] = field(default_factory=list)
+    updated: List[str] = field(default_factory=list)
+    skipped: List[str] = field(default_factory=list)
+    conflicts: List[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.updated)
+
+
+@dataclass(frozen=True)
+class McpSyncTarget:
+    """A profile config targeted by ``hermes mcp sync``."""
+
+    name: str
+    config_path: Path
+
+
+def _default_shared_mcp_path() -> Path:
+    """Return the profile-root shared MCP YAML path."""
+    return get_default_hermes_root() / "shared" / "mcp_servers.yaml"
+
+
+def _load_yaml_mapping(path: Path) -> dict:
+    """Load a YAML file that must contain a mapping."""
+    path = Path(path).expanduser()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Shared MCP file not found: {path}")
+
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML file must contain a mapping: {path}")
+    return data
+
+
+def _load_shared_mcp_servers(path: Path) -> Dict[str, dict]:
+    """Load shared MCP server definitions from a YAML file.
+
+    Accepts either a wrapped shape::
+
+        mcp_servers:
+          name: {...}
+
+    or a raw ``{name: config}`` mapping.
+    """
+    data = _load_yaml_mapping(path)
+    raw_servers = data.get("mcp_servers", data)
+    if not isinstance(raw_servers, dict):
+        raise ValueError("Shared MCP file must contain a mapping of server names to configs")
+
+    servers: Dict[str, dict] = {}
+    for name, cfg in raw_servers.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Shared MCP server names must be non-empty strings")
+        if not isinstance(cfg, dict):
+            raise ValueError(f"Shared MCP server '{name}' must be a mapping")
+        servers[name] = copy.deepcopy(cfg)
+    return servers
+
+
+def _read_config_file(path: Path) -> dict:
+    """Read a profile config file as raw YAML, returning {} when absent/empty."""
+    path = Path(path).expanduser()
+    if not path.exists():
+        return {}
+    data = _load_yaml_mapping(path)
+    return data
+
+
+def _write_config_file(path: Path, config: dict) -> None:
+    """Write a profile config file atomically."""
+    from utils import atomic_yaml_write
+
+    atomic_yaml_write(Path(path).expanduser(), config, sort_keys=False)
+
+
+def _parse_selected_server_names(raw_servers: Optional[List[str]]) -> Optional[Set[str]]:
+    """Parse repeated/comma-separated ``--servers`` values."""
+    if not raw_servers:
+        return None
+
+    selected: Set[str] = set()
+    for raw in raw_servers:
+        for item in str(raw or "").split(","):
+            name = item.strip()
+            if name:
+                selected.add(name)
+    return selected
+
+
+def _plan_mcp_sync(
+    target_servers: Dict[str, dict],
+    shared_servers: Dict[str, dict],
+    selected_names: Optional[Set[str]],
+    *,
+    force: bool,
+) -> McpSyncPlan:
+    """Plan a deterministic MCP-server merge without filesystem side effects."""
+    merged = copy.deepcopy(target_servers or {})
+    plan = McpSyncPlan(merged_servers=merged)
+
+    for name in sorted(shared_servers):
+        if selected_names is not None and name not in selected_names:
+            continue
+
+        shared_cfg = copy.deepcopy(shared_servers[name])
+        if name not in merged:
+            merged[name] = shared_cfg
+            plan.added.append(name)
+        elif merged[name] == shared_cfg:
+            plan.skipped.append(name)
+        elif force:
+            merged[name] = shared_cfg
+            plan.updated.append(name)
+        else:
+            plan.conflicts.append(name)
+
+    return plan
+
+
+def _resolve_mcp_sync_targets(profile_names: List[str], all_profiles: bool) -> List[McpSyncTarget]:
+    """Resolve ``hermes mcp sync`` target profiles to config paths."""
+    from hermes_cli.profiles import (
+        get_profile_dir,
+        list_profiles,
+        normalize_profile_name,
+        profile_exists,
+        validate_profile_name,
+    )
+
+    if all_profiles and profile_names:
+        raise ValueError("Use either --all or --profile, not both")
+    if all_profiles:
+        return [
+            McpSyncTarget(name=profile.name, config_path=Path(profile.path) / "config.yaml")
+            for profile in list_profiles()
+        ]
+    if not profile_names:
+        raise ValueError("Specify --profile NAME or --all")
+
+    targets: List[McpSyncTarget] = []
+    seen: Set[str] = set()
+    for raw_name in profile_names:
+        name = normalize_profile_name(raw_name)
+        validate_profile_name(name)
+        if name != "default" and not profile_exists(name):
+            raise FileNotFoundError(
+                f"Profile '{name}' does not exist. Create it with: hermes profile create {name}"
+            )
+        if name in seen:
+            continue
+        seen.add(name)
+        targets.append(McpSyncTarget(name=name, config_path=get_profile_dir(name) / "config.yaml"))
+    return targets
+
+
+def _format_names(names: List[str]) -> str:
+    return ", ".join(names) if names else "-"
 
 
 def _apply_mcp_preset(
@@ -588,6 +760,92 @@ def _interpolate_value(value: str) -> str:
     return re.sub(r"\$\{(\w+)\}", _replace, value)
 
 
+# ─── hermes mcp sync ──────────────────────────────────────────────────────────
+
+def cmd_mcp_sync(args):
+    """Sync shared MCP server definitions into one or more profile configs."""
+    shared_path = Path(getattr(args, "shared", None) or _default_shared_mcp_path()).expanduser()
+    dry_run = bool(getattr(args, "dry_run", False))
+    force = bool(getattr(args, "force", False))
+    profile_names = list(getattr(args, "profile", None) or [])
+    all_profiles = bool(getattr(args, "all", False))
+
+    try:
+        shared_servers = _load_shared_mcp_servers(shared_path)
+        selected_names = _parse_selected_server_names(getattr(args, "servers", None))
+        if selected_names:
+            missing = sorted(selected_names - set(shared_servers))
+            if missing:
+                _error(f"Unknown shared MCP server(s): {', '.join(missing)}")
+                _info(f"Available in {shared_path}: {', '.join(sorted(shared_servers)) or '(none)'}")
+                return
+        targets = _resolve_mcp_sync_targets(profile_names, all_profiles)
+    except FileNotFoundError as exc:
+        _error(str(exc))
+        if str(exc).startswith("Shared MCP file not found"):
+            _info("Create it with: mkdir -p ~/.hermes/shared && $EDITOR ~/.hermes/shared/mcp_servers.yaml")
+        return
+    except ValueError as exc:
+        _error(str(exc))
+        return
+
+    if dry_run:
+        print(color("  DRY RUN — no files will be changed", Colors.YELLOW))
+    print(color(f"  Shared MCP file: {shared_path}", Colors.CYAN))
+
+    any_changes = False
+    any_conflicts = False
+    for target in targets:
+        try:
+            config = _read_config_file(target.config_path)
+        except ValueError as exc:
+            _error(f"{target.name}: {exc}")
+            continue
+
+        current_servers = config.get("mcp_servers")
+        if not isinstance(current_servers, dict):
+            current_servers = {}
+
+        plan = _plan_mcp_sync(
+            target_servers=current_servers,
+            shared_servers=shared_servers,
+            selected_names=selected_names,
+            force=force,
+        )
+        any_changes = any_changes or plan.changed
+        any_conflicts = any_conflicts or bool(plan.conflicts)
+
+        print()
+        print(color(f"  Profile: {target.name}", Colors.CYAN))
+        _info(f"Config: {target.config_path}")
+        _info(f"Added: {_format_names(plan.added)}")
+        _info(f"Updated: {_format_names(plan.updated)}")
+        _info(f"Skipped: {_format_names(plan.skipped)}")
+        if plan.conflicts:
+            _warning(f"Conflicts: {_format_names(plan.conflicts)}")
+            _info("Use --force to replace conflicting same-name entries")
+        else:
+            _info("Conflicts: -")
+
+        if dry_run or not plan.changed:
+            continue
+
+        config["mcp_servers"] = plan.merged_servers
+        _write_config_file(target.config_path, config)
+        _success(f"Synced {target.name}")
+
+    print()
+    if dry_run:
+        _info("Dry run complete.")
+    elif any_changes:
+        _success("MCP sync complete.")
+        _info("Run /reload-mcp in active sessions or restart affected gateways.")
+    elif any_conflicts:
+        _warning("No changes written because all differences were conflicts.")
+    else:
+        _info("No MCP sync changes needed.")
+
+
 # ─── hermes mcp login ────────────────────────────────────────────────────────
 
 def cmd_mcp_login(args):
@@ -762,6 +1020,7 @@ def mcp_command(args):
         "list": cmd_mcp_list,
         "ls": cmd_mcp_list,
         "test": cmd_mcp_test,
+        "sync": cmd_mcp_sync,
         "configure": cmd_mcp_configure,
         "config": cmd_mcp_configure,
         "login": cmd_mcp_login,
@@ -781,6 +1040,7 @@ def mcp_command(args):
         _info("hermes mcp remove <name>                      Remove a server")
         _info("hermes mcp list                               List servers")
         _info("hermes mcp test <name>                        Test connection")
+        _info("hermes mcp sync --all --dry-run               Sync shared MCPs into profiles")
         _info("hermes mcp configure <name>                   Toggle tools")
         _info("hermes mcp login <name>                       Re-authenticate OAuth")
         print()

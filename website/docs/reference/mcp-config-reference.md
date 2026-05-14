@@ -228,6 +228,38 @@ mcp_my_api_list_items_v2
 
 Keep this in mind when writing `include` / `exclude` filters — use the **original** MCP tool name (with hyphens/dots), not the sanitized version.
 
+## Shared profile sync
+
+Profiles do not live-inherit MCP configuration. Each profile reads `mcp_servers` from its own `config.yaml`.
+
+To keep common MCP definitions in one place and merge them into selected profiles, create:
+
+```yaml
+# ~/.hermes/shared/mcp_servers.yaml
+mcp_servers:
+  docs:
+    url: "https://mcp.docs.example.com/mcp"
+  filesystem:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
+
+Then sync with a dry run first:
+
+```bash
+hermes mcp sync --all --dry-run
+hermes mcp sync --profile main --profile research --servers docs,filesystem
+```
+
+Behavior:
+
+- Only `mcp_servers` entries are merged into target profile configs.
+- Other profile settings are preserved.
+- Existing identical entries are skipped.
+- Existing same-name entries with different config are reported as conflicts and not overwritten unless `--force` is used.
+- `--servers` accepts comma-separated names and can be repeated.
+- After syncing, restart the affected gateway or run `/reload-mcp` / `/reset` in active sessions.
+
 ## OAuth 2.1 authentication
 
 For HTTP servers that require OAuth, set `auth: oauth` on the server entry:
