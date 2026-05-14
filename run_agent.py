@@ -10054,6 +10054,7 @@ class AIAgent:
         return (
             self._needs_deepseek_tool_reasoning()
             or self._needs_kimi_tool_reasoning()
+            or self._needs_mimo_tool_reasoning()  # new
         )
 
     def _needs_kimi_tool_reasoning(self) -> bool:
@@ -10084,7 +10085,22 @@ class AIAgent:
             or "deepseek" in model
             or base_url_host_matches(self.base_url, "api.deepseek.com")
         )
-
+        
+    def _needs_mimo_tool_reasoning(self) -> bool:
+        """Return True when the current provider is Xiaomi MiMo thinking mode.
+    
+        MiMo thinking mode requires ``reasoning_content`` on every assistant
+        message when replaying conversation history. Omitting it causes HTTP 400
+        ("The reasoning_content in the thinking mode must be passed back to the API").
+        """
+        provider = (self.provider or "").lower()
+        model = (self.model or "").lower()
+        return (
+            provider == "mimo"
+            or "mimo" in model
+            or base_url_host_matches(self.base_url, "xiaomimimo.com")
+        )
+    
     def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
         """Copy provider-facing reasoning fields onto an API replay message."""
         if source_msg.get("role") != "assistant":
