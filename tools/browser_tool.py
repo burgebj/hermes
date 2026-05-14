@@ -1832,11 +1832,6 @@ def _run_browser_command(
     else:
         cmd_prefix = [browser_cmd]
 
-    cmd_parts = cmd_prefix + backend_args + [
-        "--json",
-        command
-    ] + args
-
     try:
         # Give each task its own socket directory to prevent concurrency conflicts.
         # Without this, parallel workers fight over the same default socket path,
@@ -1873,8 +1868,8 @@ def _run_browser_command(
         # - Ubuntu 23.10+ / AppArmor systems: unprivileged user namespaces
         #   are restricted, causing Chromium to exit with "No usable sandbox"
         #   even for non-root users running under systemd or containers.
+        _needs_sandbox_bypass = False
         if "AGENT_BROWSER_CHROME_FLAGS" not in browser_env:
-            _needs_sandbox_bypass = False
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 _needs_sandbox_bypass = True
                 logger.debug("browser: running as root — injecting --no-sandbox")
@@ -1895,6 +1890,15 @@ def _run_browser_command(
                 browser_env["AGENT_BROWSER_CHROME_FLAGS"] = (
                     "--no-sandbox --disable-dev-shm-usage"
                 )
+                if "AGENT_BROWSER_ARGS" not in browser_env:
+                    browser_env["AGENT_BROWSER_ARGS"] = (
+                        "--no-sandbox,--disable-dev-shm-usage"
+                    )
+
+        cmd_parts = cmd_prefix + backend_args + [
+            "--json",
+            command
+        ] + args
 
         # Use temp files for stdout/stderr instead of pipes.
         # agent-browser starts a background daemon that inherits file
