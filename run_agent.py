@@ -13027,6 +13027,37 @@ class AIAgent:
                         )
 
                         if _thinking_exhausted:
+                            # ── Context overflow vs genuine thinking exhaustion ──
+                            # When a cloud provider's input context is full, the model
+                            # may return a think-only response with finish_reason=length
+                            # instead of a 4xx error.  This looks identical to genuine
+                            # reasoning-budget exhaustion, but compaction fixes it.
+                            # Check the context size to distinguish the two cases.
+                            _compressor = self.context_compressor
+                            _ctx_overflow_tokens = _compressor.last_prompt_tokens
+                            if not _ctx_overflow_tokens:
+                                _ctx_overflow_tokens = estimate_messages_tokens_rough(messages)
+
+                            if (
+                                self.compression_enabled
+                                and _ctx_overflow_tokens >= _compressor.threshold_tokens
+                            ):
+                                self._vprint(
+                                    f"{self.log_prefix}📦 Context overflow detected "
+                                    f"(~{_ctx_overflow_tokens:,} tokens >= "
+                                    f"{_compressor.threshold_tokens:,} threshold) "
+                                    f"during thinking-exhausted response — attempting "
+                                    f"compression",
+                                    force=True,
+                                )
+                                messages, active_system_prompt = self._compress_context(
+                                    messages, system_message,
+                                    approx_tokens=_ctx_overflow_tokens,
+                                    task_id=effective_task_id,
+                                )
+                                conversation_history = None
+                                continue
+
                             _exhaust_error = (
                                 "Model used all output tokens on reasoning with none left "
                                 "for the response. Try lowering reasoning effort or "
