@@ -72,6 +72,10 @@ def _make_agent(monkeypatch):
         def _has_stream_consumers(self):
             return False
 
+        def _apply_pending_steer_to_tool_results(self, messages, num_tools):
+            # No-op for stub — real implementation appends steer text to tool results
+            pass
+
     stub = _Stub()
     # Bind the real methods under test
     stub._execute_tool_calls_concurrent = _ra.AIAgent._execute_tool_calls_concurrent.__get__(stub)

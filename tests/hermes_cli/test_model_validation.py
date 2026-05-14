@@ -7,6 +7,7 @@ from hermes_cli.models import (
     copilot_model_api_mode,
     fetch_github_model_catalog,
     curated_models_for_provider,
+    detect_static_provider_for_model,
     fetch_api_models,
     fetch_lmstudio_models,
     github_model_reasoning_efforts,
@@ -125,6 +126,14 @@ class TestParseModelInput:
         # Empty model after second colon → no triple match, falls through
         assert provider == "custom"
         assert model == "name:"
+
+
+class TestDetectStaticProviderForModel:
+    def test_bare_provider_alias_wins_over_model_family_alias(self):
+        provider, model = detect_static_provider_for_model("claude", "openrouter")
+
+        assert provider == "anthropic"
+        assert model == "claude-opus-4-7"
 
 
 # -- curated_models_for_provider ---------------------------------------------

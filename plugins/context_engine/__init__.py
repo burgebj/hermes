@@ -5,25 +5,25 @@ plugins.  Each subdirectory must contain ``__init__.py`` with a class
 implementing the ContextEngine ABC.
 
 Context engines are separate from the general plugin system — they live
-in the repo and are always available without user installation.  Only ONE
-can be active at a time, selected via ``context.engine`` in config.yaml.
+in the repo and are always available without user installation.
+
+Supported configurations:
+- context.engine: lcm      — LCM for compression only
+- context.engine: rlm      — RLM as standalone engine
+- context.engine: lcm + context.rlm: true — LCM + RLM companion mode
+
 The default engine is ``"compressor"`` (the built-in ContextCompressor).
-
-Usage:
-    from plugins.context_engine import discover_context_engines, load_context_engine
-
-    available = discover_context_engines()   # [(name, desc, available), ...]
-    engine = load_context_engine("lcm")      # ContextEngine instance
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +76,26 @@ def discover_context_engines() -> List[Tuple[str, str, bool]]:
     return results
 
 
-def load_context_engine(name: str) -> Optional["ContextEngine"]:
+def load_context_engine(name: str, **kwargs: Any) -> Optional["ContextEngine"]:
     """Load and return a ContextEngine instance by name.
+
+    Args:
+        name: Engine name (e.g. "lcm", "rlm", "compressor")
+        **kwargs: Configuration passed to the engine constructor
 
     Returns None if the engine is not found or fails to load.
     """
+    if name == "compressor":
+        # Built-in engine — don't auto-load plugins
+        return None
+
     engine_dir = _CONTEXT_ENGINE_PLUGINS_DIR / name
     if not engine_dir.is_dir():
         logger.debug("Context engine '%s' not found in %s", name, _CONTEXT_ENGINE_PLUGINS_DIR)
         return None
 
     try:
-        engine = _load_engine_from_dir(engine_dir)
+        engine = _load_engine_from_dir(engine_dir, **kwargs)
         if engine:
             return engine
         logger.warning("Context engine '%s' loaded but no engine instance found", name)
@@ -97,7 +105,52 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:
         return None
 
 
-def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
+def load_composite_engine(
+    compression_name: str = "lcm",
+    rlm_enabled: bool = False,
+    **kwargs: Any,
+) -> Optional["ContextEngine"]:
+    """Load a composite context engine combining LCM (compression) and RLM (tools).
+
+    When rlm_enabled=True, creates a CompositeContextEngine that wraps both
+    the compression engine and the RLM engine. When rlm_enabled=False,
+    returns the compression engine directly.
+
+    Args:
+        compression_name: Name of the compression engine (default: "lcm")
+        rlm_enabled: Whether to enable RLM companion mode
+        **kwargs: Configuration passed to both engines
+
+    Returns a ContextEngine instance (compressed engine or composite wrapper).
+    """
+    compression_engine = load_context_engine(compression_name, **kwargs)
+    if compression_engine is None:
+        return None
+
+    if not rlm_enabled:
+        return compression_engine
+
+    # Load RLM companion engine
+    try:
+        from plugins.context_engine.rlm import RlmContextEngine
+        rlm_engine = RlmContextEngine(**kwargs)
+    except Exception as e:
+        logger.debug("Failed to load RLM companion engine: %s", e)
+        return compression_engine
+
+    # Load the CompositeContextEngine
+    try:
+        from plugins.context_engine.rlm import CompositeContextEngine
+        engine = CompositeContextEngine(compression_engine, rlm_engine, **kwargs)
+        return engine
+    except Exception as e:
+        logger.warning("Failed to create composite engine: %s", e)
+        return compression_engine
+
+
+def _load_engine_from_dir(
+    engine_dir: Path, **kwargs: Any
+) -> Optional["ContextEngine"]:
     """Import an engine module and extract the ContextEngine instance.
 
     The module must have either:
@@ -176,7 +229,9 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
     if hasattr(mod, "register"):
         collector = _EngineCollector()
         try:
-            mod.register(collector)
+            reg_sig = inspect.signature(mod.register)
+            filtered = _filter_kwargs(kwargs, reg_sig)
+            mod.register(collector, **filtered)
             if collector.engine:
                 return collector.engine
         except Exception as e:
@@ -189,11 +244,31 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
         if (isinstance(attr, type) and issubclass(attr, ContextEngine)
                 and attr is not ContextEngine):
             try:
-                return attr()
+                init_sig = inspect.signature(attr.__init__)
+                filtered = _filter_kwargs(kwargs, init_sig)
+                return attr(**filtered)
             except Exception:
                 pass
 
     return None
+
+
+def _filter_kwargs(kwargs: Dict[str, Any], sig: "inspect.Signature") -> Dict[str, Any]:
+    """Return a filtered copy of kwargs accepted by the given signature.
+
+    If the callable declares a **kwargs parameter (VAR_KEYWORD), all kwargs are
+    passed through unchanged — the callee accepts arbitrary keyword arguments.
+    Otherwise only the kwargs whose names appear as explicit parameters are kept.
+    This prevents TypeError when a custom engine's register() does not declare
+    parameters like ``rlm_config`` or ``lcm_config``.
+    """
+    params = sig.parameters
+    # If there's a **kwargs catch-all, pass everything
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    # Otherwise filter to only declared parameter names (excluding 'self'/'ctx')
+    accepted = set(params.keys()) - {"self", "ctx"}
+    return {k: v for k, v in kwargs.items() if k in accepted}
 
 
 class _EngineCollector:
@@ -217,3 +292,4 @@ class _EngineCollector:
 
     def register_memory_provider(self, *args, **kwargs):
         pass
+

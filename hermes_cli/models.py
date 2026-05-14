@@ -12,6 +12,7 @@ import os
 import urllib.request
 import urllib.error
 import time
+import hashlib
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
@@ -1802,10 +1803,6 @@ def detect_static_provider_for_model(
     name_lower = name.lower()
     current_keys = _provider_keys(current_provider)
 
-    alias_match = _resolve_static_model_alias(name_lower, current_keys)
-    if alias_match:
-        return alias_match
-
     # --- Step 0: bare provider name typed as model ---
     # If someone types `/model nous` or `/model anthropic`, treat it as a
     # provider switch and pick the first model from that provider's catalog.
@@ -1820,6 +1817,10 @@ def detect_static_provider_for_model(
             and resolved_provider not in current_keys
         ):
             return (resolved_provider, default_models[0])
+
+    alias_match = _resolve_static_model_alias(name_lower, current_keys)
+    if alias_match:
+        return alias_match
 
     # Aggregators list other providers' models — never auto-switch TO them
     # If the model belongs to the current provider's catalog, don't suggest switching
@@ -2459,10 +2460,17 @@ def fetch_github_model_catalog(
 
 # ─── Copilot catalog context-window helpers ─────────────────────────────────
 
-# Module-level cache: {model_id: max_prompt_tokens}
-_copilot_context_cache: dict[str, int] = {}
-_copilot_context_cache_time: float = 0.0
+# Module-level cache: {credential_scope: {model_id: max_prompt_tokens}}
+_copilot_context_cache: dict[str, dict[str, int]] = {}
+_copilot_context_cache_time: dict[str, float] = {}
 _COPILOT_CONTEXT_CACHE_TTL = 3600  # 1 hour
+
+
+def _copilot_context_cache_scope(api_key: Optional[str]) -> str:
+    token = (api_key or "").strip()
+    if not token:
+        return "default"
+    return "token:" + hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
 def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> Optional[int]:
@@ -2473,10 +2481,15 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     """
     global _copilot_context_cache, _copilot_context_cache_time
 
+    scope = _copilot_context_cache_scope(api_key)
+    now = time.time()
+
     # Serve from cache if fresh
-    if _copilot_context_cache and (time.time() - _copilot_context_cache_time < _COPILOT_CONTEXT_CACHE_TTL):
-        if model_id in _copilot_context_cache:
-            return _copilot_context_cache[model_id]
+    cached = _copilot_context_cache.get(scope)
+    cached_at = _copilot_context_cache_time.get(scope, 0.0)
+    if cached is not None and (now - cached_at < _COPILOT_CONTEXT_CACHE_TTL):
+        if model_id in cached:
+            return cached[model_id]
         # Cache is fresh but model not in it — don't re-fetch
         return None
 
@@ -2496,8 +2509,8 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
         if isinstance(max_prompt, int) and max_prompt > 0:
             cache[mid] = max_prompt
 
-    _copilot_context_cache = cache
-    _copilot_context_cache_time = time.time()
+    _copilot_context_cache[scope] = cache
+    _copilot_context_cache_time[scope] = now
 
     return cache.get(model_id)
 

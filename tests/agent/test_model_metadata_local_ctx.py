@@ -426,6 +426,34 @@ class TestQueryLocalContextLengthLmStudio:
             "max_context_length (1048576) must not win over loaded_instances."
         )
 
+    def test_lmstudio_unloaded_model_uses_max_context_length(self):
+        """Unloaded LM Studio models still advertise max_context_length."""
+        from agent.model_metadata import _query_local_context_length
+
+        native_resp = self._make_resp(200, {
+            "models": [
+                {
+                    "key": "nvidia/nvidia-nemotron-3-nano-4b",
+                    "id": "nvidia/nvidia-nemotron-3-nano-4b",
+                    "max_context_length": 1_048_576,
+                    "loaded_instances": [],
+                },
+            ]
+        })
+        client_mock = self._make_client(
+            native_resp,
+            self._make_resp(404, {}),
+            self._make_resp(404, {}),
+        )
+
+        with patch("agent.model_metadata.detect_local_server_type", return_value="lm-studio"), \
+             patch("httpx.Client", return_value=client_mock):
+            result = _query_local_context_length(
+                "nvidia-nemotron-3-nano-4b", "http://192.168.1.22:1234/v1"
+            )
+
+        assert result == 1_048_576
+
 
 class TestDetectLocalServerTypeAuth:
     def test_passes_bearer_token_to_probe_requests(self):
@@ -490,6 +518,32 @@ class TestFetchEndpointModelMetadataLmStudio:
         }
         assert result["lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q8_0.gguf"]["context_length"] == 131072
         assert result["Qwen3.5-27B-GGUF/Qwen3.5-27B-Q8_0.gguf"]["context_length"] == 131072
+
+    def test_unloaded_model_uses_native_max_context_length(self):
+        from agent.model_metadata import fetch_endpoint_model_metadata
+
+        native_resp = self._make_resp(
+            {
+                "models": [
+                    {
+                        "key": "lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q8_0.gguf",
+                        "id": "lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q8_0.gguf",
+                        "max_context_length": 1_048_576,
+                        "loaded_instances": [],
+                    }
+                ]
+            }
+        )
+
+        with patch("agent.model_metadata.detect_local_server_type", return_value="lm-studio"), \
+             patch("agent.model_metadata.requests.get", return_value=native_resp):
+            result = fetch_endpoint_model_metadata(
+                "http://localhost:1234/v1",
+                force_refresh=True,
+            )
+
+        model = "lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q8_0.gguf"
+        assert result[model]["context_length"] == 1_048_576
 
 
 class TestQueryLocalContextLengthNetworkError:

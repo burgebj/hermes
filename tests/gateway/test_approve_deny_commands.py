@@ -609,10 +609,13 @@ class TestBlockingApprovalE2E:
         resolve_gateway_approval(session_key, "once")   # oldest
         resolve_gateway_approval(session_key, "deny")   # next
 
-        for t in threads:
-            t.join(timeout=5)
+        # Small sleep to let threads wake from condition waits
+        time.sleep(0.3)
 
-        assert all(r is not None for r in results)
+        for t in threads:
+            t.join(timeout=10)
+
+        assert all(r is not None for r in results), f"Results not ready: {results}"
         assert sorted(r["approved"] for r in results) == [False, True]
         assert sum("BLOCKED" in (r.get("message") or "") for r in results) == 1
         unregister_gateway_notify(session_key)

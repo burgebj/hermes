@@ -1,0 +1,15 @@
+name: lcm
+version: 1.0.0
+description: >
+  Lossless Context Management — three-layer memory hierarchy (L1 Hot / L2 Warm DAM / L3 Cold HRR)
+  with reversible compaction via SummaryDAG, 7 agent-facing tools (expand, pin, forget, search,
+  budget, toc, focus), and cross-session persistent knowledge.
+author: dusterbloom
+provides_tools:
+  - lcm_expand
+  - lcm_pin
+  - lcm_forget
+  - lcm_search
+  - lcm_budget
+  - lcm_toc
+  - lcm_focus

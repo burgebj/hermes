@@ -560,6 +560,24 @@ def _extract_max_completion_tokens(payload: Dict[str, Any]) -> Optional[int]:
     return _extract_first_int(payload, _MAX_COMPLETION_KEYS)
 
 
+def _extract_lmstudio_context_length(model: Dict[str, Any]) -> Optional[int]:
+    """Prefer loaded LM Studio runtime context, then advertised model max."""
+    for inst in model.get("loaded_instances", []) or []:
+        if not isinstance(inst, dict):
+            continue
+        cfg = inst.get("config", {})
+        ctx = cfg.get("context_length") if isinstance(cfg, dict) else None
+        coerced = _coerce_reasonable_int(ctx)
+        if coerced is not None:
+            return coerced
+
+    for key in _CONTEXT_LENGTH_KEYS:
+        coerced = _coerce_reasonable_int(model.get(key))
+        if coerced is not None:
+            return coerced
+    return None
+
+
 def _extract_pricing(payload: Dict[str, Any]) -> Dict[str, Any]:
     novita_input = payload.get("input_token_price_per_m")
     novita_output = payload.get("output_token_price_per_m")
@@ -688,15 +706,7 @@ def fetch_endpoint_model_metadata(
                         continue
                     entry: Dict[str, Any] = {"name": model.get("name", model_id)}
 
-                    context_length = None
-                    for inst in model.get("loaded_instances", []) or []:
-                        if not isinstance(inst, dict):
-                            continue
-                        cfg = inst.get("config", {})
-                        ctx = cfg.get("context_length") if isinstance(cfg, dict) else None
-                        if isinstance(ctx, int) and ctx > 0:
-                            context_length = ctx
-                            break
+                    context_length = _extract_lmstudio_context_length(model)
                     if context_length is not None:
                         entry["context_length"] = context_length
 
@@ -1153,12 +1163,9 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
                     data = resp.json()
                     for m in data.get("models", []):
                         if _model_id_matches(m.get("key", ""), model) or _model_id_matches(m.get("id", ""), model):
-                            # Prefer loaded instance context (actual runtime value)
-                            for inst in m.get("loaded_instances", []):
-                                cfg = inst.get("config", {})
-                                ctx = cfg.get("context_length")
-                                if ctx and isinstance(ctx, (int, float)):
-                                    return int(ctx)
+                            context_length = _extract_lmstudio_context_length(m)
+                            if context_length is not None:
+                                return context_length
                             break
 
             # LM Studio / vLLM / llama.cpp: try /v1/models/{model}

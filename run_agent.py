@@ -2266,42 +2266,96 @@ class AIAgent:
 
 
         # Select context engine: config-driven (like memory providers).
-        # 1. Check config.yaml context.engine setting
-        # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
-        # 3. Check general plugin system (user-installed plugins)
-        # 4. Fall back to built-in ContextCompressor
+        # 1. Check config.yaml context.engine setting (lcm/rlm/compressor)
+        # 2. Check config.yaml context.rlm (enable RLM companion)
+        # 3. Check plugins/context_engine/<name>/ directory (repo-shipped)
+        # 4. Check general plugin system (user-installed plugins)
+        # 5. Fall back to built-in ContextCompressor
         _selected_engine = None
         _engine_name = "compressor"  # default
+        _rlm_enabled = False  # RLM companion mode flag
         try:
             _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
             _engine_name = _ctx_cfg.get("engine", "compressor") or "compressor"
+            _rlm_enabled = bool(_ctx_cfg.get("rlm", False))
         except Exception:
             pass
 
-        if _engine_name != "compressor":
-            # Try loading from plugins/context_engine/<name>/
+        # Read lcm config section BEFORE constructing the engine.
+        # This ensures that lcm.enabled=false suppresses tool registration
+        # at construction time rather than waiting for on_session_start().
+        _lcm_cfg: dict = {}
+        try:
+            if isinstance(_agent_cfg, dict):
+                _lcm_cfg = _agent_cfg.get("lcm", {}) or {}
+        except Exception:
+            pass
+
+        # Load plugin engine(s).
+        # Default: any engine name is loaded via load_context_engine(name).
+        # Special cases: "compressor" uses the built-in; "rlm" is standalone.
+        # "lcm" (and any other compression engine) also supports the composite
+        # path when _rlm_enabled is True.
+        if _engine_name == "compressor":
+            # Explicitly using built-in compressor (default)
+            pass
+        elif _engine_name == "rlm":
+            # Standalone RLM mode (no compression, uses REPL)
             try:
                 from plugins.context_engine import load_context_engine
-                _selected_engine = load_context_engine(_engine_name)
+                _selected_engine = load_context_engine("rlm", rlm_config=_ctx_cfg.get("rlm_config", {}))
             except Exception as _ce_load_err:
                 logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+        else:
+            # Generic: lcm, or any plugin engine under plugins/context_engine/<name>/.
+            # Also supports composite mode (engine + RLM) when _rlm_enabled is True.
+            rlm_kwargs = {}
+            rlm_config = _ctx_cfg.get("rlm_config", {})
+            rlm_kwargs["rlm_config"] = rlm_config
+            # Pass lcm_config only for the lcm engine so custom engines whose
+            # register() does not accept lcm_config don't receive it here.
+            if _engine_name == "lcm":
+                rlm_kwargs["lcm_config"] = _lcm_cfg
 
-            # Try general plugin system as fallback
-            if _selected_engine is None:
+            if _rlm_enabled:
+                # Composite mode: LCM + RLM
                 try:
-                    from hermes_cli.plugins import get_plugin_context_engine
-                    _candidate = get_plugin_context_engine()
-                    if _candidate and _candidate.name == _engine_name:
-                        _selected_engine = _candidate
-                except Exception:
-                    pass
+                    from plugins.context_engine import load_composite_engine
+                    _selected_engine = load_composite_engine(
+                        compression_name=_engine_name,
+                        rlm_enabled=True,
+                        **rlm_kwargs,
+                    )
+                except Exception as _ce_load_err:
+                    logger.debug("Composite engine load failed (%s), falling back to RLM only", _ce_load_err)
+                    _selected_engine = None
 
             if _selected_engine is None:
-                logger.warning(
-                    "Context engine '%s' not found — falling back to built-in compressor",
-                    _engine_name,
-                )
-        # else: config says "compressor" — use built-in, don't auto-activate plugins
+                # Pure engine mode (no RLM)
+                try:
+                    from plugins.context_engine import load_context_engine
+                    _selected_engine = load_context_engine(
+                        _engine_name,
+                        **rlm_kwargs,
+                    )
+                except Exception as _ce_load_err:
+                    logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+
+        # Try general plugin system as fallback
+        if _selected_engine is None:
+            try:
+                from hermes_cli.plugins import get_plugin_context_engine
+                _candidate = get_plugin_context_engine()
+                if _candidate and _candidate.name == _engine_name:
+                    _selected_engine = _candidate
+            except Exception:
+                pass
+
+        if _selected_engine is None:
+            logger.warning(
+                "Context engine '%s' not found — falling back to built-in compressor",
+                _engine_name,
+            )
 
         if _selected_engine is not None:
             self.context_compressor = _selected_engine
@@ -11372,6 +11426,29 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
+            elif self._context_engine_tool_names and function_name in self._context_engine_tool_names:
+                # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
+                spinner = None
+                if self.quiet_mode and not self.tool_progress_callback:
+                    face = random.choice(KawaiiSpinner.KAWAII_WAITING)
+                    emoji = _get_tool_emoji(function_name)
+                    preview = _build_tool_preview(function_name, function_args) or function_name
+                    spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=self._print_fn)
+                    spinner.start()
+                _ce_result = None
+                try:
+                    function_result = self.context_compressor.handle_tool_call(function_name, function_args, messages=messages)
+                    _ce_result = function_result
+                except Exception as tool_error:
+                    function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
+                    logger.error("context_engine.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                finally:
+                    tool_duration = time.time() - tool_start_time
+                    cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_ce_result)
+                    if spinner:
+                        spinner.stop(cute_msg)
+                    elif self.quiet_mode:
+                        self._vprint(f"  {cute_msg}")
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
                 # Memory provider tools (hindsight_retain, honcho_search, etc.)
                 # These are not in the tool registry — route through MemoryManager.
@@ -12468,7 +12545,7 @@ class AIAgent:
                     native_anthropic=self._use_native_cache_layout,
                 )
 
-            # Safety net: strip orphaned tool results / add stubs for missing
+                       # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
             # gated on context_compressor — so orphans from session loading or
             # manual message manipulation are always caught.
@@ -12483,6 +12560,17 @@ class AIAgent:
             # stored conversation history keeps the reasoning block for the
             # UI transcript and session persistence.
             api_messages = self._drop_thinking_only_and_merge_users(api_messages)
+
+            # ── Refresh RLM context ────────────────────────────────────────
+            # Update the RLM REPL environment with the latest messages
+            # so peek/grep/partition work on current context.
+            try:
+                if hasattr(self, "context_compressor") and self.context_compressor:
+                    refresh = getattr(self.context_compressor, "refresh_context", None)
+                    if refresh and callable(refresh):
+                        refresh(api_messages)
+            except Exception as _refresh_err:
+                logger.debug("RLM context refresh failed: %s", _refresh_err)
 
             # Normalize message whitespace and tool-call JSON for consistent
             # prefix matching.  Ensures bit-perfect prefixes across turns,

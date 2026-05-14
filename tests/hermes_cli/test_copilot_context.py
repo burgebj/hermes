@@ -53,10 +53,10 @@ def _clear_cache():
     import hermes_cli.models as mod
 
     mod._copilot_context_cache = {}
-    mod._copilot_context_cache_time = 0.0
+    mod._copilot_context_cache_time = {}
     yield
     mod._copilot_context_cache = {}
-    mod._copilot_context_cache_time = 0.0
+    mod._copilot_context_cache_time = {}
 
 
 class TestGetCopilotModelContext:
@@ -86,6 +86,34 @@ class TestGetCopilotModelContext:
         # Only one API call despite two lookups
         assert mock_fetch.call_count == 1
 
+    def test_cache_is_scoped_by_token(self):
+        def fetch_for_token(api_key=None):
+            if api_key == "token-a":
+                return [
+                    {
+                        "id": "gpt-4.1",
+                        "capabilities": {
+                            "type": "chat",
+                            "limits": {"max_prompt_tokens": 128000},
+                        },
+                    }
+                ]
+            return [
+                {
+                    "id": "gpt-4.1",
+                    "capabilities": {
+                        "type": "chat",
+                        "limits": {"max_prompt_tokens": 64000},
+                    },
+                }
+            ]
+
+        with patch("hermes_cli.models.fetch_github_model_catalog", side_effect=fetch_for_token) as mock_fetch:
+            assert get_copilot_model_context("gpt-4.1", api_key="token-a") == 128_000
+            assert get_copilot_model_context("gpt-4.1", api_key="token-b") == 64_000
+
+        assert mock_fetch.call_count == 2
+
     @patch("hermes_cli.models.fetch_github_model_catalog", return_value=_SAMPLE_CATALOG)
     def test_cache_expires(self, mock_fetch):
         import hermes_cli.models as mod
@@ -94,7 +122,8 @@ class TestGetCopilotModelContext:
         assert mock_fetch.call_count == 1
 
         # Expire the cache
-        mod._copilot_context_cache_time = time.time() - 7200
+        scope = mod._copilot_context_cache_scope(None)
+        mod._copilot_context_cache_time[scope] = time.time() - 7200
         get_copilot_model_context("gpt-4.1")
         assert mock_fetch.call_count == 2
 

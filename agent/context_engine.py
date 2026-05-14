@@ -93,11 +93,9 @@ class ContextEngine(ABC):
         DAG, or do anything else — as long as the returned list is a valid
         OpenAI-format message sequence.
 
-        Args:
-            focus_topic: Optional topic string from manual ``/compress <focus>``.
-                Engines that support guided compression should prioritise
-                preserving information related to this topic.  Engines that
-                don't support it may simply ignore this argument.
+        ``focus_topic`` is advisory: callers may pass a topic hint to guide
+        compression. Implementations that do not use it should accept and
+        ignore it.
         """
 
     # -- Optional: pre-flight check ----------------------------------------
