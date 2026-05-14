@@ -1007,3 +1007,383 @@ class TestHermesHomeIsolation:
             expected = os.path.join(os.path.expanduser("~"), ".hermes")
             result = _get_hermes_home()
         assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# Unavailable-log helpers (#23845) — one-shot warning dedup
+# ---------------------------------------------------------------------------
+
+
+class TestUnavailableLogHelpers:
+    """Unit tests for the per-path dedup helpers that suppress repeating
+    "tirith spawn failed" / "tirith path resolved to None" warnings (#23845).
+    """
+
+    def setup_method(self) -> None:
+        # Each test sees a clean cache so order-independent.
+        _tirith_mod._reset_unavailable_log()
+
+    def teardown_method(self) -> None:
+        _tirith_mod._reset_unavailable_log()
+
+    def test_first_call_logs_once(self, caplog):
+        from tools.tirith_security import _log_unavailable_once
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            _log_unavailable_once("tirith", "tirith spawn failed: missing")
+
+        records = [r for r in caplog.records if "tirith spawn failed" in r.getMessage()]
+        assert len(records) == 1
+        assert "further occurrences for this path will be suppressed" in records[0].getMessage()
+
+    def test_second_call_same_key_is_silent(self, caplog):
+        from tools.tirith_security import _log_unavailable_once
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            _log_unavailable_once("tirith", "tirith spawn failed: missing")
+            _log_unavailable_once("tirith", "tirith spawn failed: still missing")
+            _log_unavailable_once("tirith", "tirith spawn failed: yes still")
+
+        records = [r for r in caplog.records if "tirith spawn failed" in r.getMessage()]
+        assert len(records) == 1, (
+            "Expected exactly one warning across three failures for the same path; "
+            f"got {len(records)} (#23845 dedup broken)"
+        )
+
+    def test_distinct_keys_each_log_once(self, caplog):
+        from tools.tirith_security import _log_unavailable_once
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            _log_unavailable_once("tirith", "missing on PATH")
+            _log_unavailable_once("/opt/custom/tirith", "missing at explicit path")
+            _log_unavailable_once("tirith", "missing on PATH (again)")
+            _log_unavailable_once("/opt/custom/tirith", "missing at explicit path (again)")
+
+        records = [r for r in caplog.records if r.levelname == "WARNING"]
+        msgs = [r.getMessage() for r in records]
+        assert sum("missing on PATH" in m for m in msgs) == 1
+        assert sum("missing at explicit path" in m for m in msgs) == 1
+
+    def test_clear_unavailable_log_re_arms_warning(self, caplog):
+        from tools.tirith_security import (
+            _clear_unavailable_log,
+            _log_unavailable_once,
+        )
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            _log_unavailable_once("tirith", "missing pass 1")
+            _log_unavailable_once("tirith", "missing pass 2 — should be silent")
+            _clear_unavailable_log("tirith")
+            _log_unavailable_once("tirith", "missing pass 3 — should log again")
+
+        msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("missing pass 1" in m for m in msgs)
+        assert not any("missing pass 2" in m for m in msgs)
+        assert any("missing pass 3" in m for m in msgs)
+
+    def test_clear_unavailable_log_unknown_key_is_noop(self):
+        from tools.tirith_security import _clear_unavailable_log
+
+        # Should not raise even though the key was never logged.
+        _clear_unavailable_log("never-seen-path")
+
+    def test_reset_unavailable_log_clears_all_keys(self, caplog):
+        from tools.tirith_security import (
+            _log_unavailable_once,
+            _reset_unavailable_log,
+        )
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            _log_unavailable_once("tirith", "miss A")
+            _log_unavailable_once("/a/b", "miss B")
+            caplog.clear()
+            _reset_unavailable_log()
+            _log_unavailable_once("tirith", "miss A again")
+            _log_unavailable_once("/a/b", "miss B again")
+
+        msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("miss A again" in m for m in msgs)
+        assert any("miss B again" in m for m in msgs)
+
+    def test_thread_safety_single_log_under_contention(self, caplog):
+        """Many concurrent threads racing on the same path emit exactly one warning."""
+        import threading
+        from tools.tirith_security import _log_unavailable_once
+
+        barrier = threading.Barrier(20)
+
+        def _hit() -> None:
+            barrier.wait()
+            _log_unavailable_once("tirith", "concurrent miss")
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            threads = [threading.Thread(target=_hit) for _ in range(20)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        msgs = [r.getMessage() for r in caplog.records if "concurrent miss" in r.getMessage()]
+        assert len(msgs) == 1, (
+            f"Expected exactly one warning under thread contention; got {len(msgs)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: spam suppression on repeated check_command_security calls (#23845)
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnFailureLogSpamSuppression:
+    """End-to-end regression tests for the original reproducer in #23845:
+    20 terminal commands on a host without `tirith` should emit ONE warning,
+    not 20.
+
+    The `_reset_resolved_path` autouse fixture in this module already pre-sets
+    `_resolved_path = "tirith"` so we skip auto-install and land directly in
+    the subprocess.run code path that raises OSError when the binary is
+    missing.  We additionally reset the unavailable-log cache so cases are
+    independent of test order.
+    """
+
+    def setup_method(self) -> None:
+        _tirith_mod._reset_unavailable_log()
+
+    def teardown_method(self) -> None:
+        _tirith_mod._reset_unavailable_log()
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_repeated_file_not_found_logs_once_fail_open(
+        self, mock_cfg, mock_run, caplog
+    ):
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": True,
+        }
+        mock_run.side_effect = FileNotFoundError(
+            "[WinError 2] The system cannot find the file specified."
+        )
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            # 20 terminal commands in a single session — the exact scenario
+            # described in the issue.
+            for i in range(20):
+                result = check_command_security(f"echo {i}")
+                assert result["action"] == "allow"
+                assert "unavailable" in result["summary"]
+
+        spawn_warns = [
+            r for r in caplog.records if "tirith spawn failed" in r.getMessage()
+        ]
+        assert len(spawn_warns) == 1, (
+            f"Expected one 'tirith spawn failed' WARNING across 20 calls; "
+            f"got {len(spawn_warns)} (#23845)"
+        )
+        # subprocess.run still attempted on every call — we are only
+        # deduping the WARNING, not skipping the safe fail-open path.
+        assert mock_run.call_count == 20
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_repeated_permission_error_logs_once_fail_open(
+        self, mock_cfg, mock_run, caplog
+    ):
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": True,
+        }
+        mock_run.side_effect = PermissionError("permission denied: tirith")
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            for _ in range(10):
+                check_command_security("echo hi")
+
+        warns = [r for r in caplog.records if "tirith spawn failed" in r.getMessage()]
+        assert len(warns) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_repeated_file_not_found_logs_once_fail_closed(
+        self, mock_cfg, mock_run, caplog
+    ):
+        # Same dedup behaviour even when the verdict is fail-closed; we should
+        # never spam operators no matter how the policy resolves.
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": False,
+        }
+        mock_run.side_effect = FileNotFoundError("missing")
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            for _ in range(5):
+                result = check_command_security("echo hi")
+                assert result["action"] == "block"
+
+        warns = [r for r in caplog.records if "tirith spawn failed" in r.getMessage()]
+        assert len(warns) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_success_after_failures_re_arms_warning(
+        self, mock_cfg, mock_run, caplog
+    ):
+        """If a successful scan happens between two failure bursts, the
+        next failure logs a fresh WARNING — operators should learn about
+        a regression even after an earlier suppression.
+        """
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": True,
+        }
+
+        ok_run = _mock_run(0, _json_stdout())
+
+        def _side_effect(*_a, **_kw):
+            # Cycle through the queue; raises OSError, then succeeds, then OSError.
+            return next(_side_effect.queue)
+
+        _side_effect.queue = iter(
+            [
+                FileNotFoundError("missing"),  # 1st: WARNING + dedup
+                FileNotFoundError("missing"),  # 2nd: silent
+                ok_run,                        # 3rd: succeeds, clears the cache
+                FileNotFoundError("missing"),  # 4th: WARNING again (re-armed)
+                FileNotFoundError("missing"),  # 5th: silent again
+            ]
+        )
+
+        def _side_effect_wrapper(*a, **kw):
+            val = next(_side_effect.queue)
+            if isinstance(val, BaseException):
+                raise val
+            return val
+
+        _side_effect.queue = iter(
+            [
+                FileNotFoundError("missing"),
+                FileNotFoundError("missing"),
+                ok_run,
+                FileNotFoundError("missing"),
+                FileNotFoundError("missing"),
+            ]
+        )
+        mock_run.side_effect = _side_effect_wrapper
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            for _ in range(5):
+                check_command_security("echo hi")
+
+        warns = [r for r in caplog.records if "tirith spawn failed" in r.getMessage()]
+        assert len(warns) == 2, (
+            "Expected exactly two WARNINGs (one before the success, one after) "
+            f"but got {len(warns)}"
+        )
+
+    @patch("tools.tirith_security._resolve_tirith_path")
+    @patch("tools.tirith_security._load_security_config")
+    def test_repeated_path_resolved_to_none_logs_once(
+        self, mock_cfg, mock_resolve, caplog
+    ):
+        """The 'tirith path resolved to None' WARNING should also dedup."""
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": True,
+        }
+        mock_resolve.return_value = None
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            for _ in range(15):
+                result = check_command_security("echo hi")
+                assert result["action"] == "allow"
+
+        none_warns = [
+            r for r in caplog.records if "resolved to None" in r.getMessage()
+        ]
+        assert len(none_warns) == 1, (
+            f"Expected one 'resolved to None' WARNING across 15 calls; "
+            f"got {len(none_warns)}"
+        )
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_distinct_paths_each_log_once(self, mock_cfg, mock_run, caplog):
+        """A configuration change pointing tirith_path at a different missing
+        binary should produce one fresh WARNING for the new key."""
+        configs = [
+            {"tirith_enabled": True, "tirith_path": "tirith",
+             "tirith_timeout": 5, "tirith_fail_open": True},
+            {"tirith_enabled": True, "tirith_path": "tirith",
+             "tirith_timeout": 5, "tirith_fail_open": True},
+        ]
+
+        # Same `cfg["tirith_path"]` on every call — but
+        # `_resolve_tirith_path` returns a different string each time so the
+        # cache key changes.  Use the resolver patch to control the key
+        # directly.
+        with patch(
+            "tools.tirith_security._resolve_tirith_path",
+            side_effect=lambda _p: "/opt/a/tirith",
+        ):
+            mock_cfg.return_value = configs[0]
+            mock_run.side_effect = FileNotFoundError("missing /opt/a/tirith")
+            with caplog.at_level("WARNING", logger="tools.tirith_security"):
+                for _ in range(3):
+                    check_command_security("echo a")
+                warns_a = [
+                    r for r in caplog.records
+                    if "tirith spawn failed" in r.getMessage()
+                ]
+                assert len(warns_a) == 1
+
+        with patch(
+            "tools.tirith_security._resolve_tirith_path",
+            side_effect=lambda _p: "/opt/b/tirith",
+        ):
+            mock_cfg.return_value = configs[1]
+            mock_run.side_effect = FileNotFoundError("missing /opt/b/tirith")
+            with caplog.at_level("WARNING", logger="tools.tirith_security"):
+                for _ in range(3):
+                    check_command_security("echo b")
+
+        all_warns = [
+            r for r in caplog.records if "tirith spawn failed" in r.getMessage()
+        ]
+        # Two distinct paths × one WARNING each = two WARNINGs total.
+        assert len(all_warns) == 2, (
+            f"Expected two WARNINGs (one per distinct path); got {len(all_warns)}"
+        )
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_timeout_warnings_are_not_deduped(self, mock_cfg, mock_run, caplog):
+        """Timeouts should still log every time — they're potentially
+        transient (slow CI, contention, etc.) and not the persistent
+        binary-missing pattern #23845 is about.
+        """
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": True,
+        }
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="tirith", timeout=5)
+
+        with caplog.at_level("WARNING", logger="tools.tirith_security"):
+            for _ in range(3):
+                check_command_security("slow")
+
+        timeouts = [r for r in caplog.records if "timed out" in r.getMessage()]
+        assert len(timeouts) == 3, (
+            "Timeouts should not be deduplicated; expected one per call"
+        )

@@ -101,6 +101,17 @@ _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_
 _install_lock = threading.Lock()
 _install_thread: threading.Thread | None = None
 
+# Per-path log dedup for the "tirith spawn failed" / "tirith path resolved
+# to None" warnings.  Without this, an operator running 20 terminal commands
+# in a session with `tirith` missing from PATH would see 20 identical
+# WARNING lines drowning out anything else — see #23845.  The set tracks
+# every distinct tirith path/key we've already logged about; entries are
+# cleared via :func:`_clear_unavailable_log` when subprocess.run succeeds
+# for that path again (so a later regression — e.g. binary uninstalled
+# mid-session — still surfaces).
+_unavailable_paths_logged: set[str] = set()
+_unavailable_log_lock = threading.Lock()
+
 # Disk-persistent failure marker — avoids retry across process restarts
 _MARKER_TTL = 86400  # 24 hours
 
@@ -605,6 +616,54 @@ def ensure_installed(*, log_failures: bool = True):
 
 
 # ---------------------------------------------------------------------------
+# One-shot logging for "tirith unavailable" warnings (#23845)
+# ---------------------------------------------------------------------------
+
+def _log_unavailable_once(path_key: str, message: str) -> None:
+    """Emit ``message`` at WARNING level the first time ``path_key`` is unavailable.
+
+    Subsequent calls with the same ``path_key`` are silent.  This prevents
+    the "tirith spawn failed" / "tirith path resolved to None" warnings
+    from repeating on every single terminal command when the binary is
+    missing — the dominant failure mode on Windows installs that don't
+    ship a Rust toolchain (#23845).
+
+    ``path_key`` is intentionally caller-supplied (rather than e.g. the
+    exception text) so a path change — operator points ``tirith_path`` at
+    a new location, or the auto-installer falls back from PATH to
+    ``$HERMES_HOME/bin/tirith`` — still surfaces one fresh warning.
+
+    Thread-safe; called from the request-handler thread for every terminal
+    command, so we acquire :data:`_unavailable_log_lock` before mutating
+    :data:`_unavailable_paths_logged`.
+    """
+    with _unavailable_log_lock:
+        if path_key in _unavailable_paths_logged:
+            return
+        _unavailable_paths_logged.add(path_key)
+    logger.warning(
+        "%s (further occurrences for this path will be suppressed)", message
+    )
+
+
+def _clear_unavailable_log(path_key: str) -> None:
+    """Drop ``path_key`` from the dedup cache.
+
+    Called when subprocess.run succeeds for ``path_key`` so a future
+    regression (binary uninstalled mid-session, etc.) still emits one
+    fresh warning instead of being silenced by an earlier suppression.
+    """
+    with _unavailable_log_lock:
+        _unavailable_paths_logged.discard(path_key)
+
+
+def _reset_unavailable_log() -> None:
+    """Wipe the dedup cache.  Test/maintenance helper — not on the hot path."""
+    with _unavailable_log_lock:
+        _unavailable_paths_logged.clear()
+
+
+# ---------------------------------------------------------------------------
 # Main API
 # ---------------------------------------------------------------------------
 
@@ -632,7 +691,11 @@ def check_command_security(command: str) -> dict:
     fail_open = cfg["tirith_fail_open"]
 
     if tirith_path is None:
-        logger.warning("tirith path resolved to None; scanning disabled")
+        _log_unavailable_once(
+            f"<none>:{cfg['tirith_path']}",
+            f"tirith path resolved to None for configured_path="
+            f"{cfg['tirith_path']!r}; scanning disabled",
+        )
         if fail_open:
             return {"action": "allow", "findings": [], "summary": "tirith path unavailable"}
         return {"action": "block", "findings": [], "summary": "tirith path unavailable (fail-closed)"}
@@ -646,8 +709,13 @@ def check_command_security(command: str) -> dict:
             timeout=timeout,
         )
     except OSError as exc:
-        # Covers FileNotFoundError, PermissionError, exec format error
-        logger.warning("tirith spawn failed: %s", exc)
+        # Covers FileNotFoundError, PermissionError, exec format error.
+        # `_log_unavailable_once` keeps this from spamming once per command
+        # when the binary is persistently missing (#23845).
+        _log_unavailable_once(
+            tirith_path,
+            f"tirith spawn failed for {tirith_path!r}: {exc}",
+        )
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
@@ -656,6 +724,12 @@ def check_command_security(command: str) -> dict:
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
+
+    # subprocess.run succeeded — binary is healthy for this path right now.
+    # Clear any prior unavailable-log marker so a later regression for the
+    # same path (e.g. binary uninstalled mid-session) emits one fresh
+    # warning instead of being silenced by an earlier suppression.
+    _clear_unavailable_log(tirith_path)
 
     # Map exit code to action
     exit_code = result.returncode
