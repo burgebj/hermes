@@ -347,8 +347,16 @@ export default function App() {
   );
 
   const builtinNav = useMemo(
-    () =>
-      embeddedChat ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST] : BUILTIN_NAV_REST,
+    () => [
+      embeddedChat
+        ? CHAT_NAV_ITEM
+        : {
+            ...CHAT_NAV_ITEM,
+            disabled: true,
+            disabledHint: "Run `hermes dashboard --tui` to enable",
+          },
+      ...BUILTIN_NAV_REST,
+    ],
     [embeddedChat],
   );
 
@@ -636,11 +644,33 @@ export default function App() {
 }
 
 function SidebarNavLink({ closeMobile, item, t }: SidebarNavLinkProps) {
-  const { path, label, labelKey, icon: Icon } = item;
+  const { path, label, labelKey, icon: Icon, disabled, disabledHint } = item;
 
   const navLabel = labelKey
     ? ((t.app.nav as Record<string, string>)[labelKey] ?? label)
     : label;
+
+  if (disabled) {
+    return (
+      <li>
+        <span
+          title={disabledHint}
+          aria-label={disabledHint ? `${navLabel} — ${disabledHint}` : navLabel}
+          aria-disabled="true"
+          className={cn(
+            "relative flex items-center gap-3",
+            "px-5 py-2.5",
+            "font-mondwest text-[0.8rem] tracking-[0.12em]",
+            "whitespace-nowrap opacity-30 cursor-not-allowed select-none",
+          )}
+          style={{ clipPath: "var(--component-tab-clip-path)" }}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">{navLabel}</span>
+        </span>
+      </li>
+    );
+  }
 
   return (
     <li>
@@ -802,6 +832,8 @@ interface NavItem {
   label: string;
   labelKey?: string;
   path: string;
+  disabled?: boolean;
+  disabledHint?: string;
 }
 
 interface SidebarNavLinkProps {
