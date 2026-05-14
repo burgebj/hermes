@@ -634,6 +634,10 @@ class _CodexCompletionsAdapter:
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
             else:
+                if role == "tool":
+                    continue
+                if role not in ("user", "assistant", "developer"):
+                    role = "user"
                 input_msgs.append({
                     "role": role,
                     "content": _convert_content_for_responses(content),

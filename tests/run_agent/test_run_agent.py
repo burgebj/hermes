@@ -3521,6 +3521,88 @@ class TestRetryExhaustion:
 
 
 # ---------------------------------------------------------------------------
+# Flush sentinel leak
+# ---------------------------------------------------------------------------
+
+
+class TestFlushSentinelNotLeaked:
+    """_flush_sentinel must be stripped before sending messages to the API."""
+
+    def test_flush_sentinel_stripped_from_api_messages(self, agent_with_memory_tool):
+        """Verify _flush_sentinel is not sent to the API provider."""
+        agent = agent_with_memory_tool
+        agent._memory_store = MagicMock()
+        agent._memory_flush_min_turns = 1
+        agent._user_turn_count = 10
+        agent._cached_system_prompt = "system"
+
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "remember this"},
+        ]
+
+        # Mock the API to return a simple response (no tool calls)
+        mock_msg = SimpleNamespace(content="OK", tool_calls=None)
+        mock_choice = SimpleNamespace(message=mock_msg)
+        mock_response = SimpleNamespace(choices=[mock_choice])
+        agent.client.chat.completions.create.return_value = mock_response
+
+        # Bypass auxiliary client so flush uses agent.client directly
+        with patch("agent.auxiliary_client.call_llm", side_effect=RuntimeError("no provider")):
+            agent.flush_memories(messages, min_turns=0)
+
+        # Check what was actually sent to the API
+        call_args = agent.client.chat.completions.create.call_args
+        assert call_args is not None, "flush_memories never called the API"
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        for msg in api_messages:
+            assert "_flush_sentinel" not in msg, (
+                f"_flush_sentinel leaked to API in message: {msg}"
+            )
+
+    def test_flush_auxiliary_messages_skip_tool_role_history(self, agent_with_memory_tool):
+        """Flush calls should not forward tool-role transcript messages to aux providers."""
+        agent = agent_with_memory_tool
+        agent._memory_store = MagicMock()
+        agent._memory_flush_min_turns = 1
+        agent._user_turn_count = 10
+        agent._cached_system_prompt = "system"
+
+        messages = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": "Let me check",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "memory", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": '{"ok": true}',
+            },
+            {"role": "user", "content": "remember this"},
+        ]
+
+        mock_msg = SimpleNamespace(content="OK", tool_calls=None)
+        mock_choice = SimpleNamespace(message=mock_msg)
+        mock_response = SimpleNamespace(choices=[mock_choice])
+
+        with patch("agent.auxiliary_client.call_llm", return_value=mock_response) as mock_call_llm:
+            agent.flush_memories(messages, min_turns=0)
+
+        assert mock_call_llm.called, "flush_memories never called the auxiliary client"
+        api_messages = mock_call_llm.call_args.kwargs["messages"]
+        assert all(msg.get("role") != "tool" for msg in api_messages)
+
+
+# ---------------------------------------------------------------------------
 # Conversation history mutation
 # ---------------------------------------------------------------------------
 
