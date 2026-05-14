@@ -1873,7 +1873,7 @@ def _run_browser_command(
         # - Ubuntu 23.10+ / AppArmor systems: unprivileged user namespaces
         #   are restricted, causing Chromium to exit with "No usable sandbox"
         #   even for non-root users running under systemd or containers.
-        if "AGENT_BROWSER_CHROME_FLAGS" not in browser_env:
+        if "AGENT_BROWSER_ARGS" not in browser_env and "AGENT_BROWSER_CHROME_FLAGS" not in browser_env:
             _needs_sandbox_bypass = False
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 _needs_sandbox_bypass = True
@@ -1892,9 +1892,24 @@ def _run_browser_command(
                 except OSError:
                     pass
             if _needs_sandbox_bypass:
-                browser_env["AGENT_BROWSER_CHROME_FLAGS"] = (
+                # agent-browser 0.26+ uses AGENT_BROWSER_ARGS
+                # (older versions used AGENT_BROWSER_CHROME_FLAGS)
+                browser_env["AGENT_BROWSER_ARGS"] = (
                     "--no-sandbox --disable-dev-shm-usage"
                 )
+
+        # Inject --args --no-sandbox when needed (issue #15765)
+        # Must be injected BEFORE the command, as agent-browser expects global options first
+        args_inject = []
+        if "AGENT_BROWSER_ARGS" in browser_env:
+            args_inject = ["--args", browser_env["AGENT_BROWSER_ARGS"].replace(" ", ",")]
+            # Remove from env so it doesn't conflict
+            del browser_env["AGENT_BROWSER_ARGS"]
+
+        cmd_parts = cmd_prefix + args_inject + backend_args + [
+            "--json",
+            command
+        ] + args
 
         # Use temp files for stdout/stderr instead of pipes.
         # agent-browser starts a background daemon that inherits file
