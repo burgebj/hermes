@@ -110,6 +110,7 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
             [schtasks, *args],
             capture_output=True,
             text=True,
+            encoding="mbcs",  # schtasks outputs in system ANSI code page (e.g. GBK on Chinese Windows)
             timeout=_SCHTASKS_TIMEOUT_S,
             # CREATE_NO_WINDOW avoids a flashing console window when the CLI
             # is itself hosted in a TUI. See tools/browser_tool.py for the
@@ -683,9 +684,17 @@ def stop() -> None:
 
 
 def restart() -> None:
-    """Stop the gateway then start it again."""
+    """Restart the gateway via --replace (spawns a new instance that gracefully
+    replaces the running one, then exits).
+
+    Unlike the cross-platform stop()+start() pattern, this path relies on
+    the new process's built-in ``--replace`` logic in ``start_gateway()``:
+    it reads the old PID from the lock file (which works on Windows where
+    process-table scans via PowerShell often fail), sends SIGTERM, waits for
+    the old process to exit, releases any stale scoped locks, then acquires
+    the runtime lock and starts.  If no gateway is running --replace is a
+    no-op and the new gateway starts fresh.
+    """
     _assert_windows()
-    stop()
-    # Give Windows a moment to release the listening port.
-    time.sleep(1.0)
-    start()
+    pid = _spawn_detached()
+    _report_gateway_start(f"direct spawn (PID {pid})")
