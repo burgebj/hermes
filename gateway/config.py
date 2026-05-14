@@ -734,7 +734,7 @@ def load_gateway_config() -> GatewayConfig:
             if "thread_sessions_per_user" in yaml_cfg:
                 gw_data["thread_sessions_per_user"] = yaml_cfg["thread_sessions_per_user"]
 
-            streaming_cfg = yaml_cfg.get("streaming")
+            streaming_cfg = yaml_cfg.get("streaming") or yaml_cfg.get("gateway", {}).get("streaming")
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
 
