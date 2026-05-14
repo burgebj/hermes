@@ -512,3 +512,81 @@ class TestRunBrowserCommandPathConstruction:
         result_path = captured_env.get("PATH", "")
         assert "/data/data/com.termux/files/usr/bin" in result_path
         assert "/data/data/com.termux/files/usr/sbin" in result_path
+
+    def test_injects_agent_browser_args_for_root_sandbox_bypass(self, tmp_path):
+        """Root launches should pass --no-sandbox through AGENT_BROWSER_ARGS."""
+        captured_env = {}
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.wait.return_value = 0
+
+        def capture_popen(cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            return mock_proc
+
+        fake_session = {
+            "session_name": "test-session",
+            "session_id": "test-id",
+            "cdp_url": None,
+        }
+        fake_json = json.dumps({"success": True})
+
+        with patch("tools.browser_tool._find_agent_browser", return_value="/usr/local/bin/agent-browser"), \
+             patch("tools.browser_tool._chromium_installed", return_value=True), \
+             patch("tools.browser_tool._get_session_info", return_value=fake_session), \
+             patch("tools.browser_tool._socket_safe_tmpdir", return_value=str(tmp_path)), \
+             patch("tools.browser_tool._discover_homebrew_node_dirs", return_value=[]), \
+             patch("subprocess.Popen", side_effect=capture_popen), \
+             patch("os.open", return_value=99), \
+             patch("os.close"), \
+             patch("os.geteuid", return_value=0), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test"}, clear=True):
+            with patch("builtins.open", mock_open(read_data=fake_json)):
+                _run_browser_command("test-task", "navigate", ["https://example.com"])
+
+        assert captured_env["AGENT_BROWSER_ARGS"] == "--no-sandbox --disable-dev-shm-usage"
+        assert "AGENT_BROWSER_CHROME_FLAGS" not in captured_env
+
+    def test_injects_agent_browser_args_for_apparmor_restrictions(self, tmp_path):
+        """AppArmor userns restrictions should also flow through AGENT_BROWSER_ARGS."""
+        captured_env = {}
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.wait.return_value = 0
+
+        def capture_popen(cmd, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            return mock_proc
+
+        fake_session = {
+            "session_name": "test-session",
+            "session_id": "test-id",
+            "cdp_url": None,
+        }
+        fake_json = json.dumps({"success": True})
+        userns_path = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+
+        def selective_open(path, *args, **kwargs):
+            if path == userns_path:
+                return mock_open(read_data="1")()
+            return mock_open(read_data=fake_json)()
+
+        with patch("tools.browser_tool._find_agent_browser", return_value="/usr/local/bin/agent-browser"), \
+             patch("tools.browser_tool._chromium_installed", return_value=True), \
+             patch("tools.browser_tool._get_session_info", return_value=fake_session), \
+             patch("tools.browser_tool._socket_safe_tmpdir", return_value=str(tmp_path)), \
+             patch("tools.browser_tool._discover_homebrew_node_dirs", return_value=[]), \
+             patch("subprocess.Popen", side_effect=capture_popen), \
+             patch("os.open", return_value=99), \
+             patch("os.close"), \
+             patch("os.geteuid", return_value=1000), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test"}, clear=True), \
+             patch("builtins.open", side_effect=selective_open):
+            _run_browser_command("test-task", "navigate", ["https://example.com"])
+
+        assert captured_env["AGENT_BROWSER_ARGS"] == "--no-sandbox --disable-dev-shm-usage"
+        assert "AGENT_BROWSER_CHROME_FLAGS" not in captured_env

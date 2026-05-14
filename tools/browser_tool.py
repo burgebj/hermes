@@ -1873,7 +1873,7 @@ def _run_browser_command(
         # - Ubuntu 23.10+ / AppArmor systems: unprivileged user namespaces
         #   are restricted, causing Chromium to exit with "No usable sandbox"
         #   even for non-root users running under systemd or containers.
-        if "AGENT_BROWSER_CHROME_FLAGS" not in browser_env:
+        if "AGENT_BROWSER_ARGS" not in browser_env:
             _needs_sandbox_bypass = False
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 _needs_sandbox_bypass = True
@@ -1892,7 +1892,7 @@ def _run_browser_command(
                 except OSError:
                     pass
             if _needs_sandbox_bypass:
-                browser_env["AGENT_BROWSER_CHROME_FLAGS"] = (
+                browser_env["AGENT_BROWSER_ARGS"] = (
                     "--no-sandbox --disable-dev-shm-usage"
                 )
 
