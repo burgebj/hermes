@@ -12852,6 +12852,43 @@ class AIAgent:
                             else:
                                 error_details.append("response.choices is empty")
 
+                        # Guard: valid choice list but the first choice has no
+                        # usable payload (empty content, no reasoning, no tool
+                        # calls, finish_reason is stop or absent).  Some providers
+                        # (notably Ollama-hosted GLM / reasoning models) return
+                        # these "silent-empty" responses sporadically.  Without
+                        # this guard they slip through as blank replies.
+                        if (
+                            not response_invalid
+                            and response is not None
+                            and hasattr(response, "choices")
+                            and response.choices
+                        ):
+                            _choice = response.choices[0]
+                            _msg = getattr(_choice, "message", None)
+                            _content = getattr(_msg, "content", None) if _msg else None
+                            _reasoning = (
+                                getattr(_msg, "reasoning_content", None)
+                                or getattr(_msg, "reasoning", None)
+                            ) if _msg else None
+                            _tool_calls = getattr(_msg, "tool_calls", None) if _msg else None
+                            _fr = getattr(_choice, "finish_reason", None)
+                            _content_empty = (
+                                _content is None
+                                or (isinstance(_content, str) and not _content.strip())
+                            )
+                            if (
+                                _content_empty
+                                and not _reasoning
+                                and not _tool_calls
+                                and _fr in (None, "stop")
+                            ):
+                                response_invalid = True
+                                error_details.append(
+                                    "response choice has no usable content, "
+                                    "reasoning, or tool calls (silent-empty)"
+                                )
+
                     if response_invalid:
                         # Stop spinner before printing error messages
                         if thinking_spinner:
