@@ -216,6 +216,52 @@ describe('Md wrapping', () => {
 
     expect(lines.some(line => line.startsWith(' hi  ok'))).toBe(true)
   })
+
+  it('renders markdown tables as fixed-width wrapped columns', () => {
+    const text = [
+      '| Date | Paper | Authors |',
+      '|---|---|---|',
+      '| **2026-05-08** | **LLMs Improving LLMs: Agentic Discovery for Test-Time Scaling** <br><https://arxiv.org/abs/2605.08083v1> | Tong Zheng, Haolin Liu, Chengsong Huang, Huiwen Bao, Sheng Zhang, Rui Liu, et al. |',
+      '| **2026-05-08** | **AgentEscapeBench: Evaluating Out-of-Domain Tool-Grounded Reasoning in LLM Agents** | Zhengkang Guo, Yiyang Li, Lin Qiu, Xiaohua Wang, Jingwen Xv, Dongyu Ru, et al. |'
+    ].join('\n')
+    const lines = renderPlain(
+      React.createElement(Box, { width: 80 }, React.createElement(Md, { t: DEFAULT_THEME, text, width: 80 }))
+    )
+    const output = lines.join('\n')
+
+    expect(output).toContain('│ Date       │ Paper')
+    expect(output).toContain('│ Authors')
+    expect(output).toContain('│ 2026-05-08 │ LLMs Improving LLMs')
+    expect(output).toContain('│ Tong Zheng')
+    expect(output).toContain('│            │ Discovery for Test-Time')
+    expect(output).toContain('│            │ Scaling')
+    expect(output).toContain('│            │ https://arxiv.org/abs/2605.080')
+    expect(output).toContain('│            │ 83v1')
+    expect(output).toContain('├────────────┼')
+    expect(output).toContain('└────────────┴')
+    expect(lines.filter(line => line.includes('─'))).toHaveLength(4)
+    expect(output).not.toContain('AgentsZhengkang')
+    expect(output).not.toContain('2026-0LLMs')
+    expect(output).not.toContain('<br>')
+  })
+
+  it('keeps bordered tables inside the visible body when width is slightly optimistic', () => {
+    const text = [
+      '| Date | Paper | Authors |',
+      '|---|---|---|',
+      '| 2026-05-08 | Learning CLI Agents with Structured Action Credit under Selective Observation https://arxiv.org/abs/2605.08013v1 | Haoyang Su, Ying Wen |',
+      '| 2026-05-08 | GazeVLM: Active Vision via Internal Attention Control for Multimodal Reasoning https://arxiv.org/abs/2605.07817v1 | Brown Ebouky, Gabriele Carrino, Niccolo Avogaro, Christoph Studer, Andrea Bartezzaghi, Mattia Rigotti |'
+    ].join('\n')
+    const lines = renderPlain(
+      React.createElement(Box, { width: 76 }, React.createElement(Md, { t: DEFAULT_THEME, text, width: 80 }))
+    )
+    const output = lines.join('\n')
+
+    expect(output).not.toContain('…')
+    expect(output).not.toContain('...')
+    expect(output).toContain('│ 2026-05-08 │ Learning CLI Agents')
+    expect(output).toContain('└────────────┴')
+  })
 })
 
 describe('Md link labels', () => {

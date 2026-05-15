@@ -104,6 +104,7 @@ export const MessageLine = memo(function MessageLine({
 
   const { body, glyph, prefix } = ROLE[msg.role](t)
   const gutterWidth = transcriptGutterWidth(msg.role, t.brand.prompt)
+  const bodyWidth = transcriptBodyWidth(cols, msg.role, t.brand.prompt)
 
   const showDetails =
     (toolsMode !== 'hidden' && Boolean(msg.tools?.length)) || (thinkingMode !== 'hidden' && Boolean(thinking))
@@ -143,9 +144,14 @@ export const MessageLine = memo(function MessageLine({
         // Incremental markdown: split at the last stable block boundary so
         // only the in-flight tail re-tokenizes per delta. See
         // streamingMarkdown.tsx for the cost model.
-        <StreamingMd compact={compact} t={t} text={boundedLiveRenderText(msg.text)} />
+        <StreamingMd compact={compact} t={t} text={boundedLiveRenderText(msg.text)} width={bodyWidth} />
       ) : (
-        <Md compact={compact} t={t} text={limitHistoryRender ? boundedHistoryRenderText(msg.text) : msg.text} />
+        <Md
+          compact={compact}
+          t={t}
+          text={limitHistoryRender ? boundedHistoryRenderText(msg.text) : msg.text}
+          width={bodyWidth}
+        />
       )
     }
 
@@ -199,7 +205,7 @@ export const MessageLine = memo(function MessageLine({
           </Text>
         </NoSelect>
 
-        <Box width={transcriptBodyWidth(cols, msg.role, t.brand.prompt)}>{content}</Box>
+        <Box width={bodyWidth}>{content}</Box>
       </Box>
     </Box>
   )

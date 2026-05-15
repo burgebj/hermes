@@ -1,5 +1,5 @@
 import { Box, Link, stringWidth, Text } from '@hermes/ink'
-import { Fragment, memo, type ReactNode, useMemo } from 'react'
+import { memo, type ReactNode, useMemo } from 'react'
 
 import { ensureEmojiPresentation } from '../lib/emoji.js'
 import { normalizeExternalUrl, urlSlugTitleLabel, useLinkTitle } from '../lib/externalLink.js'
@@ -200,45 +200,172 @@ export const stripInlineMarkup = (v: string) =>
     .replace(/(?<!\$)\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\$)/g, '$1')
     .replace(/\\\(([^\n]+?)\\\)/g, '$1')
 
-const renderTable = (k: number, rows: string[][], t: Theme) => {
-  // Column widths in *display cells*, not UTF-16 code units.  CJK
-  // glyphs and most emoji render as two cells but `String#length`
-  // counts them as one, which collapses Chinese / Japanese / Korean
-  // tables into drift across rows.  `stringWidth` (Bun.stringWidth
-  // fast path + an East-Asian-width-aware fallback, memoised in
-  // @hermes/ink) returns the actual cell count.
-  const cellWidth = (raw: string) => stringWidth(stripInlineMarkup(raw))
+const tableCellText = (cell: string) =>
+  cell
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 
-  const widths = rows[0]!.map((_, ci) => Math.max(...rows.map(r => cellWidth(r[ci] ?? ''))))
+const tableCellWidth = (cell: string) => stringWidth(stripInlineMarkup(tableCellText(cell)).replace(/\s+/g, ' ').trim())
 
-  // Thin divider under the header.  Without it tables look like prose
-  // with extra spacing because the header is just accent-coloured text
-  // (#15534).  We avoid full borders on purpose — column widths come
-  // from `stringWidth(...)`, so the dividers and the row content stay
-  // in sync on CJK / emoji tables; tab-style column gaps still read
-  // cleanly without the boxed look.
-  const sep = widths.map(w => '─'.repeat(Math.max(1, w))).join('  ')
+const TABLE_SAFE_GUTTER = 4
+const tableBorderWidth = (columnCount: number) => columnCount * 3 + 1
+
+const tableWidths = (rows: string[][], availableWidth: number) => {
+  const preferred = rows[0]!.map((_, ci) => Math.max(...rows.map(r => tableCellWidth(r[ci] ?? ''))))
+
+  const contentWidth = Math.max(
+    preferred.length * 8,
+    availableWidth - TABLE_SAFE_GUTTER - 2 - tableBorderWidth(preferred.length)
+  )
+
+  const preferredTotal = preferred.reduce((sum, width) => sum + width, 0)
+
+  if (preferredTotal <= contentWidth) {
+    return preferred
+  }
+
+  const minimum = preferred.map((width, index) => Math.min(width, index === 0 ? 10 : 18))
+  let remaining = contentWidth - minimum.reduce((sum, width) => sum + width, 0)
+
+  if (remaining <= 0) {
+    const width = Math.max(6, Math.floor(contentWidth / preferred.length))
+
+    return preferred.map(() => width)
+  }
+
+  const extra = preferred.map((width, index) => Math.max(0, width - minimum[index]!))
+  let extraTotal = extra.reduce((sum, width) => sum + width, 0)
+  const widths = [...minimum]
+
+  while (remaining > 0 && extraTotal > 0) {
+    let used = 0
+
+    for (let i = 0; i < widths.length && remaining > 0; i++) {
+      if (extra[i]! <= 0) {
+        continue
+      }
+
+      const share = Math.max(1, Math.floor((remaining * extra[i]!) / extraTotal))
+      const add = Math.min(share, extra[i]!, remaining)
+      widths[i] += add
+      extra[i] -= add
+      remaining -= add
+      used += add
+    }
+
+    if (!used) {
+      break
+    }
+
+    extraTotal = extra.reduce((sum, width) => sum + width, 0)
+  }
+
+  return widths
+}
+
+const splitLongWord = (word: string, width: number) => {
+  const parts: string[] = []
+  let part = ''
+
+  for (const char of [...word]) {
+    if (part && stringWidth(part) + stringWidth(char) > width) {
+      parts.push(part)
+      part = char
+    } else {
+      part += char
+    }
+  }
+
+  if (part) {
+    parts.push(part)
+  }
+
+  return parts
+}
+
+const padDisplayEnd = (value: string, width: number) => `${value}${' '.repeat(Math.max(0, width - stringWidth(value)))}`
+
+const wrapTableCell = (cell: string, width: number) => {
+  const words = stripInlineMarkup(cell).split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let line = ''
+
+  for (const word of words) {
+    const parts = stringWidth(word) > width ? splitLongWord(word, width) : [word]
+
+    for (const part of parts) {
+      if (!line) {
+        line = part
+      } else if (stringWidth(line) + 1 + stringWidth(part) <= width) {
+        line += ` ${part}`
+      } else {
+        lines.push(line)
+        line = part
+      }
+    }
+  }
+
+  if (line) {
+    lines.push(line)
+  }
+
+  return lines.length ? lines : ['']
+}
+
+const tableLine = (row: string[][], widths: number[], line: number) => {
+  const parts: ReactNode[] = [
+    <Text color="white" key="start">
+      │{' '}
+    </Text>
+  ]
+
+  widths.forEach((width, ci) => {
+    parts.push(<Text key={`cell-${ci}`}>{padDisplayEnd(row[ci]?.[line] ?? '', width)}</Text>)
+    parts.push(
+      <Text color="white" key={`border-${ci}`}>
+        {' '}
+        │{ci < widths.length - 1 ? ' ' : ''}
+      </Text>
+    )
+  })
+
+  return parts
+}
+
+const tableBorder = (widths: number[], left: string, join: string, right: string) =>
+  `${left}${widths.map(w => '─'.repeat(w + 2)).join(join)}${right}`
+
+const renderTable = (k: number, rows: string[][], t: Theme, width?: number) => {
+  const displayRows = rows.map(row => row.map(tableCellText))
+  const widths = tableWidths(displayRows, width ?? 80)
+  const topBorder = tableBorder(widths, '┌', '┬', '┐')
+  const headerBorder = tableBorder(widths, '├', '┼', '┤')
+  const rowBorder = tableBorder(widths, '├', '┼', '┤')
+  const bottomBorder = tableBorder(widths, '└', '┴', '┘')
+  const wrappedRows = displayRows.map(row => row.map((cell, ci) => wrapTableCell(cell, widths[ci]!)))
 
   return (
     <Box flexDirection="column" key={k} paddingLeft={2}>
-      {rows.map((row, ri) => (
-        <Fragment key={ri}>
-          <Box>
-            {widths.map((w, ci) => (
-              <Text bold={ri === 0} color={ri === 0 ? t.color.accent : undefined} key={ci}>
-                <MdInline t={t} text={row[ci] ?? ''} />
-                {' '.repeat(Math.max(0, w - cellWidth(row[ci] ?? '')))}
-                {ci < widths.length - 1 ? '  ' : ''}
+      <Text color="white" wrap="truncate-end">
+        {topBorder}
+      </Text>
+      {wrappedRows.map((row, ri) => {
+        const rowHeight = Math.max(...row.map(cell => cell.length))
+
+        return (
+          <Box flexDirection="column" key={ri}>
+            {Array.from({ length: rowHeight }, (_, line) => (
+              <Text bold={ri === 0} key={line} wrap="truncate-end">
+                {tableLine(row, widths, line)}
               </Text>
             ))}
-          </Box>
-          {ri === 0 && rows.length > 1 ? (
-            <Text color={t.color.muted} dimColor>
-              {sep}
+            <Text color="white" wrap="truncate-end">
+              {ri === wrappedRows.length - 1 ? bottomBorder : ri === 0 ? headerBorder : rowBorder}
             </Text>
-          ) : null}
-        </Fragment>
-      ))}
+          </Box>
+        )
+      })}
     </Box>
   )
 }
@@ -395,10 +522,10 @@ const cacheSet = (b: Map<string, ReactNode[]>, key: string, v: ReactNode[]) => {
   }
 }
 
-function MdImpl({ compact, t, text }: MdProps) {
+function MdImpl({ compact, t, text, width }: MdProps) {
   const nodes = useMemo(() => {
     const bucket = cacheBucket(t)
-    const cacheKey = `${compact ? '1' : '0'}|${text}`
+    const cacheKey = `${compact ? '1' : '0'}|${width ?? ''}|${text}`
     const cached = cacheGet(bucket, cacheKey)
 
     if (cached) {
@@ -490,7 +617,7 @@ function MdImpl({ compact, t, text }: MdProps) {
 
         if (['md', 'markdown'].includes(lang)) {
           start('paragraph')
-          nodes.push(<Md compact={compact} key={key} t={t} text={block.join('\n')} />)
+          nodes.push(<Md compact={compact} key={key} t={t} text={block.join('\n')} width={width} />)
 
           continue
         }
@@ -785,7 +912,7 @@ function MdImpl({ compact, t, text }: MdProps) {
           rows.push(splitRow(lines[i]!))
         }
 
-        nodes.push(renderTable(key, rows, t))
+        nodes.push(renderTable(key, rows, t, width))
 
         continue
       }
@@ -838,7 +965,7 @@ function MdImpl({ compact, t, text }: MdProps) {
         }
 
         if (rows.length) {
-          nodes.push(renderTable(key, rows, t))
+          nodes.push(renderTable(key, rows, t, width))
         }
 
         continue
@@ -852,7 +979,7 @@ function MdImpl({ compact, t, text }: MdProps) {
     cacheSet(bucket, cacheKey, nodes)
 
     return nodes
-  }, [compact, t, text])
+  }, [compact, t, text, width])
 
   return <Box flexDirection="column">{nodes}</Box>
 }
@@ -865,4 +992,5 @@ interface MdProps {
   compact?: boolean
   t: Theme
   text: string
+  width?: number
 }
