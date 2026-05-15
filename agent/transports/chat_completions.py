@@ -187,6 +187,7 @@ class ChatCompletionsTransport(ProviderTransport):
             is_github_models: bool
             is_nvidia_nim: bool
             is_kimi: bool
+            is_deepseek: bool
             is_tokenhub: bool
             is_lmstudio: bool
             is_custom_provider: bool
@@ -346,6 +347,17 @@ class ChatCompletionsTransport(ProviderTransport):
                     _kimi_thinking_enabled = False
             extra_body["thinking"] = {
                 "type": "enabled" if _kimi_thinking_enabled else "disabled",
+            }
+
+        # DeepSeek extra_body.thinking (same protocol as Kimi)
+        is_deepseek = params.get("is_deepseek", False)
+        if is_deepseek:
+            _ds_thinking_enabled = True
+            if reasoning_config and isinstance(reasoning_config, dict):
+                if reasoning_config.get("enabled") is False:
+                    _ds_thinking_enabled = False
+            extra_body["thinking"] = {
+                "type": "enabled" if _ds_thinking_enabled else "disabled",
             }
 
         # Reasoning. LM Studio is handled above via top-level reasoning_effort,

@@ -257,3 +257,31 @@ class TestCustomOllamaParity:
             reasoning_config={"enabled": False, "effort": "none"},
         )
         assert kw["extra_body"]["think"] is False
+
+
+class TestDeepSeekParity:
+    """DeepSeek native API: thinking via extra_body.thinking (transport fallback)."""
+    # Note: is_deepseek=True triggers the transport-layer fallback;
+    # the DeepSeekProfile also handles thinking via build_api_kwargs_extras.
+
+    def test_thinking_enabled(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": True, "effort": "medium"},
+            is_deepseek=True,
+        )
+        assert kw["extra_body"]["thinking"] == {"type": "enabled"}
+
+    def test_thinking_disabled(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": False},
+            is_deepseek=True,
+        )
+        assert kw["extra_body"]["thinking"] == {"type": "disabled"}

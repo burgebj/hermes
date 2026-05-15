@@ -292,3 +292,25 @@ class TestBaseProfile:
         eb, tl = p.build_api_kwargs_extras()
         assert eb == {}
         assert tl == {}
+
+
+class TestDeepSeekProfile:
+    def test_thinking_enabled(self):
+        p = get_provider_profile("deepseek")
+        eb, tl = p.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+        assert eb["thinking"] == {"type": "enabled"}
+
+    def test_thinking_disabled(self):
+        p = get_provider_profile("deepseek")
+        eb, tl = p.build_api_kwargs_extras(
+            reasoning_config={"enabled": False},
+        )
+        assert eb["thinking"] == {"type": "disabled"}
+
+    def test_no_config_defaults_enabled(self):
+        """When reasoning_config is None, thinking defaults to enabled."""
+        p = get_provider_profile("deepseek")
+        eb, tl = p.build_api_kwargs_extras(reasoning_config=None)
+        assert eb["thinking"] == {"type": "enabled"}
