@@ -23,6 +23,26 @@ import { getUiState } from './uiStore.js'
 
 const isCtrl = (key: { ctrl: boolean }, ch: string, target: string) => key.ctrl && ch.toLowerCase() === target
 
+/**
+ * When the composer input is empty and the user presses Backspace, restore the
+ * last buffered continuation line (`\` + Enter aggregator in useSubmission)
+ * back into the input so it can be edited or deleted. Returns null when no
+ * action is needed.
+ */
+export function popInputBufOnEmptyBackspace(
+  input: string,
+  inputBuf: readonly string[]
+): { input: string; inputBuf: string[] } | null {
+  if (input !== '' || inputBuf.length === 0) {
+    return null
+  }
+
+  return {
+    input: inputBuf[inputBuf.length - 1] ?? '',
+    inputBuf: inputBuf.slice(0, -1)
+  }
+}
+
 export function applyVoiceRecordResponse(
   response: null | VoiceRecordResponse,
   starting: boolean,
@@ -372,6 +392,17 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (key.escape && terminal.hasSelection) {
       return clearSelection()
+    }
+
+    if (key.backspace) {
+      const popped = popInputBufOnEmptyBackspace(cState.input, cState.inputBuf)
+
+      if (popped) {
+        cActions.setInputBuf(popped.inputBuf)
+        cActions.setInput(popped.input)
+
+        return
+      }
     }
 
     if (key.upArrow && !cState.inputBuf.length) {
