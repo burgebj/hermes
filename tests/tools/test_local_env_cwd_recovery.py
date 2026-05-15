@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 from tools.environments.local import (
     LocalEnvironment,
+    _native_windows_cwd,
     _resolve_safe_cwd,
 )
 
@@ -50,6 +51,34 @@ class TestResolveSafeCwd:
         sep = os.path.sep
         monkeypatch.setattr(os.path, "isdir", lambda p: p == sep)
         assert _resolve_safe_cwd("/no/such/deep/dir") == sep
+
+    def test_accepts_git_bash_msys_path_on_windows(self, monkeypatch):
+        monkeypatch.setattr("tools.environments.local._IS_WINDOWS", True)
+
+        def fake_isdir(path: str) -> bool:
+            return path == r"C:\Users\alice\repo"
+
+        monkeypatch.setattr(os.path, "isdir", fake_isdir)
+        assert _resolve_safe_cwd("/c/Users/alice/repo") == "/c/Users/alice/repo"
+
+    def test_walks_git_bash_path_up_to_existing_windows_parent(self, monkeypatch):
+        monkeypatch.setattr("tools.environments.local._IS_WINDOWS", True)
+
+        def fake_isdir(path: str) -> bool:
+            return path == r"C:\Users\alice"
+
+        monkeypatch.setattr(os.path, "isdir", fake_isdir)
+        assert _resolve_safe_cwd("/c/Users/alice/missing/project") == "/c/Users/alice"
+
+
+class TestNativeWindowsCwd:
+    def test_converts_git_bash_path_on_windows(self, monkeypatch):
+        monkeypatch.setattr("tools.environments.local._IS_WINDOWS", True)
+        assert _native_windows_cwd("/c/Users/alice/repo") == r"C:\Users\alice\repo"
+
+    def test_leaves_non_windows_path_unchanged(self, monkeypatch):
+        monkeypatch.setattr("tools.environments.local._IS_WINDOWS", False)
+        assert _native_windows_cwd("/c/Users/alice/repo") == "/c/Users/alice/repo"
 
 
 def _fake_interrupt():

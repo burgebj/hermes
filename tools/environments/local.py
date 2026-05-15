@@ -18,6 +18,13 @@ _IS_WINDOWS = platform.system() == "Windows"
 logger = logging.getLogger(__name__)
 
 
+def _native_windows_cwd(path: str) -> str:
+    """Convert Git Bash / MSYS ``/c/...`` cwd paths to native Windows form."""
+    if _IS_WINDOWS and path and re.match(r"^/[a-zA-Z]/", path):
+        return path[1].upper() + ":" + path[2:].replace("/", "\\")
+    return path
+
+
 def _resolve_safe_cwd(cwd: str) -> str:
     """Return ``cwd`` if it exists as a directory, else the nearest existing
     ancestor.  Falls back to ``tempfile.gettempdir()`` only if walking up the
@@ -30,11 +37,16 @@ def _resolve_safe_cwd(cwd: str) -> str:
     raises ``FileNotFoundError`` before bash starts, wedging every subsequent
     terminal call until the gateway restarts.
     """
-    if cwd and os.path.isdir(cwd):
+    def _is_existing_dir(candidate: str) -> bool:
+        if not candidate:
+            return False
+        return os.path.isdir(candidate) or os.path.isdir(_native_windows_cwd(candidate))
+
+    if _is_existing_dir(cwd):
         return cwd
     parent = os.path.dirname(cwd) if cwd else ""
     while parent:
-        if os.path.isdir(parent):
+        if _is_existing_dir(parent):
             return parent
         next_parent = os.path.dirname(parent)
         if next_parent == parent:
@@ -467,9 +479,7 @@ class LocalEnvironment(BaseEnvironment):
 
         # On Windows, self.cwd may be a Git Bash-style path (/c/Users/...)
         # from pwd output. subprocess.Popen needs a native Windows path.
-        _popen_cwd = self.cwd
-        if _IS_WINDOWS and _popen_cwd and re.match(r'^/[a-zA-Z]/', _popen_cwd):
-            _popen_cwd = _popen_cwd[1].upper() + ':' + _popen_cwd[2:].replace('/', '\\')
+        _popen_cwd = _native_windows_cwd(self.cwd)
 
         proc = subprocess.Popen(
             args,
