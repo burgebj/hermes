@@ -183,6 +183,21 @@ class TestTruncateAroundMatches:
         result = _truncate_around_matches(text, "alpha beta")
         assert result.lower().count("alpha beta") == 2
 
+    def test_fts5_boolean_operators_are_not_match_terms(self):
+        early_boolean_noise = "or " * 200
+        filler = "x" * 1200
+        target = "Luka asked to resume the Injoy integration discussion."
+        text = early_boolean_noise + filler + target + filler
+
+        result = _truncate_around_matches(
+            text,
+            "Luka OR resume OR Injoy",
+            max_chars=220,
+        )
+
+        assert "Luka" in result
+        assert "Injoy" in result
+
 
 class TestSessionSearchConcurrency:
     def test_defaults_to_three(self):

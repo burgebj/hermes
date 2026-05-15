@@ -27,6 +27,7 @@ from typing import Dict, Any, List, Optional, Union
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 MAX_SESSION_CHARS = 100_000
 MAX_SUMMARY_TOKENS = 10000
+_FTS5_QUERY_OPERATORS = {"and", "or", "not", "near"}
 
 
 def _get_session_search_max_concurrency(default: int = 3) -> int:
@@ -110,6 +111,15 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _query_match_terms(query: str) -> list[str]:
+    """Return query terms useful for transcript window placement."""
+    terms = []
+    for raw_term in re.findall(r"[\w.-]+", query.lower()):
+        if raw_term not in _FTS5_QUERY_OPERATORS:
+            terms.append(raw_term)
+    return terms
+
+
 def _truncate_around_matches(
     full_text: str, query: str, max_chars: int = MAX_SESSION_CHARS
 ) -> str:
@@ -139,7 +149,7 @@ def _truncate_around_matches(
 
     # --- 2. Proximity co-occurrence of all terms (within 200 chars) -----------
     if not match_positions:
-        terms = query_lower.split()
+        terms = _query_match_terms(query_lower)
         if len(terms) > 1:
             # Collect every occurrence of each term
             term_positions: dict[str, list[int]] = {}
@@ -159,7 +169,7 @@ def _truncate_around_matches(
 
     # --- 3. Individual term positions (last resort) ---------------------------
     if not match_positions:
-        terms = query_lower.split()
+        terms = _query_match_terms(query_lower)
         for t in terms:
             for m in re.finditer(re.escape(t), text_lower):
                 match_positions.append(m.start())
