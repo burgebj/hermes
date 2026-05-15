@@ -268,11 +268,34 @@ def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[st
     return None
 
 
+def _default_creation_dir() -> Path:
+    """Return the directory new skills should be created in.
+
+    When ``skills.external_dirs`` is configured in ``config.yaml``, prefer the
+    first existing entry so contributors editing an external skills repo can
+    create skills in-place. Falls back to local ``~/.hermes/skills/`` when no
+    external dirs are configured.
+
+    Closes #21810 — ``skill_manage(action='create')`` previously hardcoded
+    ``SKILLS_DIR``, dropping new skills into the user-local store even when an
+    external dir was set as the canonical authoring location.
+    """
+    try:
+        from agent.skill_utils import get_external_skills_dirs
+        external = get_external_skills_dirs()
+    except Exception:
+        external = []
+    if external:
+        return external[0]
+    return SKILLS_DIR
+
+
 def _resolve_skill_dir(name: str, category: str = None) -> Path:
     """Build the directory path for a new skill, optionally under a category."""
+    base = _default_creation_dir()
     if category:
-        return SKILLS_DIR / category / name
-    return SKILLS_DIR / name
+        return base / category / name
+    return base / name
 
 
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
@@ -412,10 +435,15 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         shutil.rmtree(skill_dir, ignore_errors=True)
         return {"success": False, "error": scan_error}
 
+    creation_root = _containing_skills_root(skill_dir)
+    try:
+        rel_path = skill_dir.relative_to(creation_root)
+    except ValueError:
+        rel_path = skill_dir
     result = {
         "success": True,
         "message": f"Skill '{name}' created.",
-        "path": str(skill_dir.relative_to(SKILLS_DIR)),
+        "path": str(rel_path),
         "skill_md": str(skill_md),
     }
     if category:

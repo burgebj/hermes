@@ -943,3 +943,72 @@ class TestPinnedGuard:
                        side_effect=RuntimeError("sidecar broken")):
                 result = _delete_skill("my-skill")
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# external_dirs honored on create — #21810
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSkillRespectsExternalDirs:
+    """skill_manage(action='create') must drop the new skill into the first
+    configured ``skills.external_dirs`` entry instead of the local
+    ~/.hermes/skills/ when one is set. Closes #21810.
+    """
+
+    def test_no_external_dirs_uses_local_skills_dir(self, tmp_path):
+        """Regression guard: with no external_dirs, behavior is unchanged."""
+        with patch("tools.skill_manager_tool.SKILLS_DIR", tmp_path), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[tmp_path]), \
+             patch("agent.skill_utils.get_external_skills_dirs", return_value=[]):
+            result = _create_skill("local-skill", VALID_SKILL_CONTENT)
+        assert result["success"] is True
+        assert (tmp_path / "local-skill" / "SKILL.md").exists()
+
+    def test_external_dir_used_when_configured(self, tmp_path):
+        """First external_dirs entry wins over SKILLS_DIR."""
+        local = tmp_path / "local"
+        external = tmp_path / "external"
+        local.mkdir()
+        external.mkdir()
+        with patch("tools.skill_manager_tool.SKILLS_DIR", local), \
+             patch("agent.skill_utils.get_all_skills_dirs",
+                   return_value=[local, external]), \
+             patch("agent.skill_utils.get_external_skills_dirs",
+                   return_value=[external]):
+            result = _create_skill("ext-skill", VALID_SKILL_CONTENT)
+        assert result["success"] is True
+        assert (external / "ext-skill" / "SKILL.md").exists()
+        assert not (local / "ext-skill").exists()
+
+    def test_external_dir_used_with_category(self, tmp_path):
+        """Category nesting still applies under the external root."""
+        local = tmp_path / "local"
+        external = tmp_path / "external"
+        local.mkdir()
+        external.mkdir()
+        with patch("tools.skill_manager_tool.SKILLS_DIR", local), \
+             patch("agent.skill_utils.get_all_skills_dirs",
+                   return_value=[local, external]), \
+             patch("agent.skill_utils.get_external_skills_dirs",
+                   return_value=[external]):
+            result = _create_skill("cat-skill", VALID_SKILL_CONTENT, category="ops")
+        assert result["success"] is True
+        assert (external / "ops" / "cat-skill" / "SKILL.md").exists()
+        assert result["path"] == str(Path("ops") / "cat-skill")
+
+    def test_first_external_dir_wins(self, tmp_path):
+        """When multiple external dirs configured, the first is preferred."""
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        with patch("tools.skill_manager_tool.SKILLS_DIR", tmp_path / "local"), \
+             patch("agent.skill_utils.get_all_skills_dirs",
+                   return_value=[first, second]), \
+             patch("agent.skill_utils.get_external_skills_dirs",
+                   return_value=[first, second]):
+            result = _create_skill("multi-skill", VALID_SKILL_CONTENT)
+        assert result["success"] is True
+        assert (first / "multi-skill" / "SKILL.md").exists()
+        assert not (second / "multi-skill").exists()
