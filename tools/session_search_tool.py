@@ -110,6 +110,37 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _strip_fts5_operators(query: str) -> str:
+    """Extract plain content terms from an FTS5 query string.
+
+    Strips boolean operators (``AND``, ``OR``, ``NOT``), ``NEAR(...)``
+    clauses, column filters (``column:term``), prefix operators (``*``),
+    and FTS5 special characters (``+``, ``{}``, ``()``, ``^``, ``~``).
+    Preserves quoted-phrase content (without the quotes).
+
+    Returns an empty string if *query* contained only operators / syntax.
+    """
+    result = query
+
+    # Remove quoted phrases but keep their content
+    result = re.sub(r'"([^"]*)"', r'\1', result)
+
+    # Remove NEAR(...) clauses entirely
+    result = re.sub(r'NEAR\s*\([^)]*\)', '', result, flags=re.IGNORECASE)
+
+    # Remove column filters (e.g. role:user, body:term)
+    result = re.sub(r'\w+:\w+', '', result)
+
+    # Remove FTS5 special characters
+    result = re.sub(r'[+{}()^~*]', ' ', result)
+
+    # Remove boolean operators (standalone words)
+    result = re.sub(r'\b(?:AND|OR|NOT)\b', '', result, flags=re.IGNORECASE)
+
+    # Collapse whitespace
+    return ' '.join(result.split()).strip()
+
+
 def _truncate_around_matches(
     full_text: str, query: str, max_chars: int = MAX_SESSION_CHARS
 ) -> str:
@@ -125,21 +156,31 @@ def _truncate_around_matches(
 
     Once candidate positions are collected the function picks the window
     start that covers the most of them.
+
+    FTS5 boolean operators (AND, OR, NOT) and other query syntax are
+    stripped before matching so they are not treated as search terms
+    (fixes #4238 / #4239).
     """
     if len(full_text) <= max_chars:
         return full_text
 
     text_lower = full_text.lower()
     query_lower = query.lower().strip()
+
+    # Strip FTS5 operators so boolean keywords aren't treated as search terms.
+    clean_query = _strip_fts5_operators(query_lower)
+    if not clean_query:
+        clean_query = query_lower  # fallback if stripping removed everything
+
     match_positions: list[int] = []
 
     # --- 1. Full-phrase search ------------------------------------------------
-    phrase_pat = re.compile(re.escape(query_lower))
+    phrase_pat = re.compile(re.escape(clean_query))
     match_positions = [m.start() for m in phrase_pat.finditer(text_lower)]
 
     # --- 2. Proximity co-occurrence of all terms (within 200 chars) -----------
     if not match_positions:
-        terms = query_lower.split()
+        terms = clean_query.split()
         if len(terms) > 1:
             # Collect every occurrence of each term
             term_positions: dict[str, list[int]] = {}
@@ -159,7 +200,7 @@ def _truncate_around_matches(
 
     # --- 3. Individual term positions (last resort) ---------------------------
     if not match_positions:
-        terms = query_lower.split()
+        terms = clean_query.split()
         for t in terms:
             for m in re.finditer(re.escape(t), text_lower):
                 match_positions.append(m.start())

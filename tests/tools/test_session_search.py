@@ -9,6 +9,7 @@ from tools.session_search_tool import (
     _format_timestamp,
     _format_conversation,
     _truncate_around_matches,
+    _strip_fts5_operators,
     _get_session_search_max_concurrency,
     _list_recent_sessions,
     _HIDDEN_SESSION_SOURCES,
@@ -182,6 +183,88 @@ class TestTruncateAroundMatches:
         text = pre + match1 + gap + match2 + post
         result = _truncate_around_matches(text, "alpha beta")
         assert result.lower().count("alpha beta") == 2
+
+
+class TestStripFts5Operators:
+    """Tests for _strip_fts5_operators (#4238)."""
+
+    def test_plain_query_unchanged(self):
+        assert _strip_fts5_operators("docker postgres") == "docker postgres"
+
+    def test_strips_AND(self):
+        assert _strip_fts5_operators("docker AND postgres") == "docker postgres"
+
+    def test_strips_OR(self):
+        assert _strip_fts5_operators("docker OR postgres") == "docker postgres"
+
+    def test_strips_NOT(self):
+        assert _strip_fts5_operators("docker NOT test") == "docker test"
+
+    def test_strips_case_insensitive_operators(self):
+        assert _strip_fts5_operators("docker and postgres") == "docker postgres"
+        assert _strip_fts5_operators("docker Or postgres") == "docker postgres"
+
+    def test_strips_multiple_operators(self):
+        assert _strip_fts5_operators("a AND b OR c NOT d") == "a b c d"
+
+    def test_preserves_quoted_content(self):
+        assert _strip_fts5_operators('"exact phrase" AND other') == "exact phrase other"
+
+    def test_strips_NEAR(self):
+        assert _strip_fts5_operators("NEAR(docker postgres, 5)") == ""
+
+    def test_strips_column_filter(self):
+        assert _strip_fts5_operators("role:user docker") == "docker"
+
+    def test_strips_column_filter_with_content(self):
+        assert _strip_fts5_operators("body:important term") == "term"
+
+    def test_strips_special_chars(self):
+        assert _strip_fts5_operators("docker+ postgres* test^") == "docker postgres test"
+
+    def test_empty_after_stripping(self):
+        assert _strip_fts5_operators("AND OR NOT") == ""
+
+    def test_preserves_operational_in_words(self):
+        """'AND' inside a word like 'android' should not be stripped."""
+        # Note: word boundary \b means 'android' won't match \bAND\b
+        assert _strip_fts5_operators("android development") == "android development"
+
+
+class TestTruncateAroundMatchesFts5:
+    """Tests that _truncate_around_matches handles FTS5 queries correctly (#4238/#4239)."""
+
+    def test_boolean_operators_not_treated_as_terms(self):
+        """AND/OR/NOT should not generate match positions in text."""
+        padding = "x" * (MAX_SESSION_CHARS + 5000)
+        text = padding + " docker and postgres " + padding
+        # With the old code, "and" would match the literal "and" in text.
+        # With the fix, only "docker" and "postgres" are content terms.
+        result = _truncate_around_matches(text, "docker AND postgres")
+        assert "docker" in result.lower()
+        assert "postgres" in result.lower()
+
+    def test_query_with_not_operator(self):
+        """NOT should be stripped, remaining terms used for matching."""
+        padding = "x" * (MAX_SESSION_CHARS + 5000)
+        text = padding + " docker container running " + padding
+        result = _truncate_around_matches(text, "docker NOT postgres")
+        assert "docker" in result.lower()
+
+    def test_quoted_phrase_in_fts5_query(self):
+        """Quoted phrases should have their content preserved for matching."""
+        padding = "x" * (MAX_SESSION_CHARS + 5000)
+        text = padding + " exact phrase here " + padding
+        result = _truncate_around_matches(text, '"exact phrase" AND other')
+        assert "exact phrase" in result.lower()
+
+    def test_pure_operators_fallback(self):
+        """If query is only operators, fall back to raw query."""
+        padding = "x" * (MAX_SESSION_CHARS + 5000)
+        text = padding + " AND OR NOT " + padding
+        # Should not crash — falls back to raw query
+        result = _truncate_around_matches(text, "AND OR NOT")
+        assert len(result) <= MAX_SESSION_CHARS + 100
 
 
 class TestSessionSearchConcurrency:
