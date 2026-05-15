@@ -6797,7 +6797,117 @@ def _hermes_exe_shims(scripts_dir: Path) -> list[Path]:
     ]
 
 
-def _quarantine_running_hermes_exe(scripts_dir: Path) -> list[tuple[Path, Path]]:
+def _scan_windows_hermes_entrypoint_pids(scripts_dir: Path) -> list[int]:
+    """Return other Hermes entry-point processes using this venv Scripts dir."""
+    if not _is_windows():
+        return []
+
+    self_pid = os.getpid()
+    try:
+        scripts_resolved = scripts_dir.resolve()
+    except OSError:
+        scripts_resolved = scripts_dir
+
+    def _under_scripts_dir(path_text: str) -> bool:
+        if not path_text:
+            return False
+        try:
+            path = Path(path_text.strip('"')).resolve()
+            return path.parent == scripts_resolved
+        except OSError:
+            return False
+
+    try:
+        result = subprocess.run(
+            [
+                "wmic",
+                "process",
+                "get",
+                "ProcessId,ExecutablePath,CommandLine",
+                "/FORMAT:LIST",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+
+    if result.returncode != 0 or result.stdout is None:
+        return []
+
+    pids: list[int] = []
+    record: dict[str, str] = {}
+
+    def _flush_record() -> None:
+        if not record:
+            return
+        try:
+            pid = int(record.get("ProcessId", ""))
+        except ValueError:
+            return
+        if pid == self_pid:
+            return
+
+        exe = record.get("ExecutablePath", "")
+        exe_name = Path(exe).name.lower() if exe else ""
+        if exe_name not in {"hermes.exe", "hermes-gateway.exe"}:
+            return
+        if _under_scripts_dir(exe):
+            pids.append(pid)
+
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            _flush_record()
+            record = {}
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            record[key] = value
+    _flush_record()
+
+    return sorted(set(pids))
+
+
+def _stop_windows_hermes_entrypoint_processes(scripts_dir: Path) -> bool:
+    """Stop other Hermes entry-point processes before replacing Windows shims."""
+    pids = _scan_windows_hermes_entrypoint_pids(scripts_dir)
+    if not pids:
+        return False
+
+    print(
+        f"  Stopping {len(pids)} stale Hermes process(es) blocking update: "
+        + ", ".join(str(pid) for pid in pids)
+    )
+
+    stopped_any = False
+    for pid in pids:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            print(f"    failed to stop PID {pid}: {e}")
+            continue
+
+        if result.returncode == 0:
+            stopped_any = True
+        else:
+            details = (result.stderr or result.stdout or "").strip()
+            print(f"    failed to stop PID {pid}: {details or 'taskkill failed'}")
+
+    return stopped_any
+
+
+def _quarantine_running_hermes_exe(
+    scripts_dir: Path,
+) -> tuple[list[tuple[Path, Path]], list[Path]]:
     """Pre-empt Windows file lock on the running ``hermes.exe``.
 
     Windows allows RENAMING a mapped/running executable (the kernel tracks the
@@ -6810,12 +6920,14 @@ def _quarantine_running_hermes_exe(scripts_dir: Path) -> list[tuple[Path, Path]]
     fresh shims at the original paths. The ``.old`` files are cleaned up on
     the next hermes invocation by ``_cleanup_quarantined_exes``.
 
-    Returns the list of (original, quarantined) pairs so the caller can roll
-    back if the install itself fails before uv writes a replacement.
+    Returns (moved, failed). ``moved`` contains (original, quarantined) pairs
+    so the caller can roll back if the install itself fails before uv writes a
+    replacement; ``failed`` contains shims that remained locked.
     """
     moved: list[tuple[Path, Path]] = []
+    failed: list[Path] = []
     if not _is_windows():
-        return moved
+        return moved, failed
 
     import time
     stamp = int(time.time() * 1000)
@@ -6830,6 +6942,31 @@ def _quarantine_running_hermes_exe(scripts_dir: Path) -> list[tuple[Path, Path]]
             # Best-effort: keep going. uv's failure later will surface the
             # real error; this is a heuristic, not a hard guarantee.
             print(f"  ⚠ Could not quarantine {shim.name}: {e}")
+            failed.append(shim)
+    return moved, failed
+
+
+def _prepare_windows_entrypoint_shims_for_install(
+    scripts_dir: Path,
+) -> list[tuple[Path, Path]]:
+    """Free Windows console-script shims before pip/uv rewrites them."""
+    moved, failed = _quarantine_running_hermes_exe(scripts_dir)
+    if not failed:
+        return moved
+
+    stopped = _stop_windows_hermes_entrypoint_processes(scripts_dir)
+    if stopped:
+        retry_moved, failed = _quarantine_running_hermes_exe(scripts_dir)
+        moved.extend(retry_moved)
+
+    if failed and stopped:
+        names = ", ".join(shim.name for shim in failed)
+        raise RuntimeError(
+            "Hermes update cannot replace locked Windows entry-point shim(s): "
+            f"{names}. Close other Hermes windows/processes and run "
+            "`hermes update` again."
+        )
+
     return moved
 
 
@@ -6955,7 +7092,7 @@ def _install_python_dependencies_with_optional_fallback(
     def _install(args: list[str]) -> None:
         moved: list[tuple[Path, Path]] = []
         if scripts_dir is not None:
-            moved = _quarantine_running_hermes_exe(scripts_dir)
+            moved = _prepare_windows_entrypoint_shims_for_install(scripts_dir)
         try:
             _run_install_with_heartbeat(install_cmd_prefix + args, env=env)
         except BaseException:
