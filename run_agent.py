@@ -12299,6 +12299,9 @@ class AIAgent:
                     self._safe_print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
                 break
 
+            if self._credential_pool:
+                self._credential_pool.mark_used()
+
             # Fire step_callback for gateway hooks (agent:step event)
             if self.step_callback is not None:
                 try:

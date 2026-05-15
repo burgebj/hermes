@@ -836,6 +836,22 @@ class CredentialPool:
             return False
         return False
 
+    def mark_used(self, entry_id: Optional[str] = None) -> None:
+        """Increment request_count for the current entry.
+
+        The least_used strategy selects credentials by request_count, so
+        production API calls must update the count and persist it.
+        """
+        target_id = entry_id or self._current_id
+        if not target_id:
+            return
+        with self._lock:
+            for idx, entry in enumerate(self._entries):
+                if entry.id == target_id:
+                    self._entries[idx] = replace(entry, request_count=entry.request_count + 1)
+                    self._persist()
+                    return
+
     def select(self) -> Optional[PooledCredential]:
         with self._lock:
             return self._select_unlocked()
