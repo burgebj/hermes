@@ -2104,11 +2104,19 @@ def _hermes_home_for_target_user(target_home_dir: str) -> str:
 
 
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
-    python_path = get_python_path()
+    # Always prefer the project venv Python for ExecStart — sys.executable
+    # may point to a bare uv-managed interpreter with no site-packages.
+    venv = _detect_venv_dir()
+    if venv is not None:
+        python_path = str(venv / "Scripts" / "python.exe" if is_windows() else venv / "bin" / "python")
+    else:
+        # No venv found — default to PROJECT_ROOT/venv even if it doesn't exist
+        # yet, so the service file is always valid.  sys.executable is avoided
+        # because under uv it resolves to a standalone CPython with no packages.
+        python_path = str(PROJECT_ROOT / "venv" / "bin" / "python")
     working_dir = str(PROJECT_ROOT)
-    detected_venv = _detect_venv_dir()
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
-    venv_bin = str(detected_venv / "bin") if detected_venv else str(PROJECT_ROOT / "venv" / "bin")
+    venv_dir = str(venv) if venv else str(PROJECT_ROOT / "venv")
+    venv_bin = str(venv / "bin") if venv else str(PROJECT_ROOT / "venv" / "bin")
     node_bin = str(PROJECT_ROOT / "node_modules" / ".bin")
 
     path_entries = [venv_bin, node_bin]
