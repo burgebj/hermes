@@ -400,6 +400,43 @@ class TestSessionSearch:
         assert result["sessions_searched"] == 1
         assert current_sid not in [r.get("session_id") for r in result.get("results", [])]
 
+    def test_truncates_around_fts_matched_message_content(self, monkeypatch):
+        """The summarizer window should use the message FTS matched, not the first text term."""
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        target = "TARGET_RESUME_REVIEW resume details near the end"
+        mock_db.search_messages.return_value = [
+            {
+                "session_id": "s1",
+                "content": target,
+                "source": "cli",
+                "session_started": 1709500000,
+                "model": "test",
+            },
+        ]
+        mock_db.get_session.return_value = {"parent_session_id": None}
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "resume appears early"},
+            {"role": "assistant", "content": "x" * (MAX_SESSION_CHARS + 5000)},
+            {"role": "user", "content": target},
+        ]
+
+        captured = {}
+
+        async def fake_summarize(text, _query, _meta):
+            captured["text"] = text
+            return "summary"
+
+        monkeypatch.setattr("tools.session_search_tool._summarize_session", fake_summarize)
+        monkeypatch.setattr("model_tools._run_async", lambda coro: asyncio.run(coro))
+
+        result = json.loads(session_search(query="resume", db=mock_db, limit=1))
+
+        assert result["success"] is True
+        assert target in captured["text"]
+
     def test_current_child_session_excludes_parent_lineage(self):
         """Compression/delegation parents should be excluded for the active child session."""
         from unittest.mock import MagicMock

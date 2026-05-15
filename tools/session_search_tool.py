@@ -111,7 +111,10 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
 
 
 def _truncate_around_matches(
-    full_text: str, query: str, max_chars: int = MAX_SESSION_CHARS
+    full_text: str,
+    query: str,
+    max_chars: int = MAX_SESSION_CHARS,
+    match_positions: Optional[List[int]] = None,
 ) -> str:
     """
     Truncate a conversation transcript to *max_chars*, choosing a window
@@ -131,14 +134,20 @@ def _truncate_around_matches(
 
     text_lower = full_text.lower()
     query_lower = query.lower().strip()
-    match_positions: list[int] = []
+    candidate_positions: list[int] = []
+
+    if match_positions:
+        candidate_positions.extend(
+            pos for pos in match_positions if isinstance(pos, int) and pos >= 0
+        )
 
     # --- 1. Full-phrase search ------------------------------------------------
-    phrase_pat = re.compile(re.escape(query_lower))
-    match_positions = [m.start() for m in phrase_pat.finditer(text_lower)]
+    if not candidate_positions:
+        phrase_pat = re.compile(re.escape(query_lower))
+        candidate_positions = [m.start() for m in phrase_pat.finditer(text_lower)]
 
     # --- 2. Proximity co-occurrence of all terms (within 200 chars) -----------
-    if not match_positions:
+    if not candidate_positions:
         terms = query_lower.split()
         if len(terms) > 1:
             # Collect every occurrence of each term
@@ -155,33 +164,33 @@ def _truncate_around_matches(
                     for t in terms
                     if t != rarest
                 ):
-                    match_positions.append(pos)
+                    candidate_positions.append(pos)
 
     # --- 3. Individual term positions (last resort) ---------------------------
-    if not match_positions:
+    if not candidate_positions:
         terms = query_lower.split()
         for t in terms:
             for m in re.finditer(re.escape(t), text_lower):
-                match_positions.append(m.start())
+                candidate_positions.append(m.start())
 
-    if not match_positions:
+    if not candidate_positions:
         # Nothing at all — take from the start
         truncated = full_text[:max_chars]
         suffix = "\n\n...[later conversation truncated]..." if max_chars < len(full_text) else ""
         return truncated + suffix
 
     # --- Pick window that covers the most match positions ---------------------
-    match_positions.sort()
+    candidate_positions.sort()
 
     best_start = 0
     best_count = 0
-    for candidate in match_positions:
+    for candidate in candidate_positions:
         ws = max(0, candidate - max_chars // 4)  # bias: 25% before, 75% after
         we = ws + max_chars
         if we > len(full_text):
             ws = max(0, len(full_text) - max_chars)
             we = len(full_text)
-        count = sum(1 for p in match_positions if ws <= p < we)
+        count = sum(1 for p in candidate_positions if ws <= p < we)
         if count > best_count:
             best_count = count
             best_start = ws
@@ -193,6 +202,22 @@ def _truncate_around_matches(
     prefix = "...[earlier conversation truncated]...\n\n" if start > 0 else ""
     suffix = "\n\n...[later conversation truncated]..." if end < len(full_text) else ""
     return prefix + truncated + suffix
+
+
+def _find_match_positions_from_contents(
+    conversation_text: str,
+    matched_contents: List[str],
+) -> List[int]:
+    """Map FTS matched message content back to formatted transcript offsets."""
+    text_lower = conversation_text.lower()
+    positions: List[int] = []
+    for content in matched_contents:
+        if not isinstance(content, str) or not content:
+            continue
+        pos = text_lower.find(content.lower())
+        if pos >= 0:
+            positions.append(pos)
+    return positions
 
 
 async def _summarize_session(
@@ -434,7 +459,11 @@ def session_search(
             if resolved_sid not in seen_sessions:
                 result = dict(result)
                 result["session_id"] = resolved_sid
+                result["_matched_contents"] = []
                 seen_sessions[resolved_sid] = result
+            content = result.get("content")
+            if isinstance(content, str) and content:
+                seen_sessions[resolved_sid]["_matched_contents"].append(content)
             if len(seen_sessions) >= limit:
                 break
 
@@ -447,7 +476,15 @@ def session_search(
                     continue
                 session_meta = db.get_session(session_id) or {}
                 conversation_text = _format_conversation(messages)
-                conversation_text = _truncate_around_matches(conversation_text, query)
+                match_positions = _find_match_positions_from_contents(
+                    conversation_text,
+                    match_info.get("_matched_contents", []),
+                )
+                conversation_text = _truncate_around_matches(
+                    conversation_text,
+                    query,
+                    match_positions=match_positions,
+                )
                 tasks.append((session_id, match_info, conversation_text, session_meta))
             except Exception as e:
                 logging.warning(
