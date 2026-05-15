@@ -1702,9 +1702,17 @@ class AIAgent:
                     }
                     if _provider_timeout is not None:
                         client_kwargs["timeout"] = _provider_timeout
-                    # Preserve any default_headers the router set
-                    if hasattr(_routed_client, '_default_headers') and _routed_client._default_headers:
-                        client_kwargs["default_headers"] = dict(_routed_client._default_headers)
+                    # Preserve any default_headers the router set.
+                    # OpenAI SDK >= 1.x stores user-supplied default_headers in
+                    # _custom_headers (not _default_headers), so without the
+                    # _custom_headers branch the codex_cloudflare_headers
+                    # (originator, ChatGPT-Account-ID, codex_cli_rs UA) silently
+                    # drop here and the Codex backend rejects every model with a
+                    # "not supported when using Codex with a ChatGPT account" 400.
+                    _routed_headers = getattr(_routed_client, '_custom_headers', None) \
+                        or getattr(_routed_client, '_default_headers', None)
+                    if _routed_headers:
+                        client_kwargs["default_headers"] = dict(_routed_headers)
                 else:
                     # When the user explicitly chose a non-OpenRouter provider
                     # but no credentials were found, fail fast with a clear
@@ -1753,8 +1761,10 @@ class AIAgent:
                                 }
                                 if _provider_timeout is not None:
                                     client_kwargs["timeout"] = _provider_timeout
-                                if hasattr(_fb_client, "_default_headers") and _fb_client._default_headers:
-                                    client_kwargs["default_headers"] = dict(_fb_client._default_headers)
+                                _fb_headers = getattr(_fb_client, "_custom_headers", None) \
+                                    or getattr(_fb_client, "_default_headers", None)
+                                if _fb_headers:
+                                    client_kwargs["default_headers"] = dict(_fb_headers)
                                 _fb_resolved = True
                                 break
                         if not _fb_resolved:
