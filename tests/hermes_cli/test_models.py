@@ -880,3 +880,90 @@ class TestNousRecommendedModels:
             patch("hermes_cli.models.check_nous_free_tier", side_effect=RuntimeError("boom")),
         ):
             assert get_nous_recommended_aux_model(vision=False) == "paid-model"
+
+
+class TestSpecificExceptionHandling:
+    """Regression tests: narrowed exception types must still catch the expected errors,
+    and unexpected types must propagate (not be silently swallowed)."""
+
+    def test_xai_curated_models_falls_back_on_json_decode_error(self):
+        """JSONDecodeError from disk cache is caught; static fallback returned."""
+        from hermes_cli.models import _xai_curated_models, _XAI_STATIC_FALLBACK
+        import json
+
+        bad = json.JSONDecodeError("Expecting value", "", 0)
+        with patch("agent.models_dev._load_disk_cache", side_effect=bad):
+            result = _xai_curated_models()
+
+        assert result == list(_XAI_STATIC_FALLBACK)
+
+    def test_xai_curated_models_falls_back_on_os_error(self):
+        """OSError (missing file) from disk cache is caught; static fallback returned."""
+        from hermes_cli.models import _xai_curated_models, _XAI_STATIC_FALLBACK
+
+        with patch("agent.models_dev._load_disk_cache", side_effect=OSError("no such file")):
+            result = _xai_curated_models()
+
+        assert result == list(_XAI_STATIC_FALLBACK)
+
+    def test_fetch_nous_account_tier_returns_empty_on_json_decode_error(self):
+        """JSONDecodeError from malformed API response returns {}."""
+        from hermes_cli.models import fetch_nous_account_tier
+
+        resp = MagicMock()
+        resp.read.return_value = b"not-json{"
+        ctx = MagicMock()
+        ctx.__enter__.return_value = resp
+        ctx.__exit__.return_value = False
+
+        with patch("urllib.request.urlopen", return_value=ctx):
+            result = fetch_nous_account_tier("tok", "https://portal.nousresearch.com")
+
+        assert result == {}
+
+    def test_fetch_nous_account_tier_propagates_unexpected_errors(self):
+        """RuntimeError from unexpected cause must propagate, not be silently swallowed.
+
+        Stash-verify anchor: fails with ``except Exception`` (swallows RuntimeError),
+        passes after narrowing to ``(OSError, json.JSONDecodeError, UnicodeDecodeError)``.
+        """
+        import pytest
+        from hermes_cli.models import fetch_nous_account_tier
+
+        with patch("urllib.request.urlopen", side_effect=RuntimeError("unexpected")):
+            with pytest.raises(RuntimeError):
+                fetch_nous_account_tier("tok", "https://portal.nousresearch.com")
+
+    def test_fetch_nous_recommended_models_returns_empty_on_network_error(self):
+        """OSError from network failure returns empty dict."""
+        from hermes_cli.models import fetch_nous_recommended_models
+        import hermes_cli.models as _m
+
+        _m._nous_recommended_cache.clear()
+        with patch("urllib.request.urlopen", side_effect=OSError("unreachable")):
+            result = fetch_nous_recommended_models(
+                portal_base_url="https://portal.nousresearch.com",
+                force_refresh=True,
+            )
+
+        assert result == {}
+
+    def test_fetch_models_with_pricing_returns_empty_on_json_decode_error(self):
+        """JSONDecodeError from malformed /v1/models response returns {}."""
+        import hermes_cli.models as _m
+
+        _m._pricing_cache.clear()
+        resp = MagicMock()
+        resp.read.return_value = b"<html>bad</html>"
+        ctx = MagicMock()
+        ctx.__enter__.return_value = resp
+        ctx.__exit__.return_value = False
+
+        with patch("urllib.request.urlopen", return_value=ctx):
+            result = _m.fetch_models_with_pricing(
+                base_url="https://openrouter.ai/api",
+                api_key=None,
+                force_refresh=True,
+            )
+
+        assert result == {}
