@@ -929,6 +929,7 @@ DEFAULT_CONFIG = {
         "backend": "",           # shared fallback — applies to both search and extract
         "search_backend": "",    # per-capability override for web_search (e.g. "searxng")
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
+        "gemini_model": "gemini-3.1-flash-lite", # default model for Gemini Google Search Grounding
     },
 
     "browser": {
