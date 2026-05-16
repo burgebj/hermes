@@ -8021,6 +8021,11 @@ class AIAgent:
         if self._interrupt_requested:
             raise InterruptedError("Agent interrupted before streaming API call")
 
+        # One-shot guard for the stale-stream fallback activation (#25689).
+        # Reset per call so each new attempt gets one chance to advance the
+        # fallback chain when the stale detector fires.
+        self._stale_fallback_activated_this_call = False
+
         if self.api_mode == "codex_responses":
             # Codex streams internally via _run_codex_stream. The main dispatch
             # in _interruptible_api_call already calls it; we just need to
@@ -8817,6 +8822,8 @@ class AIAgent:
                     self._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
                 except Exception:
                     pass
+                # Eager fallback on stale stream (#25689). See helper.
+                self._maybe_activate_fallback_on_stale_stream()
                 # Reset the timer so we don't kill repeatedly while
                 # the inner thread processes the closure.
                 last_chunk_time["t"] = time.time()
@@ -8904,6 +8911,50 @@ class AIAgent:
         return result["response"]
 
     # ── Provider fallback ──────────────────────────────────────────────────
+
+    def _maybe_activate_fallback_on_stale_stream(self) -> bool:
+        """Advance the fallback chain (if configured) on the first stale
+        stream kill of the current ``_interruptible_streaming_api_call``
+        call.
+
+        An unresponsive primary that holds the SSE connection without
+        delivering chunks won't recover by retrying itself — retries just
+        burn another ``_stream_stale_timeout`` window per attempt. By
+        activating the fallback eagerly, the outer retry loop comes back
+        with the next provider's client.
+
+        Returns ``True`` if a fallback was activated this call, ``False``
+        otherwise. The one-shot guard
+        (``_stale_fallback_activated_this_call``) prevents
+        double-activation when multiple stale ticks fire before the
+        worker thread sees the connection closure. The guard is reset at
+        the top of each ``_interruptible_streaming_api_call`` call.
+        Fixes #25689.
+        """
+        if getattr(self, "_stale_fallback_activated_this_call", False):
+            return False
+        self._stale_fallback_activated_this_call = True
+        try:
+            if (
+                getattr(self, "_fallback_index", 0)
+                >= len(getattr(self, "_fallback_chain", []) or [])
+            ):
+                return False
+            from agent.error_classifier import FailoverReason as _FR
+            if not self._try_activate_fallback(reason=_FR.timeout):
+                return False
+            try:
+                self._emit_status(
+                    "⚠️ Stale stream — switching to fallback provider."
+                )
+            except Exception:
+                pass
+            return True
+        except Exception:
+            logger.debug(
+                "stale stream fallback activation failed", exc_info=True
+            )
+            return False
 
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
         """Switch to the next fallback model/provider in the chain.

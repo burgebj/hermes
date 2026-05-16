@@ -668,6 +668,83 @@ class TestStreamingFallback:
         assert mock_client.chat.completions.create.call_count == 1
 
 
+class TestStaleStreamFallbackActivation:
+    """#25689 — when the stream stale detector fires, the fallback chain
+    should be activated so the outer retry loop comes back with the next
+    provider, not the same unresponsive one."""
+
+    def _make_agent(self):
+        from run_agent import AIAgent
+        return AIAgent(
+            api_key="test-key",
+            base_url="https://primary.example.com/v1",
+            model="primary/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    def test_first_stale_kill_activates_fallback(self):
+        agent = self._make_agent()
+        agent._stale_fallback_activated_this_call = False
+        agent._fallback_chain = [{"provider": "z", "model": "next/model"}]
+        agent._fallback_index = 0
+        called = {}
+        def _fake(reason=None):
+            called["reason"] = reason
+            agent._fallback_index += 1
+            return True
+        agent._try_activate_fallback = _fake  # type: ignore[assignment]
+        assert agent._maybe_activate_fallback_on_stale_stream() is True
+        assert called.get("reason") is not None
+        assert called["reason"].value == "timeout"
+
+    def test_second_stale_kill_in_same_call_is_noop(self):
+        """Multiple stale ticks within one call must not double-advance
+        the chain — the one-shot guard handles it."""
+        agent = self._make_agent()
+        agent._stale_fallback_activated_this_call = False
+        agent._fallback_chain = [
+            {"provider": "z", "model": "next/model"},
+            {"provider": "z", "model": "third/model"},
+        ]
+        agent._fallback_index = 0
+        agent._try_activate_fallback = lambda reason=None: (  # type: ignore[assignment]
+            setattr(agent, "_fallback_index", agent._fallback_index + 1) or True
+        )
+        assert agent._maybe_activate_fallback_on_stale_stream() is True
+        assert agent._fallback_index == 1
+        # Second call within the same _interruptible_streaming_api_call:
+        assert agent._maybe_activate_fallback_on_stale_stream() is False
+        assert agent._fallback_index == 1
+
+    def test_no_fallback_when_chain_exhausted(self):
+        agent = self._make_agent()
+        agent._stale_fallback_activated_this_call = False
+        agent._fallback_chain = [{"provider": "z", "model": "next/model"}]
+        agent._fallback_index = 1  # already past the end
+        called = {"count": 0}
+        def _fake(reason=None):
+            called["count"] += 1
+            return False
+        agent._try_activate_fallback = _fake  # type: ignore[assignment]
+        assert agent._maybe_activate_fallback_on_stale_stream() is False
+        assert called["count"] == 0
+
+    def test_no_fallback_when_chain_empty(self):
+        agent = self._make_agent()
+        agent._stale_fallback_activated_this_call = False
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        called = {"count": 0}
+        agent._try_activate_fallback = (
+            lambda reason=None: called.__setitem__("count", called["count"] + 1)
+            or False
+        )
+        assert agent._maybe_activate_fallback_on_stale_stream() is False
+        assert called["count"] == 0
+
+
 # ── Test: Reasoning Streaming ────────────────────────────────────────────
 
 
