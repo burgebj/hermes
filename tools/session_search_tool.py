@@ -205,9 +205,12 @@ async def _summarize_session(
         "1. What the user asked about or wanted to accomplish\n"
         "2. What actions were taken and what the outcomes were\n"
         "3. Key decisions, solutions found, or conclusions reached\n"
-        "4. Any specific commands, files, URLs, or technical details that were important\n"
+        "4. Commands, files, URLs, or technical details that SUCCEEDED (exit_code 0, no error). "
+        "For tool calls that failed (non-zero exit_code, error output, or 'unexpected argument'), "
+        "describe only what failed and why — do NOT reproduce the broken command itself, "
+        "as repeating it would cause the same failure again\n"
         "5. Anything left unresolved or notable\n\n"
-        "Be thorough but concise. Preserve specific details (commands, paths, error messages) "
+        "Be thorough but concise. Preserve specific details (paths, URLs, conclusions) "
         "that would be useful to recall. Write in past tense as a factual recap."
     )
 
