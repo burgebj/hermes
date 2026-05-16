@@ -2054,6 +2054,10 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
+        skip_skills_index=(
+            is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
+            or is_truthy_value(os.environ.get("HERMES_NO_SKILLS_INDEX"))
+        ),
         **_agent_cbs(sid),
     )
 
