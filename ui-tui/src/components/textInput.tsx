@@ -16,7 +16,7 @@ import {
 
 type InkExt = typeof Ink & {
   stringWidth: (s: string) => number
-  useDeclaredCursor: (a: { line: number; column: number; active: boolean }) => (el: any) => void
+  useDeclaredCursor: (a: { line: number; column: number; active: boolean }) => (el: unknown) => void
   useStdout: () => { stdout?: NodeJS.WriteStream }
   useTerminalFocus: () => boolean
 }
