@@ -53,7 +53,7 @@ from hermes_cli.config import cfg_get
 from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import get_hermes_home
 from model_tools import check_toolset_requirements, get_tool_definitions
-from utils import base_url_host_matches
+from utils import base_url_host_matches, is_truthy_value
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
 # capture our warnings.  (run_agent.py also does
@@ -1221,8 +1221,10 @@ def init_agent(
             compression_threshold = _model_cthresh
     except Exception:
         pass
-    compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
-    compression_status_messages = str(_compression_cfg.get("status_messages", True)).lower() in {"true", "1", "yes", "on"}
+    compression_enabled = is_truthy_value(_compression_cfg.get("enabled", True), default=True)
+    compression_status_messages = is_truthy_value(
+        _compression_cfg.get("status_messages", True), default=True
+    )
     compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
     compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
     # protect_first_n is the number of non-system messages to protect at
