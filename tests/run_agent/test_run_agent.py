@@ -1031,8 +1031,18 @@ class TestBuildSystemPrompt:
 class TestToolUseEnforcementConfig:
     """Tests for the agent.tool_use_enforcement config option."""
 
-    def _make_agent(self, model="openai/gpt-4.1", tool_use_enforcement="auto"):
+    def _make_agent(
+        self,
+        model="openai/gpt-4.1",
+        tool_use_enforcement="auto",
+        xai_operational_guidance=False,
+        provider=None,
+    ):
         """Create an agent with tools and a specific enforcement config."""
+        agent_config = {
+            "tool_use_enforcement": tool_use_enforcement,
+            "xai_operational_guidance": xai_operational_guidance,
+        }
         with (
             patch(
                 "run_agent.get_tool_definitions",
@@ -1042,7 +1052,7 @@ class TestToolUseEnforcementConfig:
             patch("run_agent.OpenAI"),
             patch(
                 "hermes_cli.config.load_config",
-                return_value={"agent": {"tool_use_enforcement": tool_use_enforcement}},
+                return_value={"agent": agent_config},
             ),
         ):
             a = AIAgent(
@@ -1054,6 +1064,8 @@ class TestToolUseEnforcementConfig:
                 skip_memory=True,
             )
             a.client = MagicMock()
+            if provider:
+                a.provider = provider
             return a
 
     def test_auto_injects_for_gpt(self):
@@ -1067,6 +1079,55 @@ class TestToolUseEnforcementConfig:
         agent = self._make_agent(model="openai/codex-mini", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+
+    def test_auto_skips_xai_guidance_for_grok_by_default(self):
+        from agent.prompt_builder import (
+            TOOL_USE_ENFORCEMENT_GUIDANCE,
+            XAI_MODEL_OPERATIONAL_GUIDANCE,
+        )
+
+        agent = self._make_agent(model="x-ai/grok-4.3", tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert XAI_MODEL_OPERATIONAL_GUIDANCE not in prompt
+
+    def test_opt_in_injects_xai_guidance_for_grok(self):
+        from agent.prompt_builder import (
+            TOOL_USE_ENFORCEMENT_GUIDANCE,
+            XAI_MODEL_OPERATIONAL_GUIDANCE,
+        )
+
+        agent = self._make_agent(
+            model="x-ai/grok-4.3",
+            tool_use_enforcement="auto",
+            xai_operational_guidance=True,
+        )
+        prompt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert XAI_MODEL_OPERATIONAL_GUIDANCE in prompt
+
+    def test_opt_in_injects_xai_guidance_for_xai_provider(self):
+        from agent.prompt_builder import XAI_MODEL_OPERATIONAL_GUIDANCE
+
+        agent = self._make_agent(
+            model="custom/current",
+            tool_use_enforcement=True,
+            xai_operational_guidance="on",
+            provider="xai",
+        )
+        prompt = agent._build_system_prompt()
+        assert XAI_MODEL_OPERATIONAL_GUIDANCE in prompt
+
+    def test_false_disables_xai_guidance_for_grok(self):
+        from agent.prompt_builder import XAI_MODEL_OPERATIONAL_GUIDANCE
+
+        agent = self._make_agent(
+            model="x-ai/grok-4.3",
+            tool_use_enforcement=True,
+            xai_operational_guidance=False,
+        )
+        prompt = agent._build_system_prompt()
+        assert XAI_MODEL_OPERATIONAL_GUIDANCE not in prompt
 
     def test_auto_skips_for_claude(self):
         from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE

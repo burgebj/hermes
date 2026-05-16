@@ -160,7 +160,17 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import (
+    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    XAI_MODEL_OPERATIONAL_GUIDANCE,
+    build_context_files_prompt,
+    build_environment_hints,
+    build_skills_system_prompt,
+    load_soul_md,
+)
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -2114,6 +2124,7 @@ class AIAgent:
         if not isinstance(_agent_section, dict):
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+        self._xai_operational_guidance = _agent_section.get("xai_operational_guidance", False)
 
         # App-level API retry count (wraps each model API call).  Default 3,
         # overridable via agent.api_max_retries in config.yaml.  See #11616.
@@ -6149,6 +6160,20 @@ class AIAgent:
                 # prerequisite checks, verification, anti-hallucination).
                 if "gpt" in _model_lower or "codex" in _model_lower:
                     stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                # xAI/Grok operational guidance is intentionally opt-in.
+                # Model-specific prompt tuning can regress task routing, so
+                # default Grok behavior remains unchanged unless enabled.
+                _provider_lower = (getattr(self, "provider", "") or "").lower()
+                _xai_guidance = self._xai_operational_guidance
+                if isinstance(_xai_guidance, str):
+                    _xai_guidance = _xai_guidance.lower() in {"true", "always", "yes", "on"}
+                else:
+                    _xai_guidance = bool(_xai_guidance)
+                if (
+                    _xai_guidance
+                    and ("grok" in _model_lower or _provider_lower in {"xai", "xai-oauth", "x-ai"})
+                ):
+                    stable_parts.append(XAI_MODEL_OPERATIONAL_GUIDANCE)
 
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
