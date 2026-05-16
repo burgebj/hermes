@@ -13458,16 +13458,39 @@ class AIAgent:
                                 "error": "Response truncated due to output length limit"
                             }
                         else:
-                            # First message was truncated - mark as failed
-                            self._vprint(f"{self.log_prefix}❌ First response truncated - cannot recover", force=True)
+                            # First message was truncated — try continuation retry before giving up
+                            if length_continue_retries < 3:
+                                length_continue_retries += 1
+                                self._vprint(
+                                    f"{self.log_prefix}↻ Requesting continuation for first message "
+                                    f"({length_continue_retries}/3)...",
+                                    force=True,
+                                )
+                                continue_msg = {
+                                    "role": "user",
+                                    "content": (
+                                        "[System: Your previous response was truncated by the output "
+                                        "length limit. Continue exactly where you left off. Do not "
+                                        "restart or repeat prior text. Finish the answer directly.]"
+                                    ),
+                                }
+                                messages.append(continue_msg)
+                                self._session_messages = messages
+                                self._save_session_log(messages)
+                                restart_with_length_continuation = True
+                                continue
+
+                            # All continuation attempts exhausted — return partial response if available
+                            partial_response = self._strip_think_blocks(truncated_response_prefix).strip()
+                            self._cleanup_task_resources(effective_task_id)
                             self._persist_session(messages, conversation_history)
                             return {
-                                "final_response": None,
+                                "final_response": partial_response or None,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
-                                "failed": True,
-                                "error": "First response truncated due to output length limit"
+                                "partial": True,
+                                "error": "First response remained truncated after 3 continuation attempts",
                             }
                     
                     # Track actual token usage from response for context management
