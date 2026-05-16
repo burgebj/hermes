@@ -12933,10 +12933,17 @@ class AIAgent:
                             self.thinking_callback("")
 
                     _use_streaming = True
+                    # ACP subprocess shims (copilot-acp, including Gemini CLI ACP)
+                    # currently expose a non-streaming OpenAI-compatible facade.
+                    # If we pass stream=True, the shim still returns a regular
+                    # SimpleNamespace response; the streaming path then tries to
+                    # iterate it and raises: 'types.SimpleNamespace' object is not iterable.
+                    if self.provider == "copilot-acp":
+                        _use_streaming = False
                     # Provider signaled "stream not supported" on a previous
                     # attempt — switch to non-streaming for the rest of this
                     # session instead of re-failing every retry.
-                    if getattr(self, "_disable_streaming", False):
+                    elif getattr(self, "_disable_streaming", False):
                         _use_streaming = False
                     # CopilotACPClient communicates via subprocess stdio and
                     # returns a plain SimpleNamespace — not an iterable

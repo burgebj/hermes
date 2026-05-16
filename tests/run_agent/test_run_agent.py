@@ -2530,6 +2530,29 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_copilot_acp_uses_non_streaming_path_even_with_stream_consumer(self, agent):
+        self._setup_agent(agent)
+        agent.provider = "copilot-acp"
+        agent.stream_delta_callback = lambda _delta: None
+        resp = _mock_response(content="ACP final answer", finish_reason="stop")
+
+        with (
+            patch.object(agent, "_interruptible_api_call", return_value=resp) as mock_api_call,
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                side_effect=AssertionError("copilot-acp must not use streaming path"),
+            ) as mock_streaming_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "ACP final answer"
+        mock_api_call.assert_called_once()
+        mock_streaming_call.assert_not_called()
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
