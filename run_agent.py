@@ -15471,9 +15471,7 @@ class AIAgent:
                             messages.append({
                                 "role": "user",
                                 "content": (
-                                    "You just executed tool calls but returned an "
-                                    "empty response. Please process the tool "
-                                    "results above and continue with the task."
+                                    "Continue with your task based on the tool results above."
                                 ),
                                 "_empty_recovery_synthetic": True,
                             })
@@ -15530,16 +15528,16 @@ class AIAgent:
                             _has_structured
                             and self._thinking_prefill_retries >= 2
                         )
-                        if _truly_empty and (not _has_structured or _prefill_exhausted) and self._empty_content_retries < 3:
+                        if _truly_empty and (not _has_structured or _prefill_exhausted) and self._empty_content_retries < 2:
                             self._empty_content_retries += 1
                             logger.warning(
                                 "Empty response (no content or reasoning) — "
-                                "retry %d/3 (model=%s)",
+                                "retry %d/2 (model=%s)",
                                 self._empty_content_retries, self.model,
                             )
                             self._emit_status(
                                 f"⚠️ Empty response from model — retrying "
-                                f"({self._empty_content_retries}/3)"
+                                f"({self._empty_content_retries}/2)"
                             )
                             continue
 

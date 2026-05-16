@@ -1486,21 +1486,60 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                     )
             compressed.append(msg)
 
-        # If LLM summary failed, insert a static fallback so the model
-        # knows context was lost rather than silently dropping everything.
+        # If LLM summary failed, use truncation fallback: keep head + last N
+        # turns, discard the middle entirely. This is more robust than injecting
+        # a static placeholder that still consumes tokens without useful context.
+        # The truncation approach prevents the OOM / context-overflow errors
+        # that result from failed compression leaving the context too large.
         if not summary:
-            if not self.quiet_mode:
-                logger.warning("Summary generation failed — inserting static fallback context marker")
             n_dropped = compress_end - compress_start
             self._last_summary_dropped_count = n_dropped
             self._last_summary_fallback_used = True
-            summary = (
-                f"{SUMMARY_PREFIX}\n"
-                f"Summary generation was unavailable. {n_dropped} message(s) were "
-                f"removed to free context space but could not be summarized. The removed "
-                f"messages contained earlier work in this session. Continue based on the "
-                f"recent messages below and the current state of any files or resources."
-            )
+            if not self.quiet_mode:
+                logger.warning(
+                    "Summary generation failed — using truncation fallback "
+                    "(keep head + last %d messages, dropped %d middle messages)",
+                    n_messages - compress_end,
+                    n_dropped,
+                )
+            # Build truncated output: head messages + tail messages only,
+            # with a brief truncation notice between them.
+            truncated = []
+            for i in range(compress_start):
+                msg = messages[i].copy()
+                if i == 0 and msg.get("role") == "system":
+                    existing = msg.get("content")
+                    _truncation_note = (
+                        "[Note: Earlier conversation turns were truncated to free context space "
+                        "because summary generation failed. The current session state may still "
+                        "reflect earlier work — build on visible state rather than re-doing work. "
+                        "Your persistent memory (MEMORY.md, USER.md) remains fully authoritative.]"
+                    )
+                    if _truncation_note not in _content_text_for_contains(existing):
+                        msg["content"] = _append_text_to_content(
+                            existing,
+                            "\n\n" + _truncation_note if isinstance(existing, str) and existing else _truncation_note,
+                        )
+                truncated.append(msg)
+
+            for i in range(compress_end, n_messages):
+                truncated.append(messages[i].copy())
+
+            truncated = self._sanitize_tool_pairs(truncated)
+
+            self.compression_count += 1
+            new_estimate = estimate_messages_tokens_rough(truncated)
+            saved_estimate = display_tokens - new_estimate
+            savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
+            self._last_compression_savings_pct = savings_pct
+
+            if not self.quiet_mode:
+                logger.info(
+                    "Truncated (fallback): %d -> %d messages (~%d tokens saved, %.0f%%)",
+                    n_messages, len(truncated), saved_estimate, savings_pct,
+                )
+
+            return truncated
 
         _merge_summary_into_tail = False
         last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
