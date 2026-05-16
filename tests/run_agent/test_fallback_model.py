@@ -509,3 +509,59 @@ class TestFallbackKeyEnvResolution:
         assert captured["explicit_api_key"] is None, (
             "Unset api_key_env should yield None, not empty string"
         )
+
+
+# =============================================================================
+# custom_providers forwarding in compressor update (#25494 parity)
+# =============================================================================
+
+class TestFallbackCompressorCustomProviders:
+    """Fallback activation must forward custom_providers to get_model_context_length.
+
+    PR #25494 fixed _check_compression_model_feasibility; this covers the
+    third path (_try_activate_fallback) that was still missing the forward.
+    Without it, a custom provider with a per-model context_length entry in
+    config.yaml falls through to the 256K default when the fallback activates,
+    causing the compressor to use the wrong threshold.
+    """
+
+    def test_custom_providers_forwarded_to_context_length_probe(self):
+        """get_model_context_length must receive custom_providers when the
+        fallback model is activated and a context_compressor is present."""
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        )
+
+        mock_client = _mock_resolve(
+            api_key="sk-or-key",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        mock_compressor = MagicMock()
+        agent.context_compressor = mock_compressor
+
+        fake_providers = [{"name": "my-proxy", "base_url": "http://127.0.0.1:8080", "models": {}}]
+
+        captured = {}
+
+        def _fake_get_ctx(model, base_url="", api_key="", config_context_length=None,
+                          provider="", custom_providers=None):
+            captured["custom_providers"] = custom_providers
+            return 200_000
+
+        with (
+            patch("agent.auxiliary_client.resolve_provider_client",
+                  return_value=(mock_client, "anthropic/claude-sonnet-4")),
+            patch("agent.model_metadata.get_model_context_length", side_effect=_fake_get_ctx),
+            patch("hermes_cli.config.load_config", return_value={}),
+            patch("hermes_cli.config.get_compatible_custom_providers",
+                  return_value=fake_providers),
+        ):
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        assert "custom_providers" in captured, (
+            "get_model_context_length was not called in the fallback activation path"
+        )
+        assert captured["custom_providers"] == fake_providers, (
+            "custom_providers from live config was not forwarded to get_model_context_length"
+        )

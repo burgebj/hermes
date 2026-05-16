@@ -9165,10 +9165,20 @@ class AIAgent:
             # the fallback activation drops to 128K even when config says 204800.
             if hasattr(self, 'context_compressor') and self.context_compressor:
                 from agent.model_metadata import get_model_context_length
+                # Re-read custom_providers from live config so per-model
+                # context_length overrides are honored for the fallback model —
+                # mirrors switch_model() (closes #15779 for the fallback path).
+                _fb_custom_providers = None
+                try:
+                    from hermes_cli.config import load_config, get_compatible_custom_providers
+                    _fb_custom_providers = get_compatible_custom_providers(load_config())
+                except Exception:
+                    _fb_custom_providers = None
                 fb_context_length = get_model_context_length(
                     self.model, base_url=self.base_url,
                     api_key=self.api_key, provider=self.provider,
                     config_context_length=getattr(self, "_config_context_length", None),
+                    custom_providers=_fb_custom_providers,
                 )
                 self.context_compressor.update_model(
                     model=self.model,
