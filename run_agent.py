@@ -6832,6 +6832,13 @@ class AIAgent:
             keepalive_http = self._build_keepalive_http_client(client_kwargs.get("base_url", ""))
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
+        # Kimi For Coding 99元套餐 server-side gate 需要白名单 User-Agent
+        # (KimiCLI / Claude Code / Kilo Code). auxiliary_client.py 已对 side-task
+        # 注入同一 UA, 这里把主推理路径也补上。
+        if "api.kimi.com" in str(client_kwargs.get("base_url", "")).lower():
+            headers = dict(client_kwargs.get("default_headers") or {})
+            headers.setdefault("User-Agent", "KimiCLI/1.30.0")
+            client_kwargs = {**client_kwargs, "default_headers": headers}
         # Uses the module-level `OpenAI` name, resolved lazily on first
         # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
         client = OpenAI(**client_kwargs)
