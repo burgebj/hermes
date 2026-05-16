@@ -441,6 +441,111 @@ class TestPreflightCompression:
         assert "Compacting context" in events[0][1]
         assert events[1] == ("compress", "started")
 
+    def test_preflight_emits_single_compression_status(self, agent):
+        """Preflight has its own status, so _compress_context should not add a second one."""
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 2000
+        agent.context_compressor.threshold_tokens = 200
+        agent.compression_status_messages = True
+
+        big_history = []
+        for i in range(20):
+            big_history.append({"role": "user", "content": f"Message number {i} with padding"})
+            big_history.append({"role": "assistant", "content": f"Response number {i} with padding"})
+
+        ok_resp = _mock_response(content="After preflight", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [ok_resp]
+        status_messages = []
+        agent.status_callback = lambda ev, msg: status_messages.append((ev, msg))
+
+        def _fake_compress(messages, current_tokens=None, focus_topic=None):
+            return [
+                {"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"},
+                {"role": "user", "content": "hello"},
+            ]
+
+        with (
+            patch.object(agent.context_compressor, "compress", side_effect=_fake_compress),
+            patch.object(agent, "_build_system_prompt", return_value="new system prompt"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.estimate_request_tokens_rough", side_effect=[500, 42, 42]),
+        ):
+            result = agent.run_conversation("hello", conversation_history=big_history)
+
+        assert result["completed"] is True
+        compression_statuses = [
+            msg for ev, msg in status_messages
+            if ev == "lifecycle"
+            and ("Preflight compression" in msg or "Compacting context" in msg)
+        ]
+        assert compression_statuses == [
+            "📦 Preflight compression: ~500 tokens >= 200 threshold. This may take a moment."
+        ]
+
+    def test_compression_status_messages_can_be_disabled(self, agent):
+        """compression.status_messages=false suppresses user-facing compaction status."""
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 2000
+        agent.context_compressor.threshold_tokens = 200
+        agent.compression_status_messages = False
+
+        big_history = []
+        for i in range(20):
+            big_history.append({"role": "user", "content": f"Message number {i} with padding"})
+            big_history.append({"role": "assistant", "content": f"Response number {i} with padding"})
+
+        ok_resp = _mock_response(content="After silent preflight", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [ok_resp]
+        status_messages = []
+        agent.status_callback = lambda ev, msg: status_messages.append((ev, msg))
+
+        def _fake_compress(messages, current_tokens=None, focus_topic=None):
+            return [
+                {"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"},
+                {"role": "user", "content": "hello"},
+            ]
+
+        with (
+            patch.object(agent.context_compressor, "compress", side_effect=_fake_compress),
+            patch.object(agent, "_build_system_prompt", return_value="new system prompt"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.estimate_request_tokens_rough", side_effect=[500, 42, 42]),
+        ):
+            result = agent.run_conversation("hello", conversation_history=big_history)
+
+        assert result["completed"] is True
+        assert not [
+            msg for ev, msg in status_messages
+            if ev == "lifecycle"
+            and ("Preflight compression" in msg or "Compacting context" in msg)
+        ]
+
+    def test_compression_status_messages_config_defaults_on(self):
+        """The config option defaults on but can be disabled via compression.status_messages."""
+        from hermes_cli.config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["compression"]["status_messages"] is True
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={"compression": {"status_messages": False}}),
+        ):
+            configured_agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert configured_agent.compression_status_messages is False
+
     def test_preflight_compresses_oversized_history(self, agent):
         """When loaded history exceeds the model's context threshold, compress before API call."""
         agent.compression_enabled = True

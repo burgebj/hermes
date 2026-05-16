@@ -523,7 +523,7 @@ def run_conversation(
                 agent.model,
                 f"{agent.context_compressor.context_length:,}",
             )
-            agent._emit_status(
+            agent._emit_compression_status(
                 f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
                 f">= {agent.context_compressor.threshold_tokens:,} threshold. "
                 "This may take a moment."
@@ -534,7 +534,7 @@ def run_conversation(
                 _orig_len = len(messages)
                 messages, active_system_prompt = agent._compress_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
-                    task_id=effective_task_id,
+                    task_id=effective_task_id, emit_status=False,
                 )
                 if len(messages) >= _orig_len:
                     break  # Cannot compress further
@@ -2509,7 +2509,7 @@ def run_conversation(
                         # messages to the new session, not skipping them.
                         conversation_history = None
                         if len(messages) < original_len or old_ctx > _reduced_ctx:
-                            agent._emit_status(
+                            agent._emit_compression_status(
                                 f"🗜️ Context reduced to {_reduced_ctx:,} tokens "
                                 f"(was {old_ctx:,}), retrying..."
                             )
@@ -2663,7 +2663,7 @@ def run_conversation(
                             "failed": True,
                             "compression_exhausted": True,
                         }
-                    agent._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
+                    agent._emit_compression_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                     original_len = len(messages)
                     messages, active_system_prompt = agent._compress_context(
@@ -2676,7 +2676,7 @@ def run_conversation(
                     conversation_history = None
 
                     if len(messages) < original_len:
-                        agent._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                        agent._emit_compression_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
                         time.sleep(2)  # Brief pause between compression retries
                         restart_with_compressed_messages = True
                         break
@@ -2821,7 +2821,7 @@ def run_conversation(
                             "failed": True,
                             "compression_exhausted": True,
                         }
-                    agent._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
+                    agent._emit_compression_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                     original_len = len(messages)
                     messages, active_system_prompt = agent._compress_context(
@@ -2835,7 +2835,7 @@ def run_conversation(
 
                     if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
                         if len(messages) < original_len:
-                            agent._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            agent._emit_compression_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
                         time.sleep(2)  # Brief pause between compression retries
                         restart_with_compressed_messages = True
                         break

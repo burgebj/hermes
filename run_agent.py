@@ -700,6 +700,12 @@ class AIAgent:
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
 
+    def _emit_compression_status(self, message: str) -> None:
+        """Emit a user-facing context-compression status if enabled."""
+        if not getattr(self, "compression_status_messages", True):
+            return
+        self._emit_status(message)
+
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
 
@@ -4038,19 +4044,20 @@ class AIAgent:
         """
         return self.api_mode != "codex_responses"
 
-    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False) -> tuple:
+    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False, emit_status: bool = True) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
         ``force=True`` is passed by the manual ``/compress`` slash command
         so users can bypass the summary-failure cooldown after an
         auto-compress abort.  Auto-compress callers use the default
-        ``force=False``.
+        ``force=False``. ``emit_status=False`` lets preflight callers emit
+        one aggregate status line without duplicating the compaction banner.
         """
         from agent.conversation_compression import compress_context
         return compress_context(
             self, messages, system_message,
             approx_tokens=approx_tokens, task_id=task_id, focus_topic=focus_topic,
-            force=force,
+            force=force, emit_status=emit_status,
         )
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
