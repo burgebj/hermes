@@ -6187,6 +6187,22 @@ class AIAgent:
             except Exception:
                 pass
 
+        # Load constraints file if configured
+        if not self.skip_context_files:
+            try:
+                from hermes_cli.config import load_config
+                _cfg = load_config()
+                _cpath = _cfg.get("constraints_path") if isinstance(_cfg, dict) else None
+                if _cpath:
+                    _cpath = os.path.expanduser(str(_cpath).strip())
+                    if os.path.isfile(_cpath):
+                        with open(_cpath, "r", encoding="utf-8") as _f:
+                            _constraints = _f.read().strip()
+                        if _constraints:
+                            prompt_parts.append(f"<constraints>\n{_constraints}\n</constraints>")
+            except Exception:
+                pass
+
         from hermes_time import now as _hermes_now
         now = _hermes_now()
         timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
