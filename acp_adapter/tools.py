@@ -1123,7 +1123,14 @@ def build_tool_start(
         )
 
     # Generic fallback
-    import json
+    # NOTE: Do not re-import json here. ``json`` is already imported at module
+    # scope (see top of file). A function-scope ``import json`` would make
+    # ``json`` a local in this entire function, which then shadows the
+    # module-level binding for *every* reference -- including the
+    # ``json.dumps`` call inside the ``_POLISHED_TOOLS`` branch above. That
+    # raises ``UnboundLocalError`` for any polished tool that isn't matched
+    # by an earlier specific branch (discord, kanban_*, ha_*, browser_*,
+    # feishu_*, yb_*, etc.). See issue #20250.
     try:
         args_text = json.dumps(arguments, indent=2, default=str)
     except (TypeError, ValueError):

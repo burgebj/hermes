@@ -264,6 +264,46 @@ class TestBuildToolStart:
         assert isinstance(result, ToolCallStart)
         assert result.kind == "other"
 
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            # Tools listed in _POLISHED_TOOLS that have no dedicated
+            # branch in build_tool_start and previously fell through to the
+            # generic-fallback branch. A function-scope ``import json`` in
+            # that branch caused ``json`` to be treated as a local for the
+            # entire function, raising UnboundLocalError on the json.dumps
+            # call inside the _POLISHED_TOOLS branch above. Issue #20250.
+            "discord",
+            "discord_admin",
+            "kanban_create",
+            "kanban_show",
+            "kanban_block",
+            "kanban_heartbeat",
+            "ha_get_state",
+            "ha_call_service",
+            "browser_navigate",
+            "browser_click",
+            "browser_snapshot",
+            "feishu_doc_read",
+            "yb_send_dm",
+            "yb_query_group_info",
+            "mixture_of_agents",
+            "send_message",
+            "cronjob",
+            "vision_analyze",
+            "image_generate",
+            "text_to_speech",
+        ],
+    )
+    def test_build_tool_start_polished_tool_does_not_raise_unbound_local(self, tool_name):
+        """Polished tools that fall through to the generic branch must not
+        trigger UnboundLocalError on ``json`` — regression for issue #20250.
+        """
+        result = build_tool_start("tc-poli", tool_name, {"foo": "bar"})
+        assert isinstance(result, ToolCallStart)
+        # Polished tools should suppress raw_input.
+        assert result.raw_input is None
+
 
 # ---------------------------------------------------------------------------
 # build_tool_complete
