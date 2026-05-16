@@ -5708,6 +5708,36 @@ class HermesCLI:
         print(f"  Home:    {display}")
         print()
 
+    def _handle_memory_command(self, cmd: str) -> None:
+        """Display persistent memory contents (MEMORY.md + USER.md)."""
+        from tools.memory_tool import MemoryStore, parse_memory_command
+        from tools.memory_format import format_memory_cli
+
+        parts = cmd.split(maxsplit=1)
+        args_str = parts[1] if len(parts) > 1 else ""
+        parsed = parse_memory_command(args_str)
+
+        if "error" in parsed:
+            self._console_print(f"  [red]{parsed['error']}[/]")
+            return
+
+        if parsed.get("action") != "read":
+            self._console_print(
+                "  [yellow]Only /memory and /memory [memory|user] are supported on the CLI.[/]"
+            )
+            return
+
+        try:
+            store = MemoryStore()
+            data = store.get_readout()
+        except Exception as exc:
+            self._console_print(f"  [red]Couldn't read memory: {exc}[/]")
+            return
+
+        self._console_print()
+        self._console_print(format_memory_cli(data, parsed["target"]))
+        self._console_print()
+
     def show_config(self):
         """Display current configuration with kawaii ASCII art."""
         # Get terminal config from environment (which was set from cli-config.yaml)
@@ -7717,6 +7747,8 @@ class HermesCLI:
             self.show_help()
         elif canonical == "profile":
             self._handle_profile_command()
+        elif canonical == "memory":
+            self._handle_memory_command(cmd_original)
         elif canonical == "tools":
             self._handle_tools_command(cmd_original)
         elif canonical == "toolsets":
