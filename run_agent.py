@@ -12924,6 +12924,39 @@ class AIAgent:
                     except Exception:
                         pass  # Never let rate guard break the agent loop
 
+
+                # ── Credential pool exhaustion guard ──────────────
+                # If the credential pool exists but ALL entries are in
+                # exhaustion cooldown (429/402), skip the API call and
+                # activate fallback immediately instead of burning retries
+                # against credentials that will just fail again.
+                if self._credential_pool is not None and not self._credential_pool.has_available():
+                    self._vprint(
+                        f"{self.log_prefix}⏳ All credentials in cooldown — trying fallback...",
+                        force=True,
+                    )
+                    self._emit_status("⏳ All credentials in cooldown — trying fallback...")
+                    if self._try_activate_fallback():
+                        retry_count = 0
+                        compression_attempts = 0
+                        primary_recovery_attempted = False
+                        continue
+                    # No fallback available — wait out the cooldown
+                    _cooldown_msg = "All provider credentials are in rate-limit cooldown."
+                    self._persist_session(messages, conversation_history)
+                    return {
+                        "final_response": (
+                            f"⏳ {_cooldown_msg}\n\n"
+                            "No fallback provider available. "
+                            "Try again in a few minutes, or add a "
+                            "fallback provider in config.yaml."
+                        ),
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": _cooldown_msg,
+                    }
                 try:
                     self._reset_stream_delivery_tracking()
                     api_kwargs = self._build_api_kwargs(api_messages)
