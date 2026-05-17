@@ -25,12 +25,22 @@ import re
 from typing import Dict, Any, List, Optional, Union
 
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
-MAX_SESSION_CHARS = 100_000
-MAX_SUMMARY_TOKENS = 10000
+# Defaults — can be overridden via auxiliary.session_search config.
+DEFAULT_MAX_SESSION_CHARS = 100_000
+DEFAULT_MAX_SUMMARY_TOKENS = 10_000
+DEFAULT_MAX_RETRIES = 3
+
+# Backward-compatible aliases for external consumers (tests, etc.).
+MAX_SESSION_CHARS = DEFAULT_MAX_SESSION_CHARS
+MAX_SUMMARY_TOKENS = DEFAULT_MAX_SUMMARY_TOKENS
 
 
-def _get_session_search_max_concurrency(default: int = 3) -> int:
-    """Read auxiliary.session_search.max_concurrency with sane bounds."""
+def _get_session_search_config(key: str, default, clamp_min=None, clamp_max=None):
+    """Read a value from auxiliary.session_search.<key> with type coercion and bounds.
+
+    Falls back to *default* if the key is missing, config loading fails, or the
+    value cannot be coerced to the expected type.
+    """
     try:
         from hermes_cli.config import load_config
         config = load_config()
@@ -40,14 +50,61 @@ def _get_session_search_max_concurrency(default: int = 3) -> int:
     task_config = aux.get("session_search", {}) if isinstance(aux, dict) else {}
     if not isinstance(task_config, dict):
         return default
-    raw = task_config.get("max_concurrency")
+    raw = task_config.get(key)
     if raw is None:
         return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return max(1, min(value, 5))
+    # Coerce — allow strings from YAML that represent numbers.
+    if isinstance(default, int):
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+    elif isinstance(default, float):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+    else:
+        value = raw
+    if clamp_min is not None:
+        value = max(clamp_min, value)
+    if clamp_max is not None:
+        value = min(clamp_max, value)
+    return value
+
+
+def _get_session_search_max_concurrency(default: int = 3) -> int:
+    """Read auxiliary.session_search.max_concurrency with sane bounds."""
+    return _get_session_search_config("max_concurrency", default, clamp_min=1, clamp_max=5)
+
+
+def _get_session_search_max_session_chars(default: int = DEFAULT_MAX_SESSION_CHARS) -> int:
+    """Read auxiliary.session_search.max_session_chars.
+
+    Controls how many characters of a conversation transcript are prefilled
+    before summarisation.  Lower values reduce per-call cost for slow/local
+    backends at the expense of less context.
+    """
+    return _get_session_search_config("max_session_chars", default, clamp_min=1_000)
+
+
+def _get_session_search_max_summary_tokens(default: int = DEFAULT_MAX_SUMMARY_TOKENS) -> int:
+    """Read auxiliary.session_search.max_summary_tokens.
+
+    Upper bound on the number of tokens the summarisation model may generate
+    per call.
+    """
+    return _get_session_search_config("max_summary_tokens", default, clamp_min=100)
+
+
+def _get_session_search_max_retries(default: int = DEFAULT_MAX_RETRIES) -> int:
+    """Read auxiliary.session_search.max_retries.
+
+    Number of retry attempts on transient/empty-content failures.
+    Reducing this avoids long retry loops on slow backends where each attempt
+    is costly.
+    """
+    return _get_session_search_config("max_retries", default, clamp_min=0, clamp_max=10)
 
 
 def _format_timestamp(ts: Union[int, float, str, None]) -> str:
@@ -111,7 +168,7 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
 
 
 def _truncate_around_matches(
-    full_text: str, query: str, max_chars: int = MAX_SESSION_CHARS
+    full_text: str, query: str, max_chars: int = DEFAULT_MAX_SESSION_CHARS
 ) -> str:
     """
     Truncate a conversation transcript to *max_chars*, choosing a window
@@ -222,7 +279,8 @@ async def _summarize_session(
         f"Summarize this conversation with focus on: {query}"
     )
 
-    max_retries = 3
+    max_retries = _get_session_search_max_retries()
+    max_summary_tokens = _get_session_search_max_summary_tokens()
     for attempt in range(max_retries):
         try:
             response = await async_call_llm(
@@ -232,7 +290,7 @@ async def _summarize_session(
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
-                max_tokens=MAX_SUMMARY_TOKENS,
+                max_tokens=max_summary_tokens,
             )
             content = extract_content_or_reasoning(response)
             if content:
@@ -447,7 +505,7 @@ def session_search(
                     continue
                 session_meta = db.get_session(session_id) or {}
                 conversation_text = _format_conversation(messages)
-                conversation_text = _truncate_around_matches(conversation_text, query)
+                conversation_text = _truncate_around_matches(conversation_text, query, max_chars=_get_session_search_max_session_chars())
                 tasks.append((session_id, match_info, conversation_text, session_meta))
             except Exception as e:
                 logging.warning(
