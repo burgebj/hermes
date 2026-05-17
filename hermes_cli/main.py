@@ -10946,6 +10946,29 @@ Examples:
         "name", nargs="?", help="Specific skill to audit (default: all)"
     )
 
+    skills_validate = skills_subparsers.add_parser(
+        "validate", help="Run read-only integrity checks for skills"
+    )
+    skills_validate.add_argument(
+        "--bundled",
+        action="store_true",
+        help="Validate bundled skills shipped with Hermes",
+    )
+    skills_validate.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON",
+    )
+    skills_validate.add_argument(
+        "--check",
+        action="append",
+        default=None,
+        help=(
+            "Run only a named check. Repeat to select multiple checks. "
+            "Defaults to all local bundled-skill checks."
+        ),
+    )
+
     skills_uninstall = skills_subparsers.add_parser(
         "uninstall", help="Remove a hub-installed skill"
     )
