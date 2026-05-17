@@ -535,8 +535,21 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
 
 
 @app.get("/api/status")
-async def get_status():
+async def get_status(request: Request):
     current_ver, latest_ver = check_config_version()
+
+    if not _has_valid_session_token(request):
+        try:
+            gateway_running = get_running_pid() is not None
+        except Exception:
+            gateway_running = False
+        return {
+            "version": __version__,
+            "release_date": __release_date__,
+            "config_version": current_ver,
+            "latest_config_version": latest_ver,
+            "gateway_running": gateway_running,
+        }
 
     # --- Gateway liveness detection ---
     # Try local PID check first (same-host).  If that fails and a remote
