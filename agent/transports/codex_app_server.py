@@ -23,11 +23,34 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
+
+
+def resolve_codex_bin(codex_bin: Optional[str] = "codex") -> str:
+    """Resolve the Codex executable for Hermes' app-server runtime.
+
+    Hermes may be launched by daemons or cron jobs with a minimal PATH. Prefer
+    an explicit Hermes override first, then the profile-local TTY-safe wrapper,
+    then the caller-provided command.
+    """
+    requested = (codex_bin or "codex").strip()
+    if requested != "codex":
+        return requested
+
+    env_bin = os.getenv("HERMES_CODEX_BIN", "").strip()
+    if env_bin:
+        return env_bin
+
+    user_wrapper = Path.home() / "bin" / "codex"
+    if user_wrapper.is_file() and os.access(user_wrapper, os.X_OK):
+        return str(user_wrapper)
+
+    return requested
 
 
 @dataclass
@@ -73,8 +96,8 @@ class CodexAppServerClient:
         extra_args: Optional[list[str]] = None,
         env: Optional[dict[str, str]] = None,
     ) -> None:
-        self._codex_bin = codex_bin
-        cmd = [codex_bin, "app-server"] + list(extra_args or [])
+        self._codex_bin = resolve_codex_bin(codex_bin)
+        cmd = [self._codex_bin, "app-server"] + list(extra_args or [])
         spawn_env = os.environ.copy()
         if env:
             spawn_env.update(env)
@@ -341,16 +364,17 @@ def check_codex_binary(
     """Verify codex CLI is installed and meets minimum version.
 
     Returns (ok, message). Used by setup wizard and runtime startup."""
+    resolved_codex_bin = resolve_codex_bin(codex_bin)
     try:
         proc = subprocess.run(
-            [codex_bin, "--version"],
+            [resolved_codex_bin, "--version"],
             capture_output=True,
             text=True,
             timeout=10,
         )
     except FileNotFoundError:
         return False, (
-            f"codex CLI not found at {codex_bin!r}. Install with: "
+            f"codex CLI not found at {resolved_codex_bin!r}. Install with: "
             f"npm i -g @openai/codex"
         )
     except subprocess.TimeoutExpired:

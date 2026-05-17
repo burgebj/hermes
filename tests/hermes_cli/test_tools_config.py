@@ -1064,9 +1064,12 @@ def test_reconfigure_provider_runs_post_setup_for_env_var_providers(
     monkeypatch.setattr("hermes_cli.tools_config._prompt", lambda *a, **kw: "")
     monkeypatch.setattr("hermes_cli.tools_config.save_env_value", lambda k, v: None)
 
+    # integration-contract: browser providers migrated to plugins, so the
+    # reconfigure regression must look at the same visible-provider surface as
+    # the setup/reconfigure UI instead of only the static non-provider UX rows.
     provider = next(
         p
-        for p in TOOL_CATEGORIES["browser"]["providers"]
+        for p in _visible_providers(TOOL_CATEGORIES["browser"], {})
         if p["name"] == provider_name
     )
     _reconfigure_provider(provider, {})

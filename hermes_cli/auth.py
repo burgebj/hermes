@@ -3197,7 +3197,35 @@ def resolve_xai_oauth_runtime_credentials(
     refresh_if_expiring: bool = True,
     refresh_skew_seconds: int = XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 ) -> Dict[str, Any]:
-    data = _read_xai_oauth_tokens()
+    try:
+        data = _read_xai_oauth_tokens()
+    except AuthError as singleton_error:
+        try:
+            from agent.credential_pool import load_pool
+
+            pool = load_pool("xai-oauth")
+            entry = pool.try_refresh_current() if force_refresh else pool.select()
+            if entry is not None:
+                access_token = str(getattr(entry, "runtime_api_key", "") or "").strip()
+                base_url = (
+                    os.getenv("HERMES_XAI_BASE_URL", "").strip().rstrip("/")
+                    or os.getenv("XAI_BASE_URL", "").strip().rstrip("/")
+                    or str(getattr(entry, "runtime_base_url", "") or "").strip().rstrip("/")
+                    or DEFAULT_XAI_OAUTH_BASE_URL
+                )
+                if access_token and base_url:
+                    return {
+                        "provider": "xai-oauth",
+                        "base_url": base_url,
+                        "api_key": access_token,
+                        "source": "credential-pool",
+                        "last_refresh": getattr(entry, "last_refresh", None),
+                        "auth_mode": "oauth_pkce",
+                    }
+        except Exception:
+            pass
+        raise singleton_error
+
     tokens = dict(data["tokens"])
     access_token = str(tokens.get("access_token", "") or "").strip()
     refresh_timeout_seconds = float(os.getenv("HERMES_XAI_REFRESH_TIMEOUT_SECONDS", "20"))
@@ -4881,6 +4909,21 @@ def _update_config_for_provider(
             model_cfg["default"] = default_model
 
     config["model"] = model_cfg
+
+    if provider_id == "xai-oauth":
+        platform_toolsets = config.get("platform_toolsets")
+        if not isinstance(platform_toolsets, dict):
+            platform_toolsets = {}
+            config["platform_toolsets"] = platform_toolsets
+
+        cli_toolsets = platform_toolsets.get("cli")
+        if not isinstance(cli_toolsets, list):
+            cli_toolsets = ["hermes-cli"]
+
+        normalized_cli_toolsets = [str(toolset) for toolset in cli_toolsets]
+        if "no_mcp" not in normalized_cli_toolsets:
+            normalized_cli_toolsets.append("no_mcp")
+        platform_toolsets["cli"] = normalized_cli_toolsets
 
     atomic_yaml_write(config_path, config, sort_keys=False)
     return config_path

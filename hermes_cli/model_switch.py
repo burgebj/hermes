@@ -1692,7 +1692,8 @@ def list_authenticated_providers(
             # Ollama servers) — the /models endpoint often works without
             # auth.  The CLI's _model_flow_named_custom always probes, so
             # the Telegram/Discord picker should do the same for parity.
-            if api_url:
+            public_ollama_cloud = api_url.rstrip("/").lower() == "https://ollama.com/v1"
+            if api_url and (api_key or not public_ollama_cloud):
                 try:
                     from hermes_cli.models import fetch_api_models
 

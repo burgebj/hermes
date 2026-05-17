@@ -314,6 +314,7 @@ class TestRunBackgroundTask:
 
         mock_adapter.send.assert_called_once()
         assert mock_adapter.send.call_args.kwargs["metadata"] == {
+            "direct_messages_topic_id": "20197",
             "thread_id": "20197",
             "telegram_dm_topic_reply_fallback": True,
             "telegram_reply_to_message_id": "463",

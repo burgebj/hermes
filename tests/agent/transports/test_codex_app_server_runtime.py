@@ -111,8 +111,35 @@ class TestCodexAppServerModule:
         from agent.transports import codex_app_server
 
         assert codex_app_server.MIN_CODEX_VERSION >= (0, 1, 0)
+        assert callable(codex_app_server.resolve_codex_bin)
         assert callable(codex_app_server.parse_codex_version)
         assert callable(codex_app_server.check_codex_binary)
+
+    def test_resolve_codex_bin_prefers_env_override(self, monkeypatch) -> None:
+        from agent.transports.codex_app_server import resolve_codex_bin
+
+        monkeypatch.setenv("HERMES_CODEX_BIN", "/opt/hermes/bin/codex-safe")
+
+        assert resolve_codex_bin() == "/opt/hermes/bin/codex-safe"
+
+    def test_resolve_codex_bin_keeps_explicit_binary(self, monkeypatch) -> None:
+        from agent.transports.codex_app_server import resolve_codex_bin
+
+        monkeypatch.setenv("HERMES_CODEX_BIN", "/opt/hermes/bin/codex-safe")
+
+        assert resolve_codex_bin("/tmp/custom-codex") == "/tmp/custom-codex"
+
+    def test_resolve_codex_bin_prefers_user_wrapper(self, monkeypatch, tmp_path) -> None:
+        from agent.transports.codex_app_server import resolve_codex_bin
+
+        wrapper = tmp_path / "bin" / "codex"
+        wrapper.parent.mkdir()
+        wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_CODEX_BIN", raising=False)
+
+        assert resolve_codex_bin() == str(wrapper)
 
     def test_parse_codex_version_valid(self) -> None:
         from agent.transports.codex_app_server import parse_codex_version
@@ -134,6 +161,17 @@ class TestCodexAppServerModule:
         ok, msg = check_codex_binary(codex_bin="/nonexistent/codex/binary/path")
         assert ok is False
         assert "not found" in msg.lower() or "no such" in msg.lower()
+
+    def test_check_binary_uses_resolved_wrapper(self, monkeypatch, tmp_path) -> None:
+        from agent.transports.codex_app_server import check_codex_binary
+
+        wrapper = tmp_path / "missing-codex-safe"
+        monkeypatch.setenv("HERMES_CODEX_BIN", str(wrapper))
+
+        ok, msg = check_codex_binary()
+
+        assert ok is False
+        assert str(wrapper) in msg
 
     def test_codex_error_class_is_runtimeerror(self) -> None:
         from agent.transports.codex_app_server import CodexAppServerError
@@ -167,6 +205,7 @@ class TestSpawnEnvIsolation:
 
         class FakePopen:
             def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
                 captured["env"] = kwargs.get("env", {}).copy()
                 # Provide minimal Popen surface so __init__ doesn't crash
                 # on attribute access during construction.
@@ -190,10 +229,12 @@ class TestSpawnEnvIsolation:
 
         monkeypatch.setattr(subprocess, "Popen", FakePopen)
         monkeypatch.setenv("HOME", "/users/alice")
+        monkeypatch.setenv("HERMES_CODEX_BIN", "/opt/hermes/bin/codex-safe")
 
         client = cas.CodexAppServerClient(codex_bin="codex")
         client._closed = True  # so close() is a no-op
 
+        assert captured["cmd"][0] == "/opt/hermes/bin/codex-safe"
         # The spawn env must have HOME=/users/alice unchanged
         assert captured["env"].get("HOME") == "/users/alice", (
             f"HOME got rewritten in codex spawn env: "
@@ -211,6 +252,7 @@ class TestSpawnEnvIsolation:
 
         class FakePopen:
             def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
                 captured["env"] = kwargs.get("env", {}).copy()
                 self.stdin = None
                 self.stdout = None
@@ -232,12 +274,14 @@ class TestSpawnEnvIsolation:
 
         monkeypatch.setattr(subprocess, "Popen", FakePopen)
         monkeypatch.setenv("HOME", "/users/alice")
+        monkeypatch.setenv("HERMES_CODEX_BIN", "/opt/hermes/bin/codex-safe")
 
         client = cas.CodexAppServerClient(
             codex_bin="codex", codex_home="/tmp/profile/codex"
         )
         client._closed = True
 
+        assert captured["cmd"][0] == "/opt/hermes/bin/codex-safe"
         assert captured["env"].get("CODEX_HOME") == "/tmp/profile/codex"
         # And HOME still passes through unchanged
         assert captured["env"].get("HOME") == "/users/alice"

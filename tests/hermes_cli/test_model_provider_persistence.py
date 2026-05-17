@@ -97,6 +97,50 @@ class TestProviderPersistsAfterModelSave:
         assert mock_write.call_count == 1
         assert config_path.read_text(encoding="utf-8") == original_text
 
+    def test_xai_oauth_provider_disables_cli_mcp_by_default(self, config_home):
+        """runtime-contract: Grok OAuth CLI setup must not inherit default MCP servers.
+
+        xAI Grok can return an empty final response when a one-shot CLI prompt
+        is paired with a large set of MCP tool schemas. Selecting xAI OAuth
+        should therefore persist the platform-scoped no_mcp sentinel while
+        leaving global MCP server configuration untouched.
+        """
+        import yaml
+
+        from hermes_cli.auth import _update_config_for_provider
+
+        _update_config_for_provider("xai-oauth", "https://api.x.ai/v1")
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        assert config["model"]["provider"] == "xai-oauth"
+        assert config["model"]["base_url"] == "https://api.x.ai/v1"
+        assert config["platform_toolsets"]["cli"] == ["hermes-cli", "no_mcp"]
+
+    def test_xai_oauth_provider_preserves_existing_cli_toolsets_when_disabling_mcp(
+        self, config_home
+    ):
+        """runtime-contract: existing CLI tool choices survive the xAI no_mcp guard."""
+        import yaml
+
+        from hermes_cli.auth import _update_config_for_provider
+
+        (config_home / "config.yaml").write_text(
+            "model:\n"
+            "  default: grok-4.3\n"
+            "platform_toolsets:\n"
+            "  cli:\n"
+            "  - web\n"
+            "  - terminal\n"
+            "  telegram:\n"
+            "  - hermes-telegram\n"
+        )
+
+        _update_config_for_provider("xai-oauth", "https://api.x.ai/v1")
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        assert config["platform_toolsets"]["cli"] == ["web", "terminal", "no_mcp"]
+        assert config["platform_toolsets"]["telegram"] == ["hermes-telegram"]
+
     def test_api_key_provider_saved_when_model_was_string(self, config_home, monkeypatch):
         """_model_flow_api_key_provider must persist the provider even when
         config.model started as a plain string."""
@@ -393,4 +437,3 @@ class TestBaseUrlValidation:
 
         saved = get_env_value("GLM_BASE_URL") or ""
         assert saved == "", "Empty input should not save a base URL"
-

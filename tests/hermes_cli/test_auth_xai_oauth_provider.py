@@ -965,6 +965,48 @@ def test_runtime_provider_default_base_url_when_pool_entry_missing_url(tmp_path,
     assert runtime["base_url"] == DEFAULT_XAI_OAUTH_BASE_URL
 
 
+def test_resolve_xai_oauth_runtime_credentials_uses_pool_without_singleton(tmp_path, monkeypatch):
+    """auth-contract: `hermes auth add xai-oauth` may store only pool credentials.
+
+    Main runtime resolution must accept that pool-only state instead of
+    requiring the older providers["xai-oauth"] singleton shape.
+    """
+    from agent.credential_pool import load_pool, AUTH_TYPE_OAUTH, PooledCredential
+    import uuid
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}}))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("HERMES_XAI_BASE_URL", raising=False)
+    monkeypatch.delenv("XAI_BASE_URL", raising=False)
+
+    fresh = _jwt_with_exp(int(time.time()) + 3600)
+    pool = load_pool("xai-oauth")
+    pool.add_entry(
+        PooledCredential(
+            provider="xai-oauth",
+            id=uuid.uuid4().hex[:6],
+            label="test",
+            auth_type=AUTH_TYPE_OAUTH,
+            priority=0,
+            source="manual:xai_pkce",
+            access_token=fresh,
+            refresh_token="rt",
+            base_url=DEFAULT_XAI_OAUTH_BASE_URL,
+            last_refresh="2026-05-17T00:00:00Z",
+        )
+    )
+
+    creds = resolve_xai_oauth_runtime_credentials()
+
+    assert creds["provider"] == "xai-oauth"
+    assert creds["api_key"] == fresh
+    assert creds["base_url"] == DEFAULT_XAI_OAUTH_BASE_URL
+    assert creds["source"] == "credential-pool"
+    assert creds["last_refresh"] == "2026-05-17T00:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # Token-expiry behavior on the pool path
 # ---------------------------------------------------------------------------

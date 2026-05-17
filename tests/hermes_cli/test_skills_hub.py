@@ -5,7 +5,15 @@ import pytest
 from rich.console import Console
 
 from cli import ChatConsole
-from hermes_cli.skills_hub import do_check, do_install, do_list, do_update, handle_skills_slash
+from hermes_cli.skills_hub import (
+    do_check,
+    do_inspect,
+    do_install,
+    do_list,
+    do_update,
+    handle_skills_slash,
+    inspect_skill,
+)
 
 
 class _DummyLockFile:
@@ -136,6 +144,58 @@ def test_do_list_filter_local(three_source_env):
     assert "local-skill" in output
     assert "builtin-skill" not in output
     assert "hub-skill" not in output
+
+
+def test_do_inspect_prefers_installed_local_skill(monkeypatch):
+    """`hermes skills inspect <name>` should work for installed local skills,
+    not only remote registry identifiers."""
+    payload = {
+        "success": True,
+        "name": "local-skill",
+        "description": "local description",
+        "content": "---\nname: local-skill\n---\n# Local Skill",
+        "path": "devops/local-skill/SKILL.md",
+        "skill_dir": "/tmp/skills/devops/local-skill",
+    }
+
+    monkeypatch.setattr(
+        "tools.skills_tool.skill_view",
+        lambda name, preprocess=False: __import__("json").dumps(payload),
+    )
+    monkeypatch.setattr(
+        "tools.skills_hub.create_source_router",
+        lambda auth: (_ for _ in ()).throw(AssertionError("remote lookup should not run")),
+    )
+
+    sink = StringIO()
+    console = Console(file=sink, force_terminal=False, color_system=None)
+    do_inspect("local-skill", console=console)
+    output = sink.getvalue()
+
+    assert "local-skill" in output
+    assert "local description" in output
+    assert "installed local skill" in output
+
+
+def test_programmatic_inspect_returns_installed_local_skill(monkeypatch):
+    payload = {
+        "success": True,
+        "name": "local-skill",
+        "description": "local description",
+        "content": "# Local Skill",
+        "path": "devops/local-skill/SKILL.md",
+    }
+
+    monkeypatch.setattr(
+        "tools.skills_tool.skill_view",
+        lambda name, preprocess=False: __import__("json").dumps(payload),
+    )
+
+    result = inspect_skill("local-skill")
+
+    assert result["source"] == "local"
+    assert result["name"] == "local-skill"
+    assert result["path"] == "devops/local-skill/SKILL.md"
 
 
 def test_do_list_filter_hub(three_source_env):

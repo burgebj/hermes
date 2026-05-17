@@ -442,12 +442,14 @@ class TestVprintForceParameter:
         assert "normal message" in captured.out
 
     def test_error_messages_use_force_in_run_agent(self):
-        """Verify that critical error _vprint calls in run_agent.py
+        """Verify that critical error _vprint calls in the run loop
         include force=True."""
-        with open("run_agent.py", "r") as f:
-            source = f.read()
+        sources = []
+        for path in ("run_agent.py", "agent/conversation_loop.py"):
+            with open(path, "r") as f:
+                sources.append(f.read())
 
-        tree = ast.parse(source)
+        tree = ast.parse("\n".join(sources))
 
         forced_error_count = 0
         unforced_error_count = 0

@@ -1035,6 +1035,7 @@ AUTHOR_MAP = {
     "paultian.research@gmail.com": "paul-tian",  # PR #19423
     "info@glesperance.com": "glesperance",  # PR #19443
     "lxl694522264@gmail.com": "EvilDrag0n",  # PR #20651
+    "richardowen7212@gmail.com": "MadKangYu",  # PR #27343
     # v0.13.0 additions
     "clode@clo5de.info": "jackey8616",  # via PR salvage
     "james.russo@heygen.com": "jrusso1020",  # via PR salvage
