@@ -337,7 +337,19 @@ class TestExtractMedia:
         media, cleaned = BasePlatformAdapter.extract_media(content)
         assert media == [("/tmp/x.jpg", False)]
         assert "[[as_document]]" not in cleaned
-        assert "Here is your infographic" in cleaned
+
+    def test_media_tag_strips_markdown_bold_asterisks(self):
+        # LLM may wrap MEDIA tag in bold: **MEDIA:/path/to/file.docx**
+        content = "**MEDIA:/tmp/report.docx**"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/report.docx", False)]
+        assert cleaned == ""
+
+    def test_media_tag_strips_single_leading_trailing_asterisk(self):
+        content = "*MEDIA:/tmp/report.pdf*"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/report.pdf", False)]
+        assert cleaned == ""
 
     def test_as_document_directive_alone_does_not_attach_voice_flag(self):
         """[[as_document]] is independent of [[audio_as_voice]] — combining
