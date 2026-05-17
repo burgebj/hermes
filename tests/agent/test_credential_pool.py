@@ -1563,6 +1563,84 @@ def test_sync_codex_entry_noop_when_tokens_match(tmp_path, monkeypatch):
     assert synced is entry
 
 
+def test_codex_refresh_uses_newer_auth_store_tokens_before_network_retry(tmp_path, monkeypatch):
+    """Codex refresh tokens are single-use; re-sync before refreshing stale pool entries."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, _codex_auth_store("access-OLD", "refresh-OLD"))
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+    assert entry.refresh_token == "refresh-OLD"
+
+    # Another process refreshed the singleton auth store first, consuming the
+    # pool entry's refresh token while this in-memory pool still holds it.
+    _write_auth_store(tmp_path, _codex_auth_store("access-FRESH", "refresh-FRESH"))
+
+    def fake_refresh(access_token, refresh_token):
+        assert access_token == "access-FRESH"
+        assert refresh_token == "refresh-FRESH"
+        return {
+            "access_token": "access-NEW",
+            "refresh_token": "refresh-NEW",
+            "last_refresh": "2026-04-28T00:05:00Z",
+        }
+
+    monkeypatch.setattr(
+        "agent.credential_pool.auth_mod.refresh_codex_oauth_pure",
+        fake_refresh,
+    )
+
+    refreshed = pool._refresh_entry(entry, force=False)
+
+    assert refreshed is not None
+    assert refreshed.access_token == "access-NEW"
+    assert refreshed.refresh_token == "refresh-NEW"
+    assert refreshed.last_status == "ok"
+
+
+def test_codex_refresh_retries_after_auth_store_changes_during_failure(tmp_path, monkeypatch):
+    """If another process consumes a Codex refresh token mid-call, re-sync and retry once."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, _codex_auth_store("access-OLD", "refresh-OLD"))
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+    assert entry is not None
+
+    calls = []
+
+    def fake_refresh(access_token, refresh_token):
+        calls.append((access_token, refresh_token))
+        if refresh_token == "refresh-OLD":
+            _write_auth_store(tmp_path, _codex_auth_store("access-FRESH", "refresh-FRESH"))
+            raise RuntimeError("invalid_grant")
+        assert access_token == "access-FRESH"
+        assert refresh_token == "refresh-FRESH"
+        return {
+            "access_token": "access-NEW",
+            "refresh_token": "refresh-NEW",
+            "last_refresh": "2026-04-28T00:10:00Z",
+        }
+
+    monkeypatch.setattr(
+        "agent.credential_pool.auth_mod.refresh_codex_oauth_pure",
+        fake_refresh,
+    )
+
+    refreshed = pool._refresh_entry(entry, force=False)
+
+    assert calls == [("access-OLD", "refresh-OLD"), ("access-FRESH", "refresh-FRESH")]
+    assert refreshed is not None
+    assert refreshed.access_token == "access-NEW"
+    assert refreshed.refresh_token == "refresh-NEW"
+    assert refreshed.last_status == "ok"
+
+
 def test_codex_exhausted_entry_recovers_via_auth_store_sync(tmp_path, monkeypatch):
     """An exhausted Codex entry should recover when auth.json has newer tokens.
 

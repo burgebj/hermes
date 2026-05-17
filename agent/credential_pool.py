@@ -778,6 +778,9 @@ class CredentialPool:
                     except Exception as wexc:
                         logger.debug("Failed to write refreshed token to credentials file: %s", wexc)
             elif self.provider == "openai-codex":
+                synced = self._sync_codex_entry_from_auth_store(entry)
+                if synced is not entry:
+                    entry = synced
                 refreshed = auth_mod.refresh_codex_oauth_pure(
                     entry.access_token,
                     entry.refresh_token,
@@ -929,6 +932,39 @@ class CredentialPool:
                     self._persist()
                     self._sync_device_code_entry_to_auth_store(updated)
                     return updated
+            # For openai-codex: another process may have consumed the
+            # single-use refresh token between our proactive sync and the HTTP
+            # call. Re-sync from auth.json and retry once with the fresher pair.
+            if self.provider == "openai-codex":
+                synced = self._sync_codex_entry_from_auth_store(entry)
+                if synced.refresh_token != entry.refresh_token or synced.access_token != entry.access_token:
+                    logger.debug("Codex refresh failed but auth.json has newer tokens — retrying")
+                    try:
+                        refreshed = auth_mod.refresh_codex_oauth_pure(
+                            synced.access_token,
+                            synced.refresh_token,
+                        )
+                        updated = replace(
+                            synced,
+                            access_token=refreshed["access_token"],
+                            refresh_token=refreshed["refresh_token"],
+                            last_refresh=refreshed.get("last_refresh"),
+                            last_status=STATUS_OK,
+                            last_status_at=None,
+                            last_error_code=None,
+                            last_error_reason=None,
+                            last_error_message=None,
+                            last_error_reset_at=None,
+                        )
+                        self._replace_entry(synced, updated)
+                        self._persist()
+                        self._sync_device_code_entry_to_auth_store(updated)
+                        return updated
+                    except Exception as retry_exc:
+                        logger.debug("Codex retry refresh also failed: %s", retry_exc)
+                elif not self._entry_needs_refresh(synced):
+                    logger.debug("Codex auth.json has valid token, using without refresh")
+                    return synced
             self._mark_exhausted(entry, None)
             return None
 
