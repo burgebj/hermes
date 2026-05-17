@@ -10016,9 +10016,14 @@ class AIAgent:
             if _ephemeral_out is not None:
                 self._ephemeral_max_output_tokens = None
 
+            # Strip image parts for non-vision models so that providers
+            # with a profile also get the vision_analyze text-fallback
+            # instead of raw image_url parts that the model rejects.
+            _msgs_for_chat = self._prepare_messages_for_non_vision_model(api_messages)
+
             return _ct.build_kwargs(
                 model=self.model,
-                messages=api_messages,
+                messages=_msgs_for_chat,
                 tools=tools_for_api,
                 base_url=self.base_url,
                 timeout=self._resolved_api_call_timeout(),
