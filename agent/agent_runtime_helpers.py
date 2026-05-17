@@ -1198,6 +1198,24 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             agent._client_log_context(),
         )
         return client
+    if agent.provider == "claude-code" or str(client_kwargs.get("base_url", "")).startswith("claude://"):
+        from agent.claude_code_cli import ClaudeCodeClient
+
+        safe_kwargs = {
+            k: v
+            for k, v in client_kwargs.items()
+            if k in {"api_key", "base_url", "model", "binding_key", "command", "args"}
+        }
+        safe_kwargs["model"] = getattr(agent, "model", "")
+        safe_kwargs["binding_key"] = getattr(agent, "session_id", None)
+        client = ClaudeCodeClient(**safe_kwargs)
+        _ra().logger.info(
+            "Claude Code CLI client created (%s, shared=%s) %s",
+            reason,
+            shared,
+            agent._client_log_context(),
+        )
+        return client
     if agent.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
         from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 

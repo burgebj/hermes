@@ -992,8 +992,10 @@ def run_conversation(
                 # API upgrade (lines ~1083-1085).
                 elif (
                     agent.provider == "copilot-acp"
+                    or agent.provider == "claude-code"
                     or str(agent.base_url or "").lower().startswith("acp://copilot")
                     or str(agent.base_url or "").lower().startswith("acp+tcp://")
+                    or str(agent.base_url or "").lower().startswith("claude://")
                 ):
                     _use_streaming = False
                 elif not agent._has_stream_consumers():

@@ -173,6 +173,37 @@ def test_resolve_runtime_provider_qwen_oauth(monkeypatch):
     assert resolved["requested_provider"] == "qwen-oauth"
 
 
+def test_resolve_runtime_provider_claude_code_uses_cli_runtime(monkeypatch):
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "claude-code",
+            "default": "claude-sonnet-4-6",
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_external_process_provider_credentials",
+        lambda provider: {
+            "base_url": "claude://local",
+            "api_key": provider,
+            "command": "/usr/local/bin/claude",
+            "args": ["-p"],
+            "source": "process",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="claude-code")
+
+    assert resolved["provider"] == "claude-code"
+    assert resolved["api_mode"] == "claude_code_cli"
+    assert resolved["base_url"] == "claude://local"
+    assert resolved["api_key"] == "claude-code"
+    assert resolved["command"] == "/usr/local/bin/claude"
+    assert resolved["source"] == "process"
+
+
 def test_resolve_runtime_provider_uses_qwen_pool_entry(monkeypatch):
     class _Entry:
         access_token = "pool-qwen-token"

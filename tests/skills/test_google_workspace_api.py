@@ -21,6 +21,10 @@ API_PATH = (
     Path(__file__).resolve().parents[2]
     / "skills/productivity/google-workspace/scripts/google_api.py"
 )
+SETUP_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "skills/productivity/google-workspace/scripts/setup.py"
+)
 
 
 @pytest.fixture
@@ -52,6 +56,19 @@ def api_module(monkeypatch, tmp_path):
     module._gws_binary = lambda: "/usr/bin/gws"
     # Bypass authentication check — no real token file in CI.
     module._ensure_authenticated = lambda: None
+    return module
+
+
+@pytest.fixture
+def setup_module(monkeypatch, tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    spec = importlib.util.spec_from_file_location("gws_setup_test", SETUP_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
     return module
 
 
@@ -234,3 +251,36 @@ def test_api_get_credentials_refresh_persists_authorized_user_type(api_module, m
     assert isinstance(creds, FakeCredentials)
     assert saved["token"] == "ya29.refreshed"
     assert saved["type"] == "authorized_user"
+
+
+def test_api_uses_read_only_drive_and_docs_scopes(api_module):
+    assert "https://www.googleapis.com/auth/drive.readonly" in api_module.SCOPES
+    assert "https://www.googleapis.com/auth/documents.readonly" in api_module.SCOPES
+    assert "https://www.googleapis.com/auth/tasks" in api_module.SCOPES
+    assert "https://www.googleapis.com/auth/drive" not in api_module.SCOPES
+    assert "https://www.googleapis.com/auth/documents" not in api_module.SCOPES
+
+
+def test_setup_uses_read_only_drive_and_docs_scopes(setup_module):
+    assert "https://www.googleapis.com/auth/drive.readonly" in setup_module.SCOPES
+    assert "https://www.googleapis.com/auth/documents.readonly" in setup_module.SCOPES
+    assert "https://www.googleapis.com/auth/tasks" in setup_module.SCOPES
+    assert "https://www.googleapis.com/auth/drive" not in setup_module.SCOPES
+    assert "https://www.googleapis.com/auth/documents" not in setup_module.SCOPES
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "drive_upload",
+        "drive_download",
+        "drive_create_folder",
+        "drive_share",
+        "drive_delete",
+        "sheets_create",
+        "docs_create",
+        "docs_append",
+    ],
+)
+def test_api_does_not_expose_mutating_drive_docs_sheets_helpers(api_module, name):
+    assert not hasattr(api_module, name)

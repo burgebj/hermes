@@ -127,6 +127,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    GOOGLE_CHAT = "google_chat"
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -431,6 +433,15 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     ),
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
+    ),
+    Platform.GOOGLE_CHAT: lambda cfg: bool(
+        cfg.extra.get("project_id")
+        and (cfg.extra.get("subscription_name") or cfg.extra.get("subscription"))
+        and (
+            cfg.extra.get("service_account_json")
+            or os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
+            or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        )
     ),
     Platform.DINGTALK: lambda cfg: bool(
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))

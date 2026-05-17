@@ -99,6 +99,29 @@ class TestIsNetworkAccessible:
 class TestConnectBindGuard:
     """Verify that connect() refuses dangerous configurations."""
 
+    def test_loopback_without_key_requires_explicit_development_opt_in(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1"}))
+        assert adapter._requires_api_key() is True
+
+    @pytest.mark.asyncio
+    async def test_refuses_loopback_without_development_opt_in(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1"}))
+        result = await adapter.connect()
+        assert result is False
+        assert adapter._app is None
+
+    def test_loopback_development_opt_in_allows_missing_key(self):
+        adapter = APIServerAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "host": "127.0.0.1",
+                    "allow_unauthenticated_localhost": True,
+                },
+            )
+        )
+        assert adapter._requires_api_key() is False
+
     @pytest.mark.asyncio
     async def test_refuses_ipv4_wildcard_without_key(self):
         adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "0.0.0.0"}))
@@ -111,12 +134,19 @@ class TestConnectBindGuard:
         result = await adapter.connect()
         assert result is False
 
-    def test_allows_loopback_without_key(self):
-        """Loopback with no key should pass the guard."""
-        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1"}))
+    def test_allows_loopback_without_key_with_development_opt_in(self):
+        """Loopback with no key should pass only with explicit development opt-in."""
+        adapter = APIServerAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "host": "127.0.0.1",
+                    "allow_unauthenticated_localhost": True,
+                },
+            )
+        )
         assert adapter._api_key == ""
-        # The guard condition: is_network_accessible(host) AND NOT api_key
-        # For loopback, is_network_accessible is False so the guard does not block.
+        assert adapter._requires_api_key() is False
         assert is_network_accessible(adapter._host) is False
 
     @pytest.mark.asyncio

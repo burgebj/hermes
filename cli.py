@@ -10041,6 +10041,7 @@ class HermesCLI:
         except Exception as e:
             _cprint(f"\n{_DIM}Voice processing error: {e}{_RST}")
         finally:
+            should_restart_continuous = False
             with self._voice_lock:
                 self._voice_processing = False
             if hasattr(self, '_app') and self._app:
@@ -10059,7 +10060,8 @@ class HermesCLI:
                     self._voice_continuous = False
                     self._no_speech_count = 0
                     _cprint(f"{_DIM}No speech detected 3 times, continuous mode stopped.{_RST}")
-                    return
+                else:
+                    should_restart_continuous = self._voice_continuous and not self._voice_recording
             else:
                 self._no_speech_count = 0
 
@@ -10067,7 +10069,7 @@ class HermesCLI:
             # restart recording so the user can keep talking.
             # (When transcript IS submitted, process_loop handles restart
             # after chat() completes.)
-            if self._voice_continuous and not submitted and not self._voice_recording:
+            if should_restart_continuous:
                 def _restart_recording():
                     try:
                         self._voice_start_recording()

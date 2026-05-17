@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -155,6 +156,23 @@ _SENSITIVE_PATH_PREFIXES = (
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 
+def _allowed_temp_roots() -> tuple[str, ...]:
+    roots: list[str] = []
+    for raw in (
+        tempfile.gettempdir(),
+        os.environ.get("TMPDIR", ""),
+        os.environ.get("TMP", ""),
+        os.environ.get("TEMP", ""),
+    ):
+        if not raw:
+            continue
+        for candidate in {raw, os.path.realpath(raw)}:
+            norm = os.path.normpath(candidate)
+            if norm and norm not in roots:
+                roots.append(norm)
+    return tuple(roots)
+
+
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
     try:
@@ -162,6 +180,12 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except (OSError, ValueError):
         resolved = filepath
     normalized = os.path.normpath(os.path.expanduser(filepath))
+    temp_roots = _allowed_temp_roots()
+    if any(
+        resolved == root or resolved.startswith(root.rstrip("/") + "/")
+        for root in temp_roots
+    ):
+        return None
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."

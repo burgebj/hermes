@@ -123,6 +123,12 @@ _ensure_google_mocks()
 import plugins.platforms.google_chat.adapter as _gc_mod  # noqa: E402
 
 _gc_mod.GOOGLE_CHAT_AVAILABLE = True
+_gc_mod._google_modules_loaded = True
+_gc_mod.service_account = sys.modules["google.oauth2.service_account"]
+_gc_mod.pubsub_v1 = sys.modules["google.cloud.pubsub_v1"]
+_gc_mod.gax_exceptions = sys.modules["google.api_core.exceptions"]
+_gc_mod.HttpError = _FakeHttpError
+_gc_mod.MediaFileUpload = sys.modules["googleapiclient.http"].MediaFileUpload
 
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome  # noqa: E402
 from plugins.platforms.google_chat.adapter import (  # noqa: E402
@@ -2740,7 +2746,7 @@ class _FakeAiohttpSession:
 
 def _install_fake_aiohttp(monkeypatch, session):
     fake_aiohttp = types.SimpleNamespace(
-        ClientSession=lambda timeout=None: session,
+        ClientSession=lambda **kwargs: session,
         ClientTimeout=lambda total=None: None,
     )
     monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)

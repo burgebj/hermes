@@ -716,6 +716,18 @@ class AIAgent:
             except Exception:
                 logger.debug("status_callback error in _emit_warning", exc_info=True)
 
+    def _emit_error(self, message: str) -> None:
+        """Emit a fatal user-visible error even while streaming TTS is active."""
+        try:
+            self._vprint(f"{self.log_prefix}❌ {message}", force=True)
+        except Exception:
+            pass
+        if self.status_callback:
+            try:
+                self.status_callback("error", message)
+            except Exception:
+                logger.debug("status_callback error in _emit_error", exc_info=True)
+
     # Stream-diagnostic class header preserved for backward compat —
     # actual list lives in ``agent.stream_diag.STREAM_DIAG_HEADERS``.
     from agent.stream_diag import STREAM_DIAG_HEADERS as _STREAM_DIAG_HEADERS  # noqa: E402
@@ -3601,11 +3613,15 @@ class AIAgent:
         ``reasoning_content`` on every assistant tool-call message; omitting
         it causes the next replay to fail with HTTP 400.
 
-        Also detects Kimi models served through third-party providers (e.g.
-        ollama-cloud) by matching ``kimi`` in the model name.
+        OpenRouter serves Kimi model IDs too, but it does not require the
+        Moonshot/Kimi ``reasoning_content`` replay contract; routing there
+        must not trigger the compatibility pad.
         """
+        provider = (self.provider or "").strip().lower()
+        if provider in {"openrouter", "nous"} or base_url_host_matches(self.base_url, "openrouter.ai"):
+            return False
         return (
-            self.provider in {"kimi-coding", "kimi-coding-cn"}
+            provider in {"kimi-coding", "kimi-coding-cn"}
             or base_url_host_matches(self.base_url, "api.kimi.com")
             or base_url_host_matches(self.base_url, "moonshot.ai")
             or base_url_host_matches(self.base_url, "moonshot.cn")

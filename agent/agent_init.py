@@ -224,7 +224,7 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
+    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server", "claude_code_cli"}:
         agent.api_mode = api_mode
     elif agent.provider == "openai-codex":
         agent.api_mode = "codex_responses"
@@ -611,6 +611,9 @@ def init_agent(
             if _provider_timeout is not None:
                 client_kwargs["timeout"] = _provider_timeout
             if agent.provider == "copilot-acp":
+                client_kwargs["command"] = agent.acp_command
+                client_kwargs["args"] = agent.acp_args
+            elif agent.provider == "claude-code":
                 client_kwargs["command"] = agent.acp_command
                 client_kwargs["args"] = agent.acp_args
             effective_base = base_url

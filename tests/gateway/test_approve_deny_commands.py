@@ -367,6 +367,10 @@ class TestBlockingApprovalE2E:
         os.environ.pop("HERMES_GATEWAY_SESSION", None)
         os.environ.pop("HERMES_EXEC_ASK", None)
         os.environ.pop("HERMES_SESSION_KEY", None)
+        os.environ["TIRITH_ENABLED"] = "0"
+
+    def teardown_method(self):
+        os.environ.pop("TIRITH_ENABLED", None)
 
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""

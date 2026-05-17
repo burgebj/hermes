@@ -2515,11 +2515,15 @@ def _require_service_installed(action: str, system: bool = False) -> None:
         sys.exit(1)
 
 
+def _should_preflight_user_systemd() -> bool:
+    return is_linux() and shutil.which("systemctl") is not None
+
+
 def systemd_start(system: bool = False):
     system = _select_systemd_scope(system)
     if system:
         _require_root_for_system_service("start")
-    else:
+    elif _should_preflight_user_systemd():
         # Fail fast with actionable guidance if the user D-Bus session is not
         # reachable (common on fresh RHEL/Debian SSH sessions without linger).
         # Raises UserSystemdUnavailableError with a remediation message.
@@ -2561,7 +2565,7 @@ def systemd_restart(system: bool = False):
     system = _select_systemd_scope(system)
     if system:
         _require_root_for_system_service("restart")
-    else:
+    elif _should_preflight_user_systemd():
         _preflight_user_systemd()
     _require_service_installed("restart", system=system)
     refresh_systemd_unit_if_needed(system=system)

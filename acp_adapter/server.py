@@ -1524,6 +1524,12 @@ class HermesACPAgent(acp.Agent):
             requested_provider=target_provider,
         )
         self.session_manager.save_session(state.session_id)
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            resolve_runtime_provider(requested=target_provider)
+        except Exception:
+            logger.debug("ACP model switch provider verification failed", exc_info=True)
         provider_label = getattr(state.agent, "provider", None) or target_provider or current_provider
         logger.info("Session %s: model switched to %s", state.session_id, new_model)
         return f"Model switched to: {new_model}\nProvider: {provider_label}"

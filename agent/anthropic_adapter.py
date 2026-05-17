@@ -11,6 +11,7 @@ Auth supports:
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -312,6 +313,50 @@ def _detect_claude_code_version() -> str:
 
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 _MCP_TOOL_PREFIX = "mcp_"
+
+
+def _claude_code_credentials_home() -> Path:
+    """Return the Claude Code HOME whose credentials Hermes should use."""
+    override = os.getenv("HERMES_CLAUDE_CODE_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home()
+
+
+def _claude_code_keychain_service(home: Optional[Path] = None) -> str:
+    """Claude Code's home-scoped Keychain service name."""
+    home_path = home or _claude_code_credentials_home()
+    digest = hashlib.sha256(str(home_path).encode("utf-8")).hexdigest()[:8]
+    return f"Claude Code-credentials-{digest}"
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _claude_code_keychain_candidates(home: Optional[Path] = None) -> list[tuple[str, str]]:
+    """Return Keychain service/account candidates without exposing secrets."""
+    home_path = home or _claude_code_credentials_home()
+    services = [_claude_code_keychain_service(home_path), "Claude Code-credentials"]
+    accounts = _unique_strings([
+        os.getenv("USER", "").strip(),
+        os.getenv("LOGNAME", "").strip(),
+        "unknown",
+    ])
+    return [(service, account) for service in _unique_strings(services) for account in accounts]
+
+
+def _should_probe_claude_code_keychain(home: Path) -> bool:
+    """Avoid piercing test/sandboxed homes unless the home override is explicit."""
+    if os.getenv("HERMES_CLAUDE_CODE_HOME", "").strip():
+        return True
+    return home == Path(os.path.expanduser("~"))
 
 
 def _get_claude_code_version() -> str:
@@ -657,12 +702,13 @@ def build_anthropic_bedrock_client(region: str):
     )
 
 
-def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
+def _read_claude_code_credentials_from_keychain(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Read Claude Code OAuth credentials from the macOS Keychain.
 
     Claude Code >=2.1.114 stores credentials in the macOS Keychain under the
-    service name "Claude Code-credentials" rather than (or in addition to)
-    the JSON file at ~/.claude/.credentials.json.
+    service name "Claude Code-credentials" or a home-scoped service named
+    "Claude Code-credentials-{sha256(HOME)[:8]}" rather than (or in addition
+    to) the JSON file at ~/.claude/.credentials.json.
 
     The password field contains a JSON string with the same claudeAiOauth
     structure as the JSON file.
@@ -672,44 +718,50 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
     if platform.system() != "Darwin":
         return None
 
-    try:
-        # Read the "Claude Code-credentials" generic password entry
-        result = subprocess.run(
-            ["security", "find-generic-password",
-             "-s", "Claude Code-credentials",
-             "-w"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        logger.debug("Keychain: security command not available or timed out")
-        return None
+    for service, account in _claude_code_keychain_candidates(home):
+        try:
+            result = subprocess.run(
+                [
+                    "security", "find-generic-password",
+                    "-s", service,
+                    "-a", account,
+                    "-w",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.debug("Keychain: security command not available or timed out")
+            return None
 
-    if result.returncode != 0:
-        logger.debug("Keychain: no entry found for 'Claude Code-credentials'")
-        return None
+        if result.returncode != 0:
+            continue
 
-    raw = result.stdout.strip()
-    if not raw:
-        return None
+        raw = result.stdout.strip()
+        if not raw:
+            continue
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.debug("Keychain: credentials payload is not valid JSON")
-        return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.debug("Keychain: credentials payload for %s is not valid JSON", service)
+            continue
 
-    oauth_data = data.get("claudeAiOauth")
-    if oauth_data and isinstance(oauth_data, dict):
-        access_token = oauth_data.get("accessToken", "")
-        if access_token:
-            return {
-                "accessToken": access_token,
-                "refreshToken": oauth_data.get("refreshToken", ""),
-                "expiresAt": oauth_data.get("expiresAt", 0),
-                "source": "macos_keychain",
-            }
+        oauth_data = data.get("claudeAiOauth")
+        if oauth_data and isinstance(oauth_data, dict):
+            access_token = oauth_data.get("accessToken", "")
+            if access_token:
+                return {
+                    "accessToken": access_token,
+                    "refreshToken": oauth_data.get("refreshToken", ""),
+                    "expiresAt": oauth_data.get("expiresAt", 0),
+                    "source": "macos_keychain",
+                    "_keychain_service": service,
+                    "_keychain_account": account,
+                }
+
+    logger.debug("Keychain: no Claude Code OAuth entry found")
 
     return None
 
@@ -728,13 +780,13 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
 
     Returns dict with {accessToken, refreshToken?, expiresAt?} or None.
     """
-    # Try macOS Keychain first (covers Claude Code >=2.1.114)
-    kc_creds = _read_claude_code_credentials_from_keychain()
-    if kc_creds:
-        return kc_creds
+    credential_home = _claude_code_credentials_home()
+    cred_path = credential_home / ".claude" / ".credentials.json"
+    if _should_probe_claude_code_keychain(credential_home):
+        kc_creds = _read_claude_code_credentials_from_keychain(credential_home)
+        if kc_creds:
+            return kc_creds
 
-    # Fall back to JSON file
-    cred_path = Path.home() / ".claude" / ".credentials.json"
     if cred_path.exists():
         try:
             data = json.loads(cred_path.read_text(encoding="utf-8"))
@@ -868,6 +920,38 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def _write_claude_code_credentials_to_keychain(oauth_data: Dict[str, Any]) -> None:
+    """Persist refreshed Claude Code OAuth credentials to the active Keychain service."""
+    if platform.system() != "Darwin":
+        return
+
+    service = (
+        _claude_code_keychain_service()
+        if os.getenv("HERMES_CLAUDE_CODE_HOME", "").strip()
+        else "Claude Code-credentials"
+    )
+    account = os.getenv("USER", "").strip() or os.getenv("LOGNAME", "").strip() or "unknown"
+    payload = json.dumps({"claudeAiOauth": oauth_data})
+    try:
+        result = subprocess.run(
+            [
+                "security", "add-generic-password",
+                "-U",
+                "-s", service,
+                "-a", account,
+                "-w", payload,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("Failed to write Claude Code credentials to Keychain: %s", exc)
+        return
+    if result.returncode != 0:
+        logger.debug("Failed to write Claude Code credentials to Keychain service %s", service)
+
+
 def _write_claude_code_credentials(
     access_token: str,
     refresh_token: str,
@@ -882,7 +966,8 @@ def _write_claude_code_credentials(
     as valid.  Claude Code >=2.1.81 gates on the presence of ``"user:inference"``
     in the stored scopes before it will use the token.
     """
-    cred_path = Path.home() / ".claude" / ".credentials.json"
+    credential_home = _claude_code_credentials_home()
+    cred_path = credential_home / ".claude" / ".credentials.json"
     try:
         # Read existing file to preserve other fields
         existing = {}
@@ -902,6 +987,7 @@ def _write_claude_code_credentials(
             oauth_data["scopes"] = existing["claudeAiOauth"]["scopes"]
 
         existing["claudeAiOauth"] = oauth_data
+        _write_claude_code_credentials_to_keychain(oauth_data)
 
         cred_path.parent.mkdir(parents=True, exist_ok=True)
         _tmp_cred = cred_path.with_suffix(".tmp")
@@ -2082,5 +2168,3 @@ def build_anthropic_kwargs(
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
-
-

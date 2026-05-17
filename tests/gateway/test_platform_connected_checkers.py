@@ -95,6 +95,12 @@ def test_checker_returns_true_when_configured(platform, checker, monkeypatch):
         mock_config.extra = {"app_id": "app", "client_secret": "sec"}
     elif platform == Platform.YUANBAO:
         mock_config.extra = {"app_id": "app", "app_secret": "sec"}
+    elif platform == Platform.GOOGLE_CHAT:
+        mock_config.extra = {
+            "project_id": "project",
+            "subscription_name": "projects/project/subscriptions/hermes",
+            "service_account_json": "/tmp/google-chat-sa.json",
+        }
     elif platform == Platform.DINGTALK:
         mock_config.extra = {"client_id": "id", "client_secret": "sec"}
     else:

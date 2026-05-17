@@ -268,7 +268,7 @@ def _get_provider(stt_config: dict) -> str:
         if provider == "xai":
             from tools.xai_http import resolve_xai_http_credentials
 
-            if resolve_xai_http_credentials().get("api_key"):
+            if resolve_xai_http_credentials().get("api_key") or get_env_value("XAI_API_KEY"):
                 return "xai"
             logger.warning(
                 "STT provider 'xai' configured but no xAI credentials are available"
@@ -714,7 +714,7 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
     from tools.xai_http import resolve_xai_http_credentials
 
     creds = resolve_xai_http_credentials()
-    api_key = str(creds.get("api_key") or "").strip()
+    api_key = str(creds.get("api_key") or get_env_value("XAI_API_KEY") or "").strip()
     if not api_key:
         return {
             "success": False,

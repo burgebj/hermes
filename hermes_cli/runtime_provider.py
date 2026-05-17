@@ -173,6 +173,7 @@ _VALID_API_MODES = {
     "codex_responses",
     "anthropic_messages",
     "bedrock_converse",
+    "claude_code_cli",
     # Optional opt-in: hand the entire turn to a `codex app-server` subprocess
     # so terminal/file-ops/patching/sandboxing run inside Codex's own runtime
     # instead of Hermes' tool dispatch. Gated behind config key
@@ -1012,6 +1013,19 @@ def resolve_runtime_provider(
         )
         return azure_runtime
 
+    if requested_provider == "claude-code":
+        creds = resolve_external_process_provider_credentials("claude-code")
+        return {
+            "provider": "claude-code",
+            "api_mode": "claude_code_cli",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "command": creds.get("command", ""),
+            "args": list(creds.get("args") or []),
+            "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
@@ -1212,6 +1226,19 @@ def resolve_runtime_provider(
         return {
             "provider": "copilot-acp",
             "api_mode": "chat_completions",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "command": creds.get("command", ""),
+            "args": list(creds.get("args") or []),
+            "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "claude-code":
+        creds = resolve_external_process_provider_credentials(provider)
+        return {
+            "provider": "claude-code",
+            "api_mode": "claude_code_cli",
             "base_url": creds.get("base_url", "").rstrip("/"),
             "api_key": creds.get("api_key", ""),
             "command": creds.get("command", ""),
