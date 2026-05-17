@@ -852,6 +852,90 @@ class TestGetDueJobs:
         assert recovered_dt > now
 
 
+class TestCatchup:
+    """Tests for catchup=True behaviour in get_due_jobs."""
+
+    def test_catchup_false_stale_job_skipped(self, tmp_cron_dir):
+        """Default (catchup=False): a stale job outside the grace window is skipped."""
+        create_job(prompt="Stale", schedule="every 1h", catchup=False)
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now(timezone.utc) - timedelta(minutes=35)).isoformat()
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+        assert len(due) == 0
+
+    def test_catchup_true_stale_job_fires(self, tmp_cron_dir):
+        """catchup=True: a stale job outside the grace window executes immediately."""
+        job = create_job(prompt="Missed", schedule="every 1h", catchup=True)
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now(timezone.utc) - timedelta(minutes=35)).isoformat()
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+        assert len(due) == 1
+        assert due[0]["id"] == job["id"]
+
+    def test_catchup_true_advances_next_run(self, tmp_cron_dir):
+        """After a catchup fire, next_run_at is advanced to a future slot."""
+        from cron.jobs import _ensure_aware, _hermes_now
+        job = create_job(prompt="Missed", schedule="every 1h", catchup=True)
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now(timezone.utc) - timedelta(minutes=35)).isoformat()
+        save_jobs(jobs)
+
+        get_due_jobs()
+
+        updated = get_job(job["id"])
+        next_dt = _ensure_aware(datetime.fromisoformat(updated["next_run_at"]))
+        assert next_dt > _hermes_now()
+
+    def test_catchup_true_fires_once_not_multiple_times(self, tmp_cron_dir):
+        """Even when multiple periods were missed, only one catch-up run fires."""
+        job = create_job(prompt="Missed many", schedule="every 1h", catchup=True)
+        # Simulate 3 hours of downtime (way past a single period)
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+        # Exactly one run despite 3 missed periods
+        assert len([j for j in due if j["id"] == job["id"]]) == 1
+
+    def test_catchup_within_grace_window_fires_normally(self, tmp_cron_dir):
+        """A job within its grace window fires regardless of catchup flag."""
+        job = create_job(prompt="In window", schedule="every 1h", catchup=False)
+        jobs = load_jobs()
+        # 10 min late is within 30-min grace for an hourly job
+        jobs[0]["next_run_at"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+        assert len(due) == 1
+        assert due[0]["id"] == job["id"]
+
+    def test_catchup_stored_and_retrievable(self, tmp_cron_dir):
+        """catchup flag is persisted and readable via get_job."""
+        job = create_job(prompt="Test", schedule="every 1h", catchup=True)
+        retrieved = get_job(job["id"])
+        assert retrieved["catchup"] is True
+
+    def test_catchup_default_is_false(self, tmp_cron_dir):
+        """Jobs created without catchup= default to catchup=False."""
+        job = create_job(prompt="Default", schedule="every 1h")
+        retrieved = get_job(job["id"])
+        assert not retrieved.get("catchup", False)
+
+    def test_update_job_catchup(self, tmp_cron_dir):
+        """update_job can enable and disable catchup on an existing job."""
+        job = create_job(prompt="Updatable", schedule="every 1h", catchup=False)
+        updated = update_job(job["id"], {"catchup": True})
+        assert updated["catchup"] is True
+
+        updated2 = update_job(job["id"], {"catchup": False})
+        assert not updated2.get("catchup", True)
+
+
 class TestEnabledToolsets:
     def test_enabled_toolsets_stored(self, tmp_cron_dir):
         job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=["web", "terminal"])

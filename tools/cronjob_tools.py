@@ -415,6 +415,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["workdir"] = job["workdir"]
     if job.get("profile"):
         result["profile"] = job["profile"]
+    if job.get("catchup"):
+        result["catchup"] = True
     return result
 
 
@@ -439,6 +441,7 @@ def cronjob(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    catchup: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -506,6 +509,7 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 profile=_normalize_optional_job_value(profile),
                 no_agent=_no_agent,
+                catchup=bool(catchup) if catchup is not None else False,
             )
             return json.dumps(
                 {
@@ -657,6 +661,8 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if catchup is not None:
+                updates["catchup"] = bool(catchup)
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -800,6 +806,20 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional Hermes profile name to run the job under. When set, the scheduler resolves that profile, applies a context-local Hermes home override, loads that profile's config/.env for the run, and bridges HERMES_HOME into subprocesses. Any temporary process-environment changes from profile .env loading are restored after the job exits. Use 'default' for the root Hermes profile. Named profiles must already exist. When unset (default), preserves the scheduler's existing profile. On update, pass an empty string to clear. Jobs with profile run sequentially (not parallel) to keep profile-scoped runtime state isolated."
             },
+            "catchup": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Default: False. When True, a recurring job that missed its scheduled run "
+                    "(because the gateway was down or the scheduler was blocked) will execute "
+                    "immediately on the next scheduler tick instead of silently fast-forwarding "
+                    "to the next future occurrence. Exactly one catch-up run fires per missed "
+                    "period — not one per skipped occurrence — then the normal schedule resumes. "
+                    "Useful for critical recurring jobs (backups, health-checks, daily digests) "
+                    "where a missed run should be compensated. Leave False (default) for jobs "
+                    "where running late makes no sense (e.g. \"send morning briefing\")."
+                ),
+            },
         },
         "required": ["action"]
     }
@@ -856,6 +876,7 @@ registry.register(
         workdir=args.get("workdir"),
         profile=args.get("profile"),
         no_agent=args.get("no_agent"),
+        catchup=args.get("catchup"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,
