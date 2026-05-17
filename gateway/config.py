@@ -440,6 +440,49 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
 
 
 @dataclass
+class SlackAutoJoinConfig:
+    """Auto-join Slack channels whose names match a regex.
+
+    Config schema (top-level key in config.yaml)::
+
+        slack_auto_join:
+          enabled: false
+          channel_regex: "^inc-.*$"
+          slack_prompt_on_join: ""   # optional: injected after joining; ${channel_name} is substituted
+
+    Requires the Slack app to have the ``channels:join`` OAuth scope and
+    the ``channel_created`` event subscribed in the app manifest.
+
+    For the bot to also trigger when manually invited to an existing channel
+    (not just on channel_created), also subscribe the ``member_joined_channel``
+    event in the app manifest.
+    """
+    enabled: bool = False
+    # Compiled at load time; None means regex was empty/invalid (skip all).
+    channel_regex: str = ""
+    # Optional prompt injected as a synthetic message after joining a channel.
+    # Supports ${channel_name} substitution.  Empty string = no prompt.
+    slack_prompt_on_join: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "channel_regex": self.channel_regex,
+            "slack_prompt_on_join": self.slack_prompt_on_join,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SlackAutoJoinConfig":
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            channel_regex=str(data.get("channel_regex", "")),
+            slack_prompt_on_join=str(data.get("slack_prompt_on_join", "")),
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -476,8 +519,16 @@ class GatewayConfig:
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
+    # Global allow-all override (mirrors GATEWAY_ALLOW_ALL_USERS env var but
+    # settable from config.yaml).  When True, every authenticated message is
+    # accepted regardless of per-user allowlists.
+    allow_all_users: bool = False
+
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
+
+    # Slack auto-join configuration
+    slack_auto_join: SlackAutoJoinConfig = field(default_factory=SlackAutoJoinConfig)
 
     # Session store pruning: drop SessionEntry records older than this many
     # days from the in-memory dict and sessions.json.  Keeps the store from
@@ -632,6 +683,8 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        allow_all_users = _coerce_bool(data.get("allow_all_users"), False)
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -646,7 +699,9 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            slack_auto_join=SlackAutoJoinConfig.from_dict(data.get("slack_auto_join", {})),
             session_store_max_age_days=session_store_max_age_days,
+            allow_all_users=allow_all_users,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -742,6 +797,10 @@ def load_gateway_config() -> GatewayConfig:
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
 
+            slack_auto_join_cfg = yaml_cfg.get("slack_auto_join")
+            if isinstance(slack_auto_join_cfg, dict):
+                gw_data["slack_auto_join"] = slack_auto_join_cfg
+
             if "reset_triggers" in yaml_cfg:
                 gw_data["reset_triggers"] = yaml_cfg["reset_triggers"]
 
@@ -753,6 +812,9 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            if "allow_all_users" in yaml_cfg:
+                gw_data["allow_all_users"] = yaml_cfg["allow_all_users"]
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.

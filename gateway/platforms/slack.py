@@ -348,6 +348,10 @@ class SlackAdapter(BasePlatformAdapter):
         # (channel_id, user_id) to avoid cross-user collisions.
         # Each value: {"response_url": str, "ts": float}
         self._slash_command_contexts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Auto-join config (loaded lazily in connect() from gateway config)
+        self._auto_join_enabled: bool = False
+        self._auto_join_regex: Optional[Any] = None  # compiled re.Pattern or None
+        self._auto_join_prompt: str = ""  # slack_prompt_on_join template
 
     def _describe_slack_api_error(self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Convert Slack API auth/permission failures into actionable user-facing text."""
@@ -630,6 +634,45 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_assistant_thread_context_changed(event, say):
                 await self._handle_assistant_thread_lifecycle_event(event)
 
+            # ------------------------------------------------------------------
+            # Auto-join: load config and register channel_created handler
+            # ------------------------------------------------------------------
+            try:
+                from gateway.config import load_gateway_config
+                _gw_cfg = load_gateway_config()
+                _aj = _gw_cfg.slack_auto_join
+                self._auto_join_enabled = _aj.enabled
+                if _aj.enabled and _aj.channel_regex:
+                    import re as _re_mod
+                    try:
+                        self._auto_join_regex = _re_mod.compile(_aj.channel_regex, _re_mod.IGNORECASE)
+                        self._auto_join_prompt = _aj.slack_prompt_on_join or ""
+                        logger.info(
+                            "[Slack] Auto-join enabled, regex: %s", _aj.channel_regex
+                        )
+                    except _re_mod.error as _rx_err:
+                        logger.warning(
+                            "[Slack] slack_auto_join.channel_regex is invalid (%s) — auto-join disabled",
+                            _rx_err,
+                        )
+                        self._auto_join_enabled = False
+                        self._auto_join_regex = None
+                elif _aj.enabled and not _aj.channel_regex:
+                    logger.warning(
+                        "[Slack] slack_auto_join.enabled=true but channel_regex is empty — auto-join disabled"
+                    )
+                    self._auto_join_enabled = False
+            except Exception as _aj_exc:
+                logger.warning("[Slack] Could not load slack_auto_join config: %s", _aj_exc)
+
+            @self._app.event("channel_created")
+            async def handle_channel_created(event, say):
+                await self._handle_channel_created(event)
+
+            @self._app.event("member_joined_channel")
+            async def handle_member_joined_channel(event, say):
+                await self._handle_member_joined_channel(event)
+
             # Register slash command handler(s)
             #
             # Every gateway command from COMMAND_REGISTRY is a native Slack
@@ -691,6 +734,22 @@ class SlackAdapter(BasePlatformAdapter):
                 "[Slack] Socket Mode connected (%d workspace(s))",
                 len(self._team_clients),
             )
+            # Warn operators that open-channel auth is active so the risk is visible in logs.
+            _allow_on_ch = self._slack_allow_all_users_on_channel()
+            if _allow_on_ch:
+                if "*" in _allow_on_ch:
+                    logger.warning(
+                        "[Slack] SECURITY: allow_all_users_on_channel is set to ALL channels. "
+                        "Any workspace member in any channel where the bot is present can send commands. "
+                        "Restrict this to specific channel IDs unless you intend open access."
+                    )
+                else:
+                    logger.warning(
+                        "[Slack] SECURITY: allow_all_users_on_channel is active for %d channel(s): %s. "
+                        "Any workspace member in these channels can send commands without being in SLACK_ALLOWED_USERS.",
+                        len(_allow_on_ch),
+                        ", ".join(sorted(_allow_on_ch)),
+                    )
             return True
 
         except Exception as e:  # pragma: no cover - defensive logging
@@ -1763,6 +1822,172 @@ class SlackAdapter(BasePlatformAdapter):
         metadata = self._extract_assistant_thread_metadata(event)
         self._cache_assistant_thread_metadata(metadata)
         self._seed_assistant_thread_session(metadata)
+
+    async def _handle_channel_created(self, event: dict) -> None:
+        """Auto-join a newly created channel if its name matches the configured regex.
+
+        Requires:
+          - slack_auto_join.enabled: true in config.yaml
+          - slack_auto_join.channel_regex: <pattern>
+          - Slack app scopes: channels:read, channels:join
+          - channel_created subscribed in the Slack app manifest
+
+        After joining, if slack_auto_join.slack_prompt_on_join is set the bot
+        dispatches a synthetic message into the new channel so the agent can
+        begin investigating without waiting for a human message.
+        ${channel_name} in the template is substituted with the actual channel name.
+        """
+        if not self._auto_join_enabled or self._auto_join_regex is None:
+            return
+
+        channel_info = event.get("channel", {})
+        channel_id   = channel_info.get("id", "")
+        channel_name = channel_info.get("name", "")
+
+        if not channel_id or not channel_name:
+            logger.debug("[Slack] channel_created event missing id/name — skipping")
+            return
+
+        if self._auto_join_regex.search(channel_name):
+            logger.debug(
+                "[Slack] Auto-join: channel #%s (%s) matched regex — joining",
+                channel_name, channel_id,
+            )
+            client = self._app.client
+            joined = False
+            try:
+                await client.conversations_join(channel=channel_id)
+                # Resolve team_id for multi-workspace client routing
+                try:
+                    info_resp = await client.conversations_info(channel=channel_id)
+                    ch = info_resp.get("channel", {})
+                    team_ids = ch.get("shared_team_ids") or []
+                    if team_ids:
+                        self._channel_team[channel_id] = team_ids[0]
+                except Exception as _info_exc:
+                    logger.debug(
+                        "[Slack] Auto-join: could not resolve team_id for %s: %s",
+                        channel_id, _info_exc,
+                    )
+                logger.info(
+                    "[Slack] Auto-join: joined #%s (%s)",
+                    channel_name, channel_id,
+                )
+                joined = True
+            except Exception as exc:
+                err_str = str(exc)
+                if "missing_scope" in err_str or "not_allowed" in err_str:
+                    logger.error(
+                        "[Slack] Auto-join: cannot join #%s — bot lacks 'channels:join' scope. "
+                        "Add it to your Slack app manifest and reinstall the app.",
+                        channel_name,
+                    )
+                else:
+                    logger.warning(
+                        "[Slack] Auto-join: failed to join #%s (%s): %s",
+                        channel_name, channel_id, exc,
+                    )
+
+            if joined and self._auto_join_prompt:
+                await self._dispatch_prompt_on_join(channel_id, channel_name)
+        else:
+            logger.debug(
+                "[Slack] Auto-join: channel #%s (%s) did not match regex — skipping",
+                channel_name, channel_id,
+            )
+
+    async def _handle_member_joined_channel(self, event: dict) -> None:
+        """Fire the prompt-on-join flow when the bot is added to an existing channel.
+
+        This covers the case where the bot is manually invited to a channel that
+        already exists (i.e. was created before the bot was running, or the bot
+        was offline when channel_created fired).
+
+        Requires ``member_joined_channel`` subscribed in the Slack app manifest.
+        """
+        if not self._auto_join_enabled or self._auto_join_regex is None:
+            return
+
+        # Only act when it is the bot itself that joined.
+        user_id = event.get("user", "")
+        if not self._bot_user_id or user_id != self._bot_user_id:
+            return
+
+        channel_id   = event.get("channel", "")
+        channel_name = event.get("channel_name", "") or channel_id
+
+        if not channel_id:
+            return
+
+        # For member_joined_channel we may only have the channel ID in the event;
+        # resolve the name via the API if the event field is empty.
+        if channel_name == channel_id:
+            try:
+                info_resp = await self._app.client.conversations_info(channel=channel_id)
+                ch = info_resp.get("channel", {})
+                channel_name = ch.get("name", channel_id)
+                team_ids = ch.get("shared_team_ids") or []
+                if team_ids:
+                    self._channel_team[channel_id] = team_ids[0]
+            except Exception as _exc:
+                logger.debug(
+                    "[Slack] member_joined_channel: could not resolve name for %s: %s",
+                    channel_id, _exc,
+                )
+
+        if not self._auto_join_regex.search(channel_name):
+            logger.debug(
+                "[Slack] member_joined_channel: #%s did not match regex — skipping",
+                channel_name,
+            )
+            return
+
+        logger.info(
+            "[Slack] member_joined_channel: bot joined #%s (%s) — dispatching prompt",
+            channel_name, channel_id,
+        )
+        if self._auto_join_prompt:
+            await self._dispatch_prompt_on_join(channel_id, channel_name)
+
+    async def _dispatch_prompt_on_join(self, channel_id: str, channel_name: str) -> None:
+        """Dispatch a synthetic agent prompt into *channel_id* after auto-join.
+
+        Substitutes ``${channel_name}`` in :attr:`_auto_join_prompt` with the
+        real channel name, then routes it through the normal message-handling
+        pipeline (auth checks, session creation, agent invocation) as an
+        internal system message.
+        """
+        prompt = self._auto_join_prompt.replace("${channel_name}", channel_name)
+        if not prompt.strip():
+            return
+
+        logger.info(
+            "[Slack] Auto-join: dispatching prompt to #%s: %s",
+            channel_name, prompt[:120],
+        )
+
+        source = self.build_source(
+            chat_id=channel_id,
+            chat_name=channel_name,
+            chat_type="group",
+            user_id=self._bot_user_id or "system",
+            user_name="hermes",
+            thread_id=None,
+        )
+
+        msg_event = MessageEvent(
+            text=prompt,
+            source=source,
+            internal=True,  # bypass normal user-auth check
+        )
+        try:
+            await self.handle_message(msg_event)
+        except Exception as exc:
+            logger.warning(
+                "[Slack] Auto-join: prompt dispatch to #%s failed: %s",
+                channel_name, exc,
+            )
+
 
     async def _handle_slack_message(self, event: dict) -> None:
         """Handle an incoming Slack message event."""
@@ -3025,3 +3250,30 @@ class SlackAdapter(BasePlatformAdapter):
         if isinstance(raw, str) and raw.strip():
             return {part.strip() for part in raw.split(",") if part.strip()}
         return set()
+
+    def _slack_allow_all_users_on_channel(self) -> set:
+        """Return channel IDs where any workspace member may interact.
+
+        When a message arrives from a channel in this set the per-user
+        SLACK_ALLOWED_USERS / GATEWAY_ALLOWED_USERS check is bypassed.
+
+        Config key  : platforms.slack.allow_all_users_on_channel
+        Env var     : SLACK_ALLOW_ALL_USERS_ON_CHANNEL
+
+        Accepts a comma-separated list of Slack channel IDs *or* the
+        string ``"true"`` / ``"1"`` / ``"yes"`` to match every channel
+        (equivalent to SLACK_ALLOW_ALL_USERS but scoped to channels only).
+
+        Empty / unset → feature disabled (default, safe).
+        """
+        raw = self.config.extra.get("allow_all_users_on_channel")
+        if raw is None:
+            raw = os.getenv("SLACK_ALLOW_ALL_USERS_ON_CHANNEL", "")
+        if isinstance(raw, bool):
+            return {"*"} if raw else set()
+        s = str(raw).strip()
+        if not s:
+            return set()
+        if s.lower() in ("true", "1", "yes"):
+            return {"*"}
+        return {part.strip() for part in s.split(",") if part.strip()}

@@ -397,6 +397,7 @@ class TestSendToPlatformChunking:
             "***",
             "C123",
             "*hello* from <https://example.com|Hermes>",
+            thread_id=None,
         )
 
     def test_slack_bold_italic_formatted_before_send(self, monkeypatch):
@@ -2332,3 +2333,286 @@ class TestCheckSendMessage:
              patch("gateway.status.is_gateway_running",
                    side_effect=ImportError("simulated")):
             assert _check_send_message() is False
+
+
+# ---------------------------------------------------------------------------
+# Slack MEDIA upload support (_send_slack_file + _send_to_platform routing)
+# ---------------------------------------------------------------------------
+
+class TestSendSlackFile:
+    """Unit tests for the _send_slack_file helper."""
+
+    def test_returns_error_when_file_missing(self):
+        from tools.send_message_tool import _send_slack_file
+        result = asyncio.run(
+            _send_slack_file("tok", "C123", "/nonexistent/file.pdf")
+        )
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    def test_modern_upload_happy_path(self, tmp_path):
+        """Modern two-step upload (getUploadURLExternal + completeUploadExternal) succeeds."""
+        from tools.send_message_tool import _send_slack_file
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 dummy")
+
+        get_url_response = {"ok": True, "upload_url": "https://files.slack.com/upload/v1/ABC", "file_id": "F001"}
+        complete_response = {"ok": True, "files": [{"id": "F001"}]}
+
+        import aiohttp
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_get = AsyncMock()
+        mock_get.__aenter__ = AsyncMock(return_value=MagicMock(json=AsyncMock(return_value=get_url_response)))
+        mock_get.__aexit__ = AsyncMock(return_value=False)
+
+        mock_put = AsyncMock()
+        mock_put.__aenter__ = AsyncMock(return_value=MagicMock(status=200))
+        mock_put.__aexit__ = AsyncMock(return_value=False)
+
+        mock_complete = AsyncMock()
+        mock_complete.__aenter__ = AsyncMock(return_value=MagicMock(json=AsyncMock(return_value=complete_response)))
+        mock_complete.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_get
+        mock_session.post.side_effect = [mock_put, mock_complete]
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = asyncio.run(
+                _send_slack_file("tok", "C123", str(pdf), initial_comment="Here is the report")
+            )
+
+        assert result["success"] is True
+        assert result["platform"] == "slack"
+        assert result["file_id"] == "F001"
+        assert result["filename"] == "report.pdf"
+
+    def test_thread_id_passed_to_complete_payload(self, tmp_path):
+        """thread_ts is forwarded to files.completeUploadExternal."""
+        from tools.send_message_tool import _send_slack_file
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 dummy")
+
+        get_url_response = {"ok": True, "upload_url": "https://files.slack.com/upload/v1/ABC", "file_id": "F002"}
+        complete_response = {"ok": True, "files": [{"id": "F002"}]}
+        complete_calls = []
+
+        import aiohttp
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_get = AsyncMock()
+        mock_get.__aenter__ = AsyncMock(return_value=MagicMock(json=AsyncMock(return_value=get_url_response)))
+        mock_get.__aexit__ = AsyncMock(return_value=False)
+
+        mock_put = AsyncMock()
+        mock_put.__aenter__ = AsyncMock(return_value=MagicMock(status=200))
+        mock_put.__aexit__ = AsyncMock(return_value=False)
+
+        mock_complete_ctx = MagicMock()
+        mock_complete_ctx.__aenter__ = AsyncMock(return_value=MagicMock(json=AsyncMock(return_value=complete_response)))
+        mock_complete_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_get
+
+        def _post_side_effect(url, **kwargs):
+            complete_calls.append((url, kwargs))
+            if "upload" in url and "complete" not in url:
+                return mock_put
+            return mock_complete_ctx
+
+        mock_session.post.side_effect = _post_side_effect
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            asyncio.run(
+                _send_slack_file("tok", "C123", str(pdf), thread_id="1234567890.000100")
+            )
+
+        # The complete call should carry thread_ts
+        complete_call = next(
+            (c for url, c in complete_calls if "completeUploadExternal" in url), None
+        )
+        assert complete_call is not None
+        payload = complete_call.get("json", {})
+        assert payload.get("thread_ts") == "1234567890.000100"
+
+    def test_legacy_fallback_when_modern_endpoint_fails(self, tmp_path):
+        """Falls back to files.upload when getUploadURLExternal returns ok=False."""
+        from tools.send_message_tool import _send_slack_file
+
+        pdf = tmp_path / "fallback.pdf"
+        pdf.write_bytes(b"%PDF-1.4 legacy")
+
+        get_url_response = {"ok": False, "error": "method_not_supported_for_channel_type"}
+        legacy_response = {"ok": True, "file": {"id": "F_LEGACY"}}
+
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_get = AsyncMock()
+        mock_get.__aenter__ = AsyncMock(return_value=MagicMock(json=AsyncMock(return_value=get_url_response)))
+        mock_get.__aexit__ = AsyncMock(return_value=False)
+
+        mock_legacy_post = AsyncMock()
+        mock_legacy_post.__aenter__ = AsyncMock(return_value=MagicMock(json=AsyncMock(return_value=legacy_response)))
+        mock_legacy_post.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_get
+        mock_session.post.return_value = mock_legacy_post
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = asyncio.run(
+                _send_slack_file("tok", "C123", str(pdf))
+            )
+
+        assert result["success"] is True
+        assert result["file_id"] == "F_LEGACY"
+
+
+class TestSendToPlatformSlackMedia:
+    """Integration tests — _send_to_platform routes Slack MEDIA correctly."""
+
+    def test_slack_media_only_calls_send_slack_file(self, tmp_path, monkeypatch):
+        """A MEDIA-only Slack message calls _send_slack_file (not _send_slack)."""
+        _ensure_slack_mock(monkeypatch)
+        import gateway.platforms.slack as slack_mod
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+
+        text_calls = []
+        file_calls = []
+
+        async def fake_send_slack(token, chat_id, message, thread_id=None):
+            text_calls.append(message)
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": "1"}
+
+        async def fake_send_slack_file(token, chat_id, file_path, initial_comment="", thread_id=None):
+            file_calls.append(file_path)
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "file_id": "F1", "filename": "report.pdf"}
+
+        with patch("tools.send_message_tool._send_slack", fake_send_slack), \
+             patch("tools.send_message_tool._send_slack_file", fake_send_slack_file):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "C123",
+                    "",
+                    media_files=[(str(pdf), False)],
+                )
+            )
+
+        assert result["success"] is True
+        assert file_calls == [str(pdf)]
+        assert text_calls == []
+
+    def test_slack_text_and_media_sends_text_then_file(self, tmp_path, monkeypatch):
+        """Text + MEDIA sends the text message first, then uploads the file."""
+        _ensure_slack_mock(monkeypatch)
+        import gateway.platforms.slack as slack_mod
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+
+        call_order = []
+
+        async def fake_send_slack(token, chat_id, message, thread_id=None):
+            call_order.append(("text", message))
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": "1"}
+
+        async def fake_send_slack_file(token, chat_id, file_path, initial_comment="", thread_id=None):
+            call_order.append(("file", file_path))
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "file_id": "F1", "filename": "report.pdf"}
+
+        with patch("tools.send_message_tool._send_slack", fake_send_slack), \
+             patch("tools.send_message_tool._send_slack_file", fake_send_slack_file):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "C123",
+                    "Here is your report",
+                    media_files=[(str(pdf), False)],
+                )
+            )
+
+        assert result["success"] is True
+        assert call_order[0] == ("text", "Here is your report")
+        assert call_order[1][0] == "file"
+
+    def test_slack_media_thread_id_forwarded(self, tmp_path, monkeypatch):
+        """thread_id is forwarded to both _send_slack and _send_slack_file."""
+        _ensure_slack_mock(monkeypatch)
+        import gateway.platforms.slack as slack_mod
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+
+        received_thread_ids = []
+
+        async def fake_send_slack(token, chat_id, message, thread_id=None):
+            received_thread_ids.append(("text", thread_id))
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": "1"}
+
+        async def fake_send_slack_file(token, chat_id, file_path, initial_comment="", thread_id=None):
+            received_thread_ids.append(("file", thread_id))
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "file_id": "F1", "filename": "report.pdf"}
+
+        with patch("tools.send_message_tool._send_slack", fake_send_slack), \
+             patch("tools.send_message_tool._send_slack_file", fake_send_slack_file):
+            asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "C123",
+                    "See attached",
+                    media_files=[(str(pdf), False)],
+                    thread_id="1234567890.000100",
+                )
+            )
+
+        for _kind, tid in received_thread_ids:
+            assert tid == "1234567890.000100"
+
+    def test_slack_media_file_error_propagates(self, tmp_path, monkeypatch):
+        """An upload error from _send_slack_file surfaces immediately."""
+        _ensure_slack_mock(monkeypatch)
+        import gateway.platforms.slack as slack_mod
+        monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test")
+
+        async def fake_send_slack(token, chat_id, message, thread_id=None):
+            return {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": "1"}
+
+        async def fake_send_slack_file(token, chat_id, file_path, initial_comment="", thread_id=None):
+            return {"error": "not_in_channel"}
+
+        with patch("tools.send_message_tool._send_slack", fake_send_slack), \
+             patch("tools.send_message_tool._send_slack_file", fake_send_slack_file):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.SLACK,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "C123",
+                    "caption",
+                    media_files=[(str(pdf), False)],
+                )
+            )
+
+        assert "error" in result
+        assert "not_in_channel" in result["error"]
