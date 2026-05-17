@@ -2867,6 +2867,29 @@ class AIAgent:
         self._fallback_chain = fallback_chain
         self._fallback_model = fallback_chain[0] if fallback_chain else None
 
+        # ── Strip incompatible thinking blocks on cross-provider switch ──
+        # reasoning_details / reasoning_content from the old provider are
+        # invalid for the new one.
+        # Strip both from in-memory history to avoid a round-trip 400.
+        if old_norm and new_norm and old_norm != new_norm:
+            _session_msgs = getattr(self, "_session_messages", None)
+            if isinstance(_session_msgs, list):
+                _stripped = 0
+                for _sm in _session_msgs:
+                    if isinstance(_sm, dict) and _sm.get("role") == "assistant":
+                        _had_rd = _sm.pop("reasoning_details", None) is not None
+                        _had_rc = _sm.pop("reasoning_content", None) is not None
+                        if _had_rd or _had_rc:
+                            _stripped += 1
+                if _stripped:
+                    logging.info(
+                        "%sCross-provider switch (%s → %s): stripped "
+                        "reasoning_details/reasoning_content from %d "
+                        "assistant messages to prevent thinking-signature "
+                        "errors",
+                        self.log_prefix, old_provider, new_provider, _stripped,
+                    )
+
         logging.info(
             "Model switched in-place: %s (%s) -> %s (%s)",
             old_model, old_provider, new_model, new_provider,
@@ -14073,7 +14096,7 @@ class AIAgent:
                     # content.  Any upstream mutation (context compression,
                     # session truncation, message merging) invalidates the
                     # signature → HTTP 400.  Recovery: strip reasoning_details
-                    # from all messages so the next retry sends no thinking
+                    # and reasoning_content from all messages so the next retry sends no thinking
                     # blocks at all.  One-shot — don't retry infinitely.
                     if (
                         classified.reason == FailoverReason.thinking_signature
@@ -14083,6 +14106,7 @@ class AIAgent:
                         for _m in messages:
                             if isinstance(_m, dict):
                                 _m.pop("reasoning_details", None)
+                                _m.pop("reasoning_content", None)
                         self._vprint(
                             f"{self.log_prefix}⚠️  Thinking block signature invalid — "
                             f"stripped all thinking blocks, retrying...",
@@ -14090,7 +14114,8 @@ class AIAgent:
                         )
                         logging.warning(
                             "%sThinking block signature recovery: stripped "
-                            "reasoning_details from %d messages",
+                            "reasoning_details and reasoning_content from "
+                            "%d messages",
                             self.log_prefix, len(messages),
                         )
                         continue
