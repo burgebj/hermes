@@ -91,6 +91,47 @@ def test_repair_merges_consecutive_user_messages():
     assert len(messages) == 1
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "first\n\nsecond"
+    assert agent._session_db_needs_rewrite is True
+
+
+def test_repaired_shorter_history_rewrites_session_db_current_turn(tmp_path):
+    """If repair shortens history, persistence must not skip the current turn."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    session_id = "repair-current-turn"
+    db.create_session(session_id=session_id, source="test")
+    db.append_message(session_id, role="assistant", content="prior answer")
+    db.append_message(session_id, role="user", content="stale user tail")
+
+    agent = _bare_agent()
+    agent.session_id = session_id
+    agent._session_db = db
+    agent._session_db_created = True
+    agent._last_flushed_db_idx = 0
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+    agent._ensure_db_session = lambda: None
+
+    conversation_history = [
+        {"role": "assistant", "content": "prior answer"},
+        {"role": "user", "content": "stale user tail"},
+    ]
+    messages = list(conversation_history) + [
+        {"role": "user", "content": "CURRENT TURN SHOULD PERSIST"},
+    ]
+
+    repairs = AIAgent._repair_message_sequence(agent, messages)
+    AIAgent._flush_messages_to_session_db(agent, messages, conversation_history)
+
+    rows = db.get_messages(session_id)
+    assert repairs == 1
+    assert len(messages) == len(conversation_history)
+    assert len(rows) == 2
+    assert rows[1]["role"] == "user"
+    assert rows[1]["content"] == "stale user tail\n\nCURRENT TURN SHOULD PERSIST"
+    assert agent._last_flushed_db_idx == 2
+    assert agent._session_db_needs_rewrite is False
 
 
 def test_repair_preserves_user_content_when_one_side_empty():

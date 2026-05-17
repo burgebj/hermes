@@ -1598,6 +1598,7 @@ class AIAgent:
         # (e.g. CLI voice mode adds a temporary prefix for the live call only).
         self._persist_user_message_idx = None
         self._persist_user_message_override = None
+        self._session_db_needs_rewrite = False
 
         # Cache anthropic image-to-text fallbacks per image payload/URL so a
         # single tool loop does not repeatedly re-run auxiliary vision on the
@@ -4746,6 +4747,14 @@ class AIAgent:
             # Rewrite in place so downstream paths (persistence, return
             # value, session DB flush) see the repaired sequence.
             messages[:] = merged
+            # The repair may have merged the current user turn into a message
+            # that was already flushed to SQLite, so append-only persistence can
+            # silently skip the new text. Force the next DB flush to resync the
+            # stored transcript from the repaired in-memory history.
+            try:
+                self._session_db_needs_rewrite = True
+            except Exception:
+                pass
 
         return repairs
 
@@ -4763,6 +4772,11 @@ class AIAgent:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
                 self._ensure_db_session()
+            if getattr(self, "_session_db_needs_rewrite", False):
+                self._session_db.replace_messages(self.session_id, messages)
+                self._last_flushed_db_idx = len(messages)
+                self._session_db_needs_rewrite = False
+                return
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
             for msg in messages[flush_from:]:
