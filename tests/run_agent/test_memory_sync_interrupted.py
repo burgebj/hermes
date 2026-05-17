@@ -193,3 +193,92 @@ class TestSyncExternalMemoryForTurn:
         else:
             agent._memory_manager.sync_all.assert_not_called()
             agent._memory_manager.queue_prefetch_all.assert_not_called()
+
+
+class TestMemorySyncNonblocking:
+    """Regression guard for #24453 — _sync_external_memory_for_turn must
+    work correctly when called from a background daemon thread.
+
+    run_conversation dispatches the call to a daemon thread so slow providers
+    (e.g. Hindsight, which runs LLM-based entity resolution taking 30-50s)
+    do not block run_conversation from returning and delay response.completed
+    in SSE clients.
+    """
+
+    def test_sync_completes_when_called_from_background_thread(self):
+        """sync_all and queue_prefetch_all are called correctly when
+        _sync_external_memory_for_turn is invoked from a daemon thread,
+        matching how run_conversation dispatches it after the fix."""
+        import threading
+
+        agent = _bare_agent()
+        done = threading.Event()
+
+        def _run():
+            agent._sync_external_memory_for_turn(
+                original_user_message="What is the capital of France?",
+                final_response="Paris.",
+                interrupted=False,
+            )
+            done.set()
+
+        t = threading.Thread(target=_run, daemon=True, name="hermes-memory-sync")
+        t.start()
+        done.wait(timeout=2.0)
+
+        assert done.is_set(), "memory-sync thread did not complete in time"
+        agent._memory_manager.sync_all.assert_called_once_with(
+            "What is the capital of France?", "Paris.",
+            session_id="test_session_001",
+        )
+        agent._memory_manager.queue_prefetch_all.assert_called_once_with(
+            "What is the capital of France?",
+            session_id="test_session_001",
+        )
+
+    def test_interrupted_still_skipped_from_background_thread(self):
+        """The interrupted-turn guard in _sync_external_memory_for_turn
+        works identically whether the method is called on the main thread
+        (old behaviour) or from the daemon thread (new call site)."""
+        import threading
+
+        agent = _bare_agent()
+        done = threading.Event()
+
+        def _run():
+            agent._sync_external_memory_for_turn(
+                original_user_message="hello",
+                final_response="partial...",
+                interrupted=True,
+            )
+            done.set()
+
+        threading.Thread(target=_run, daemon=True, name="hermes-memory-sync").start()
+        done.wait(timeout=2.0)
+
+        assert done.is_set()
+        agent._memory_manager.sync_all.assert_not_called()
+
+    def test_exception_in_thread_does_not_propagate(self):
+        """A crash inside sync_all must stay contained within the daemon
+        thread and must not surface to the caller (run_conversation)."""
+        import threading
+
+        agent = _bare_agent()
+        agent._memory_manager.sync_all.side_effect = RuntimeError("provider down")
+        done = threading.Event()
+
+        def _run():
+            agent._sync_external_memory_for_turn(
+                original_user_message="hi",
+                final_response="hey",
+                interrupted=False,
+            )
+            done.set()
+
+        t = threading.Thread(target=_run, daemon=True, name="hermes-memory-sync")
+        t.start()
+        done.wait(timeout=2.0)
+
+        assert done.is_set(), "thread raised and was not caught"
+        agent._memory_manager.sync_all.assert_called_once()

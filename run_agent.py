@@ -5869,6 +5869,9 @@ class AIAgent:
         wrapped in ``try/except Exception`` because external memory
         providers are strictly best-effort — a misconfigured or offline
         backend must not block the user from seeing their response.
+
+        Called from a background daemon thread by ``run_conversation`` so
+        slow providers do not delay ``response.completed`` in SSE clients.
         """
         if interrupted:
             return
@@ -16009,12 +16012,22 @@ class AIAgent:
             _should_review_skills = True
             self._iters_since_skill = 0
 
-        # External memory provider: sync the completed turn + queue next prefetch.
-        self._sync_external_memory_for_turn(
-            original_user_message=original_user_message,
-            final_response=final_response,
-            interrupted=interrupted,
-        )
+        # External memory provider: sync the completed turn + queue next
+        # prefetch.  Dispatched to a daemon thread so slow providers (e.g.
+        # Hindsight, which runs LLM-based entity resolution) do not block
+        # run_conversation from returning and delay response.completed in
+        # the SSE client (#24453).  The method is already best-effort
+        # (try/except) so a background failure is safe to ignore.
+        threading.Thread(
+            target=self._sync_external_memory_for_turn,
+            kwargs={
+                "original_user_message": original_user_message,
+                "final_response": final_response,
+                "interrupted": interrupted,
+            },
+            daemon=True,
+            name="hermes-memory-sync",
+        ).start()
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
