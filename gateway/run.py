@@ -417,6 +417,17 @@ def _reload_runtime_env_preserving_config_authority() -> None:
     if isinstance(agent_cfg, dict) and "max_turns" in agent_cfg:
         os.environ["HERMES_MAX_ITERATIONS"] = str(agent_cfg["max_turns"])
 
+    # Re-bridge terminal.cwd so long-lived gateways pick up config changes
+    # on /new or /reset without needing a full restart.  Only explicit
+    # absolute paths from config.yaml are bridged (placeholders like "."
+    # / "auto" / "cwd" are resolved at startup and should not override a
+    # previously-set value).
+    _terminal_cfg = cfg.get("terminal")
+    if isinstance(_terminal_cfg, dict):
+        _cwd_val = _terminal_cfg.get("cwd")
+        if _cwd_val and str(_cwd_val) not in {".", "auto", "cwd"}:
+            os.environ["TERMINAL_CWD"] = os.path.expanduser(str(_cwd_val))
+
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
 _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
