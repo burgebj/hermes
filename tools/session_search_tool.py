@@ -421,7 +421,10 @@ def session_search(
         # Group by resolved (parent) session_id, dedup, skip the current
         # session lineage. Compression and delegation create child sessions
         # that still belong to the same active conversation.
+        # Also collect FTS5 match message IDs per session so we can window-load
+        # only messages near matches instead of the full conversation (#24280).
         seen_sessions = {}
+        match_ids_by_session: dict = {}
         for result in raw_results:
             raw_sid = result["session_id"]
             resolved_sid = _resolve_to_parent(raw_sid)
@@ -435,6 +438,11 @@ def session_search(
                 result = dict(result)
                 result["session_id"] = resolved_sid
                 seen_sessions[resolved_sid] = result
+                match_ids_by_session[resolved_sid] = []
+            # Collect all match message IDs for this session (before dedup limit)
+            mid = result.get("id")
+            if mid is not None:
+                match_ids_by_session[resolved_sid].append(int(mid))
             if len(seen_sessions) >= limit:
                 break
 
@@ -442,12 +450,26 @@ def session_search(
         tasks = []
         for session_id, match_info in seen_sessions.items():
             try:
-                messages = db.get_messages_as_conversation(session_id)
+                match_ids = match_ids_by_session.get(session_id, [])
+                if match_ids:
+                    # Window-load: only messages near FTS5 match positions.
+                    # Dramatically faster for large sessions (800+ msgs).
+                    # Gracefully falls back to full load on error.
+                    messages = db.get_messages_window(
+                        session_id, match_ids, window_size=10
+                    )
+                else:
+                    messages = db.get_messages_as_conversation(session_id)
                 if not messages:
                     continue
                 session_meta = db.get_session(session_id) or {}
                 conversation_text = _format_conversation(messages)
-                conversation_text = _truncate_around_matches(conversation_text, query)
+                # Skip truncation when window-loaded — the window is already
+                # focused on match positions, so the whole text is relevant.
+                if not match_ids:
+                    conversation_text = _truncate_around_matches(
+                        conversation_text, query
+                    )
                 tasks.append((session_id, match_info, conversation_text, session_meta))
             except Exception as e:
                 logging.warning(

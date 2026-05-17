@@ -1753,6 +1753,178 @@ class SessionDB:
             messages.append(msg)
         return messages
 
+    def get_messages_window(
+        self,
+        session_id: str,
+        match_message_ids: List[int],
+        window_size: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Load only messages near specific match positions within a session.
+
+        Unlike ``get_messages_as_conversation()`` which loads the *entire*
+        conversation, this method pulls only the ``window_size`` messages
+        before and after each FTS5 match using simple indexed queries.
+        Large sessions (800+ messages, 800 KB+) benefit dramatically.
+
+        Used by ``session_search`` to avoid loading full conversations before
+        truncation (fixes #24280, #16671).
+
+        Args:
+            session_id: Session to load from.
+            match_message_ids: Message IDs that matched the FTS5 query.
+            window_size: Messages to include before *and* after each match
+                         (default 10, so up to 21 messages per isolated match).
+
+        Returns:
+            List of message dicts in conversation order (by timestamp, id),
+            deduplicated across overlapping match windows.  Falls back to
+            ``get_messages_as_conversation()`` on error for robustness.
+        """
+        if not match_message_ids:
+            return []
+
+        # Columns to fetch — must include timestamp/id for post-collection
+        # sorting (multiple matches may produce overlapping, out-of-order windows).
+        _MSG_COLS = (
+            "id, timestamp, role, content, tool_call_id, tool_calls, "
+            "tool_name, finish_reason, reasoning, reasoning_content, "
+            "reasoning_details, codex_reasoning_items, codex_message_items"
+        )
+
+        all_rows: list = []
+        seen_ids: set = set()
+
+        try:
+            with self._lock:
+                for match_id in match_message_ids:
+                    # Get the match message's timestamp and id for ordering
+                    match_row = self._conn.execute(
+                        "SELECT id, timestamp FROM messages WHERE id = ?",
+                        (match_id,),
+                    ).fetchone()
+                    if not match_row:
+                        continue
+                    ts = match_row["timestamp"]
+                    mid = match_row["id"]
+
+                    # Messages *before* the match (newest-first, then reverse)
+                    before = self._conn.execute(
+                        f"""SELECT {_MSG_COLS} FROM messages
+                            WHERE session_id = ?
+                              AND (timestamp < ? OR (timestamp = ? AND id < ?))
+                            ORDER BY timestamp DESC, id DESC
+                            LIMIT ?""",
+                        (session_id, ts, ts, mid, window_size),
+                    ).fetchall()
+
+                    # The match message itself
+                    match_msg = self._conn.execute(
+                        f"SELECT {_MSG_COLS} FROM messages WHERE id = ?",
+                        (match_id,),
+                    ).fetchone()
+
+                    # Messages *after* the match
+                    after = self._conn.execute(
+                        f"""SELECT {_MSG_COLS} FROM messages
+                            WHERE session_id = ?
+                              AND (timestamp > ? OR (timestamp = ? AND id > ?))
+                            ORDER BY timestamp ASC, id ASC
+                            LIMIT ?""",
+                        (session_id, ts, ts, mid, window_size),
+                    ).fetchall()
+
+                    # Collect in order: before (reversed) + match + after
+                    for row in reversed(before):
+                        if row["id"] not in seen_ids:
+                            seen_ids.add(row["id"])
+                            all_rows.append(row)
+                    if match_msg and match_msg["id"] not in seen_ids:
+                        seen_ids.add(match_msg["id"])
+                        all_rows.append(match_msg)
+                    for row in after:
+                        if row["id"] not in seen_ids:
+                            seen_ids.add(row["id"])
+                            all_rows.append(row)
+
+            # Sort by conversation order — multiple matches may produce
+            # overlapping windows whose collection order does not match
+            # conversation order (e.g. match at pos 45 processed before
+            # match at pos 15).
+            all_rows.sort(key=lambda r: (r["timestamp"], r["id"]))
+
+        except Exception:
+            logger.warning(
+                "get_messages_window failed for session %s, "
+                "falling back to full load",
+                session_id, exc_info=True,
+            )
+            return self.get_messages_as_conversation(session_id)
+
+        # Build message dicts — identical format to get_messages_as_conversation()
+        messages = []
+        for row in all_rows:
+            content = self._decode_content(row["content"])
+            if row["role"] in {"user", "assistant"} and isinstance(content, str):
+                content = sanitize_context(content).strip()
+            msg = {"role": row["role"], "content": content}
+            if row["tool_call_id"]:
+                msg["tool_call_id"] = row["tool_call_id"]
+            if row["tool_name"]:
+                msg["tool_name"] = row["tool_name"]
+            if row["tool_calls"]:
+                try:
+                    msg["tool_calls"] = json.loads(row["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to deserialize tool_calls in window "
+                        "load, falling back to []"
+                    )
+                    msg["tool_calls"] = []
+            if row["role"] == "assistant":
+                if row["finish_reason"]:
+                    msg["finish_reason"] = row["finish_reason"]
+                if row["reasoning"]:
+                    msg["reasoning"] = row["reasoning"]
+                if row["reasoning_content"] is not None:
+                    msg["reasoning_content"] = row["reasoning_content"]
+                if row["reasoning_details"]:
+                    try:
+                        msg["reasoning_details"] = json.loads(
+                            row["reasoning_details"]
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(
+                            "Failed to deserialize reasoning_details "
+                            "in window load, falling back to None"
+                        )
+                        msg["reasoning_details"] = None
+                if row["codex_reasoning_items"]:
+                    try:
+                        msg["codex_reasoning_items"] = json.loads(
+                            row["codex_reasoning_items"]
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(
+                            "Failed to deserialize codex_reasoning_items "
+                            "in window load, falling back to None"
+                        )
+                        msg["codex_reasoning_items"] = None
+                if row["codex_message_items"]:
+                    try:
+                        msg["codex_message_items"] = json.loads(
+                            row["codex_message_items"]
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(
+                            "Failed to deserialize codex_message_items "
+                            "in window load, falling back to None"
+                        )
+                        msg["codex_message_items"] = None
+            messages.append(msg)
+
+        return messages
+
     def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:
         if not session_id:
             return [session_id]

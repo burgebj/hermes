@@ -576,3 +576,174 @@ class TestSessionSearch:
         assert entry["source"] == "api_server", (
             f"source should be parent's 'api_server', got {entry['source']!r}"
         )
+
+
+# =========================================================================
+# get_messages_window — windowed message loading (#24280, #16671)
+# =========================================================================
+
+class TestGetMessagesWindow:
+    """Verify SessionDB.get_messages_window() loads only messages near
+    match positions, not the full conversation."""
+
+    def test_window_limits_output_for_large_session(self):
+        """100-message session: a window of size 3 around 1 match should
+        return ≤7 messages (1 match + 3 before + 3 after), not all 100."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        sid = "test_window_large"
+        db.create_session(sid, source="cli")
+
+        # Insert 100 messages with predictable content
+        with db._lock:
+            for i in range(100):
+                db._conn.execute(
+                    """INSERT INTO messages
+                       (session_id, role, content, timestamp)
+                       VALUES (?, ?, ?, ?)""",
+                    (sid, "user", f"message number {i}", float(100_000_000 + i * 10)),
+                )
+
+        # Pick message #50 as the match
+        with db._lock:
+            match_row = db._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND content = ?",
+                (sid, "message number 50"),
+            ).fetchone()
+        match_id = match_row["id"]
+
+        # Window size 3 → expect at most 1 + 3 + 3 = 7 messages
+        result = db.get_messages_window(sid, [match_id], window_size=3)
+
+        assert 3 <= len(result) <= 7, (
+            f"Expected 3-7 messages with window_size=3, got {len(result)}"
+        )
+        # The match message must be in the result
+        contents = {m["content"] for m in result}
+        assert "message number 50" in contents, "Match message not in window"
+        # Messages far from the match should NOT be present
+        assert "message number 0" not in contents, "Far-away message leaked into window"
+        assert "message number 99" not in contents, "Far-away message leaked into window"
+
+    def test_multiple_matches_merge_overlapping_windows(self):
+        """Two matches close together should merge into one window without
+        duplicates, and results MUST be in conversation order."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        sid = "test_window_merge"
+        db.create_session(sid, source="cli")
+
+        with db._lock:
+            for i in range(30):
+                db._conn.execute(
+                    """INSERT INTO messages
+                       (session_id, role, content, timestamp)
+                       VALUES (?, ?, ?, ?)""",
+                    (sid, "user", f"msg_{i}", float(100_000_000 + i * 10)),
+                )
+
+            # Get IDs for messages #10 and #12 (close together)
+            row_a = db._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND content = ?",
+                (sid, "msg_10"),
+            ).fetchone()
+            row_b = db._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND content = ?",
+                (sid, "msg_12"),
+            ).fetchone()
+
+        result = db.get_messages_window(
+            sid, [row_a["id"], row_b["id"]], window_size=5
+        )
+
+        # Should be deduplicated (DISTINCT in SQL)
+        contents = [m["content"] for m in result]
+        seen = set()
+        for c in contents:
+            assert c not in seen, f"Duplicate content in window: {c}"
+            seen.add(c)
+
+        # Both match messages must be present
+        assert "msg_10" in contents and "msg_12" in contents
+
+        # Must be in conversation order (monotonically increasing)
+        msg_nums = [int(c.split("_")[1]) for c in contents]
+        for i in range(1, len(msg_nums)):
+            assert msg_nums[i] > msg_nums[i - 1], (
+                f"Messages out of order: msg_{msg_nums[i-1]} before "
+                f"msg_{msg_nums[i]}"
+            )
+
+    def test_falls_back_to_full_load_on_error(self):
+        """When the SQL fails (e.g., bad params), gracefully fall back to
+        get_messages_as_conversation()."""
+        from hermes_state import SessionDB
+        import logging
+
+        db = SessionDB()
+        sid = "test_window_fallback"
+        db.create_session(sid, source="cli")
+
+        with db._lock:
+            db._conn.execute(
+                """INSERT INTO messages (session_id, role, content, timestamp)
+                   VALUES (?, ?, ?, ?)""",
+                (sid, "user", "only message", 100_000_000.0),
+            )
+
+        # Empty match_ids → should return empty list (not fallback)
+        result_empty = db.get_messages_window(sid, [], window_size=5)
+        assert result_empty == [], "Empty match_ids should return empty list"
+
+        # Valid match_ids return the right data
+        with db._lock:
+            row = db._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ?", (sid,)
+            ).fetchone()
+
+        result = db.get_messages_window(sid, [row["id"]], window_size=5)
+        assert len(result) == 1
+        assert result[0]["content"] == "only message"
+
+    def test_window_preserves_message_format(self):
+        """Window-loaded messages must have the same dict shape as
+        get_messages_as_conversation()."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        sid = "test_window_format"
+        db.create_session(sid, source="cli")
+
+        with db._lock:
+            db._conn.execute(
+                """INSERT INTO messages
+                   (session_id, role, content, tool_name, tool_calls, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (sid, "assistant", "I'll help", "test_tool",
+                 '["call_1"]', 100_000_000.0),
+            )
+            db._conn.execute(
+                """INSERT INTO messages
+                   (session_id, role, content, tool_call_id, timestamp)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (sid, "tool", '{"result": "ok"}', "call_1", 100_000_001.0),
+            )
+            row = db._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = ?",
+                (sid, "assistant"),
+            ).fetchone()
+
+        # Window-load
+        window_result = db.get_messages_window(sid, [row["id"]], window_size=5)
+        # Full-load for comparison
+        full_result = db.get_messages_as_conversation(sid)
+
+        # Both should have the same number of messages (small session)
+        assert len(window_result) == len(full_result) == 2
+
+        # Verify essential keys exist
+        for msg in window_result:
+            assert "role" in msg
+            assert "content" in msg
