@@ -23,6 +23,9 @@ Options:
   --no-push                Do not update the branch's upstream remote after
                            a successful rebase. By default, the script pushes
                            with --force-with-lease so local and fork stay in sync.
+  --no-restart             Do not restart running gateway/dashboard processes
+                           after a successful update. By default, running
+                           services are restarted so the UI loads new code.
   --push-fork              Deprecated alias for the default push behavior.
   --expected-branch NAME   Require this local branch before updating. Defaults
                            to local/hindsight-embedded-profile-env, or the
@@ -36,6 +39,7 @@ Options:
 Examples:
   scripts/update-current-branch.sh
   scripts/update-current-branch.sh --no-push
+  scripts/update-current-branch.sh --no-restart
   scripts/update-current-branch.sh --expected-branch my/local-branch
   scripts/update-current-branch.sh --upstream origin/main
 EOF
@@ -163,6 +167,7 @@ restore_stash_if_needed() {
 
 DRY_RUN=0
 PUSH_FORK=1
+RESTART_SERVICES=1
 UPSTREAM_REF=""
 EXPECTED_BRANCH="${HERMES_UPDATE_BRANCH:-$DEFAULT_EXPECTED_BRANCH}"
 ALLOW_ANY_BRANCH=0
@@ -175,6 +180,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-push)
             PUSH_FORK=0
+            shift
+            ;;
+        --no-restart)
+            RESTART_SERVICES=0
             shift
             ;;
         --expected-branch)
@@ -285,6 +294,50 @@ ok "Updated $current_branch onto $UPSTREAM_REF"
 ok "Backup branch kept at $backup_branch"
 
 
+
+clear_update_cache() {
+    local home
+    for home in "$HOME/.hermes" "$HOME/.hermes/profiles"/*; do
+        [ -e "$home/.update_check" ] || continue
+        rm -f "$home/.update_check"
+    done
+}
+
+restart_running_services() {
+    [ "$RESTART_SERVICES" = "1" ] || return 0
+    [ "$DRY_RUN" = "1" ] && return 0
+
+    local hermes_cmd gateway_was_running dashboard_cmds
+    hermes_cmd="$(command -v hermes || true)"
+    [ -n "$hermes_cmd" ] || return 0
+
+    gateway_was_running=0
+    if pgrep -f "hermes_cli.main gateway run" >/dev/null 2>&1; then
+        gateway_was_running=1
+    fi
+
+    dashboard_cmds="$(pgrep -af "hermes_cli.main dashboard" | sed 's/^[0-9][0-9]* //' || true)"
+
+    clear_update_cache
+
+    if [ "$gateway_was_running" = "1" ]; then
+        info "Restarting running gateway so it loads the updated code"
+        "$hermes_cmd" gateway restart || warn "gateway restart failed; run: hermes gateway restart"
+    fi
+
+    if [ -n "$dashboard_cmds" ]; then
+        info "Restarting running dashboard so the UI loads the updated code"
+        "$hermes_cmd" dashboard --stop || warn "dashboard stop failed; run: hermes dashboard --stop"
+        while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            info "Starting dashboard: $cmd"
+            nohup bash -lc "$cmd" >/dev/null 2>&1 &
+        done <<EOF_DASHBOARD_CMDS
+$dashboard_cmds
+EOF_DASHBOARD_CMDS
+    fi
+}
+
 print_post_update_upstream_guidance() {
     local tracking ahead_remote behind_remote remote_name remote_branch
     tracking="$1"
@@ -315,5 +368,7 @@ if [ "$PUSH_FORK" = "1" ]; then
 else
     print_post_update_upstream_guidance "$upstream_branch"
 fi
+
+restart_running_services
 
 git status --short --branch
