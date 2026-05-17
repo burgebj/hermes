@@ -102,3 +102,38 @@ def test_switch_within_same_provider_preserves_chain():
         )
 
     assert agent._fallback_chain == chain
+
+
+def test_switch_clears_stale_turn_scoped_recovery_state():
+    agent = _make_agent([{"provider": "openrouter", "model": "x-ai/grok-4"}])
+    agent._empty_content_retries = 3
+    agent._invalid_tool_retries = 2
+    agent._invalid_json_retries = 4
+    agent._incomplete_scratchpad_retries = 1
+    agent._codex_incomplete_retries = 5
+    agent._thinking_prefill_retries = 2
+    agent._post_tool_empty_retried = True
+    agent._last_content_with_tools = "stale"
+    agent._last_content_tools_all_housekeeping = True
+    agent._mute_post_response = True
+    agent._unicode_sanitization_passes = 7
+    agent._vision_supported = False
+    agent._tool_guardrail_halt_decision = object()
+    agent._tool_guardrails = MagicMock()
+
+    _switch_to_anthropic(agent)
+
+    assert agent._empty_content_retries == 0
+    assert agent._invalid_tool_retries == 0
+    assert agent._invalid_json_retries == 0
+    assert agent._incomplete_scratchpad_retries == 0
+    assert agent._codex_incomplete_retries == 0
+    assert agent._thinking_prefill_retries == 0
+    assert agent._post_tool_empty_retried is False
+    assert agent._last_content_with_tools is None
+    assert agent._last_content_tools_all_housekeeping is False
+    assert agent._mute_post_response is False
+    assert agent._unicode_sanitization_passes == 0
+    assert agent._vision_supported is True
+    assert agent._tool_guardrail_halt_decision is None
+    agent._tool_guardrails.reset_for_turn.assert_called_once_with()
