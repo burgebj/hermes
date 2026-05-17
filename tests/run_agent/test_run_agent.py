@@ -326,6 +326,48 @@ class TestStripThinkBlocks:
         result = agent._strip_think_blocks("<thought>orphaned reasoning without close")
         assert "<thought>" not in result
 
+    # ─── Doubled URL-scheme repair (#25744) ────────────────────────────
+    # Gemma 4 (huihui Q4_K_S abliterated) intermittently emits markdown
+    # links with a duplicated scheme prefix — ``[Title](httpshttps://...)``.
+    # Strip the duplicated front so the URL becomes clickable again.
+
+    def test_doubled_https_in_markdown_link_repaired(self, agent):
+        """Issue #25744: `[T](httpshttps://...)` -> `[T](https://...)`."""
+        result = agent._strip_think_blocks(
+            "click [here](httpshttps://github.com/NousResearch/hermes-agent)"
+        )
+        assert result == "click [here](https://github.com/NousResearch/hermes-agent)"
+
+    def test_doubled_http_in_markdown_link_repaired(self, agent):
+        result = agent._strip_think_blocks("see [docs](httphttp://example.com/path)")
+        assert result == "see [docs](http://example.com/path)"
+
+    def test_mixed_doubled_schemes_repaired(self, agent):
+        result = agent._strip_think_blocks(
+            "a httpshttp://x.com b httphttps://y.com"
+        )
+        assert result == "a http://x.com b https://y.com"
+
+    def test_uppercase_doubled_scheme_repaired(self, agent):
+        result = agent._strip_think_blocks("see HTTPSHTTPS://example.com")
+        assert result == "see HTTPS://example.com"
+
+    def test_plain_https_unchanged(self, agent):
+        result = agent._strip_think_blocks("plain link https://example.com works")
+        assert result == "plain link https://example.com works"
+
+    def test_apache_httpd_unchanged(self, agent):
+        """Word boundary: `httpd`, `httpx`, etc. must not be touched."""
+        result = agent._strip_think_blocks("apache httpd and httpx library")
+        assert result == "apache httpd and httpx library"
+
+    def test_http_inside_query_string_unchanged(self, agent):
+        """A legitimate `http://` later in a path/query is preserved."""
+        result = agent._strip_think_blocks(
+            "see https://example.com?ref=http://other.example"
+        )
+        assert result == "see https://example.com?ref=http://other.example"
+
     # ─── Unterminated-block coverage (#8878, #9568, #10408) ──────────────
     # Reasoning models served via NIM / MiniMax M2.7 frequently drop the
     # closing tag, leaking raw reasoning into assistant content. The open

@@ -3834,6 +3834,19 @@ class AIAgent:
             content,
             flags=re.IGNORECASE,
         )
+        # 4. Repair markdown URLs corrupted with a duplicated scheme prefix
+        #    (#25744). Gemma 4 (huihui Q4_K_S abliterated) intermittently
+        #    emits ``[Title](httpshttps://...)`` or ``[Title](httphttp://...)``
+        #    inside markdown link targets, making URLs unclickable. The
+        #    pattern is unambiguous — no legitimate URI scheme starts with
+        #    ``httpshttps``/``httphttp``/``httpshttp``/``httphttps`` — so a
+        #    flat substitution is safe to run unconditionally.
+        content = re.sub(
+            r'\bhttps?(https?://)',
+            r'\1',
+            content,
+            flags=re.IGNORECASE,
+        )
         return content
 
     @staticmethod
