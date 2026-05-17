@@ -7,7 +7,12 @@ variants like "Ignore ALL prior instructions" bypassed the scanner.
 Fix: allow optional extra words with `(?:\\w+\\s+)*` groups.
 """
 
+from pathlib import Path
+
 from tools.cronjob_tools import _scan_cron_prompt
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestMultiWordInjectionBypass:
@@ -46,3 +51,12 @@ class TestMultiWordInjectionBypass:
         assert _scan_cron_prompt("Monitor disk usage and alert if above 90%") == ""
         assert _scan_cron_prompt("Ignore this file in the backup") == ""
         assert _scan_cron_prompt("Run all migrations") == ""
+
+    def test_bundled_github_pr_workflow_skill_not_blocked(self):
+        """The bundled PR workflow skill is loaded into cron prompts in the wild.
+
+        Keep legitimate GitHub API examples phrased so they do not trip the
+        cron scanner before the scheduled agent body can run.
+        """
+        skill_path = ROOT / "skills" / "github" / "github-pr-workflow" / "SKILL.md"
+        assert _scan_cron_prompt(skill_path.read_text(encoding="utf-8")) == ""

@@ -356,6 +356,11 @@ class TestTeePattern:
         assert dangerous is True
         assert key is not None
 
+    def test_tee_absolute_ssh_authorized_keys(self):
+        dangerous, key, desc = detect_dangerous_command("cat file | tee /home/agent/.ssh/authorized_keys")
+        assert dangerous is True
+        assert key is not None
+
     def test_tee_block_device(self):
         dangerous, key, desc = detect_dangerous_command("echo x | tee /dev/sda")
         assert dangerous is True
@@ -363,6 +368,11 @@ class TestTeePattern:
 
     def test_tee_hermes_env(self):
         dangerous, key, desc = detect_dangerous_command("echo x | tee ~/.hermes/.env")
+        assert dangerous is True
+        assert key is not None
+
+    def test_tee_absolute_hermes_env(self):
+        dangerous, key, desc = detect_dangerous_command("echo x | tee /home/agent/.hermes/.env")
         assert dangerous is True
         assert key is not None
 
@@ -426,6 +436,16 @@ class TestSensitiveRedirectPattern:
 
     def test_append_to_tilde_ssh_authorized_keys(self):
         dangerous, key, desc = detect_dangerous_command("cat key >> ~/.ssh/authorized_keys")
+        assert dangerous is True
+        assert key is not None
+
+    def test_append_to_absolute_ssh_authorized_keys(self):
+        dangerous, key, desc = detect_dangerous_command("cat key >> /home/agent/.ssh/authorized_keys")
+        assert dangerous is True
+        assert key is not None
+
+    def test_append_to_absolute_hermes_env(self):
+        dangerous, key, desc = detect_dangerous_command("echo x >> /home/agent/.hermes/.env")
         assert dangerous is True
         assert key is not None
 

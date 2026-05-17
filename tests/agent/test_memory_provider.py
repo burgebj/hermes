@@ -1060,3 +1060,66 @@ class TestHonchoCadenceTracking:
         p.on_turn_start(2, "second message")
         should_skip = p._injection_frequency == "first-turn" and p._turn_count > 1
         assert should_skip, "Second turn (turn 2) SHOULD be skipped"
+
+    def test_auto_context_filter_drops_operational_ttl_lines(self):
+        """Auto-injected Honcho context should omit stale execution-state crumbs."""
+        from plugins.memory.honcho import HonchoMemoryProvider
+
+        p = HonchoMemoryProvider()
+        text = "\n".join([
+            "Ruslan prefers Git as the execution-state authority.",
+            "The next run for codex-journal-periodic-reconcile.timer is scheduled for 2026-04-24.",
+            "hermes confirmed the HEAD of agent-protocol is abcdef1234567890abcdef1234567890abcdef12.",
+            "PREFERENCE: Hermes maintenance jobs must use deliver=local and require hermes gateway.",
+            "Browser screenshot saved under localhost:4180 for a one-off check.",
+            "A stale local branch ref named journal/promote-april-14-evening-runtime-refresh exists in the checkout.",
+            "hermes's runtime reports Honcho as active and connected, as verified by the commands hermes memory status and hermes doctor.",
+            "Current delivery state - Journal canonical: promoted, merged, local main synced, clean.",
+            "The current HEAD is 9d75f38e6.",
+        ])
+
+        filtered = p._filter_auto_context_text(text)
+
+        assert "Ruslan prefers Git" in filtered
+        assert "deliver=local" in filtered
+        assert "next run" not in filtered
+        assert "HEAD of agent-protocol" not in filtered
+        assert "localhost:4180" not in filtered
+        assert "stale local branch" not in filtered
+        assert "active and connected" not in filtered
+        assert "Current delivery state" not in filtered
+        assert "current HEAD" not in filtered
+
+    def test_ai_self_representation_skipped_when_ai_self_observation_disabled(self):
+        """ai.observeMe=false should keep the AI card but not inject stale self-representation."""
+        from types import SimpleNamespace
+        from plugins.memory.honcho import HonchoMemoryProvider
+
+        p = HonchoMemoryProvider()
+        p._config = SimpleNamespace(ai_observe_me=False, raw={})
+        ctx = {
+            "representation": "Ruslan prefers concise evidence.",
+            "card": "Name: Ruslan",
+            "ai_representation": "hermes confirmed the HEAD of agent-protocol is abcdef1234567890abcdef1234567890abcdef12.",
+            "ai_card": "Name: Hermes Agent",
+        }
+
+        formatted = p._format_first_turn_context(ctx)
+
+        assert "## User Representation" in formatted
+        assert "## AI Identity Card" in formatted
+        assert "Name: Hermes Agent" in formatted
+        assert "## AI Self-Representation" not in formatted
+        assert "HEAD of agent-protocol" not in formatted
+
+    def test_dialectic_prompts_exclude_transient_operational_state(self):
+        """Auto-dialectic should ask Honcho for durable user context, not repo/process state."""
+        from plugins.memory.honcho import HonchoMemoryProvider
+
+        p = HonchoMemoryProvider()
+
+        for pass_idx in (0, 1, 2):
+            prompt = p._build_dialectic_prompt(pass_idx, ["prior signal"], is_cold=False)
+            assert "Exclude transient operational state" in prompt
+            assert "commit hashes" in prompt
+            assert "timer status" in prompt

@@ -465,16 +465,82 @@ class HonchoMemoryProvider(MemoryProvider):
             logger.warning("Honcho lazy session init failed: %s", e)
             return False
 
+    _AUTO_CONTEXT_NOISE_RE = re.compile(
+        r"(?i)("
+        r"\bnext run\b|\bscheduled for\b.*\b(timer|cron)|"
+        r"\bconfirmed the HEAD\b|\bcurrent HEAD\b|\bHEAD of\b|\bcommit hash\b|\bcommit [0-9a-f]{7,40}\b|\b[0-9a-f]{32,40}\b|"
+        r"\bPR #\d+\b|\bPull Request #\d+\b|\bcreated a new branch\b|\bbranch .*\b(clean|synced|ahead|behind)\b|"
+        r"\bdirty_count\b|\bpromotion_required\b|\bblocking_finding_count\b|\bVALIDATE_[A-Z0-9_]+\b|"
+        r"\bactive jobs related to\b|\bactive and connected\b|\bruntime reports Honcho\b|\bcurrent delivery state\b|\bcurrent work state\b|\blocal main synced\b|\bgateway is running\b|\bsystemd timer\b|\bstale local branch\b|\bstale branch ref\b|"
+        r"\blocalhost:\d+\b|\b127\.0\.0\.1\b|\bbrowser screenshot\b|\brequest log\b|\bcompile log\b|"
+        r"\btool call\b|\btool result\b|\bproc_[a-f0-9]+\b"
+        r")"
+    )
+    _AUTO_CONTEXT_PROTECTED_RE = re.compile(
+        r"(?i)("
+        r"^(PREFERENCE|TRAIT|INSTRUCTION|Workflow|Repository|Tech Stack|Projects?|Environment|Name|GitHub|Goal|Occupation):|"
+        r"\b(prefers|wants|expects|dislikes|prioritizes|mandates)\b|"
+        r"Git owns execution state|Journal summarizes|deliver=local|hermes gateway|"
+        r"observe_me=false|dreams should|reusable|best practice|heuristic|boundary|ingestion policy"
+        r")"
+    )
+    _AUTO_CONTEXT_HYGIENE_NOTE = (
+        "Exclude transient operational state: commit hashes, branch/PR status, "
+        "timer status, process/runtime status, localhost/browser crumbs, and one-off task state. "
+        "Prefer stable user preferences, standing instructions, durable project context, and reusable lessons."
+    )
+
+    @classmethod
+    def _filter_auto_context_text(cls, text: str) -> str:
+        """Remove stale execution-state lines from auto-injected Honcho context.
+
+        Honcho tools can still expose raw/search results on demand.  This filter
+        only protects unconditional prompt injection from durable-looking facts
+        that should stay in Git, logs, Journal summaries, or explicit lookups.
+        """
+        if not text:
+            return ""
+        kept: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                kept.append(line)
+                continue
+            if stripped.startswith("##"):
+                kept.append(line)
+                continue
+            if cls._AUTO_CONTEXT_PROTECTED_RE.search(stripped):
+                kept.append(line)
+                continue
+            if cls._AUTO_CONTEXT_NOISE_RE.search(stripped):
+                continue
+            kept.append(line)
+        return "\n".join(kept).strip()
+
+    def _include_ai_self_representation(self) -> bool:
+        """Return whether to auto-inject the AI peer representation."""
+        if not self._config:
+            return True
+        raw = getattr(self._config, "raw", None) or {}
+        host = getattr(self._config, "host", "hermes")
+        host_block = (raw.get("hosts") or {}).get(host, {}) if isinstance(raw, dict) else {}
+        for key in ("injectAiSelfContext", "includeAiSelfRepresentation"):
+            if key in host_block:
+                return bool(host_block[key])
+            if isinstance(raw, dict) and key in raw:
+                return bool(raw[key])
+        return bool(getattr(self._config, "ai_observe_me", True))
+
     def _format_first_turn_context(self, ctx: dict) -> str:
         """Format the prefetch context dict into a readable system prompt block."""
         parts = []
 
         # Session summary — session-scoped context, placed first for relevance
-        summary = ctx.get("summary", "")
+        summary = self._filter_auto_context_text(ctx.get("summary", ""))
         if summary:
             parts.append(f"## Session Summary\n{summary}")
 
-        rep = ctx.get("representation", "")
+        rep = self._filter_auto_context_text(ctx.get("representation", ""))
         if rep:
             parts.append(f"## User Representation\n{rep}")
 
@@ -482,8 +548,8 @@ class HonchoMemoryProvider(MemoryProvider):
         if card:
             parts.append(f"## User Peer Card\n{card}")
 
-        ai_rep = ctx.get("ai_representation", "")
-        if ai_rep:
+        ai_rep = self._filter_auto_context_text(ctx.get("ai_representation", ""))
+        if ai_rep and self._include_ai_self_representation():
             parts.append(f"## AI Self-Representation\n{ai_rep}")
 
         ai_card = ctx.get("ai_card", "")
@@ -679,6 +745,7 @@ class HonchoMemoryProvider(MemoryProvider):
             return ""
 
         result = "\n\n".join(parts)
+        result = self._filter_auto_context_text(result)
 
         # ----- Port #3265: token budget enforcement -----
         result = self._truncate_to_budget(result)
@@ -894,17 +961,20 @@ class HonchoMemoryProvider(MemoryProvider):
         Pass 1: self-audit / targeted synthesis against gaps from pass 0.
         Pass 2: reconciliation / contradiction check across prior passes.
         """
+        hygiene_note = self._AUTO_CONTEXT_HYGIENE_NOTE
         if pass_idx == 0:
             if is_cold:
                 return (
                     "Who is this person? What are their preferences, goals, "
                     "and working style? Focus on facts that would help an AI "
-                    "assistant be immediately useful."
+                    "assistant be immediately useful. "
+                    f"{hygiene_note}"
                 )
             return (
                 "Given what's been discussed in this session so far, what "
                 "context about this user is most relevant to the current "
-                "conversation? Prioritize active context over biographical facts."
+                "conversation? Prioritize durable working context over biographical facts. "
+                f"{hygiene_note}"
             )
         elif pass_idx == 1:
             prior = prior_results[-1] if prior_results else ""
@@ -912,8 +982,9 @@ class HonchoMemoryProvider(MemoryProvider):
                 f"Given this initial assessment:\n\n{prior}\n\n"
                 "What gaps remain in your understanding that would help "
                 "going forward? Synthesize what you actually know about "
-                "the user's current state and immediate needs, grounded "
-                "in evidence from recent sessions."
+                "the user's durable preferences, standing constraints, and reusable needs, "
+                "grounded in evidence from recent sessions. "
+                f"{hygiene_note}"
             )
         else:
             # pass 2: reconciliation
@@ -922,8 +993,9 @@ class HonchoMemoryProvider(MemoryProvider):
                 f"Pass 1:\n{prior_results[0] if len(prior_results) > 0 else '(empty)'}\n\n"
                 f"Pass 2:\n{prior_results[1] if len(prior_results) > 1 else '(empty)'}\n\n"
                 "Do these assessments cohere? Reconcile any contradictions "
-                "and produce a final, concise synthesis of what matters most "
-                "for the current conversation."
+                "and produce a final, concise synthesis of durable context that matters most "
+                "for the current conversation. "
+                f"{hygiene_note}"
             )
 
     @staticmethod
