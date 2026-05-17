@@ -9,6 +9,13 @@ providers (violating role alternation), which retriggered the empty-retry
 recovery every turn.
 """
 
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+from hermes_state import SessionDB
 from run_agent import AIAgent
 
 
@@ -199,3 +206,61 @@ def test_repair_preserves_system_messages():
     AIAgent._repair_message_sequence(agent, messages)
 
     assert messages == original
+
+
+def test_flush_rewrites_session_db_when_repair_merges_current_turn():
+    """If repair merges the current turn into an existing user row, DB must rewrite."""
+    db = None
+    tmpdir = tempfile.mkdtemp()
+    try:
+        db_path = Path(tmpdir) / "repair.db"
+        db = SessionDB(db_path=db_path)
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                model="test/model",
+                quiet_mode=True,
+                session_db=db,
+                session_id="repair-session",
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent._ensure_db_session()
+
+        db.append_message("repair-session", role="assistant", content="prior answer")
+        db.append_message("repair-session", role="user", content="stale user tail")
+        agent._last_flushed_db_idx = 2
+
+        conversation_history = [
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "stale user tail"},
+        ]
+        messages = list(conversation_history) + [
+            {"role": "user", "content": "CURRENT TURN SHOULD PERSIST"},
+        ]
+
+        repairs = agent._repair_message_sequence(messages)
+
+        assert repairs == 1
+        assert agent._session_db_needs_rewrite is True
+        assert messages == [
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "stale user tail\n\nCURRENT TURN SHOULD PERSIST"},
+        ]
+
+        agent._flush_messages_to_session_db(messages, conversation_history)
+
+        rows = db.get_messages("repair-session")
+        assert [(row["role"], row["content"]) for row in rows] == [
+            ("assistant", "prior answer"),
+            ("user", "stale user tail\n\nCURRENT TURN SHOULD PERSIST"),
+        ]
+        assert agent._last_flushed_db_idx == 2
+        assert agent._session_db_needs_rewrite is False
+    finally:
+        if db is not None:
+            db.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)

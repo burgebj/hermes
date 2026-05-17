@@ -1999,6 +1999,7 @@ class AIAgent:
         self._session_db = session_db
         self._parent_session_id = parent_session_id
         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+        self._session_db_needs_rewrite = False  # full transcript rewrite after in-place repair
         self._session_db_created = False  # DB row deferred to run_conversation()
         self._session_init_model_config = {
             "max_iterations": self.max_iterations,
@@ -4746,8 +4747,51 @@ class AIAgent:
             # Rewrite in place so downstream paths (persistence, return
             # value, session DB flush) see the repaired sequence.
             messages[:] = merged
+            self._session_db_needs_rewrite = True
 
         return repairs
+
+    def _normalize_message_for_session_db(self, msg: Dict) -> Dict[str, Any]:
+        """Return a SessionDB-safe copy of a transcript message."""
+        role = msg.get("role", "unknown")
+        content = msg.get("content")
+        # Persist multimodal tool results as their text summary only —
+        # base64 images would bloat the session DB and aren't useful
+        # for cross-session replay.
+        if _is_multimodal_tool_result(content):
+            content = _multimodal_text_summary(content)
+        elif isinstance(content, list):
+            # List of OpenAI-style content parts: strip images, keep text.
+            _txt = []
+            for p in content:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    _txt.append(str(p.get("text", "")))
+                elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
+                    _txt.append("[screenshot]")
+            content = "\n".join(_txt) if _txt else None
+
+        tool_calls_data = None
+        if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
+            tool_calls_data = [
+                {"name": tc.function.name, "arguments": tc.function.arguments}
+                for tc in msg.tool_calls
+            ]
+        elif isinstance(msg.get("tool_calls"), list):
+            tool_calls_data = msg["tool_calls"]
+
+        return {
+            "role": role,
+            "content": content,
+            "tool_name": msg.get("tool_name"),
+            "tool_calls": tool_calls_data,
+            "tool_call_id": msg.get("tool_call_id"),
+            "finish_reason": msg.get("finish_reason"),
+            "reasoning": msg.get("reasoning") if role == "assistant" else None,
+            "reasoning_content": msg.get("reasoning_content") if role == "assistant" else None,
+            "reasoning_details": msg.get("reasoning_details") if role == "assistant" else None,
+            "codex_reasoning_items": msg.get("codex_reasoning_items") if role == "assistant" else None,
+            "codex_message_items": msg.get("codex_message_items") if role == "assistant" else None,
+        }
 
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Persist any un-flushed messages to the SQLite session store.
@@ -4763,46 +4807,32 @@ class AIAgent:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
                 self._ensure_db_session()
+            if self._session_db_needs_rewrite:
+                normalized_messages = [
+                    self._normalize_message_for_session_db(msg)
+                    for msg in messages
+                ]
+                self._session_db.replace_messages(self.session_id, normalized_messages)
+                self._last_flushed_db_idx = len(messages)
+                self._session_db_needs_rewrite = False
+                return
             start_idx = len(conversation_history) if conversation_history else 0
-            flush_from = max(start_idx, self._last_flushed_db_idx)
+            flush_from = min(max(start_idx, self._last_flushed_db_idx), len(messages))
             for msg in messages[flush_from:]:
-                role = msg.get("role", "unknown")
-                content = msg.get("content")
-                # Persist multimodal tool results as their text summary only —
-                # base64 images would bloat the session DB and aren't useful
-                # for cross-session replay.
-                if _is_multimodal_tool_result(content):
-                    content = _multimodal_text_summary(content)
-                elif isinstance(content, list):
-                    # List of OpenAI-style content parts: strip images, keep text.
-                    _txt = []
-                    for p in content:
-                        if isinstance(p, dict) and p.get("type") == "text":
-                            _txt.append(str(p.get("text", "")))
-                        elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
-                            _txt.append("[screenshot]")
-                    content = "\n".join(_txt) if _txt else None
-                tool_calls_data = None
-                if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-                    tool_calls_data = [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
-                        for tc in msg.tool_calls
-                    ]
-                elif isinstance(msg.get("tool_calls"), list):
-                    tool_calls_data = msg["tool_calls"]
+                normalized = self._normalize_message_for_session_db(msg)
                 self._session_db.append_message(
                     session_id=self.session_id,
-                    role=role,
-                    content=content,
-                    tool_name=msg.get("tool_name"),
-                    tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    role=normalized["role"],
+                    content=normalized["content"],
+                    tool_name=normalized["tool_name"],
+                    tool_calls=normalized["tool_calls"],
+                    tool_call_id=normalized["tool_call_id"],
+                    finish_reason=normalized["finish_reason"],
+                    reasoning=normalized["reasoning"],
+                    reasoning_content=normalized["reasoning_content"],
+                    reasoning_details=normalized["reasoning_details"],
+                    codex_reasoning_items=normalized["codex_reasoning_items"],
+                    codex_message_items=normalized["codex_message_items"],
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
