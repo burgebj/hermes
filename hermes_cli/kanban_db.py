@@ -3896,10 +3896,14 @@ def _resolve_hermes_argv() -> list[str]:
 
     hermes_bin = shutil.which("hermes")
     if hermes_bin:
-        return [hermes_bin]
-    # Fallback to the module form. ``hermes_cli.main`` is the actual
-    # console-script target declared in pyproject.toml, NOT a top-level
-    # ``hermes`` package — there is no ``hermes`` package to import.
+         return [hermes_bin]
+    # Second fallback: hardcoded well-known path for environments where
+    # shutil.which() fails to resolve symlinks (e.g. /usr/local/bin/hermes
+    # → /root/.local/bin/hermes) despite PATH being correct.
+    _HARDCODED_FALLBACK = "/usr/local/bin/hermes"
+    if os.path.isfile(_HARDCODED_FALLBACK) and os.access(_HARDCODED_FALLBACK, os.X_OK):
+        return [_HARDCODED_FALLBACK]
+    # Final fallback: module form for venv setups without hermes shim on PATH.
     return [sys.executable, "-m", "hermes_cli.main"]
 
 
