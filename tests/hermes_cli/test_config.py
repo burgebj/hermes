@@ -11,9 +11,13 @@ from hermes_cli.config import (
     get_hermes_home,
     ensure_hermes_home,
     get_compatible_custom_providers,
+    _explicit_config_paths,
+    _normalize_max_turns_config,
+    _strip_default_values,
     load_config,
     load_env,
     migrate_config,
+    read_raw_config,
     remove_env_value,
     save_config,
     save_env_value,
@@ -732,3 +736,75 @@ class TestUserMessagePreviewConfig:
         preview = DEFAULT_CONFIG["display"]["user_message_preview"]
         assert preview["first_lines"] == 2
         assert preview["last_lines"] == 2
+
+
+
+class TestConfigNormalizationDoesNotOverwriteUserValues:
+    """Regression tests for #27354.
+
+    Config normalisation must not silently overwrite user-set values with
+    schema defaults on restart or when save_config is called as part of an
+    unrelated update."""
+
+    def test_save_config_does_not_inject_max_turns_when_unset(self, tmp_path):
+        """When the user never set max_turns, save_config must not write it."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": DEFAULT_CONFIG["_config_version"],
+                 "memory": {"user_char_limit": 2200}}
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_config(load_config())
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # agent.max_turns must NOT appear when the user never set it
+        assert "max_turns" not in raw.get("agent", {})
+        # user_char_limit must survive
+        assert raw["memory"]["user_char_limit"] == 2200
+
+    def test_save_config_preserves_explicit_default_values(self, tmp_path):
+        """Values matching the schema default must survive when explicitly set."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": DEFAULT_CONFIG["_config_version"],
+                 "approvals": {"mode": "manual"},
+                 "memory": {"user_char_limit": 2200}}
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_config(load_config())
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # Default-valued field must be preserved
+        assert raw["approvals"]["mode"] == "manual"
+        # Non-default field must also survive
+        assert raw["memory"]["user_char_limit"] == 2200
+
+    def test_normalize_max_turns_does_not_inject_default(self):
+        """_normalize_max_turns_config must not inject DEFAULT_CONFIG default."""
+        from hermes_cli.config import _normalize_max_turns_config as _norm
+        result = _norm({"_config_version": DEFAULT_CONFIG["_config_version"]})
+        assert "max_turns" not in result.get("agent", {}), (
+            "_normalize_max_turns_config should not inject agent.max_turns when "
+            "the user never set it"
+        )
+
+    def test_explicit_config_paths_from_raw_before_normalization(self, tmp_path):
+        """_explicit_config_paths must be computed from raw config, not normalised."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": DEFAULT_CONFIG["_config_version"],
+                 "memory": {"user_char_limit": 2200}},
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            raw_paths = _explicit_config_paths(read_raw_config())
+
+        assert ("memory", "user_char_limit") in raw_paths
+        # max_turns is NOT in the raw config, so must not be in explicit paths
+        assert ("agent", "max_turns") not in raw_paths
