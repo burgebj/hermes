@@ -853,6 +853,110 @@ class TestNewEndpoints:
             },
         ]
 
+    def test_profiles_list_marks_default_profile_active(self):
+        """The default profile (whose HERMES_HOME the dashboard process is bound
+        to) should report is_active=True; sub-profiles created during the test
+        should not."""
+        import hermes_cli.profiles as profiles_mod
+        # Sub-profile creation paths sometimes call into the gateway service
+        # cleanup helper — stub it out so the test stays hermetic.
+        # (mirrors test_profile_soul_round_trip)
+        try:
+            import pytest  # noqa: F401
+        except ImportError:
+            pass
+        profiles_mod_orig = profiles_mod._cleanup_gateway_service
+        profiles_mod._cleanup_gateway_service = lambda *a, **kw: None
+        try:
+            self.client.post("/api/profiles", json={"name": "active-test-prof"})
+            data = self.client.get("/api/profiles").json()
+        finally:
+            self.client.delete("/api/profiles/active-test-prof")
+            profiles_mod._cleanup_gateway_service = profiles_mod_orig
+        by_name = {p["name"]: p for p in data["profiles"]}
+        assert by_name["default"]["is_active"] is True
+        if "active-test-prof" in by_name:
+            assert by_name["active-test-prof"]["is_active"] is False
+
+    def test_profile_skills_list_picks_up_profile_dir(self, monkeypatch):
+        """GET /api/profiles/{name}/skills should scan the profile's own
+        skills/ directory, not the process-level HERMES_HOME."""
+        from pathlib import Path
+        import hermes_cli.profiles as profiles_mod
+        monkeypatch.setattr(profiles_mod, "_cleanup_gateway_service", lambda *a, **kw: None)
+
+        self.client.post("/api/profiles", json={"name": "skill-scope-prof"})
+        try:
+            profile_dir = Path(profiles_mod.get_profile_dir("skill-scope-prof"))
+            skill_dir = profile_dir / "skills" / "productivity" / "ben-only-skill"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: ben-only-skill\n"
+                "description: A skill that exists only in skill-scope-prof.\n"
+                "---\n"
+                "# Body\n",
+                encoding="utf-8",
+            )
+            resp = self.client.get("/api/profiles/skill-scope-prof/skills")
+            assert resp.status_code == 200
+            skills = resp.json()
+            found = [s for s in skills if s["name"] == "ben-only-skill"]
+            assert len(found) == 1, f"expected 1 ben-only-skill, got {skills}"
+            assert found[0]["enabled"] is True
+            assert found[0]["category"] == "productivity"
+            assert found[0]["description"].startswith("A skill that exists")
+        finally:
+            self.client.delete("/api/profiles/skill-scope-prof")
+
+    def test_profile_skill_toggle_persists_to_profile_config(self, monkeypatch):
+        """PUT /api/profiles/{name}/skills/toggle should write to the profile's
+        own config.yaml, leaving the dashboard's active profile untouched."""
+        from pathlib import Path
+        import yaml
+        import hermes_cli.profiles as profiles_mod
+        monkeypatch.setattr(profiles_mod, "_cleanup_gateway_service", lambda *a, **kw: None)
+
+        self.client.post("/api/profiles", json={"name": "toggle-prof"})
+        try:
+            put = self.client.put(
+                "/api/profiles/toggle-prof/skills/toggle",
+                json={"name": "fake-skill", "enabled": False},
+            )
+            assert put.status_code == 200
+            assert put.json()["profile"] == "toggle-prof"
+            assert put.json()["enabled"] is False
+
+            profile_cfg = Path(profiles_mod.get_profile_dir("toggle-prof")) / "config.yaml"
+            assert profile_cfg.exists()
+            parsed = yaml.safe_load(profile_cfg.read_text(encoding="utf-8")) or {}
+            assert parsed.get("skills", {}).get("disabled") == ["fake-skill"]
+
+            # Re-enable removes the entry rather than leaving a stale flag.
+            put2 = self.client.put(
+                "/api/profiles/toggle-prof/skills/toggle",
+                json={"name": "fake-skill", "enabled": True},
+            )
+            assert put2.status_code == 200
+            parsed2 = yaml.safe_load(profile_cfg.read_text(encoding="utf-8")) or {}
+            assert parsed2.get("skills", {}).get("disabled") == []
+        finally:
+            self.client.delete("/api/profiles/toggle-prof")
+
+    def test_profile_skills_unknown_profile_404(self):
+        resp = self.client.get("/api/profiles/nonexistent/skills")
+        assert resp.status_code == 404
+        resp2 = self.client.put(
+            "/api/profiles/nonexistent/skills/toggle",
+            json={"name": "x", "enabled": False},
+        )
+        assert resp2.status_code == 404
+
+    def test_profile_skills_invalid_name_400(self):
+        resp = self.client.get("/api/profiles/Bad@Name/skills")
+        assert resp.status_code == 400
+        assert "Invalid profile name" in resp.json()["detail"]
+
     def test_toolsets_list(self):
         resp = self.client.get("/api/tools/toolsets")
         assert resp.status_code == 200

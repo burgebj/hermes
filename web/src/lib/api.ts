@@ -203,6 +203,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, enabled }),
     }),
+  // Per-profile skill management. The dashboard daemon edits the active
+  // profile by default; these routes let it edit other installed profiles
+  // without spawning a second daemon per profile.
+  getProfileSkills: (profile: string) =>
+    fetchJSON<SkillInfo[]>(`/api/profiles/${encodeURIComponent(profile)}/skills`),
+  toggleProfileSkill: (profile: string, name: string, enabled: boolean) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/profiles/${encodeURIComponent(profile)}/skills/toggle`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, enabled }),
+      },
+    ),
   getToolsets: () => fetchJSON<ToolsetInfo[]>("/api/tools/toolsets"),
 
   // Session search (FTS5)
@@ -505,6 +519,13 @@ export interface ProfileInfo {
   name: string;
   path: string;
   is_default: boolean;
+  /**
+   * True when this profile is the one the running dashboard process is
+   * bound to (matches HERMES_HOME). Optional for backward-compat with
+   * older gateways that don't emit the field — callers should treat
+   * undefined as false.
+   */
+  is_active?: boolean;
   model: string | null;
   provider: string | null;
   has_env: boolean;
