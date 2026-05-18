@@ -3,7 +3,7 @@
 set -e
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
-INSTALL_DIR="/opt/hermes"
+INSTALL_DIR="${INSTALL_DIR:-/opt/hermes}"
 
 # --- Privilege dropping via gosu ---
 # When started as root (the default for Docker, or fakeroot in rootless Podman),
@@ -60,6 +60,35 @@ fi
 
 # --- Running as hermes from here ---
 source "${INSTALL_DIR}/.venv/bin/activate"
+
+# Preflight: $HERMES_HOME must be writable by the running user before we
+# attempt to populate it.  Rootless Podman quadlets that pin ``User=%U:%G``
+# skip the gosu/chown branch above, so a misaligned host UID + bind-mount
+# permissions combo would otherwise hit ``mkdir -p`` and emit an opaque
+# ``Permission denied`` for every brace-expanded subdirectory before
+# crashing the container under ``set -e`` (#20377).  Detect the situation
+# up front and surface an actionable diagnostic instead.
+if [ ! -d "$HERMES_HOME" ] || [ ! -w "$HERMES_HOME" ]; then
+    cat >&2 <<EOF
+[entrypoint] HERMES_HOME=$HERMES_HOME is not writable by uid=$(id -u) gid=$(id -g).
+
+Likely causes:
+  - Rootless Podman/Docker quadlet pins User=%U:%G but the bind-mount source
+    on the host is owned by a different UID (no chown happens because the
+    entrypoint never enters the privileged branch).
+  - Volume mount failed to overlay /opt/data (e.g. SELinux relabel issues
+    when the source dir does not exist).
+
+Fix on the host:
+  - mkdir -p \$HOME/containers/<service>/data
+  - chown \$(id -u):\$(id -g) \$HOME/containers/<service>/data
+  - Re-run with the volume mount in place.
+
+Or omit User=%U:%G and let the entrypoint drop privileges via gosu (the
+default flow), which will chown the volume to the in-container hermes user.
+EOF
+    exit 1
+fi
 
 # Create essential directory structure.  Cache and platform directories
 # (cache/images, cache/audio, platforms/whatsapp, etc.) are created on
