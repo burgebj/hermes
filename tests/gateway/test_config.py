@@ -70,6 +70,23 @@ class TestPlatformConfigRoundtrip:
         restored = PlatformConfig.from_dict({"gateway_restart_notification": "false"})
         assert restored.gateway_restart_notification is False
 
+    def test_gateway_restart_notification_reads_from_extra_fallback(self):
+        """When gateway_restart_notification is absent at top-level but present
+        in extra (as happens after the shared-key bridging loop in
+        load_gateway_config), from_dict must still pick it up."""
+        restored = PlatformConfig.from_dict({
+            "extra": {"gateway_restart_notification": False},
+        })
+        assert restored.gateway_restart_notification is False
+
+    def test_gateway_restart_notification_top_level_takes_precedence_over_extra(self):
+        """Top-level value wins when both top-level and extra provide the key."""
+        restored = PlatformConfig.from_dict({
+            "gateway_restart_notification": True,
+            "extra": {"gateway_restart_notification": False},
+        })
+        assert restored.gateway_restart_notification is True
+
 
 class TestGetConnectedPlatforms:
     def test_returns_enabled_with_token(self):
@@ -679,3 +696,66 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+
+class TestGatewayRestartNotificationBridging:
+    """Regression tests for the gateway_restart_notification config bridge bug.
+
+    Setting ``discord: gateway_restart_notification: false`` in config.yaml
+    was silently ignored because:
+
+    1. The shared-key bridging loop in load_gateway_config() did not include
+       ``gateway_restart_notification`` in its bridge list, so the value never
+       reached ``platforms_data["discord"]``.
+    2. PlatformConfig.from_dict() only read the key from the top-level dict,
+       not from ``extra`` where bridged values land.
+
+    Both issues are fixed. These tests verify the end-to-end path.
+    """
+
+    def test_discord_yaml_section_bridged_to_platform_config(self, tmp_path, monkeypatch):
+        """``discord: gateway_restart_notification: false`` in config.yaml
+        must propagate to PlatformConfig.gateway_restart_notification."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n  gateway_restart_notification: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        config = load_gateway_config()
+        discord_cfg = config.platforms.get(Platform.DISCORD)
+        assert discord_cfg is not None
+        assert discord_cfg.gateway_restart_notification is False
+
+    def test_telegram_yaml_section_bridged_to_platform_config(self, tmp_path, monkeypatch):
+        """``telegram: gateway_restart_notification: false`` in config.yaml
+        must propagate to PlatformConfig.gateway_restart_notification."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "telegram:\n  gateway_restart_notification: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        config = load_gateway_config()
+        telegram_cfg = config.platforms.get(Platform.TELEGRAM)
+        assert telegram_cfg is not None
+        assert telegram_cfg.gateway_restart_notification is False
+
+    def test_default_true_when_not_set(self, tmp_path, monkeypatch):
+        """When gateway_restart_notification is absent, the default must be True."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n  require_mention: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        config = load_gateway_config()
+        discord_cfg = config.platforms.get(Platform.DISCORD)
+        assert discord_cfg is not None
+        assert discord_cfg.gateway_restart_notification is True
