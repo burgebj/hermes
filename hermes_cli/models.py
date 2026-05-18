@@ -1709,6 +1709,26 @@ def _get_custom_base_url() -> str:
     return ""
 
 
+def _get_azure_foundry_base_url() -> str:
+    """Resolve the Azure Foundry endpoint base URL.
+
+    Precedence mirrors the runtime resolver in ``hermes_cli.runtime_provider``:
+    ``model.base_url`` from ``config.yaml`` (only when ``model.provider`` is
+    ``azure-foundry``) wins over the ``AZURE_FOUNDRY_BASE_URL`` env var, so
+    the picker and the inference path agree on which resource to talk to.
+    """
+    try:
+        from hermes_cli.config import load_config
+        model_cfg = (load_config() or {}).get("model") or {}
+        if isinstance(model_cfg, dict) and str(model_cfg.get("provider") or "").strip().lower() == "azure-foundry":
+            cfg_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            if cfg_url:
+                return cfg_url
+    except Exception:
+        pass
+    return os.getenv("AZURE_FOUNDRY_BASE_URL", "").strip().rstrip("/")
+
+
 def curated_models_for_provider(
     provider: Optional[str],
     *,
@@ -2265,6 +2285,28 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             live = fetch_api_models(api_key, base_url)
             if live:
                 return live
+    # Azure Foundry: deployments are per-resource so the static catalog is
+    # intentionally empty. Probe GET <base>/models to populate the picker
+    # with the deployment IDs the configured API key can see — same probe
+    # the setup wizard already uses (#27989).
+    if normalized == "azure-foundry":
+        try:
+            base_url = _get_azure_foundry_base_url()
+            api_key = ""
+            try:
+                from hermes_cli.config import get_env_value
+                api_key = str(get_env_value("AZURE_FOUNDRY_API_KEY") or "").strip()
+            except Exception:
+                api_key = ""
+            if not api_key:
+                api_key = os.getenv("AZURE_FOUNDRY_API_KEY", "").strip()
+            if base_url and api_key:
+                from hermes_cli.azure_detect import _probe_openai_models
+                ok, ids = _probe_openai_models(base_url, api_key)
+                if ok and ids:
+                    return ids
+        except Exception:
+            pass
     # Bedrock uses live discovery keyed by the resolved AWS region so that
     # EU/AP users see eu.*/ap.* model IDs instead of the static us.* list.
     # Note: early return intentionally skips _MODELS_DEV_PREFERRED merge
