@@ -64,6 +64,21 @@ def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     """
     if not isinstance(cfg, dict):
         return False
+    try:
+        from agent.model_registry import ModelRegistry
+        reg = ModelRegistry(cfg)
+        resolved = reg.auxiliary("vision")
+        # If the resolved provider/model differs from the main model,
+        # the user has an explicit auxiliary vision backend.
+        try:
+            main = reg.main()
+            return resolved.id != main.id
+        except ValueError:
+            # No main model — if we resolved anything for vision, it's explicit
+            return bool(resolved.provider)
+    except Exception:
+        # Fallback to legacy config parsing
+        pass
     aux = cfg.get("auxiliary") or {}
     if not isinstance(aux, dict):
         return False

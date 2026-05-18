@@ -711,49 +711,46 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
 
 def _try_resolve_fallback_provider() -> dict | None:
-    """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
+    """Attempt to resolve credentials from the fallback_model/fallback_providers config.
+
+    Uses ``ModelRegistry.fallback_chain()`` for model resolution consistency,
+    then delegates credential lookup to ``resolve_runtime_provider``.
+    """
     from hermes_cli.runtime_provider import resolve_runtime_provider
+    from agent.model_registry import ModelRegistry
+
+    cfg = _load_gateway_config()
     try:
-        import yaml as _y
-        cfg_path = _hermes_home / "config.yaml"
-        if not cfg_path.exists():
-            return None
-        with open(cfg_path, encoding="utf-8") as _f:
-            cfg = _y.safe_load(_f) or {}
-        fb = cfg.get("fallback_providers") or cfg.get("fallback_model")
-        if not fb:
-            return None
-        # Normalize to list
-        fb_list = fb if isinstance(fb, list) else [fb]
-        for entry in fb_list:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                runtime = resolve_runtime_provider(
-                    requested=entry.get("provider"),
-                    explicit_base_url=entry.get("base_url"),
-                    explicit_api_key=entry.get("api_key"),
-                )
-                logger.info(
-                    "Fallback provider resolved: %s model=%s",
-                    runtime.get("provider"),
-                    entry.get("model"),
-                )
-                return {
-                    "api_key": runtime.get("api_key"),
-                    "base_url": runtime.get("base_url"),
-                    "provider": runtime.get("provider"),
-                    "api_mode": runtime.get("api_mode"),
-                    "command": runtime.get("command"),
-                    "args": list(runtime.get("args") or []),
-                    "credential_pool": runtime.get("credential_pool"),
-                    "model": entry.get("model"),
-                }
-            except Exception as fb_exc:
-                logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
-                continue
+        reg = ModelRegistry(cfg)
+        chain = reg.fallback_chain()
     except Exception:
-        pass
+        chain = []
+
+    for resolved in chain:
+        try:
+            runtime = resolve_runtime_provider(
+                requested=resolved.provider,
+                explicit_base_url=resolved.base_url,
+                explicit_api_key=resolved.api_key,
+            )
+            logger.info(
+                "Fallback provider resolved: %s model=%s",
+                runtime.get("provider"),
+                resolved.model,
+            )
+            return {
+                "api_key": runtime.get("api_key"),
+                "base_url": runtime.get("base_url"),
+                "provider": runtime.get("provider"),
+                "api_mode": runtime.get("api_mode"),
+                "command": runtime.get("command"),
+                "args": list(runtime.get("args") or []),
+                "credential_pool": runtime.get("credential_pool"),
+                "model": resolved.model,
+            }
+        except Exception as fb_exc:
+            logger.debug("Fallback entry %s failed: %s", resolved.id, fb_exc)
+            continue
     return None
 
 
@@ -977,14 +974,23 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     Without this, temporary AIAgent instances (e.g. /compress) fall
     back to the hardcoded default which fails when the active provider is
     openai-codex.
+
+    Uses ``ModelRegistry`` for consistent parsing with the rest of Hermes.
     """
     cfg = config if config is not None else _load_gateway_config()
-    model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, str):
-        return model_cfg
-    elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
+    try:
+        from agent.model_registry import ModelRegistry
+        reg = ModelRegistry(cfg)
+        main = reg.main()
+        return main.model
+    except (ValueError, Exception):
+        # Fallback to legacy parsing if registry is unavailable
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, str):
+            return model_cfg
+        elif isinstance(model_cfg, dict):
+            return model_cfg.get("default") or model_cfg.get("model") or ""
+        return ""
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -2533,19 +2539,15 @@ class GatewayRunner:
     def _load_fallback_model() -> list | dict | None:
         """Load fallback provider chain from config.yaml.
 
-        Returns a list of provider dicts (``fallback_providers``), a single
-        dict (legacy ``fallback_model``), or None if not configured.
-        AIAgent.__init__ normalizes both formats into a chain.
+        Uses ``ModelRegistry.fallback_chain()`` for consistent resolution.
+        Returns the raw config dict (list or single dict) for backward
+        compatibility with AIAgent.__init__ which normalizes both formats.
         """
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
-                if fb:
-                    return fb
+            cfg = _load_gateway_config()
+            fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
+            if fb:
+                return fb
         except Exception:
             pass
         return None

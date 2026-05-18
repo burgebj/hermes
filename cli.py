@@ -2752,13 +2752,21 @@ class HermesCLI:
             except (TypeError, ValueError):
                 pass
         
-        # Fallback provider chain — tried in order when primary fails after retries.
-        # Supports new list format (fallback_providers) and legacy single-dict (fallback_model).
-        fb = CLI_CONFIG.get("fallback_providers") or CLI_CONFIG.get("fallback_model") or []
-        # Normalize legacy single-dict to a one-element list
-        if isinstance(fb, dict):
-            fb = [fb] if fb.get("provider") and fb.get("model") else []
-        self._fallback_model = fb
+        # Fallback provider chain — resolved via ModelRegistry for consistency
+        # with the rest of Hermes.  Supports new list format (fallback_providers)
+        # and legacy single-dict (fallback_model).
+        try:
+            from agent.model_registry import ModelRegistry
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            reg = ModelRegistry(cfg)
+            self._fallback_model = reg.fallback_chain()
+        except Exception:
+            # Fallback to legacy parsing if registry is unavailable
+            fb = CLI_CONFIG.get("fallback_providers") or CLI_CONFIG.get("fallback_model") or []
+            if isinstance(fb, dict):
+                fb = [fb] if fb.get("provider") and fb.get("model") else []
+            self._fallback_model = fb
 
         # Signature of the currently-initialised agent's runtime.  Used to
         # rebuild the agent when provider / model / base_url changes across
@@ -4219,10 +4227,9 @@ class HermesCLI:
         if runtime is None and _primary_exc is not None:
             from hermes_cli.auth import AuthError
             if isinstance(_primary_exc, AuthError):
-                _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
-                for _fb in _fb_chain:
-                    _fb_provider = (_fb.get("provider") or "").strip().lower()
-                    _fb_model = (_fb.get("model") or "").strip()
+                for fb in self._fallback_model:
+                    _fb_provider = (fb.provider if hasattr(fb, "provider") else (fb.get("provider") or "")).strip().lower()
+                    _fb_model = (fb.model if hasattr(fb, "model") else (fb.get("model") or "")).strip()
                     if not _fb_provider or not _fb_model:
                         continue
                     try:

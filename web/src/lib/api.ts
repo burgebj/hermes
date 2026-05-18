@@ -99,6 +99,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getConfiguredModels: () =>
+    fetchJSON<ConfiguredModelsResponse>("/api/model/configured"),
+  setFallbackChain: (fallbacks: { provider: string; model: string; base_url?: string }[]) =>
+    fetchJSON<SetFallbacksResponse>("/api/model/fallbacks", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fallbacks }),
+    }),
+  registerModel: (body: { provider: string; model: string; capabilities?: Record<string, unknown> }) =>
+    fetchJSON<RegisterModelResponse>("/api/model/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   saveConfig: (config: Record<string, unknown>) =>
     fetchJSON<{ ok: boolean }>("/api/config", {
       method: "PUT",
@@ -632,16 +646,16 @@ export interface ModelOptionsResponse {
   providers?: ModelOptionProvider[];
 }
 
+export interface AuxiliaryModelsResponse {
+  tasks: AuxiliaryTaskAssignment[];
+  main: { provider: string; model: string };
+}
+
 export interface AuxiliaryTaskAssignment {
   task: string;
   provider: string;
   model: string;
-  base_url: string;
-}
-
-export interface AuxiliaryModelsResponse {
-  tasks: AuxiliaryTaskAssignment[];
-  main: { provider: string; model: string };
+  base_url?: string;
 }
 
 export interface ModelAssignmentRequest {
@@ -659,6 +673,32 @@ export interface ModelAssignmentResponse {
   model?: string;
   tasks?: string[];
   reset?: boolean;
+}
+
+// ── Centralized model config types ──────────────────────────────────────
+
+export interface ModelInfo {
+  id: string;
+  provider: string;
+  model: string;
+  base_url?: string;
+  capabilities?: Record<string, unknown>;
+}
+
+export interface ConfiguredModelsResponse {
+  main: ModelInfo | null;
+  fallbacks: ModelInfo[];
+  auxiliary: AuxiliaryTaskAssignment[];
+}
+
+export interface SetFallbacksResponse {
+  ok: boolean;
+  fallbacks: ModelInfo[];
+}
+
+export interface RegisterModelResponse {
+  ok: boolean;
+  id: string;
 }
 
 // ── OAuth provider types ────────────────────────────────────────────────

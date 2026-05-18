@@ -81,20 +81,25 @@ def load_picker_context() -> ConfigContext:
 
     Replaces the inline 17-LOC config-slice that ``web_server.py`` and
     ``tui_gateway/server.py`` (×2 sites) used to do.
+
+    Uses ``ModelRegistry`` for consistent provider/model parsing.
     """
     from hermes_cli.config import get_compatible_custom_providers, load_config
+    from agent.model_registry import ModelRegistry
 
     cfg = load_config()
-    model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, dict):
-        current_model = model_cfg.get("default", model_cfg.get("name", "")) or ""
-        current_provider = model_cfg.get("provider", "") or ""
-        current_base_url = model_cfg.get("base_url", "") or ""
-    else:
-        # config.model can be a bare string in older configs.
-        current_model = str(model_cfg) if model_cfg else ""
+    try:
+        reg = ModelRegistry(cfg)
+        main = reg.main()
+        current_provider = main.provider
+        current_model = main.model
+        current_base_url = main.base_url or ""
+    except ValueError:
+        # No model configured — fall through to legacy path
         current_provider = ""
+        current_model = ""
         current_base_url = ""
+
     raw = cfg.get("providers")
     return ConfigContext(
         current_provider=current_provider,

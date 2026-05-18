@@ -1608,22 +1608,33 @@ def _read_main_model() -> str:
     override in a process-local global. This is consulted FIRST so tools
     that gate on "the active main model" (e.g. ``vision_analyze``'s native
     fast path) see the live runtime, not the persisted config default.
+
+    Uses ``ModelRegistry`` for consistent parsing with the rest of Hermes.
     """
     override = _RUNTIME_MAIN_MODEL
     if isinstance(override, str) and override.strip():
         return override.strip()
     try:
         from hermes_cli.config import load_config
+        from agent.model_registry import ModelRegistry
         cfg = load_config()
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, str) and model_cfg.strip():
-            return model_cfg.strip()
-        if isinstance(model_cfg, dict):
-            default = model_cfg.get("default", "")
-            if isinstance(default, str) and default.strip():
-                return default.strip()
-    except Exception:
-        pass
+        reg = ModelRegistry(cfg)
+        main = reg.main()
+        return main.model
+    except (ValueError, Exception):
+        # Fallback to legacy parsing if registry is unavailable
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, str) and model_cfg.strip():
+                return model_cfg.strip()
+            if isinstance(model_cfg, dict):
+                default = model_cfg.get("default", "")
+                if isinstance(default, str) and default.strip():
+                    return default.strip()
+        except Exception:
+            pass
     return ""
 
 
@@ -1635,20 +1646,31 @@ def _read_main_provider() -> str:
 
     Runtime override: see ``_read_main_model`` — same mechanism for the
     provider half of the runtime tuple.
+
+    Uses ``ModelRegistry`` for consistent parsing with the rest of Hermes.
     """
     override = _RUNTIME_MAIN_PROVIDER
     if isinstance(override, str) and override.strip():
         return override.strip().lower()
     try:
         from hermes_cli.config import load_config
+        from agent.model_registry import ModelRegistry
         cfg = load_config()
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            provider = model_cfg.get("provider", "")
-            if isinstance(provider, str) and provider.strip():
-                return provider.strip().lower()
-    except Exception:
-        pass
+        reg = ModelRegistry(cfg)
+        main = reg.main()
+        return main.provider.lower()
+    except (ValueError, Exception):
+        # Fallback to legacy parsing if registry is unavailable
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, dict):
+                provider = model_cfg.get("provider", "")
+                if isinstance(provider, str) and provider.strip():
+                    return provider.strip().lower()
+        except Exception:
+            pass
     return ""
 
 
