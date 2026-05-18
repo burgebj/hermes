@@ -748,6 +748,16 @@ class TestSignalMediaExtraction:
         assert media[0][0] == "/tmp/price_graph.png"
         assert "MEDIA:" not in cleaned
 
+    def test_extract_media_ignores_relative_word_fallback(self):
+        """extract_media() must not capture plain words or relative tokens after MEDIA:."""
+        from gateway.platforms.base import BasePlatformAdapter
+        media, _ = BasePlatformAdapter.extract_media("MEDIA:description")
+        assert media == [], "plain word after MEDIA: must not be extracted"
+        media2, _ = BasePlatformAdapter.extract_media("MEDIA:relative/path.png")
+        assert media2 == [], "relative path without leading slash must not be extracted"
+        media3, _ = BasePlatformAdapter.extract_media("MEDIA:/tmp/file.ogg")
+        assert len(media3) == 1 and media3[0][0] == "/tmp/file.ogg"
+
     def test_extract_media_finds_audio_tag(self):
         """BasePlatformAdapter.extract_media should find MEDIA: audio paths."""
         from gateway.platforms.base import BasePlatformAdapter
