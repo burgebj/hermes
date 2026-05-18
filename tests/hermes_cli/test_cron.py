@@ -4,7 +4,7 @@ from argparse import Namespace
 
 import pytest
 
-from cron.jobs import create_job, get_job, list_jobs
+from cron.jobs import create_job, get_job, list_jobs, save_jobs
 from hermes_cli.cron import cron_command
 
 
@@ -105,3 +105,21 @@ class TestCronCommandLifecycle:
         assert len(jobs) == 1
         assert jobs[0]["skills"] == ["blogwatcher", "maps"]
         assert jobs[0]["name"] == "Skill combo"
+
+    def test_list_tolerates_null_and_missing_repeat_metadata(self, tmp_cron_dir, capsys):
+        null_repeat = create_job(prompt="Null repeat", schedule="every 1h", name="Null repeat")
+        missing_repeat = create_job(prompt="Missing repeat", schedule="every 2h", name="Missing repeat")
+
+        jobs = list_jobs(include_disabled=True)
+        for job in jobs:
+            if job["id"] == null_repeat["id"]:
+                job["repeat"] = None
+            elif job["id"] == missing_repeat["id"]:
+                del job["repeat"]
+        save_jobs(jobs)
+
+        assert cron_command(Namespace(cron_command="list", all=True)) == 0
+        out = capsys.readouterr().out
+        assert "Null repeat" in out
+        assert "Missing repeat" in out
+        assert out.count("Repeat:    ∞") == 2
