@@ -217,6 +217,7 @@ export interface InputHandlerContext {
     setRecording: StateSetter<boolean>
     setVoiceEnabled: StateSetter<boolean>
   }
+  interruptKey: ParsedVoiceRecordKey
   wheelStep: number
 }
 
