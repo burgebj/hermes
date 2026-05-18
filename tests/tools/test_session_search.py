@@ -1,6 +1,7 @@
 """Tests for tools/session_search_tool.py — helper functions and search dispatcher."""
 
 import asyncio
+import concurrent.futures
 import json
 import time
 import pytest
@@ -399,6 +400,48 @@ class TestSessionSearch:
         # Current session should be skipped, only other_sid should appear
         assert result["sessions_searched"] == 1
         assert current_sid not in [r.get("session_id") for r in result.get("results", [])]
+
+    def test_summarization_bridge_timeout_returns_raw_preview(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        mock_db.search_messages.return_value = [
+            {
+                "session_id": "old_sid",
+                "content": "important old context",
+                "source": "telegram",
+                "session_started": 1709400000,
+                "model": "test",
+            },
+        ]
+        mock_db.get_session.return_value = {
+            "id": "old_sid",
+            "parent_session_id": None,
+            "source": "telegram",
+            "started_at": 1709400000,
+            "model": "test",
+        }
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "important old context"},
+            {"role": "assistant", "content": "prior answer"},
+        ]
+
+        def _raise_timeout(_coro):
+            _coro.close()
+            raise concurrent.futures.TimeoutError()
+
+        monkeypatch.setattr("model_tools._run_async", _raise_timeout)
+
+        result = json.loads(session_search(query="important", db=mock_db))
+
+        assert result["success"] is True
+        assert result["degraded"] is True
+        assert result["count"] == 1
+        entry = result["results"][0]
+        assert entry["degraded"] is True
+        assert "Raw preview" in entry["summary"]
+        assert "important old context" in entry["summary"]
 
     def test_current_child_session_excludes_parent_lineage(self):
         """Compression/delegation parents should be excluded for the active child session."""

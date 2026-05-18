@@ -26,6 +26,7 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
 )
+from gateway.run import _normalize_empty_agent_response
 from gateway.session import SessionSource, build_session_key
 
 
@@ -311,6 +312,51 @@ class TestEmptyResponseNotSuppressed:
         response = {"final_response": "(empty)", "failed": True}
         self._apply_suppression_logic(response, sc)
         assert "already_sent" not in response
+
+
+class TestIncompleteToolTurnGetsVisibleResponse:
+    def test_tool_tail_without_final_response_gets_visible_failure(self):
+        agent_result = {
+            "final_response": "",
+            "messages": [
+                {"role": "user", "content": "do work"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "session_search"}},
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "session_search",
+                    "content": '{"success": true, "results": []}',
+                    "tool_call_id": "call_1",
+                },
+            ],
+            "api_calls": 0,
+            "completed": False,
+        }
+
+        response = _normalize_empty_agent_response(agent_result, "", history_len=3)
+
+        assert response
+        assert "Processing stopped after a tool result" in response
+
+    def test_interrupted_tool_tail_stays_empty_for_stop_flow(self):
+        agent_result = {
+            "final_response": "",
+            "messages": [
+                {"role": "tool", "name": "terminal", "content": "cancelled"},
+            ],
+            "api_calls": 0,
+            "completed": False,
+            "interrupted": True,
+        }
+
+        response = _normalize_empty_agent_response(agent_result, "", history_len=3)
+
+        assert response == ""
 
 class TestQueuedMessageAlreadyStreamed:
     """The queued-message path should skip the first response only when the

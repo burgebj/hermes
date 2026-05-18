@@ -473,6 +473,8 @@ def session_search(
             ]
             return await asyncio.gather(*coros, return_exceptions=True)
 
+        summary_degraded = False
+        summarization_error = None
         try:
             # Use _run_async() which properly manages event loops across
             # CLI, gateway, and worker-thread contexts.  The previous
@@ -484,13 +486,14 @@ def session_search(
             results = _run_async(_summarize_all())
         except concurrent.futures.TimeoutError:
             logging.warning(
-                "Session summarization timed out after 60 seconds",
+                "Session summarization timed out; returning raw previews",
                 exc_info=True,
             )
-            return json.dumps({
-                "success": False,
-                "error": "Session summarization timed out. Try a more specific query or reduce the limit.",
-            }, ensure_ascii=False)
+            summary_degraded = True
+            summarization_error = (
+                "Session summarization timed out. Returning raw previews."
+            )
+            results = [None] * len(tasks)
 
         summaries = []
         for (session_id, match_info, conversation_text, session_meta), result in zip(tasks, results):
@@ -522,16 +525,23 @@ def session_search(
                 # dropped when the summarizer is unavailable (fixes #3409).
                 preview = (conversation_text[:500] + "\n…[truncated]") if conversation_text else "No preview available."
                 entry["summary"] = f"[Raw preview — summarization unavailable]\n{preview}"
+                entry["degraded"] = True
+                if summarization_error:
+                    entry["summarization_error"] = summarization_error
 
             summaries.append(entry)
 
-        return json.dumps({
+        payload = {
             "success": True,
             "query": query,
             "results": summaries,
             "count": len(summaries),
             "sessions_searched": len(seen_sessions),
-        }, ensure_ascii=False)
+        }
+        if summary_degraded:
+            payload["degraded"] = True
+            payload["warning"] = summarization_error
+        return json.dumps(payload, ensure_ascii=False)
 
     except Exception as e:
         logging.error("Session search failed: %s", e, exc_info=True)

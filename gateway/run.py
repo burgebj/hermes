@@ -1107,6 +1107,33 @@ def _normalize_empty_agent_response(
             "Try again or use /reset to start a fresh session."
         )
 
+    messages = agent_result.get("messages") or []
+    last_role = messages[-1].get("role") if messages and isinstance(messages[-1], dict) else None
+    has_tool_activity = any(
+        isinstance(msg, dict)
+        and (
+            msg.get("role") == "tool"
+            or bool(msg.get("tool_calls"))
+        )
+        for msg in messages
+    )
+    if (
+        has_tool_activity
+        and last_role == "tool"
+        and not agent_result.get("interrupted")
+    ):
+        return (
+            "⚠️ Processing stopped after a tool result, before the agent "
+            "produced a final reply. Try again to continue from the saved "
+            "tool output, or use /reset to start fresh."
+        )
+
+    if agent_result.get("completed") is False and not agent_result.get("interrupted"):
+        return (
+            "⚠️ Processing stopped before a final reply was generated. "
+            "Try again to continue, or use /reset to start fresh."
+        )
+
     api_calls = int(agent_result.get("api_calls", 0) or 0)
     if api_calls > 0 and not agent_result.get("interrupted"):
         if agent_result.get("partial"):
