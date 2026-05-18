@@ -23,6 +23,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
+    SUPPORTED_IMAGE_DOCUMENT_TYPES,
     SUPPORTED_VIDEO_TYPES,
 )
 
@@ -145,6 +146,9 @@ def _redirect_cache(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "gateway.platforms.base.VIDEO_CACHE_DIR", tmp_path / "video_cache"
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "image_cache"
     )
 
 
@@ -424,6 +428,175 @@ class TestVideoDownloadBlock:
         assert len(event.media_urls) == 1
         assert os.path.exists(event.media_urls[0])
         assert event.media_types == [SUPPORTED_VIDEO_TYPES[".mp4"]]
+
+
+# ---------------------------------------------------------------------------
+# TestImageDocuments — image files uploaded via the document path (issue #20128)
+# ---------------------------------------------------------------------------
+
+# Minimal valid image magic bytes that pass _looks_like_image
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+_JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+_WEBP_BYTES = b"RIFF" + b"\x00\x00\x00\x20" + b"WEBP" + b"\x00" * 32
+_GIF_BYTES = b"GIF89a" + b"\x00" * 32
+
+
+class TestImageDocuments:
+    """Image extensions sent as Telegram documents must route through the
+    image/photo path instead of being rejected as unsupported (issue #20128).
+    """
+
+    @pytest.mark.asyncio
+    async def test_webp_document_routed_through_photo_path(self, adapter):
+        file_obj = _make_file_obj(_WEBP_BYTES)
+        doc = _make_document(
+            file_name="sticker.webp",
+            mime_type="image/webp",
+            file_size=len(_WEBP_BYTES),
+            file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+
+        # Photo batching defers the call — flush by waiting past the delay.
+        await asyncio.sleep(adapter._media_batch_delay_seconds + 0.05)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.message_type == MessageType.PHOTO
+        assert event.media_types == ["image/webp"]
+        assert len(event.media_urls) == 1
+        assert os.path.exists(event.media_urls[0])
+        assert event.media_urls[0].lower().endswith(".webp")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "filename, mime, payload, expected_mime",
+        [
+            ("photo.jpg", "image/jpeg", _JPEG_BYTES, "image/jpeg"),
+            ("photo.jpeg", "image/jpeg", _JPEG_BYTES, "image/jpeg"),
+            ("shot.png", "image/png", _PNG_BYTES, "image/png"),
+            ("meme.gif", "image/gif", _GIF_BYTES, "image/gif"),
+        ],
+    )
+    async def test_image_document_extensions_cached(
+        self, adapter, filename, mime, payload, expected_mime
+    ):
+        file_obj = _make_file_obj(payload)
+        doc = _make_document(
+            file_name=filename, mime_type=mime,
+            file_size=len(payload), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        await asyncio.sleep(adapter._media_batch_delay_seconds + 0.05)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.message_type == MessageType.PHOTO
+        assert event.media_types == [expected_mime]
+        assert len(event.media_urls) == 1
+        assert os.path.exists(event.media_urls[0])
+
+    @pytest.mark.asyncio
+    async def test_image_document_caption_preserved(self, adapter):
+        file_obj = _make_file_obj(_PNG_BYTES)
+        doc = _make_document(
+            file_name="diagram.png", mime_type="image/png",
+            file_size=len(_PNG_BYTES), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc, caption="What is this?")
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        await asyncio.sleep(adapter._media_batch_delay_seconds + 0.05)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert "What is this?" in event.text
+        assert event.message_type == MessageType.PHOTO
+
+    @pytest.mark.asyncio
+    async def test_image_document_album_buffered(self, adapter):
+        """Multiple image documents in a media group merge into one event."""
+        file_obj_1 = _make_file_obj(_PNG_BYTES)
+        file_obj_2 = _make_file_obj(_JPEG_BYTES)
+        doc1 = _make_document(
+            file_name="a.png", mime_type="image/png",
+            file_size=len(_PNG_BYTES), file_obj=file_obj_1,
+        )
+        doc2 = _make_document(
+            file_name="b.jpg", mime_type="image/jpeg",
+            file_size=len(_JPEG_BYTES), file_obj=file_obj_2,
+        )
+        msg1 = _make_message(document=doc1, media_group_id="img-doc-album", caption="two files")
+        msg2 = _make_message(document=doc2, media_group_id="img-doc-album")
+
+        await adapter._handle_media_message(_make_update(msg1), MagicMock())
+        await adapter._handle_media_message(_make_update(msg2), MagicMock())
+        assert adapter.handle_message.await_count == 0
+        await asyncio.sleep(adapter.MEDIA_GROUP_WAIT_SECONDS + 0.05)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.message_type == MessageType.PHOTO
+        assert len(event.media_urls) == 2
+        assert set(event.media_types) == {"image/png", "image/jpeg"}
+        assert event.text == "two files"
+
+    @pytest.mark.asyncio
+    async def test_image_document_via_mime_only(self, adapter):
+        """No filename but image MIME → resolved through MIME->ext lookup."""
+        file_obj = _make_file_obj(_WEBP_BYTES)
+        doc = _make_document(
+            file_name=None, mime_type="image/webp",
+            file_size=len(_WEBP_BYTES), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        await asyncio.sleep(adapter._media_batch_delay_seconds + 0.05)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.message_type == MessageType.PHOTO
+        assert event.media_types == ["image/webp"]
+
+    @pytest.mark.asyncio
+    async def test_unsupported_message_lists_image_extensions(self, adapter):
+        """The 'Unsupported document type' message should now mention image
+        extensions so users know image-as-document uploads are accepted."""
+        doc = _make_document(
+            file_name="weird.xyz", mime_type="application/x-weird", file_size=100,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert "Unsupported" in event.text
+        for img_ext in SUPPORTED_IMAGE_DOCUMENT_TYPES:
+            assert img_ext in event.text
+
+    @pytest.mark.asyncio
+    async def test_image_document_download_failure_falls_through(self, adapter):
+        """If the image bytes can't be downloaded, the handler still calls
+        handle_message instead of crashing the whole pipeline."""
+        doc = _make_document(
+            file_name="oops.webp", mime_type="image/webp", file_size=100,
+        )
+        doc.get_file = AsyncMock(side_effect=RuntimeError("telegram down"))
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        # No exception, and we surfaced something (no batching path on failure).
+        adapter.handle_message.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

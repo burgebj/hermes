@@ -76,6 +76,7 @@ from gateway.platforms.base import (
     resolve_proxy_url,
     SUPPORTED_VIDEO_TYPES,
     SUPPORTED_DOCUMENT_TYPES,
+    SUPPORTED_IMAGE_DOCUMENT_TYPES,
     utf16_len,
 )
 from gateway.platforms.telegram_network import (
@@ -4372,6 +4373,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     video_mime_to_ext = {v: k for k, v in SUPPORTED_VIDEO_TYPES.items()}
                     ext = video_mime_to_ext.get(doc.mime_type, "")
 
+                if not ext and doc.mime_type:
+                    # SUPPORTED_IMAGE_DOCUMENT_TYPES has duplicate values (.jpg + .jpeg
+                    # both map to image/jpeg); keep the first ext we encounter.
+                    image_mime_to_ext: dict[str, str] = {}
+                    for _ext, _mime in SUPPORTED_IMAGE_DOCUMENT_TYPES.items():
+                        image_mime_to_ext.setdefault(_mime, _ext)
+                    ext = image_mime_to_ext.get(doc.mime_type, "")
+
                 if ext in SUPPORTED_VIDEO_TYPES:
                     file_obj = await doc.get_file()
                     video_bytes = await file_obj.download_as_bytearray()
@@ -4383,9 +4392,45 @@ class TelegramAdapter(BasePlatformAdapter):
                     await self.handle_message(event)
                     return
 
+                # Image documents (.jpg/.jpeg/.png/.webp/.gif uploaded as files)
+                # should be routed through the same vision/photo path as native
+                # Telegram photo messages instead of being rejected as unsupported
+                # documents (issue #20128).
+                if ext in SUPPORTED_IMAGE_DOCUMENT_TYPES:
+                    try:
+                        file_obj = await doc.get_file()
+                        image_bytes = await file_obj.download_as_bytearray()
+                        cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
+                        event.media_urls = [cached_path]
+                        event.media_types = [SUPPORTED_IMAGE_DOCUMENT_TYPES[ext]]
+                        event.message_type = MessageType.PHOTO
+                        logger.info(
+                            "[Telegram] Cached user image document (%s) at %s",
+                            ext, cached_path,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[Telegram] Failed to cache image document: %s", e, exc_info=True,
+                        )
+                        await self.handle_message(event)
+                        return
+
+                    media_group_id = getattr(msg, "media_group_id", None)
+                    if media_group_id:
+                        await self._queue_media_group_event(str(media_group_id), event)
+                    else:
+                        batch_key = self._photo_batch_key(event, msg)
+                        self._enqueue_photo_event(batch_key, event)
+                    return
+
                 # Check if supported
                 if ext not in SUPPORTED_DOCUMENT_TYPES:
-                    supported_list = ", ".join(sorted(SUPPORTED_DOCUMENT_TYPES.keys()))
+                    supported_list = ", ".join(
+                        sorted(
+                            set(SUPPORTED_DOCUMENT_TYPES.keys())
+                            | set(SUPPORTED_IMAGE_DOCUMENT_TYPES.keys())
+                        )
+                    )
                     event.text = (
                         f"Unsupported document type '{ext or 'unknown'}'. "
                         f"Supported types: {supported_list}"
