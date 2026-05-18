@@ -38,6 +38,12 @@ The `~/.hermes/` directory and default `config.yaml` are created automatically t
 # CLI voice mode (microphone + audio playback)
 pip install "hermes-agent[voice]"
 
+# Wake-word mode (local openWakeWord runtime)
+pip install "hermes-agent[voice-wake]"
+
+# Wake-word sample collection + training backend dependencies
+pip install "hermes-agent[voice-wake-train]"
+
 # Discord + Telegram messaging (includes discord.py[voice] for VC support)
 pip install "hermes-agent[messaging]"
 
@@ -54,6 +60,8 @@ pip install "hermes-agent[all]"
 | Extra | Packages | Required For |
 |-------|----------|-------------|
 | `voice` | `sounddevice`, `numpy` | CLI voice mode |
+| `voice-wake` | `openwakeword`, `onnxruntime` | Local wake-word listening |
+| `voice-wake-train` | `torch`, `scipy`, `tqdm` | Local wake-word sample collection/training backend |
 | `messaging` | `discord.py[voice]`, `python-telegram-bot`, `aiohttp` | Discord & Telegram bots |
 | `tts-premium` | `elevenlabs` | ElevenLabs TTS provider |
 
@@ -123,6 +131,10 @@ Then use these commands inside the CLI:
 /voice off      Disable voice mode
 /voice tts      Toggle TTS output
 /voice status   Show current state
+/voice wake status
+/voice wake on
+/voice wake off
+/voice wake train --phrase "Hermes"
 ```
 
 ### How It Works
@@ -152,6 +164,34 @@ Two-stage algorithm detects when you've finished speaking:
 If no speech is detected at all for 15 seconds, recording stops automatically.
 
 Both `silence_threshold` and `silence_duration` are configurable in `config.yaml`. You can also disable the record start/stop beeps with `voice.beep_enabled: false`.
+
+### Wake-Word Mode
+
+Wake-word mode keeps Hermes in a passive local listening state. When the configured openWakeWord model fires, Hermes records the command with a short pre-roll and sends the WAV through the same STT path used by Ctrl+B. After the answer finishes, Hermes stays in a dialog window for the next utterance without requiring the wake word again; after `dialog_timeout_seconds`, it returns to passive wake listening.
+
+Wake-word mode is opt-in and requires an ONNX wake-word model:
+
+```yaml
+voice:
+  wake:
+    provider: "openwakeword"
+    phrase: "Гермес"
+    model_path: "/Users/you/.hermes/wake_words/germes/model.onnx"
+    threshold: 0.5
+    patience_frames: 2
+```
+
+Commands:
+
+```text
+/voice wake status
+/voice wake train --phrase "Гермес"
+/voice wake train --phrase "Гермес" --model /path/to/model.onnx
+/voice wake on
+/voice wake off
+```
+
+`/voice wake train` collects positive, negative, and ambient samples under `~/.hermes/wake_words/<phrase>/`. If you already have a compatible openWakeWord ONNX model, use `--model` to configure it directly. For a fully local training export, set `HERMES_WAKE_TRAIN_COMMAND`; Hermes passes `HERMES_WAKE_PHRASE`, `HERMES_WAKE_DATASET_DIR`, and `HERMES_WAKE_OUTPUT_PATH` to that command.
 
 ### Streaming TTS
 
@@ -388,19 +428,49 @@ voice:
   beep_enabled: true               # Play record start/stop beeps
   silence_threshold: 200           # RMS level (0-32767) below which counts as silence
   silence_duration: 3.0            # Seconds of silence before auto-stop
+  wake:
+    provider: "openwakeword"
+    phrase: "Hermes"
+    model_path: ""                 # Path to trained/openWakeWord-compatible .onnx
+    threshold: 0.5
+    patience_frames: 2
+    vad_threshold: 0.25
+    pre_roll_ms: 1200
+    dialog_timeout_seconds: 45
+    max_utterance_seconds: 30
+    training:
+      positive_samples: 50
+      negative_samples: 30
+      ambient_seconds: 60
 
 # Speech-to-Text
 stt:
-  provider: "local"                  # "local" (free) | "groq" | "openai"
+  provider: "local"                  # "local" (free) | "whisper_http" | "groq" | "openai"
   local:
     model: "base"                    # tiny, base, small, medium, large-v3
+  whisper_http:
+    base_url: "http://127.0.0.1:8000"
+    path: "/v1/audio/transcriptions" # or "/inference" for OpenClaw-style services
+    model: "whisper-1"
+    language: ""
+    timeout: 30
   # model: "whisper-1"              # Legacy: used when provider is not set
 
 # Text-to-Speech
 tts:
-  provider: "edge"                 # "edge" (free) | "elevenlabs" | "openai" | "neutts" | "minimax"
+  provider: "edge"                 # "edge" | "silero_http" | "piper_http" | "elevenlabs" | "openai" | "neutts" | "minimax"
   edge:
     voice: "en-US-AriaNeural"      # 322 voices, 74 languages
+  silero_http:
+    base_url: "http://127.0.0.1:9000"
+    path: "/tts"
+    speaker: "eugene"
+    timeout: 60
+  piper_http:
+    base_url: "http://127.0.0.1:8088"
+    path: "/tts"
+    voice_id: ""
+    timeout: 60
   elevenlabs:
     voice_id: "pNInz6obpgDQGcFmaJgB"    # Adam
     model_id: "eleven_multilingual_v2"

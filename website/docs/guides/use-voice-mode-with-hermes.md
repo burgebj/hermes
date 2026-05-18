@@ -118,6 +118,17 @@ Use local STT and free Edge TTS:
 
 This is usually the best place to start.
 
+### OpenClaw-compatible local services
+
+If you already run the same local speech services used by OpenClaw, Hermes can
+talk to them over HTTP:
+- STT provider: `whisper_http`
+- TTS provider: `silero_http`
+- fallback TTS provider: `piper_http`
+
+`whisper_http` supports both OpenAI-compatible `POST /v1/audio/transcriptions`
+and OpenClaw-style `POST /inference` endpoints.
+
 ### Environment file example
 
 Add to `~/.hermes/.env`:
@@ -191,6 +202,39 @@ tts:
     ref_text: ''
     model: neuphonic/neutts-air-q4-gguf
     device: cpu
+```
+
+If you want the OpenClaw-compatible local HTTP setup, use:
+
+```yaml
+stt:
+  provider: "whisper_http"
+  whisper_http:
+    base_url: "http://127.0.0.1:8000"
+    path: "/v1/audio/transcriptions"
+    model: "whisper-podlodka-turbo"
+    language: "ru"
+    timeout: 30
+
+tts:
+  provider: "silero_http"
+  silero_http:
+    base_url: "http://127.0.0.1:9000"
+    path: "/tts"
+    speaker: "eugene"
+    timeout: 60
+```
+
+For an OpenClaw-style Whisper service, change only the STT path:
+
+```yaml
+stt:
+  provider: "whisper_http"
+  whisper_http:
+    base_url: "http://127.0.0.1:8000"
+    path: "/inference"
+    model: "whisper-podlodka-turbo"
+    language: "ru"
 ```
 
 ## Use case 1: CLI voice mode
