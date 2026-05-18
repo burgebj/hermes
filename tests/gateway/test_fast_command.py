@@ -4,7 +4,7 @@ import sys
 import threading
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -21,7 +21,15 @@ class _CapturingAgent:
 
     def __init__(self, *args, **kwargs):
         type(self).last_init = dict(kwargs)
+        self.model = kwargs.get("model")
+        self.provider = kwargs.get("provider")
+        self.base_url = kwargs.get("base_url")
+        self.api_key = kwargs.get("api_key")
+        self.api_mode = kwargs.get("api_mode")
         self.tools = []
+
+    def _emit_auxiliary_failure(self, *_args, **_kwargs):
+        raise AssertionError("gateway auto-title failures should stay silent")
 
     def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
         type(self).last_run = {
@@ -176,3 +184,45 @@ async def test_run_agent_passes_priority_processing_to_gateway_agent(monkeypatch
     assert result["final_response"] == "ok"
     assert _CapturingAgent.last_init["service_tier"] == "priority"
     assert _CapturingAgent.last_init["request_overrides"] == {"service_tier": "priority"}
+
+
+@pytest.mark.asyncio
+async def test_run_agent_keeps_auto_title_failures_silent(monkeypatch, tmp_path):
+    _install_fake_agent(monkeypatch)
+    runner = _make_runner()
+
+    runner._session_db = SimpleNamespace(get_session_title=lambda _sid: None)
+
+    (tmp_path / "config.yaml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+        },
+    )
+
+    import hermes_cli.tools_config as tools_config
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
+
+    with patch("agent.title_generator.maybe_auto_title") as mock_title:
+        result = await runner._run_agent(
+            message="hi",
+            context_prompt="",
+            history=[],
+            source=_make_source(),
+            session_id="session-1",
+            session_key="agent:main:telegram:dm:12345",
+        )
+
+    assert result["final_response"] == "ok"
+    mock_title.assert_called_once()
+    assert "failure_callback" not in mock_title.call_args.kwargs
