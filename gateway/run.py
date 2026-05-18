@@ -16094,6 +16094,21 @@ class GatewayRunner:
                     entry.session_id = agent.session_id
                     self.session_store._save()
 
+                # Also refresh the Telegram topic binding so the next message
+                # in this topic lane uses the compressed child session, not
+                # the stale pre-compression parent.  Without this, the
+                # binding-lookup at the top of _handle_message_with_agent
+                # would switch right back to the old session_id, causing
+                # repeated preflight compression loops (#20470).
+                if self._is_telegram_topic_lane(source):
+                    try:
+                        self._record_telegram_topic_binding(source, entry)
+                    except Exception:
+                        logger.debug(
+                            "[Telegram] Failed to refresh topic binding after "
+                            "compression split", exc_info=True,
+                        )
+
             effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
 
             # When compression created a new session, the messages list was
