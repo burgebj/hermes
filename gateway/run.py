@@ -7883,8 +7883,10 @@ class GatewayRunner:
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
-            if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
-                session_entry.session_id = agent_result["session_id"]
+            agent_session_id = agent_result.get("session_id")
+            agent_session_was_split = bool(agent_session_id and agent_session_id != session_entry.session_id)
+            if agent_session_was_split:
+                session_entry.session_id = agent_session_id
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
             try:
@@ -8072,10 +8074,36 @@ class GatewayRunner:
                 # message so the next message can load a transcript that
                 # reflects what was said.  Skip the assistant error text since
                 # it's a gateway-generated hint, not model output. (#7100)
-                self.session_store.append_to_transcript(
-                    session_entry.session_id,
-                    {"role": "user", "content": message_text, "timestamp": ts},
-                )
+                #
+                # Exception: if the failed run also split the session during
+                # compression, persist the compressed transcript into the new
+                # session. Otherwise the session-store pointer moves forward
+                # but the new transcript contains only this user turn, losing
+                # the compacted summary/tail.
+                if agent_session_was_split and agent_result.get("history_offset", len(history)) == 0:
+                    agent_persisted = self._session_db is not None
+                    compressed_messages = [
+                        msg for msg in agent_messages
+                        if isinstance(msg, dict) and msg.get("role") != "system"
+                    ]
+                    if compressed_messages:
+                        for msg in compressed_messages:
+                            entry = {**msg, "timestamp": ts}
+                            self.session_store.append_to_transcript(
+                                session_entry.session_id,
+                                entry,
+                                skip_db=agent_persisted,
+                            )
+                    else:
+                        self.session_store.append_to_transcript(
+                            session_entry.session_id,
+                            {"role": "user", "content": message_text, "timestamp": ts},
+                        )
+                else:
+                    self.session_store.append_to_transcript(
+                        session_entry.session_id,
+                        {"role": "user", "content": message_text, "timestamp": ts},
+                    )
             else:
                 history_len = agent_result.get("history_offset", len(history))
                 new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
@@ -15874,6 +15902,30 @@ class GatewayRunner:
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
+            # Compression can rotate the agent to a new session before the
+            # follow-up model call succeeds. Sync that rotation before any
+            # early return so retries load the compressed transcript.
+            agent = agent_holder[0]
+            _session_was_split = False
+            effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
+            if agent and session_key and hasattr(agent, 'session_id') and agent.session_id != session_id:
+                _session_was_split = True
+                logger.info(
+                    "Session split detected: %s → %s (compression)",
+                    session_id, agent.session_id,
+                )
+                entry = self.session_store._entries.get(session_key)
+                if entry:
+                    entry.session_id = agent.session_id
+                    self.session_store._save()
+
+            # When compression created a new session, the messages list was
+            # shortened.  Using the original history offset would produce an
+            # empty new_messages slice, causing the gateway to write only a
+            # user/assistant pair — losing the compressed summary and tail.
+            # Reset to 0 so the gateway writes ALL compressed messages.
+            _effective_history_offset = 0 if _session_was_split else len(agent_history)
+
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
                 return {
@@ -15888,7 +15940,8 @@ class GatewayRunner:
                     "error": result.get("error"),
                     "compression_exhausted": result.get("compression_exhausted", False),
                     "tools": tools_holder[0] or [],
-                    "history_offset": len(agent_history),
+                    "history_offset": _effective_history_offset,
+                    "session_id": effective_session_id,
                     "last_prompt_tokens": _last_prompt_toks,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
@@ -15931,32 +15984,6 @@ class GatewayRunner:
                         unique_tags.insert(0, "[[audio_as_voice]]")
                     final_response = final_response + "\n" + "\n".join(unique_tags)
             
-            # Sync session_id: the agent may have created a new session during
-            # mid-run context compression (_compress_context splits sessions).
-            # If so, update the session store entry so the NEXT message loads
-            # the compressed transcript, not the stale pre-compression one.
-            agent = agent_holder[0]
-            _session_was_split = False
-            if agent and session_key and hasattr(agent, 'session_id') and agent.session_id != session_id:
-                _session_was_split = True
-                logger.info(
-                    "Session split detected: %s → %s (compression)",
-                    session_id, agent.session_id,
-                )
-                entry = self.session_store._entries.get(session_key)
-                if entry:
-                    entry.session_id = agent.session_id
-                    self.session_store._save()
-
-            effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
-
-            # When compression created a new session, the messages list was
-            # shortened.  Using the original history offset would produce an
-            # empty new_messages slice, causing the gateway to write only a
-            # user/assistant pair — losing the compressed summary and tail.
-            # Reset to 0 so the gateway writes ALL compressed messages.
-            _effective_history_offset = 0 if _session_was_split else len(agent_history)
-
             # Auto-generate session title after first exchange (non-blocking)
             if final_response and self._session_db:
                 try:
