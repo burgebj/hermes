@@ -1763,6 +1763,45 @@ def terminal_tool(
                     "status": "error",
                 }, ensure_ascii=False)
 
+        # Pre-exec security checks (tirith + dangerous command detection)
+        # must run before sandbox/environment creation. In gateway ask mode,
+        # environment startup can be slow or blocked; approval_required should
+        # be emitted immediately so the gateway can show the approval prompt.
+        approval_note = None
+        if not force:
+            approval = _check_all_guards(command, env_type)
+            if not approval["approved"]:
+                # Check if this is an approval_required (gateway ask mode)
+                if approval.get("status") == "approval_required":
+                    return json.dumps({
+                        "output": "",
+                        "exit_code": -1,
+                        "error": approval.get("message", "Waiting for user approval"),
+                        "status": "approval_required",
+                        "command": approval.get("command", command),
+                        "description": approval.get("description", "command flagged"),
+                        "pattern_key": approval.get("pattern_key", ""),
+                    }, ensure_ascii=False)
+                # Command was blocked
+                desc = approval.get("description", "command flagged")
+                fallback_msg = (
+                    f"Command denied: {desc}. "
+                    "Use the approval prompt to allow it, or rephrase the command."
+                )
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": approval.get("message", fallback_msg),
+                    "status": "blocked"
+                }, ensure_ascii=False)
+            # Track whether approval was explicitly granted by the user
+            if approval.get("user_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = f"Command required approval ({desc}) and was approved by the user."
+            elif approval.get("smart_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
+
         # Start cleanup thread
         _start_cleanup_thread()
 
@@ -1855,43 +1894,6 @@ def terminal_tool(
                         _last_activity[effective_task_id] = time.time()
                         env = new_env
                     logger.info("%s environment ready for task %s", env_type, effective_task_id[:8])
-
-        # Pre-exec security checks (tirith + dangerous command detection)
-        # Skip check if force=True (user has confirmed they want to run it)
-        approval_note = None
-        if not force:
-            approval = _check_all_guards(command, env_type)
-            if not approval["approved"]:
-                # Check if this is an approval_required (gateway ask mode)
-                if approval.get("status") == "approval_required":
-                    return json.dumps({
-                        "output": "",
-                        "exit_code": -1,
-                        "error": approval.get("message", "Waiting for user approval"),
-                        "status": "approval_required",
-                        "command": approval.get("command", command),
-                        "description": approval.get("description", "command flagged"),
-                        "pattern_key": approval.get("pattern_key", ""),
-                    }, ensure_ascii=False)
-                # Command was blocked
-                desc = approval.get("description", "command flagged")
-                fallback_msg = (
-                    f"Command denied: {desc}. "
-                    "Use the approval prompt to allow it, or rephrase the command."
-                )
-                return json.dumps({
-                    "output": "",
-                    "exit_code": -1,
-                    "error": approval.get("message", fallback_msg),
-                    "status": "blocked"
-                }, ensure_ascii=False)
-            # Track whether approval was explicitly granted by the user
-            if approval.get("user_approved"):
-                desc = approval.get("description", "flagged as dangerous")
-                approval_note = f"Command required approval ({desc}) and was approved by the user."
-            elif approval.get("smart_approved"):
-                desc = approval.get("description", "flagged as dangerous")
-                approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
 
         # Validate workdir against shell injection
         if workdir:

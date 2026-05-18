@@ -76,6 +76,33 @@ class TestForegroundTimeoutCap:
         assert "long-lived" in result["error"].lower()
         assert "background=true" in result["error"]
 
+    def test_gateway_approval_required_returns_before_environment_creation(self):
+        """Dangerous commands in gateway ask mode should not wait on sandbox setup."""
+        from tools.terminal_tool import terminal_tool
+
+        def fail_if_environment_created(*_args, **_kwargs):
+            raise AssertionError("environment should not be created before approval")
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"), \
+             patch("tools.terminal_tool._create_environment", side_effect=fail_if_environment_created), \
+             patch("tools.terminal_tool._check_all_guards", return_value={
+                 "approved": False,
+                 "status": "approval_required",
+                 "command": "python -c \"print('approval bridge ok')\"",
+                 "description": "script execution via -e/-c flag",
+                 "pattern_key": "script_flag",
+                 "message": "Waiting for user approval",
+             }):
+
+            result = json.loads(terminal_tool(
+                command="python -c \"print('approval bridge ok')\"",
+            ))
+
+        assert result["status"] == "approval_required"
+        assert result["description"] == "script execution via -e/-c flag"
+        assert result["command"] == "python -c \"print('approval bridge ok')\""
+
     def test_foreground_allows_help_variant_for_server_command(self):
         """Informational variants like '--help' should not be blocked."""
         from tools.terminal_tool import terminal_tool
