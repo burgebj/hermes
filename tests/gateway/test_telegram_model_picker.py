@@ -147,6 +147,48 @@ class TestTelegramModelPicker:
         assert "12345" not in adapter._model_picker_state
 
     @pytest.mark.asyncio
+    async def test_expensive_model_requires_confirmation(self, monkeypatch):
+        adapter = _make_adapter()
+        callback = AsyncMock(return_value="Switched to `openai/gpt-5.5-pro`")
+        adapter._model_picker_state["12345"] = {
+            "providers": [
+                {"slug": "openrouter", "name": "OpenRouter", "total_models": 1, "is_current": True}
+            ],
+            "current_model": "model_1",
+            "current_provider": "openrouter",
+            "session_key": "s",
+            "on_model_selected": callback,
+            "selected_provider": "openrouter",
+            "model_list": ["openai/gpt-5.5-pro"],
+            "msg_id": 42,
+        }
+        monkeypatch.setattr(
+            "hermes_cli.model_cost_guard.expensive_model_warning",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                message="!!! EXPENSIVE MODEL WARNING !!!\ndid you mean to select openai/gpt-5.5?"
+            ),
+        )
+
+        query = AsyncMock()
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        await adapter._handle_model_picker_callback(query, "mm:0", "12345")
+
+        callback.assert_not_awaited()
+        assert "12345" in adapter._model_picker_state
+        first_edit = query.edit_message_text.call_args[1]
+        assert "EXPENSIVE MODEL WARNING" in first_edit["text"]
+        assert first_edit["reply_markup"] is not None
+
+        await adapter._handle_model_picker_callback(query, "mc:0", "12345")
+
+        callback.assert_awaited_once_with("12345", "openai/gpt-5.5-pro", "openrouter")
+        assert "12345" not in adapter._model_picker_state
+
+    @pytest.mark.asyncio
     async def test_retries_without_thread_when_thread_not_found(self):
         adapter = _make_adapter()
         providers = [{"slug": "openai", "name": "OpenAI", "total_models": 2, "is_current": True}]

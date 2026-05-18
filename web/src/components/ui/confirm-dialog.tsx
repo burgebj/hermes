@@ -56,7 +56,7 @@ export function ConfirmDialog({
         if (e.target === e.currentTarget) onCancel();
       }}
       className={cn(
-        "fixed inset-0 z-50 flex items-center justify-center",
+        "fixed inset-0 z-[200] flex items-center justify-center",
         "bg-black/60 backdrop-blur-sm",
         "animate-[fade-in_150ms_ease-out]",
       )}
@@ -90,7 +90,7 @@ export function ConfirmDialog({
             {description && (
               <p
                 id="confirm-dialog-desc"
-                className="font-mondwest text-xs text-muted-foreground leading-relaxed"
+                className="font-mondwest text-xs text-muted-foreground leading-relaxed whitespace-pre-line"
               >
                 {description}
               </p>

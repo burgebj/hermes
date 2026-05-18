@@ -472,6 +472,7 @@ class ModelAssignment(BaseModel):
     provider: str
     model: str
     task: str = ""
+    confirm_expensive_model: bool = False
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -1064,6 +1065,23 @@ async def set_model_assignment(body: ModelAssignment):
 
     try:
         cfg = load_config()
+
+        if model and not body.confirm_expensive_model:
+            try:
+                from hermes_cli.model_cost_guard import expensive_model_warning
+
+                warning = expensive_model_warning(model, provider=provider)
+            except Exception:
+                warning = None
+            if warning is not None:
+                return {
+                    "ok": False,
+                    "scope": scope,
+                    "provider": provider,
+                    "model": model,
+                    "confirm_required": True,
+                    "confirm_message": warning.message,
+                }
 
         if scope == "main":
             if not provider or not model:
