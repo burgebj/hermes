@@ -15958,19 +15958,16 @@ class GatewayRunner:
             _effective_history_offset = 0 if _session_was_split else len(agent_history)
 
             # Auto-generate session title after first exchange (non-blocking)
+            # Title-generation failures are logged but intentionally NOT surfaced
+            # to users in gateway mode — the failure is non-actionable and clutters
+            # the chat (issue #23246). CLI mode handles this differently via
+            # _emit_auxiliary_failure (issue #15775).
             if final_response and self._session_db:
                 try:
                     from agent.title_generator import maybe_auto_title
                     all_msgs = result_holder[0].get("messages", []) if result_holder[0] else []
-                    # Route title-generation failures through the agent's
-                    # user-visible warning channel so a depleted auxiliary
-                    # provider doesn't silently leave sessions untitled
-                    # (issue #15775).
-                    _title_failure_cb = getattr(
-                        agent, "_emit_auxiliary_failure", None
-                    )
-                    maybe_auto_title_kwargs = {
-                        "failure_callback": _title_failure_cb,
+                    maybe_auto_title_kwargs: dict = {
+                        # No failure_callback — failures are logged only, not shown to users
                         "main_runtime": {
                             "model": getattr(agent, "model", None),
                             "provider": getattr(agent, "provider", None),
