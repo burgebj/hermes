@@ -338,6 +338,26 @@ class TestAgentCacheLifecycle:
         assert cached[1] == sig
         assert cached[0] is agent1  # same instance
 
+    def test_cached_agent_session_mismatch_is_evicted(self):
+        """Cached agents must not be reused across compression-driven session switches."""
+        runner = _make_runner()
+        session_key = "telegram:12345"
+        cached_agent = MagicMock()
+        cached_agent.session_id = "parent-session"
+        with runner._agent_cache_lock:
+            runner._agent_cache[session_key] = (cached_agent, "sig123")
+
+        reused = runner._get_cached_agent_for_turn(
+            session_key,
+            "sig123",
+            "child-session",
+            0,
+        )
+
+        assert reused is None
+        with runner._agent_cache_lock:
+            assert session_key not in runner._agent_cache
+
     def test_cache_miss_on_model_change(self):
         """Model change produces different signature → cache miss."""
         from run_agent import AIAgent

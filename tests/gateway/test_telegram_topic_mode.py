@@ -267,6 +267,97 @@ async def test_managed_topic_binding_reuses_restored_session_over_static_lane_se
 
 
 @pytest.mark.asyncio
+async def test_topic_lane_follows_compression_tip_before_loading_history_and_rebinds_split(
+    tmp_path, monkeypatch
+):
+    import gateway.run as gateway_run
+
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    session_db.create_session(
+        session_id="compressed-root",
+        source="telegram",
+        user_id="208214988",
+    )
+    session_db.end_session("compressed-root", "compression")
+    session_db.create_session(
+        session_id="compressed-child",
+        source="telegram",
+        user_id="208214988",
+        parent_session_id="compressed-root",
+    )
+    session_db.append_message("compressed-child", "user", "already compact")
+    # Pre-create the next compression child so the test can verify rebinding
+    # after the mocked turn returns a new session id.
+    session_db.create_session(
+        session_id="compressed-grandchild",
+        source="telegram",
+        user_id="208214988",
+        parent_session_id="compressed-child",
+    )
+    session_db.bind_telegram_topic(
+        chat_id="208214988",
+        thread_id="17585",
+        user_id="208214988",
+        session_key=build_session_key(_make_source(thread_id="17585")),
+        session_id="compressed-root",
+        managed_mode="restored",
+    )
+
+    runner = _make_runner(session_db=session_db)
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+    runner.session_store.get_or_create_session.side_effect = lambda source, force_new=False: SessionEntry(
+        session_key=topic_key,
+        session_id="compressed-root",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        origin=source,
+    )
+    seen = {}
+
+    def _load_transcript(session_id):
+        seen["loaded_session_id"] = session_id
+        return [{"role": "user", "content": "already compact"}]
+
+    runner.session_store.load_transcript.side_effect = _load_transcript
+
+    async def fake_run_agent(*args, **kwargs):
+        seen["run_session_id"] = kwargs.get("session_id")
+        return {
+            "success": True,
+            "final_response": "continued",
+            "session_id": "compressed-grandchild",
+            "messages": [],
+        }
+
+    runner._run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("continue", thread_id="17585"))
+
+    assert result == "continued"
+    assert seen["loaded_session_id"] == "compressed-child"
+    assert seen["run_session_id"] == "compressed-child"
+    runner._publish_compression_split(
+        topic_source,
+        topic_key,
+        "compressed-child",
+        "compressed-grandchild",
+    )
+    binding = session_db.get_telegram_topic_binding(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert binding["session_id"] == "compressed-grandchild"
+
+
+@pytest.mark.asyncio
 async def test_telegram_group_prompt_is_not_topic_lobby_even_when_dm_topic_mode_enabled(
     tmp_path, monkeypatch
 ):
@@ -1048,7 +1139,4 @@ async def test_topic_refuses_unauthorized_user(tmp_path, monkeypatch):
         ).fetchall()
     }
     assert tables == set()
-
-
-
 
