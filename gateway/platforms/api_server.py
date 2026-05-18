@@ -62,6 +62,225 @@ CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
+# Agent pool configuration — caches AIAgent instances per session to skip
+# the ~1-3s cold-start penalty of agent initialisation on every request.
+# Prewarming creates agents at startup for brand-new sessions (opt-in).
+DEFAULT_PREWARM_COUNT = 3  # agents pre-created at startup (0 to disable; set via API_SERVER_PREWARM_COUNT env)
+DEFAULT_AGENT_POOL_SIZE = 10  # max concurrent cached agents
+DEFAULT_AGENT_TTL = 300  # idle eviction in seconds
+
+
+class AgentPool:
+    """LRU cache of AIAgent instances keyed by session_id, with optional
+    prewarming for brand-new sessions.
+
+    First request for a session_id cold-creates (as today) and caches the
+    agent. Subsequent requests reuse the warm agent — eliminating the ~1-3s
+    agent init cost on every turn after the first.
+
+    When *prewarm_count* > 0, agents are pre-created at startup and assigned
+    to the first N unique sessions via a proper :meth:`_rebind_session` that
+    updates **all** session-related state (session_id, log file, env var,
+    cached system prompt).  This preserves the system prompt prefix-caching
+    invariant because ``_cached_system_prompt`` is ``None`` at construction
+    time and built lazily inside ``run_conversation()`` — at which point the
+    real ``session_id`` is already set.
+
+    Does NOT support per-request ``ephemeral_system_prompt`` on the prewarm
+    path (the LRU-hit path neither).  If a client sends a system message in
+    the request body, it is merged into conversation history like any other
+    message — the agent's own system prompt is always used.
+    """
+
+    def __init__(self, max_size: int = 10, ttl: int = 300, prewarm_count: int = 0):
+        self.max_size = max_size
+        self.ttl = ttl
+        self._agents: Dict[str, tuple[Any, float]] = {}
+        self._order: list[str] = []  # LRU order (front = oldest)
+        self._lock = asyncio.Lock()
+        # Prewarm queue
+        self._prewarm_count = prewarm_count
+        self._prewarm_queue: asyncio.Queue = asyncio.Queue(maxsize=prewarm_count or 1)
+        self._refill_task: Optional[asyncio.Task] = None
+        self._refill_backoff: float = 0.5  # starts at 500ms, capped at 30s
+
+    # ── Prewarming ─────────────────────────────────────────────────
+
+    async def start_prewarm(self):
+        """Create ``prewarm_count`` agents at startup."""
+        if self._prewarm_count == 0:
+            return
+        logger.info("[agent_pool] Prewarming %d agents...", self._prewarm_count)
+        for i in range(self._prewarm_count):
+            try:
+                agent = await self._create_agent_naked()
+                await self._prewarm_queue.put(agent)
+            except Exception:
+                logger.exception("[agent_pool] Prewarm agent %d/%d failed", i + 1, self._prewarm_count)
+        logger.info(
+            "[agent_pool] Prewarming done — %d/%d ready",
+            self._prewarm_queue.qsize(), self._prewarm_count,
+        )
+        self._refill_task = asyncio.ensure_future(self._refill_loop())
+
+    async def _create_agent_naked(self) -> Any:
+        """Create a plain AIAgent (no session_id override, no callbacks).
+
+        The agent auto-generates a session_id internally.  All session
+        state is reassigned via ``_rebind_session`` before first use.
+        """
+        from run_agent import AIAgent
+        from gateway.run import (
+            _resolve_runtime_agent_kwargs,
+            _resolve_gateway_model,
+            GatewayRunner,
+            _load_gateway_config,
+        )
+        from hermes_cli.tools_config import _get_platform_tools
+
+        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        model = _resolve_gateway_model()
+        user_config = _load_gateway_config()
+        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        reasoning_config = GatewayRunner._load_reasoning_config()
+        fallback_model = GatewayRunner._load_fallback_model()
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: AIAgent(
+                model=model,
+                **runtime_kwargs,
+                max_iterations=int(os.getenv("HERMES_MAX_ITERATIONS", "90")),
+                quiet_mode=True,
+                verbose_logging=False,
+                enabled_toolsets=enabled_toolsets,
+                platform="api_server",
+                reasoning_config=reasoning_config,
+                fallback_model=fallback_model,
+            ),
+        )
+
+    async def _refill_loop(self):
+        """Keep the prewarm queue topped up with exponential backoff."""
+        while True:
+            try:
+                await asyncio.sleep(0.5)
+                if not self._prewarm_queue.full():
+                    agent = await self._create_agent_naked()
+                    await self._prewarm_queue.put(agent)
+                    self._refill_backoff = 0.5  # reset on success
+                else:
+                    continue  # queue full, loop sleeps and checks again
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.error(
+                    "[agent_pool] Refill failed, next in %.1fs", self._refill_backoff,
+                )
+                await asyncio.sleep(self._refill_backoff)
+                self._refill_backoff = min(self._refill_backoff * 2, 30.0)
+
+    @staticmethod
+    def _rebind_session(agent, new_session_id: str):
+        """Reassign a prewarmed agent to a new session_id.
+
+        Updates all session-related state that was eagerly initialised
+        at construction time so the agent is fully correct for the new
+        session.  System prompt, session_db, and memory are all lazy and
+        will be built correctly during ``run_conversation()``.
+        """
+        agent.session_id = new_session_id
+        # Update log file path (same pattern as _compress_context rotation)
+        if hasattr(agent, "logs_dir") and agent.logs_dir:
+            agent.session_log_file = agent.logs_dir / f"session_{new_session_id}.json"
+        # Expose session ID to tools / subprocesses
+        os.environ["HERMES_SESSION_ID"] = new_session_id
+        # Clear cached system prompt so it's rebuilt for the new session
+        # (it's None at construction anyway, but be defensive).
+        agent._cached_system_prompt = None
+        # Reset session_db flag so it creates a new row on first write
+        agent._session_db_created = False
+
+    # ── Core API ────────────────────────────────────────────────────
+
+    async def get_or_create(
+        self, session_id: str, factory
+    ) -> tuple[Any, bool]:
+        """Get an agent for *session_id*.
+
+        Three tiers: LRU cache → prewarm queue → cold create.
+
+        Returns ``(agent, hit)`` where *hit* is True if the agent was
+        found in the LRU cache (warm reuse) and False if it was freshly
+        created.  *hit*==False callers should compute usage absolutely;
+        *hit*==True callers should compute usage as a delta.
+        """
+        # 1. LRU hit
+        async with self._lock:
+            if session_id in self._agents:
+                agent, ts = self._agents[session_id]
+                if time.monotonic() - ts < self.ttl:
+                    self._order.remove(session_id)
+                    self._order.append(session_id)
+                    self._agents[session_id] = (agent, time.monotonic())
+                    return agent, True
+                # Expired — remove below
+                del self._agents[session_id]
+                self._order.remove(session_id)
+
+        # 2. Prewarm queue (non-blocking) — only when no ephemeral_system_prompt
+        if self._prewarm_count > 0 and not self._prewarm_queue.empty():
+            try:
+                agent = self._prewarm_queue.get_nowait()
+                self._rebind_session(agent, session_id)
+                async with self._lock:
+                    while len(self._agents) >= self.max_size:
+                        oldest_sid = self._order.pop(0)
+                        del self._agents[oldest_sid]
+                        logger.info("[agent_pool] Evicted LRU session=%s", oldest_sid[:16])
+                    self._agents[session_id] = (agent, time.monotonic())
+                    self._order.append(session_id)
+                logger.info("[agent_pool] Assigned pre-warmed agent to session=%s", session_id[:16])
+                return agent, True
+            except Exception:
+                logger.warning("[agent_pool] Prewarm assignment failed (falling through)", exc_info=True)
+
+        # 3. Cold create
+        loop = asyncio.get_running_loop()
+        agent = await loop.run_in_executor(None, factory)
+
+        async with self._lock:
+            while len(self._agents) >= self.max_size:
+                oldest_sid = self._order.pop(0)
+                del self._agents[oldest_sid]
+                logger.info("[agent_pool] Evicted LRU session=%s", oldest_sid[:16])
+            self._agents[session_id] = (agent, time.monotonic())
+            self._order.append(session_id)
+
+        return agent, False
+
+    async def shutdown(self):
+        if self._refill_task:
+            self._refill_task.cancel()
+            try:
+                await self._refill_task
+            except asyncio.CancelledError:
+                pass
+        async with self._lock:
+            self._agents.clear()
+            self._order.clear()
+
+    @property
+    def cached_count(self) -> int:
+        return len(self._agents)
+
+    @property
+    def prewarm_ready(self) -> int:
+        if self._prewarm_count == 0:
+            return 0
+        return self._prewarm_queue.qsize()
+
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
@@ -669,6 +888,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._agent_pool: Optional[AgentPool] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -917,7 +1137,13 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "hermes-agent"})
+        pool = self._agent_pool
+        return web.json_response({
+            "status": "ok",
+            "platform": "hermes-agent",
+            "agents_cached": pool.cached_count if pool else 0,
+            "prewarm_ready": pool.prewarm_ready if pool else 0,
+        })
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — rich status for cross-container dashboard probing.
@@ -2757,16 +2983,57 @@ class APIServerAdapter(BasePlatformAdapter):
         """
         loop = asyncio.get_running_loop()
 
+        # Try agent pool first (async, outside the sync _run() closure)
+        pool_hit = False
+        pre_usage = {"prompt": 0, "completion": 0}
+        if session_id and self._agent_pool is not None:
+            try:
+                agent, pool_hit = await self._agent_pool.get_or_create(
+                    session_id,
+                    lambda: self._create_agent(
+                        ephemeral_system_prompt=ephemeral_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=stream_delta_callback,
+                        tool_progress_callback=tool_progress_callback,
+                        tool_start_callback=tool_start_callback,
+                        tool_complete_callback=tool_complete_callback,
+                        gateway_session_key=gateway_session_key,
+                    ),
+                )
+                if pool_hit:
+                    # Snapshot cumulative counters before run so we can
+                    # report per-request usage as a delta.  Fresh agents
+                    # always start at 0 so absolute is correct for misses.
+                    pre_usage = {
+                        "prompt": getattr(agent, "session_prompt_tokens", 0) or 0,
+                        "completion": getattr(agent, "session_completion_tokens", 0) or 0,
+                    }
+            except Exception:
+                logger.warning("[agent_pool] get_or_create failed, falling through", exc_info=True)
+
         def _run():
-            agent = self._create_agent(
-                ephemeral_system_prompt=ephemeral_system_prompt,
-                session_id=session_id,
-                stream_delta_callback=stream_delta_callback,
-                tool_progress_callback=tool_progress_callback,
-                tool_start_callback=tool_start_callback,
-                tool_complete_callback=tool_complete_callback,
-                gateway_session_key=gateway_session_key,
-            )
+            nonlocal agent, pool_hit
+            if not pool_hit:
+                # Cold path — create fresh agent with all per-request params
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=stream_delta_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    tool_start_callback=tool_start_callback,
+                    tool_complete_callback=tool_complete_callback,
+                    gateway_session_key=gateway_session_key,
+                )
+            else:
+                # Warm path — set per-request callbacks on cached agent.
+                # ephemeral_system_prompt and gateway_session_key are
+                # intentionally NOT re-applied here: the agent's own
+                # system prompt is fixed per session (prefix caching
+                # invariant), and the session key was bound at creation.
+                agent.stream_delta_callback = stream_delta_callback
+                agent.tool_progress_callback = tool_progress_callback
+                agent.tool_start_callback = tool_start_callback
+                agent.tool_complete_callback = tool_complete_callback
             if agent_ref is not None:
                 agent_ref[0] = agent
             effective_task_id = session_id or str(uuid.uuid4())
@@ -2775,11 +3042,22 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history=conversation_history,
                 task_id=effective_task_id,
             )
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
+            if pool_hit:
+                # Delta-based usage to account for cumulative counters on
+                # reused agents (see teknium1 review PR #27074).
+                _p = getattr(agent, "session_prompt_tokens", 0) or 0
+                _c = getattr(agent, "session_completion_tokens", 0) or 0
+                usage = {
+                    "input_tokens": max(0, _p - pre_usage["prompt"]),
+                    "output_tokens": max(0, _c - pre_usage["completion"]),
+                    "total_tokens": max(0, _p + _c - pre_usage["prompt"] - pre_usage["completion"]),
+                }
+            else:
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
             # Include the effective session ID in the result so callers
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)
@@ -3394,6 +3672,12 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         try:
+            extra = self.config.extra or {}
+            pool_size = int(extra.get("agent_pool_size", os.getenv("AGENT_POOL_SIZE", str(DEFAULT_AGENT_POOL_SIZE))))
+            pool_ttl = int(extra.get("agent_pool_ttl", os.getenv("AGENT_POOL_TTL", str(DEFAULT_AGENT_TTL))))
+            prewarm = int(extra.get("prewarm_count", os.getenv("API_SERVER_PREWARM_COUNT", str(DEFAULT_PREWARM_COUNT))))
+            self._agent_pool = AgentPool(max_size=pool_size, ttl=pool_ttl, prewarm_count=prewarm)
+
             mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             self._app["api_server_adapter"] = self
@@ -3471,6 +3755,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._site = web.TCPSite(self._runner, self._host, self._port)
             await self._site.start()
 
+            # Fire prewarm after server is listening (fire-and-forget).
+            if self._agent_pool is not None:
+                asyncio.ensure_future(self._agent_pool.start_prewarm())
+
             self._mark_connected()
             if not self._api_key:
                 logger.warning(
@@ -3493,6 +3781,9 @@ class APIServerAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Stop the aiohttp web server."""
         self._mark_disconnected()
+        if self._agent_pool is not None:
+            await self._agent_pool.shutdown()
+            self._agent_pool = None
         if self._site:
             await self._site.stop()
             self._site = None
