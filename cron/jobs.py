@@ -496,6 +496,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    condition: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -540,6 +541,14 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        condition: Optional path to a script that is evaluated **before** the job
+                executes each tick. If the script exits with a non-zero code,
+                the job is skipped entirely (no execution, no notification).
+                Exit code 0 means "proceed". This enables deterministic
+                pre-execution gates like workday/holiday checks without
+                any LLM cost. Relative paths resolve under
+                ``~/.hermes/scripts/``. ``.sh`` / ``.bash`` extensions run
+                via bash, everything else via Python.
 
     Returns:
         The created job dict
@@ -575,6 +584,10 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
 
+    # Normalize condition script path (same rules as script path).
+    normalized_condition = str(condition).strip() if isinstance(condition, str) else None
+    normalized_condition = normalized_condition or None
+
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
     # reach the scheduler.
@@ -605,6 +618,7 @@ def create_job(
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
+        "condition": normalized_condition,
         "context_from": context_from,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),

@@ -277,6 +277,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["script"] = job["script"]
     if job.get("no_agent"):
         result["no_agent"] = True
+    if job.get("condition"):
+        result["condition"] = job["condition"]
     if job.get("enabled_toolsets"):
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
@@ -304,6 +306,7 @@ def cronjob(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    condition: Optional[str] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -370,6 +373,7 @@ def cronjob(
                 enabled_toolsets=enabled_toolsets or None,
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
+                condition=_normalize_optional_job_value(condition),
             )
             return json.dumps(
                 {
@@ -503,6 +507,8 @@ def cronjob(
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
                 updates["workdir"] = _normalize_optional_job_value(workdir) or None
+            if condition is not None:
+                updates["condition"] = _normalize_optional_job_value(condition) or None
             if no_agent is not None:
                 # Toggling no_agent on/off at update time. If flipping to True,
                 # we need a script to already exist on the job (or be part of
@@ -656,6 +662,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "string",
                 "description": "Optional absolute path to run the job from. When set, AGENTS.md / CLAUDE.md / .cursorrules from that directory are injected into the system prompt, and the terminal/file/code_exec tools use it as their working directory — useful for running a job inside a specific project repo. Must be an absolute path that exists. When unset (default), preserves the original behaviour: no project context files, tools use the scheduler's cwd. On update, pass an empty string to clear. Jobs with workdir run sequentially (not parallel) to keep per-job directories isolated."
             },
+            "condition": {
+                "type": "string",
+                "description": "Optional path to a script evaluated before each tick. If the script exits non-zero the job is skipped (no execution, no notification). Exit 0 = proceed. Enables deterministic pre-execution gates (e.g. workday checks) with zero LLM cost. Relative paths resolve under ~/.hermes/scripts/. .sh/.bash via bash, else Python. On update, pass empty string to clear."
+            },
         },
         "required": ["action"]
     }
@@ -711,6 +721,7 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        condition=args.get("condition"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,
