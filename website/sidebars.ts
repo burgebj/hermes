@@ -650,6 +650,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/messaging/weixin',
             'user-guide/messaging/qqbot',
             'user-guide/messaging/yuanbao',
+            'user-guide/messaging/kimiclaw',
           ],
         },
         {
