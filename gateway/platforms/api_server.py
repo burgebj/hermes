@@ -986,6 +986,21 @@ class APIServerAdapter(BasePlatformAdapter):
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
+        # `_resolve_runtime_agent_kwargs()` may return a "model" key when the
+        # primary provider auth fails and `_try_resolve_fallback_provider()`
+        # supplies a runtime model override from `fallback_providers[*].model`.
+        # Pop it before **-unpacking into AIAgent so we don't pass `model=`
+        # twice. Mirrors the canonical pattern in
+        # `GatewayRunner._resolve_model_runtime` (gateway/run.py).
+        runtime_model = runtime_kwargs.pop("model", None)
+        if runtime_model:
+            logger.info(
+                "API server: runtime provider supplied explicit model override: %s -> %s",
+                model,
+                runtime_model,
+            )
+            model = runtime_model
+
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 

@@ -337,6 +337,90 @@ class TestAdapterInit:
         assert isinstance(agent, FakeAgent)
         assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
 
+    def test_create_agent_handles_runtime_model_override_from_fallback(self, monkeypatch):
+        """Regression for #27540: when the primary provider auth fails and
+        ``_try_resolve_fallback_provider`` returns a dict containing a "model"
+        key, ``_create_agent`` must pop it before ``**``-unpacking into
+        ``AIAgent`` — otherwise we pass ``model=`` twice and crash with
+        ``TypeError: AIAgent() got multiple values for keyword argument 'model'``
+        on every turn after fallback kicks in.
+        """
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        # Fallback path: dict includes "model" alongside provider/base_url/api_key.
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "or-fake",
+                "api_mode": None,
+                "model": "openai/gpt-5",
+            },
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "claude-opus-4-7")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: None),
+        )
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        # Must NOT raise TypeError("multiple values for keyword argument 'model'").
+        agent = adapter._create_agent(session_id="api-session")
+
+        assert isinstance(agent, FakeAgent)
+        # Fallback's model wins over the gateway default — mirrors
+        # GatewayRunner._resolve_model_runtime behaviour.
+        assert captured["model"] == "openai/gpt-5"
+        assert captured["provider"] == "openrouter"
+        assert captured["base_url"] == "https://openrouter.ai/api/v1"
+
+    def test_create_agent_keeps_gateway_model_when_runtime_omits_model(self, monkeypatch):
+        """Primary-provider path returns no "model" key — gateway-resolved
+        model should pass through unchanged (the common case).
+        """
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "anthropic",
+                "api_key": "sk-fake",
+            },
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "claude-opus-4-7")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: None),
+        )
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        agent = adapter._create_agent(session_id="api-session")
+
+        assert isinstance(agent, FakeAgent)
+        assert captured["model"] == "claude-opus-4-7"
+        assert captured["provider"] == "anthropic"
+
 
 # ---------------------------------------------------------------------------
 # Auth checking
