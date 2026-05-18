@@ -70,6 +70,39 @@ _CRON_INVISIBLE_CHARS = {
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 }
 
+# U+200D Zero-Width Joiner is also a legitimate, required part of many
+# Unicode emoji sequences (e.g. 👨‍👩‍👧 family, 🏳️‍🌈 rainbow flag,
+# ❤️‍🩹 mending-heart, 🧑‍💻 technologist). A blanket block makes any
+# skill/doc containing these emoji unfeedable into cron prompts. We
+# accept a ZWJ when at least one of its immediate non-VS neighbours
+# is in the pictographic / emoji ranges; an attacker hiding ZWJ
+# between ASCII characters still gets caught.
+_EMOJI_NEIGHBOUR_CP_RANGES = (
+    (0x1F000, 0x1FFFF),  # Misc symbols & pictographs, emoji, supplementary
+    (0x2600,  0x27BF),   # Misc symbols + dingbats
+    (0x2300,  0x23FF),   # Misc technical
+    (0x1F1E6, 0x1F1FF),  # Regional indicators (flags)
+    (0x20E3,  0x20E3),   # Combining enclosing keycap
+)
+_VARIATION_SELECTOR_CP = 0xFE0F
+
+def _is_emoji_cp(cp: int) -> bool:
+    return any(lo <= cp <= hi for lo, hi in _EMOJI_NEIGHBOUR_CP_RANGES)
+
+def _zwj_has_emoji_neighbour(text: str, idx: int) -> bool:
+    """Return True if the ZWJ at text[idx] is part of an emoji sequence."""
+    # Walk left past any variation selectors.
+    i = idx - 1
+    while i >= 0 and ord(text[i]) == _VARIATION_SELECTOR_CP:
+        i -= 1
+    left_ok = i >= 0 and _is_emoji_cp(ord(text[i]))
+    # Walk right past any variation selectors.
+    j = idx + 1
+    while j < len(text) and ord(text[j]) == _VARIATION_SELECTOR_CP:
+        j += 1
+    right_ok = j < len(text) and _is_emoji_cp(ord(text[j]))
+    return left_ok and right_ok
+
 
 def _scan_cron_prompt(prompt: str) -> str:
     """Scan a cron prompt for critical threats. Returns error string if blocked, else empty."""
@@ -84,8 +117,20 @@ def _scan_cron_prompt(prompt: str) -> str:
         # Allow the bundled GitHub skill fallback shape without opening a
         # blanket exemption for arbitrary Authorization-header exfiltration.
         prompt_to_scan = prompt.replace(github_auth_header.group(0), "curl https://api.github.com/user")
+    # Strip out legitimate emoji ZWJ sequences before invisible-char scanning.
+    # ZWJ (U+200D) is required in many emoji (👨‍👩‍👧, 🏳️‍🌈, ❤️‍🩹, 🧑‍💻 …);
+    # only block a ZWJ when neither neighbour is pictographic.
+    if '\u200d' in prompt_to_scan:
+        stripped = []
+        for idx, ch in enumerate(prompt_to_scan):
+            if ch == '\u200d' and _zwj_has_emoji_neighbour(prompt_to_scan, idx):
+                continue  # legitimate emoji ZWJ — drop from scan
+            stripped.append(ch)
+        scan_after_emoji_strip = ''.join(stripped)
+    else:
+        scan_after_emoji_strip = prompt_to_scan
     for char in _CRON_INVISIBLE_CHARS:
-        if char in prompt_to_scan:
+        if char in scan_after_emoji_strip:
             return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
     for pattern, pid in _CRON_THREAT_PATTERNS:
         if re.search(pattern, prompt_to_scan, re.IGNORECASE):
