@@ -151,6 +151,22 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
     return 0 if upstream_rev == local_rev else UPDATE_AVAILABLE_NO_COUNT
 
 
+def _local_git_head(repo_dir: Path) -> Optional[str]:
+    """Return the current git HEAD for cache invalidation, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            head = result.stdout.strip()
+            return head or None
+    except Exception:
+        pass
+    return None
+
+
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     """Count commits behind origin/main in a local checkout."""
     try:
@@ -232,14 +248,29 @@ def check_for_updates() -> Optional[int]:
     cache_file = hermes_home / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
 
-    # Read cache — invalidate if the embedded rev has changed since last check
+    repo_head = None
+    repo_dir: Path | None = None
+    if not embedded_rev:
+        candidate_repo_dir = Path(__file__).parent.parent.resolve()
+        if not (candidate_repo_dir / ".git").exists():
+            candidate_repo_dir = hermes_home / "hermes-agent"
+        if (candidate_repo_dir / ".git").exists():
+            repo_dir = candidate_repo_dir
+            repo_head = _local_git_head(repo_dir)
+
+    # Read cache — invalidate if the embedded rev or local git HEAD changed since last check
     now = time.time()
     try:
         if cache_file.exists():
             cached = json.loads(cache_file.read_text())
+            cache_fingerprint_matches = cached.get("rev") == embedded_rev
+            if embedded_rev:
+                cache_fingerprint_matches = cache_fingerprint_matches and "repo_head" not in cached
+            elif repo_head:
+                cache_fingerprint_matches = cache_fingerprint_matches and cached.get("repo_head") == repo_head
             if (
                 now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
-                and cached.get("rev") == embedded_rev
+                and cache_fingerprint_matches
             ):
                 return cached.get("behind")
     except Exception:
@@ -248,19 +279,16 @@ def check_for_updates() -> Optional[int]:
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
-        # Prefer the running code's location over the profile-scoped path.
-        # $HERMES_HOME/hermes-agent/ may be a stale copy from --clone-all;
-        # Path(__file__) always resolves to the actual installed checkout.
-        repo_dir = Path(__file__).parent.parent.resolve()
-        if not (repo_dir / ".git").exists():
-            repo_dir = hermes_home / "hermes-agent"
-        if not (repo_dir / ".git").exists():
+        if repo_dir is None:
             behind = check_via_pypi()
         else:
             behind = _check_via_local_git(repo_dir)
 
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind, "rev": embedded_rev}))
+        payload = {"ts": now, "behind": behind, "rev": embedded_rev}
+        if repo_head:
+            payload["repo_head"] = repo_head
+        cache_file.write_text(json.dumps(payload))
     except Exception:
         pass
 
