@@ -13,6 +13,8 @@ Built-in TTS providers:
 - NeuTTS (local, free, no API key): On-device TTS via neutts
 - KittenTTS (local, free, no API key): On-device 25MB model
 - Piper (local, free, no API key): OHF-Voice/piper1-gpl neural VITS, 44 languages
+- Silero HTTP (local HTTP): OpenClaw-compatible local Silero service
+- Piper HTTP (local HTTP): OpenClaw-compatible local Piper service
 
 Custom command providers:
 - Users can declare any number of named providers with ``type: command``
@@ -171,6 +173,9 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_SILERO_HTTP_BASE_URL = "http://127.0.0.1:9000"
+DEFAULT_SILERO_HTTP_SPEAKER = "eugene"
+DEFAULT_PIPER_HTTP_BASE_URL = "http://127.0.0.1:8088"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -200,6 +205,8 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
     "piper": 5000,        # local VITS model, phoneme-based; practical cap
+    "silero_http": 4000,  # local HTTP services vary; keep requests modest
+    "piper_http": 4000,
 }
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
@@ -346,6 +353,8 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "neutts",
     "kittentts",
     "piper",
+    "silero_http",
+    "piper_http",
 })
 
 DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
@@ -956,6 +965,121 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
         f.write(response.content)
 
     return output_path
+
+
+# ===========================================================================
+# Providers: Silero/Piper HTTP TTS
+# ===========================================================================
+def _http_tts_endpoint(base_url: str, path: str) -> str:
+    return urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/"))
+
+
+def _http_tts_headers(api_key: str = "") -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _write_http_tts_response(response: Any, output_path: str, provider: str) -> str:
+    if response.status_code >= 400:
+        detail = response.text.strip()[:300] or response.reason
+        raise RuntimeError(f"{provider} HTTP error (HTTP {response.status_code}): {detail}")
+    if not response.content:
+        raise RuntimeError(f"{provider} returned empty audio")
+
+    with open(output_path, "wb") as f:
+        f.write(response.content)
+    return output_path
+
+
+def _generate_silero_http_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate speech using an OpenClaw-compatible Silero HTTP service."""
+    import requests
+
+    silero_config = tts_config.get("silero_http", {})
+    base_url = str(
+        silero_config.get("base_url")
+        or os.getenv("SILERO_TTS_BASE_URL")
+        or DEFAULT_SILERO_HTTP_BASE_URL
+    ).strip()
+    path = str(silero_config.get("path") or "/tts").strip() or "/tts"
+    speaker = str(
+        silero_config.get("speaker")
+        or DEFAULT_SILERO_HTTP_SPEAKER
+    ).strip()
+    api_key = str(
+        silero_config.get("api_key")
+        or os.getenv("SILERO_TTS_API_KEY")
+        or ""
+    ).strip()
+    timeout = float(silero_config.get("timeout", 60))
+
+    payload: Dict[str, Any] = {"text": text}
+    if speaker:
+        payload["speaker"] = speaker
+    if "auto_ssml" in silero_config:
+        payload["auto_ssml"] = silero_config["auto_ssml"]
+    if "ssml_options" in silero_config:
+        payload["ssml_options"] = silero_config["ssml_options"]
+
+    response = requests.post(
+        _http_tts_endpoint(base_url, path),
+        headers=_http_tts_headers(api_key),
+        json=payload,
+        timeout=timeout,
+    )
+    return _write_http_tts_response(response, output_path, "silero_http")
+
+
+def _generate_piper_http_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate speech using an OpenClaw-compatible Piper HTTP service."""
+    import requests
+
+    piper_config = tts_config.get("piper_http", {})
+    base_url = str(
+        piper_config.get("base_url")
+        or os.getenv("PIPER_TTS_BASE_URL")
+        or DEFAULT_PIPER_HTTP_BASE_URL
+    ).strip()
+    path = str(piper_config.get("path") or "/tts").strip() or "/tts"
+    voice_id = str(piper_config.get("voice_id") or "").strip()
+    speed = piper_config.get("speed", tts_config.get("speed"))
+    rate = str(piper_config.get("rate") or "").strip()
+    volume = str(piper_config.get("volume") or "").strip()
+    pitch = str(piper_config.get("pitch") or "").strip()
+    output_format = str(piper_config.get("output_format") or "").strip()
+    api_key = str(
+        piper_config.get("api_key")
+        or os.getenv("PIPER_TTS_API_KEY")
+        or ""
+    ).strip()
+    timeout = float(piper_config.get("timeout", 60))
+
+    payload: Dict[str, Any] = {"text": text}
+    if voice_id:
+        payload["voice_id"] = voice_id
+    if speed is not None:
+        try:
+            payload["speed"] = float(speed)
+        except (TypeError, ValueError):
+            pass
+    if rate:
+        payload["rate"] = rate
+    if volume:
+        payload["volume"] = volume
+    if pitch:
+        payload["pitch"] = pitch
+    if output_format:
+        payload["output_format"] = output_format
+
+    response = requests.post(
+        _http_tts_endpoint(base_url, path),
+        headers=_http_tts_headers(api_key),
+        json=payload,
+        timeout=timeout,
+    )
+    return _write_http_tts_response(response, output_path, "piper_http")
 
 
 # ===========================================================================
@@ -1690,6 +1814,8 @@ def text_to_speech_tool(
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
         elif want_opus and provider in {"openai", "elevenlabs", "mistral", "gemini"}:
             file_path = out_dir / f"tts_{timestamp}.ogg"
+        elif provider in ("silero_http", "piper_http"):
+            file_path = out_dir / f"tts_{timestamp}.wav"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
 
@@ -1728,6 +1854,14 @@ def text_to_speech_tool(
                 }, ensure_ascii=False)
             logger.info("Generating speech with OpenAI TTS...")
             _generate_openai_tts(text, file_str, tts_config)
+
+        elif provider == "silero_http":
+            logger.info("Generating speech with Silero HTTP TTS...")
+            _generate_silero_http_tts(text, file_str, tts_config)
+
+        elif provider == "piper_http":
+            logger.info("Generating speech with Piper HTTP TTS...")
+            _generate_piper_http_tts(text, file_str, tts_config)
 
         elif provider == "minimax":
             logger.info("Generating speech with MiniMax TTS...")
@@ -1843,6 +1977,12 @@ def text_to_speech_tool(
                     if opus_path:
                         file_str = opus_path
                 voice_compatible = file_str.endswith(".ogg")
+        elif provider in {"silero_http", "piper_http"}:
+            if want_opus and not file_str.endswith(".ogg"):
+                opus_path = _convert_to_opus(file_str)
+                if opus_path:
+                    file_str = opus_path
+            voice_compatible = file_str.endswith(".ogg")
         elif provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"} and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
@@ -1887,6 +2027,31 @@ def text_to_speech_tool(
 # ===========================================================================
 # Requirements check
 # ===========================================================================
+def _configured_http_tts_base_url(provider: str, tts_config: Dict[str, Any]) -> str:
+    """Return the effective base URL when an HTTP provider is explicitly usable."""
+    provider_config = tts_config.get(provider)
+    selected_provider = _get_provider(tts_config)
+
+    cfg = provider_config if isinstance(provider_config, dict) else {}
+    if provider == "silero_http":
+        if selected_provider != provider:
+            return str(os.getenv("SILERO_TTS_BASE_URL") or "").strip()
+        return str(
+            cfg.get("base_url")
+            or os.getenv("SILERO_TTS_BASE_URL")
+            or DEFAULT_SILERO_HTTP_BASE_URL
+        ).strip()
+    if provider == "piper_http":
+        if selected_provider != provider:
+            return str(os.getenv("PIPER_TTS_BASE_URL") or "").strip()
+        return str(
+            cfg.get("base_url")
+            or os.getenv("PIPER_TTS_BASE_URL")
+            or DEFAULT_PIPER_HTTP_BASE_URL
+        ).strip()
+    return ""
+
+
 def check_tts_requirements() -> bool:
     """
     Check if at least one TTS provider is available.
@@ -1898,8 +2063,10 @@ def check_tts_requirements() -> bool:
     Returns:
         bool: True if at least one provider can work.
     """
+    tts_config = _load_tts_config()
+
     # Any configured command provider counts as available.
-    if _has_any_command_tts_provider():
+    if _has_any_command_tts_provider(tts_config):
         return True
     try:
         _import_edge_tts()
@@ -1938,6 +2105,10 @@ def check_tts_requirements() -> bool:
     if _check_neutts_available():
         return True
     if _check_kittentts_available():
+        return True
+    if _configured_http_tts_base_url("silero_http", tts_config):
+        return True
+    if _configured_http_tts_base_url("piper_http", tts_config):
         return True
     if _check_piper_available():
         return True
