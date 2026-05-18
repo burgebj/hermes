@@ -10549,6 +10549,11 @@ def main():
     cron_run.add_argument("job_id", help="Job ID to trigger")
     _add_accept_hooks_flag(cron_run)
 
+    cron_test_run = cron_subparsers.add_parser(
+        "test-run", help="Run one job immediately and save local output"
+    )
+    cron_test_run.add_argument("job_id", help="Job ID to test")
+
     cron_remove = cron_subparsers.add_parser(
         "remove", aliases=["rm", "delete"], help="Remove a scheduled job"
     )
