@@ -76,13 +76,158 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
     return str(ts)
 
 
+# ---------------------------------------------------------------------------
+# Non-prose artifact stripping
+# ---------------------------------------------------------------------------
+
+# Patterns that identify common non-prose blobs stuffed into message content:
+#   - Base64 strings (long runs of A-Za-z0-9+/=)
+#   - Data URIs (data:image/png;base64,...)
+#   - Source-map "mappings" fields and VLQ strings (AAAA,IAAC, etc.)
+#   - Minified JS/CSS (lines > 400 chars with almost no spaces)
+#   - Large JSON dumps (starts with { or [ and exceeds 2 KB)
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
+_DATA_URI_RE = re.compile(r"data:[a-zA-Z0-9/-]+;base64,[A-Za-z0-9+/]+={0,2}")
+_SOURCEMAP_VLQ_RE = re.compile(r'"mappings"\s*:\s*"[A-Za-z0-9+/,;]{100,}"')
+_MINIFIED_LINE_RE = re.compile(r"^[^\s]{400,}$", re.MULTILINE)
+
+
+def _is_non_prose_blob(text: str) -> bool:
+    """Return True if *text* looks like a machine artifact rather than human prose."""
+    if not text or len(text) < 100:
+        return False
+    # Heuristic 1: very high ratio of non-space chars to spaces → minified/obfuscated
+    space_count = text.count(" ") + text.count("\n")
+    if space_count == 0 or (len(text) / max(space_count, 1)) > 50:
+        return True
+    # Heuristic 2: large JSON array/object
+    stripped = text.strip()
+    if len(stripped) > 2048 and stripped[0] in "[{":
+        try:
+            json.loads(stripped)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            pass
+    # Heuristic 3: source-map VLQ payload
+    if _SOURCEMAP_VLQ_RE.search(text):
+        return True
+    # Heuristic 4: single massive base64 block (> 50 % of text)
+    base64_len = sum(len(m.group(0)) for m in _BASE64_RE.finditer(text))
+    if base64_len > len(text) * 0.5:
+        return True
+    return False
+
+
+def _strip_non_prose(text: str) -> str:
+    """Replace machine artifacts with compact placeholders."""
+    if not text:
+        return text
+    # Data URIs first (they contain base64-looking text)
+    text = _DATA_URI_RE.sub("[data-uri stripped]", text)
+    # Source map VLQ blocks
+    text = _SOURCEMAP_VLQ_RE.sub('"mappings": "[source-map stripped]"', text)
+    # Large base64 blocks (but be careful not to munge short base64 like git SHAs)
+    def _replace_base64(m: re.Match) -> str:
+        blob = m.group(0)
+        # Keep tiny blobs, strip huge ones
+        if len(blob) > 300:
+            return f"[base64 blob ({len(blob)} chars) stripped]"
+        return blob
+    text = _BASE64_RE.sub(_replace_base64, text)
+    # Minified single-line JS/CSS → placeholder
+    def _replace_minified(m: re.Match) -> str:
+        line = m.group(0)
+        return f"[minified code ({len(line)} chars) stripped]"
+    text = _MINIFIED_LINE_RE.sub(_replace_minified, text)
+    # Large JSON dumps
+    def _replace_json(m: re.Match) -> str:
+        blob = m.group(0)
+        if len(blob) > 2048:
+            return f"[json dump ({len(blob)} chars) stripped]"
+        return blob
+    # Look for top-level JSON objects/arrays — this is a loose regex so we only
+    # hit obviously large contiguous blocks.
+    text = re.sub(r'\{[^{}]*\}', _replace_json, text, flags=re.DOTALL)
+    text = re.sub(r'\[[^\[\]]*\]', _replace_json, text, flags=re.DOTALL)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Turn-level relevance filtering
+# ---------------------------------------------------------------------------
+
+def _filter_messages_by_relevance(
+    messages: List[Dict[str, Any]],
+    query: str,
+    context_turns: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    Keep only messages whose content matches *query* plus *context_turns*
+    messages of surrounding context on each side.
+
+    A "turn" is one assistant reply + the user message that preceded it (if any).
+    This prevents a single huge assistant dump from dominating the transcript.
+    """
+    if not query or not messages:
+        return messages
+
+    terms = [t for t in query.lower().split() if len(t) > 1]
+    if not terms:
+        terms = [query.lower().strip()]
+
+    # Build a mask: which message indices match?
+    match_mask = [False] * len(messages)
+    for i, msg in enumerate(messages):
+        content = (msg.get("content") or "").lower()
+        if any(t in content for t in terms):
+            match_mask[i] = True
+
+    # Expand each match index by ±context_turns assistant-turns.
+    # We treat an assistant message as the boundary of a turn; walk outward
+    # *context_turns* assistant messages in each direction.
+    keep_mask = [False] * len(messages)
+    for i, matched in enumerate(match_mask):
+        if not matched:
+            continue
+        # Walk backward: count assistant messages as turn boundaries
+        turns_seen = 0
+        for j in range(i, -1, -1):
+            keep_mask[j] = True
+            if messages[j].get("role") == "assistant":
+                turns_seen += 1
+                if turns_seen > context_turns:
+                    break
+        # Walk forward
+        turns_seen = 0
+        for j in range(i, len(messages)):
+            keep_mask[j] = True
+            if messages[j].get("role") == "assistant":
+                turns_seen += 1
+                if turns_seen > context_turns:
+                    break
+
+    filtered = [messages[i] for i, keep in enumerate(keep_mask) if keep]
+    if not filtered:
+        # Fallback: if nothing matched (e.g. query terms only in tool names),
+        # return the last N messages so we don't return empty.
+        return messages[-20:] if len(messages) > 20 else messages
+    return filtered
+
+
 def _format_conversation(messages: List[Dict[str, Any]]) -> str:
-    """Format session messages into a readable transcript for summarization."""
+    """Format session messages into a readable transcript for summarization.
+
+    Non-prose attachments (base64, source maps, minified code, JSON dumps) are
+    stripped to placeholders before formatting so they cannot bloat the prompt.
+    """
     parts = []
     for msg in messages:
         role = msg.get("role", "unknown").upper()
         content = msg.get("content") or ""
         tool_name = msg.get("tool_name")
+
+        # Strip machine artifacts from every message, not just tool outputs
+        content = _strip_non_prose(content)
 
         if role == "TOOL" and tool_name:
             # Truncate long tool outputs
@@ -445,6 +590,9 @@ def session_search(
                 messages = db.get_messages_as_conversation(session_id)
                 if not messages:
                     continue
+                # --- NEW: pre-filter to query-relevant turns + strip noise ---
+                messages = _filter_messages_by_relevance(messages, query, context_turns=2)
+                # --------------------------------------------------------------
                 session_meta = db.get_session(session_id) or {}
                 conversation_text = _format_conversation(messages)
                 conversation_text = _truncate_around_matches(conversation_text, query)

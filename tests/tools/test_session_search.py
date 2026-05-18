@@ -14,6 +14,9 @@ from tools.session_search_tool import (
     _HIDDEN_SESSION_SOURCES,
     MAX_SESSION_CHARS,
     SESSION_SEARCH_SCHEMA,
+    _strip_non_prose,
+    _filter_messages_by_relevance,
+    _is_non_prose_blob,
 )
 
 
@@ -89,11 +92,22 @@ class TestFormatConversation:
         assert "[TOOL:web_search]" in result
 
     def test_long_tool_output_truncated(self):
+        # Long prose-like tool output should still be truncated
+        msgs = [
+            {"role": "tool", "content": "line " * 300, "tool_name": "terminal"},
+        ]
+        result = _format_conversation(msgs)
+        assert "[truncated]" in result
+
+    def test_non_prose_tool_output_stripped(self):
+        # Machine artifacts (base64, minified code, etc.) should be stripped
+        # to placeholders rather than kept as truncated noise.
         msgs = [
             {"role": "tool", "content": "x" * 1000, "tool_name": "terminal"},
         ]
         result = _format_conversation(msgs)
-        assert "[truncated]" in result
+        assert "[base64 blob" in result
+        assert "[truncated]" not in result
 
     def test_assistant_with_tool_calls(self):
         msgs = [
@@ -576,3 +590,96 @@ class TestSessionSearch:
         assert entry["source"] == "api_server", (
             f"source should be parent's 'api_server', got {entry['source']!r}"
         )
+
+
+# =========================================================================
+# Non-prose stripping
+# =========================================================================
+
+class TestStripNonProse:
+    def test_base64_blob_stripped(self):
+        blob = "A" * 500 + "=="
+        result = _strip_non_prose(blob)
+        assert "[base64 blob" in result
+        assert "A" * 10 not in result
+
+    def test_data_uri_stripped(self):
+        uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+        result = _strip_non_prose(uri)
+        assert "[data-uri stripped]" in result
+
+    def test_source_map_stripped(self):
+        smap = '{"version":3,"mappings":"AAAA,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG;AAAC,IAAC,EAAG"}'
+        result = _strip_non_prose(smap)
+        assert "[source-map stripped]" in result
+
+    def test_minified_code_stripped(self):
+        code = "var a=function(b){return b+1};var c=function(d){return d*2};"
+        # repeat enough to cross the 400-char line threshold
+        code = code.replace(" ", "") * 50
+        result = _strip_non_prose(code)
+        assert "[minified code" in result
+
+    def test_large_json_dump_stripped(self):
+        dump = "[" + ",".join(['{"k": "v"}'] * 500) + "]"
+        result = _strip_non_prose(dump)
+        assert "[json dump" in result
+
+    def test_normal_prose_preserved(self):
+        prose = "The quick brown fox jumps over the lazy dog."
+        assert _strip_non_prose(prose) == prose
+
+    def test_short_base64_preserved(self):
+        # Short base64-like strings (e.g. git SHAs) should not be munged
+        short = "abc123def456"
+        assert _strip_non_prose(short) == short
+
+
+class TestIsNonProseBlob:
+    def test_detects_large_base64(self):
+        assert _is_non_prose_blob("A" * 1000) is True
+
+    def test_rejects_normal_text(self):
+        assert _is_non_prose_blob("hello world") is False
+
+    def test_rejects_short_text(self):
+        assert _is_non_prose_blob("abc") is False
+
+
+# =========================================================================
+# Relevance filtering
+# =========================================================================
+
+class TestFilterMessagesByRelevance:
+    def _make_msgs(self, pairs):
+        return [{"role": r, "content": c} for r, c in pairs]
+
+    def test_keeps_matching_turns_plus_context(self):
+        msgs = self._make_msgs([
+            ("user", "hello"),
+            ("assistant", "hi"),
+            ("user", "how is weather"),
+            ("assistant", "sunny"),
+            ("user", "how do I upload ROMs"),
+            ("assistant", "use the upload endpoint"),
+            ("user", "thanks"),
+            ("assistant", "np"),
+            ("user", "what about emulators"),
+            ("assistant", "we support many"),
+        ])
+        filtered = _filter_messages_by_relevance(msgs, "upload ROMs", context_turns=1)
+        contents = [m["content"] for m in filtered]
+        assert any("upload ROMs" in c for c in contents)
+        assert not any("emulators" in c for c in contents)
+
+    def test_fallback_when_no_matches(self):
+        msgs = self._make_msgs([("user", "hello"), ("assistant", "hi")])
+        filtered = _filter_messages_by_relevance(msgs, "xyznonexistent", context_turns=1)
+        assert len(filtered) == 2
+
+    def test_empty_query_returns_all(self):
+        msgs = self._make_msgs([("user", "a"), ("assistant", "b")])
+        assert _filter_messages_by_relevance(msgs, "", context_turns=1) == msgs
+
+    def test_empty_messages_returns_empty(self):
+        assert _filter_messages_by_relevance([], "query", context_turns=1) == []
