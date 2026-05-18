@@ -2651,11 +2651,27 @@ def _profile_attr(info, name: str, default: Any = None) -> Any:
         return default
 
 
+def _active_profile_path_str() -> str:
+    """Resolved HERMES_HOME of the running dashboard process, for is_active comparison."""
+    from hermes_constants import get_hermes_home
+    try:
+        return str(get_hermes_home().resolve())
+    except Exception:
+        return ""
+
+
 def _profile_to_dict(info) -> Dict[str, Any]:
+    path_str = str(_profile_attr(info, "path", ""))
+    try:
+        resolved = str(Path(path_str).resolve()) if path_str else ""
+    except Exception:
+        resolved = path_str
     return {
         "name": _profile_attr(info, "name", ""),
-        "path": str(_profile_attr(info, "path", "")),
+        "path": path_str,
         "is_default": bool(_profile_attr(info, "is_default", False)),
+        "is_active": bool(resolved) and resolved == _active_profile_path_str(),
+        "gateway_running": bool(_profile_attr(info, "gateway_running", False)),
         "model": _profile_attr(info, "model"),
         "provider": _profile_attr(info, "provider"),
         "has_env": bool(_profile_attr(info, "has_env", False)),
@@ -2670,6 +2686,17 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
         except Exception:
             return default
 
+    active_path_str = _active_profile_path_str()
+
+    def _is_active(path: Path) -> bool:
+        try:
+            return bool(active_path_str) and str(path.resolve()) == active_path_str
+        except Exception:
+            return False
+
+    def _is_gateway_running(path: Path) -> bool:
+        return _safe(lambda: profiles_mod._check_gateway_running(path), False)
+
     profiles: List[Dict[str, Any]] = []
     default_home = profiles_mod._get_default_hermes_home()
     if default_home.is_dir():
@@ -2678,6 +2705,8 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
             "name": "default",
             "path": str(default_home),
             "is_default": True,
+            "is_active": _is_active(default_home),
+            "gateway_running": _is_gateway_running(default_home),
             "model": model,
             "provider": provider,
             "has_env": (default_home / ".env").exists(),
@@ -2694,6 +2723,8 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
                 "name": entry.name,
                 "path": str(entry),
                 "is_default": False,
+                "is_active": _is_active(entry),
+                "gateway_running": _is_gateway_running(entry),
                 "model": model,
                 "provider": provider,
                 "has_env": (entry / ".env").exists(),
@@ -2909,6 +2940,576 @@ async def toggle_skill(body: SkillToggle):
         disabled.add(body.name)
     save_disabled_skills(config, disabled)
     return {"ok": True, "name": body.name, "enabled": body.enabled}
+
+
+# ---------------------------------------------------------------------------
+# Per-profile skills endpoints
+#
+# The legacy /api/skills routes above operate on the active profile
+# (whichever HERMES_HOME the dashboard process was launched under). The
+# routes below let the UI list and toggle skills for any installed profile
+# without spawning a second dashboard daemon per profile.
+#
+# Reads/writes go directly against the profile's config.yaml (skills.disabled
+# key) rather than through load_config / save_config — those helpers are
+# bound to the process-level HERMES_HOME via get_config_path().
+# ---------------------------------------------------------------------------
+
+
+def _profile_config_path(profile_dir: Path) -> Path:
+    return profile_dir / "config.yaml"
+
+
+def _load_profile_raw_config(profile_dir: Path) -> Dict[str, Any]:
+    """Read a profile's config.yaml as raw YAML. Returns {} if missing/empty."""
+    config_path = _profile_config_path(profile_dir)
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml as _yaml
+        with open(config_path, encoding="utf-8") as f:
+            data = _yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not read config.yaml: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not parse config.yaml: {e}")
+
+
+def _save_profile_raw_config(profile_dir: Path, config: Dict[str, Any]) -> None:
+    from utils import atomic_yaml_write
+    try:
+        atomic_yaml_write(_profile_config_path(profile_dir), config)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not write config.yaml: {e}")
+
+
+def _find_skills_in_profile(profile_dir: Path) -> List[Dict[str, Any]]:
+    """Scan profile_dir/skills/ for SKILL.md files and return the same shape
+    as ``tools.skills_tool._find_all_skills`` (without external_dirs).
+
+    External-dir scanning is intentionally omitted for v1 — the dropdown is
+    aimed at toggling profile-installed skills. Skills loaded via
+    ``skills.external_dirs`` are still respected at gateway runtime.
+
+    Category is derived from the directory layout under the profile's own
+    skills/ root (matching the convention used by
+    ``tools.skills_tool._get_category_from_path``, which is hardcoded to the
+    process-level SKILLS_DIR and therefore can't be reused here).
+    """
+    from tools.skills_tool import (
+        MAX_DESCRIPTION_LENGTH,
+        MAX_NAME_LENGTH,
+        _EXCLUDED_SKILL_DIRS,
+        _parse_frontmatter,
+        skill_matches_platform,
+    )
+    from agent.skill_utils import iter_skill_index_files
+
+    skills_dir = profile_dir / "skills"
+    if not skills_dir.is_dir():
+        return []
+
+    def _category(skill_md_path: Path) -> Optional[str]:
+        try:
+            rel = skill_md_path.relative_to(skills_dir)
+        except ValueError:
+            return None
+        # rel like "mlops/axolotl/SKILL.md" → "mlops"; "airtable/SKILL.md" → None
+        return rel.parts[0] if len(rel.parts) >= 3 else None
+
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            continue
+        try:
+            content = skill_md.read_text(encoding="utf-8")[:4000]
+            frontmatter, body = _parse_frontmatter(content)
+            if not skill_matches_platform(frontmatter):
+                continue
+            name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]
+            if name in seen:
+                continue
+            description = frontmatter.get("description", "")
+            if not description:
+                for line in body.strip().split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        description = line
+                        break
+            if len(description) > MAX_DESCRIPTION_LENGTH:
+                description = description[:MAX_DESCRIPTION_LENGTH - 3] + "..."
+            seen.add(name)
+            out.append({
+                "name": name,
+                "description": description,
+                "category": _category(skill_md),
+                "path": str(skill_md.parent),
+            })
+        except (OSError, UnicodeDecodeError):
+            continue
+    out.sort(key=lambda s: s["name"].lower())
+    return out
+
+
+def _profile_disabled_skills(config: Dict[str, Any]) -> set:
+    skills_cfg = config.get("skills") if isinstance(config, dict) else None
+    if not isinstance(skills_cfg, dict):
+        return set()
+    disabled = skills_cfg.get("disabled", [])
+    if not isinstance(disabled, list):
+        return set()
+    return {str(x) for x in disabled}
+
+
+@app.get("/api/profiles/{name}/skills")
+async def get_profile_skills(name: str):
+    profile_dir = _resolve_profile_dir(name)
+    config = _load_profile_raw_config(profile_dir)
+    disabled = _profile_disabled_skills(config)
+    skills = _find_skills_in_profile(profile_dir)
+    for s in skills:
+        s["enabled"] = s["name"] not in disabled
+    return skills
+
+
+@app.put("/api/profiles/{name}/skills/toggle")
+async def toggle_profile_skill(name: str, body: SkillToggle):
+    profile_dir = _resolve_profile_dir(name)
+    config = _load_profile_raw_config(profile_dir)
+    skills_cfg = config.setdefault("skills", {}) if isinstance(config, dict) else None
+    if not isinstance(skills_cfg, dict):
+        # The skills key existed but wasn't a dict — overwrite with a fresh mapping.
+        config["skills"] = {}
+        skills_cfg = config["skills"]
+    raw_disabled = skills_cfg.get("disabled", [])
+    disabled = {str(x) for x in raw_disabled} if isinstance(raw_disabled, list) else set()
+    if body.enabled:
+        disabled.discard(body.name)
+    else:
+        disabled.add(body.name)
+    skills_cfg["disabled"] = sorted(disabled)
+    _save_profile_raw_config(profile_dir, config)
+    return {"ok": True, "name": body.name, "enabled": body.enabled, "profile": name}
+
+
+# ---------------------------------------------------------------------------
+# Per-profile cron endpoints
+#
+# The legacy /api/cron/jobs routes above operate on the active profile
+# (whichever HERMES_HOME the dashboard process was launched under, via the
+# module-global ``cron.jobs.JOBS_FILE``). The routes below let the UI list
+# and mutate cron jobs for any installed profile without spawning a second
+# dashboard daemon per profile.
+#
+# Reads/writes go directly against the profile's ``cron/jobs.json`` rather
+# than through ``cron.jobs.load_jobs`` / ``cron.jobs.save_jobs`` — those
+# functions are bound to the process-level HERMES_HOME via the resolved
+# ``JOBS_FILE`` and can't be reused for cross-profile mutation without
+# invasive global-state changes (same constraint the per-profile skills
+# routes work around for ``load_config`` / ``save_config``).
+#
+# Trigger requests against a profile whose gateway is not running return
+# 409 Conflict: the dispatcher tick is what actually picks up triggered
+# jobs, so writing ``next_run_at = now`` without a live tick is a silent
+# no-op. The frontend disables the button as the primary UX; this server-
+# side check covers the race where the gateway dies between page load and
+# click.
+# ---------------------------------------------------------------------------
+
+
+# Per-profile in-process locks to serialise dashboard writes to the same
+# profile's jobs.json. Cross-process races with a sub-profile's own
+# dispatcher are handled by ``_save_profile_jobs``'s atomic-replace; this
+# dict-of-locks only protects against two concurrent dashboard requests
+# clobbering each other.
+_profile_jobs_locks: Dict[str, threading.Lock] = {}
+_profile_jobs_locks_guard = threading.Lock()
+
+
+def _profile_jobs_lock(name: str) -> threading.Lock:
+    with _profile_jobs_locks_guard:
+        lock = _profile_jobs_locks.get(name)
+        if lock is None:
+            lock = threading.Lock()
+            _profile_jobs_locks[name] = lock
+        return lock
+
+
+def _profile_cron_jobs_path(profile_dir: Path) -> Path:
+    """Return ``<profile_dir>/cron/jobs.json``.
+
+    ``hermes_cli.profiles.get_profile_dir("default")`` already returns
+    HERMES_HOME itself (not ``HERMES_HOME/profiles/default``), so this
+    yields ``~/.hermes/cron/jobs.json`` for the default profile — matching
+    ``cron.jobs.JOBS_FILE`` for the active-default case — and
+    ``~/.hermes/profiles/<name>/cron/jobs.json`` for sub-profiles.
+    """
+    return profile_dir / "cron" / "jobs.json"
+
+
+def _load_profile_jobs(profile_dir: Path) -> List[Dict[str, Any]]:
+    """Load a profile's cron jobs list. Returns ``[]`` if the file is missing.
+
+    Matches ``cron.jobs.load_jobs``'s return shape (the bare list, not the
+    ``{"jobs": [...]}`` on-disk wrapper) so route bodies can mirror the
+    legacy cron routes one-to-one.
+    """
+    jobs_file = _profile_cron_jobs_path(profile_dir)
+    if not jobs_file.exists():
+        return []
+    try:
+        with open(jobs_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not read cron/jobs.json: {e}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Could not parse cron/jobs.json: {e}")
+    if not isinstance(data, dict):
+        return []
+    jobs = data.get("jobs", [])
+    return jobs if isinstance(jobs, list) else []
+
+
+def _save_profile_jobs(profile_dir: Path, jobs: List[Dict[str, Any]]) -> None:
+    """Atomically write a profile's cron jobs list.
+
+    Mirrors ``cron.jobs.save_jobs``'s tempfile + atomic-replace semantics
+    so a concurrent dispatcher read never sees a partially-written file.
+    """
+    import tempfile
+    from hermes_time import now as _hermes_now
+    from utils import atomic_replace
+
+    jobs_file = _profile_cron_jobs_path(profile_dir)
+    try:
+        jobs_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not create cron/ dir: {e}")
+
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_"
+        )
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not create temp file: {e}")
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        atomic_replace(tmp_path, jobs_file)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail=f"Could not write cron/jobs.json: {e}")
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+# --- Per-profile CRUD helpers (mirror cron/jobs.py's CRUD functions but
+# parametrised on profile_dir; reuse cron.jobs's pure helpers for schedule
+# parsing, next-run computation, and record normalisation) ---
+
+
+def _profile_create_job(
+    profile_dir: Path,
+    *,
+    prompt: str,
+    schedule: str,
+    name: Optional[str] = None,
+    deliver: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a cron job in ``profile_dir``'s jobs.json. Returns the new job."""
+    import uuid
+    from cron.jobs import (
+        compute_next_run,
+        parse_schedule,
+        _apply_skill_fields,
+        _normalize_job_record,
+    )
+    from hermes_time import now as _hermes_now
+
+    parsed_schedule = parse_schedule(schedule)
+    now_iso = _hermes_now().isoformat()
+    job = _apply_skill_fields({
+        "id": str(uuid.uuid4())[:8],
+        "name": (name or "").strip(),
+        "prompt": str(prompt or ""),
+        "skills": [],
+        "skill": None,
+        "model": None,
+        "provider": None,
+        "base_url": None,
+        "script": None,
+        "no_agent": False,
+        "context_from": None,
+        "schedule": parsed_schedule,
+        "schedule_display": parsed_schedule.get("display", schedule),
+        "repeat": {"times": None, "completed": 0},
+        "enabled": True,
+        "state": "scheduled",
+        "paused_at": None,
+        "paused_reason": None,
+        "created_at": now_iso,
+        "next_run_at": compute_next_run(parsed_schedule),
+        "last_run_at": None,
+        "last_status": None,
+        "last_error": None,
+        "last_delivery_error": None,
+        "deliver": deliver or "local",
+        "origin": None,
+        "enabled_toolsets": None,
+        "workdir": None,
+    })
+    jobs = _load_profile_jobs(profile_dir)
+    jobs.append(job)
+    _save_profile_jobs(profile_dir, jobs)
+    return _normalize_job_record(job)
+
+
+def _profile_update_job(
+    profile_dir: Path, job_id: str, updates: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Apply ``updates`` to a job in ``profile_dir``. Returns the updated job
+    or ``None`` if ``job_id`` is not present. Mirrors cron.jobs.update_job."""
+    from cron.jobs import (
+        compute_next_run,
+        parse_schedule,
+        _apply_skill_fields,
+        _normalize_job_record,
+        _normalize_skill_list,
+        _normalize_workdir,
+    )
+
+    jobs = _load_profile_jobs(profile_dir)
+    for i, job in enumerate(jobs):
+        if job.get("id") != job_id:
+            continue
+
+        if "workdir" in updates:
+            wd = updates["workdir"]
+            if wd in {None, "", False}:
+                updates["workdir"] = None
+            else:
+                updates["workdir"] = _normalize_workdir(wd)
+
+        updated = _apply_skill_fields({**job, **updates})
+        schedule_changed = "schedule" in updates
+
+        if "skills" in updates or "skill" in updates:
+            normalized_skills = _normalize_skill_list(
+                updated.get("skill"), updated.get("skills")
+            )
+            updated["skills"] = normalized_skills
+            updated["skill"] = normalized_skills[0] if normalized_skills else None
+
+        if schedule_changed:
+            updated_schedule = updated["schedule"]
+            if isinstance(updated_schedule, str):
+                updated_schedule = parse_schedule(updated_schedule)
+                updated["schedule"] = updated_schedule
+            updated["schedule_display"] = updates.get(
+                "schedule_display",
+                updated_schedule.get("display", updated.get("schedule_display")),
+            )
+            if updated.get("state") != "paused":
+                updated["next_run_at"] = compute_next_run(updated_schedule)
+
+        if (
+            updated.get("enabled", True)
+            and updated.get("state") != "paused"
+            and not updated.get("next_run_at")
+        ):
+            updated["next_run_at"] = compute_next_run(updated["schedule"])
+
+        jobs[i] = updated
+        _save_profile_jobs(profile_dir, jobs)
+        return _normalize_job_record(jobs[i])
+    return None
+
+
+def _profile_pause_job(
+    profile_dir: Path, job_id: str, reason: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    from hermes_time import now as _hermes_now
+    return _profile_update_job(
+        profile_dir,
+        job_id,
+        {
+            "enabled": False,
+            "state": "paused",
+            "paused_at": _hermes_now().isoformat(),
+            "paused_reason": reason,
+        },
+    )
+
+
+def _profile_resume_job(profile_dir: Path, job_id: str) -> Optional[Dict[str, Any]]:
+    from cron.jobs import compute_next_run
+
+    jobs = _load_profile_jobs(profile_dir)
+    target = next((j for j in jobs if j.get("id") == job_id), None)
+    if target is None:
+        return None
+    return _profile_update_job(
+        profile_dir,
+        job_id,
+        {
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "next_run_at": compute_next_run(target.get("schedule") or {}),
+        },
+    )
+
+
+def _profile_trigger_job(profile_dir: Path, job_id: str) -> Optional[Dict[str, Any]]:
+    from hermes_time import now as _hermes_now
+    return _profile_update_job(
+        profile_dir,
+        job_id,
+        {
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "next_run_at": _hermes_now().isoformat(),
+        },
+    )
+
+
+def _profile_remove_job(profile_dir: Path, job_id: str) -> bool:
+    import shutil
+
+    jobs = _load_profile_jobs(profile_dir)
+    remaining = [j for j in jobs if j.get("id") != job_id]
+    if len(remaining) == len(jobs):
+        return False
+    _save_profile_jobs(profile_dir, remaining)
+    # Clean up the profile's own output directory for this job so deleted
+    # sub-profile jobs don't leave orphaned output dirs accumulating.
+    output_dir = profile_dir / "cron" / "output" / job_id
+    if output_dir.exists():
+        try:
+            shutil.rmtree(output_dir)
+        except OSError:
+            _log.warning("Could not remove cron output dir %s", output_dir)
+    return True
+
+
+# --- Per-profile cron routes (mirror /api/cron/jobs* shape) ---
+
+
+@app.get("/api/profiles/{name}/cron/jobs")
+async def list_profile_cron_jobs(name: str):
+    from cron.jobs import _normalize_job_record
+    profile_dir = _resolve_profile_dir(name)
+    jobs = _load_profile_jobs(profile_dir)
+    return [_normalize_job_record(j) for j in jobs]
+
+
+@app.get("/api/profiles/{name}/cron/jobs/{job_id}")
+async def get_profile_cron_job(name: str, job_id: str):
+    from cron.jobs import _normalize_job_record
+    profile_dir = _resolve_profile_dir(name)
+    jobs = _load_profile_jobs(profile_dir)
+    for j in jobs:
+        if j.get("id") == job_id:
+            return _normalize_job_record(j)
+    raise HTTPException(status_code=404, detail="Job not found")
+
+
+@app.post("/api/profiles/{name}/cron/jobs")
+async def create_profile_cron_job(name: str, body: CronJobCreate):
+    profile_dir = _resolve_profile_dir(name)
+    try:
+        with _profile_jobs_lock(name):
+            return _profile_create_job(
+                profile_dir,
+                prompt=body.prompt,
+                schedule=body.schedule,
+                name=body.name,
+                deliver=body.deliver,
+            )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        _log.exception("POST /api/profiles/%s/cron/jobs failed", name)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/profiles/{name}/cron/jobs/{job_id}")
+async def update_profile_cron_job(name: str, job_id: str, body: CronJobUpdate):
+    profile_dir = _resolve_profile_dir(name)
+    try:
+        with _profile_jobs_lock(name):
+            job = _profile_update_job(profile_dir, job_id, body.updates)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/api/profiles/{name}/cron/jobs/{job_id}/pause")
+async def pause_profile_cron_job(name: str, job_id: str):
+    profile_dir = _resolve_profile_dir(name)
+    with _profile_jobs_lock(name):
+        job = _profile_pause_job(profile_dir, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/api/profiles/{name}/cron/jobs/{job_id}/resume")
+async def resume_profile_cron_job(name: str, job_id: str):
+    profile_dir = _resolve_profile_dir(name)
+    with _profile_jobs_lock(name):
+        job = _profile_resume_job(profile_dir, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/api/profiles/{name}/cron/jobs/{job_id}/trigger")
+async def trigger_profile_cron_job(name: str, job_id: str):
+    from hermes_cli.profiles import _check_gateway_running
+    profile_dir = _resolve_profile_dir(name)
+    if not _check_gateway_running(profile_dir):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Gateway not running for profile '{name}'. "
+                   "Start the gateway to dispatch this job.",
+        )
+    with _profile_jobs_lock(name):
+        job = _profile_trigger_job(profile_dir, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.delete("/api/profiles/{name}/cron/jobs/{job_id}")
+async def delete_profile_cron_job(name: str, job_id: str):
+    profile_dir = _resolve_profile_dir(name)
+    with _profile_jobs_lock(name):
+        removed = _profile_remove_job(profile_dir, job_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True}
 
 
 @app.get("/api/tools/toolsets")

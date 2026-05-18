@@ -154,6 +154,65 @@ export const api = {
   deleteCronJob: (id: string) =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}`, { method: "DELETE" }),
 
+  // Per-profile cron jobs. The dashboard daemon manages the active profile
+  // by default via /api/cron/jobs; these routes let it read and mutate jobs
+  // for any installed profile without spawning a second daemon per profile.
+  // Trigger requests against a profile whose gateway isn't running return
+  // 409 — the UI disables the button via ProfileInfo.gateway_running.
+  getProfileCronJobs: (profile: string) =>
+    fetchJSON<CronJob[]>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs`,
+    ),
+  getProfileCronJob: (profile: string, id: string) =>
+    fetchJSON<CronJob>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs/${encodeURIComponent(id)}`,
+    ),
+  createProfileCronJob: (
+    profile: string,
+    job: { prompt: string; schedule: string; name?: string; deliver?: string },
+  ) =>
+    fetchJSON<CronJob>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(job),
+      },
+    ),
+  updateProfileCronJob: (
+    profile: string,
+    id: string,
+    updates: Record<string, unknown>,
+  ) =>
+    fetchJSON<CronJob>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs/${encodeURIComponent(id)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates }),
+      },
+    ),
+  pauseProfileCronJob: (profile: string, id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs/${encodeURIComponent(id)}/pause`,
+      { method: "POST" },
+    ),
+  resumeProfileCronJob: (profile: string, id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs/${encodeURIComponent(id)}/resume`,
+      { method: "POST" },
+    ),
+  triggerProfileCronJob: (profile: string, id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs/${encodeURIComponent(id)}/trigger`,
+      { method: "POST" },
+    ),
+  deleteProfileCronJob: (profile: string, id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/profiles/${encodeURIComponent(profile)}/cron/jobs/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
   // Profiles (minimal)
   getProfiles: () =>
     fetchJSON<{ profiles: ProfileInfo[] }>("/api/profiles"),
@@ -203,6 +262,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, enabled }),
     }),
+  // Per-profile skill management. The dashboard daemon edits the active
+  // profile by default; these routes let it edit other installed profiles
+  // without spawning a second daemon per profile.
+  getProfileSkills: (profile: string) =>
+    fetchJSON<SkillInfo[]>(`/api/profiles/${encodeURIComponent(profile)}/skills`),
+  toggleProfileSkill: (profile: string, name: string, enabled: boolean) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/profiles/${encodeURIComponent(profile)}/skills/toggle`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, enabled }),
+      },
+    ),
   getToolsets: () => fetchJSON<ToolsetInfo[]>("/api/tools/toolsets"),
 
   // Session search (FTS5)
@@ -505,6 +578,22 @@ export interface ProfileInfo {
   name: string;
   path: string;
   is_default: boolean;
+  /**
+   * True when this profile is the one the running dashboard process is
+   * bound to (matches HERMES_HOME). Optional for backward-compat with
+   * older gateways that don't emit the field — callers should treat
+   * undefined as false.
+   */
+  is_active?: boolean;
+  /**
+   * True when this profile's gateway daemon is currently up (PID-file
+   * plus process-identity check). Used by the Cron page to gate the
+   * per-row trigger button: trigger writes ``next_run_at = now``, which
+   * is a silent no-op without a live dispatcher tick. Optional for
+   * backward-compat with older gateways — callers should treat undefined
+   * as false.
+   */
+  gateway_running?: boolean;
   model: string | null;
   provider: string | null;
   has_env: boolean;
