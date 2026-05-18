@@ -729,3 +729,87 @@ class TestProxyKwargsForAiohttp:
             assert sess_kw == {}
             assert req_kw == {"proxy": "http://proxy:8080"}
 
+
+
+class TestSendClarifyTextFallback:
+    """The default send_clarify must flip entries to text-capture when
+    rendering choices as numbered text (issue #25567)."""
+
+    def setup_method(self):
+        from tools import clarify_gateway as cm
+        with cm._lock:
+            cm._entries.clear()
+            cm._session_index.clear()
+            cm._notify_cbs.clear()
+
+    def test_send_clarify_choices_marks_awaiting_text(self):
+        """When the base send_clarify renders choices as text, it calls
+        mark_awaiting_text so the gateway text-intercept can find the entry."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from tools import clarify_gateway as cm
+        from gateway.platforms.base import SendResult
+
+        entry = cm.register("cid-base", "sk-base", "Pick one", ["A", "B"])
+        assert entry.awaiting_text is False
+        assert cm.get_pending_for_session("sk-base") is None
+
+        # Create a mock adapter with send returning a success result
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="m1"))
+
+        # Call the REAL send_clarify from BasePlatformAdapter
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                BasePlatformAdapter.send_clarify(
+                    adapter,
+                    chat_id="chat1",
+                    question="Pick one",
+                    choices=["A", "B"],
+                    clarify_id="cid-base",
+                    session_key="sk-base",
+                )
+            )
+        finally:
+            loop.close()
+
+        # After send_clarify, awaiting_text should be True
+        assert entry.awaiting_text is True, (
+            "send_clarify with choices should call mark_awaiting_text"
+        )
+        pending = cm.get_pending_for_session("sk-base")
+        assert pending is not None
+        assert pending.clarify_id == "cid-base"
+
+    def test_send_clarify_no_choices_no_mark(self):
+        """When send_clarify has no choices (open-ended), mark_awaiting_text
+        is NOT called — it's already True from register()."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from tools import clarify_gateway as cm
+        from gateway.platforms.base import SendResult
+
+        entry = cm.register("cid-open", "sk-open", "Describe?", None)
+        assert entry.awaiting_text is True
+
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="m2"))
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                BasePlatformAdapter.send_clarify(
+                    adapter,
+                    chat_id="chat1",
+                    question="Describe?",
+                    choices=None,
+                    clarify_id="cid-open",
+                    session_key="sk-open",
+                )
+            )
+        finally:
+            loop.close()
+
+        # Should still be True (was True before, still True)
+        assert entry.awaiting_text is True

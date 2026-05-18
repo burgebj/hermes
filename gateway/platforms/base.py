@@ -1803,11 +1803,23 @@ class BasePlatformAdapter(ABC):
             mark_awaiting_text(clarify_id)
         else:
             text = f"❓ {question}"
-        return await self.send(
+        result = await self.send(
             chat_id=chat_id,
             content=text,
             metadata=metadata,
         )
+        # When choices are rendered as text (this default implementation),
+        # the user will reply with a number or text.  Flip the entry into
+        # text-capture mode so the gateway intercept picks it up.  Adapters
+        # that override this method with inline buttons (Telegram, Discord)
+        # do NOT reach here — they resolve via button callbacks instead.
+        if choices:
+            try:
+                from tools.clarify_gateway import mark_awaiting_text
+                mark_awaiting_text(clarify_id)
+            except Exception:
+                pass
+        return result
 
     async def send_private_notice(
         self,
