@@ -5,14 +5,17 @@ Allows users to interact with Hermes by sending emails.
 Uses IMAP to receive and SMTP to send messages.
 
 Environment variables:
-    EMAIL_IMAP_HOST     — IMAP server host (e.g., imap.gmail.com)
-    EMAIL_IMAP_PORT     — IMAP server port (default: 993)
-    EMAIL_SMTP_HOST     — SMTP server host (e.g., smtp.gmail.com)
-    EMAIL_SMTP_PORT     — SMTP server port (default: 587)
-    EMAIL_ADDRESS       — Email address for the agent
-    EMAIL_PASSWORD      — Email password or app-specific password
-    EMAIL_POLL_INTERVAL — Seconds between mailbox checks (default: 15)
-    EMAIL_ALLOWED_USERS — Comma-separated list of allowed sender addresses
+    EMAIL_IMAP_HOST          — IMAP server host (e.g., imap.gmail.com)
+    EMAIL_IMAP_PORT          — IMAP server port (default: 993)
+    EMAIL_SMTP_HOST          — SMTP server host (e.g., smtp.gmail.com)
+    EMAIL_SMTP_PORT          — SMTP server port (default: 587)
+    EMAIL_ADDRESS            — Email address for the agent
+    EMAIL_PASSWORD           — Email password or app-specific password
+    EMAIL_POLL_INTERVAL      — Seconds between mailbox checks (default: 15)
+    EMAIL_ALLOWED_USERS      — Comma-separated list of allowed sender addresses
+    EMAIL_PROCESS_EXISTING   — When "1"/"true"/"yes"/"on", process UNSEEN mail
+                               already in INBOX at startup instead of skipping it.
+                               Default "0" (skip existing, matches historical behaviour).
 """
 
 import asyncio
@@ -263,6 +266,12 @@ class EmailAdapter(BasePlatformAdapter):
         extra = config.extra or {}
         self._skip_attachments = extra.get("skip_attachments", False)
 
+        # When True, skip the connect()-time pre-fill so existing UNSEEN mail
+        # is picked up on the first poll.  Default False = upstream behaviour.
+        self._process_existing = os.environ.get("EMAIL_PROCESS_EXISTING", "0").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
         # Track message IDs we've already processed to avoid duplicates
         self._seen_uids: set = set()
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
@@ -300,16 +309,19 @@ class EmailAdapter(BasePlatformAdapter):
             imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
             imap.login(self._address, self._password)
             _send_imap_id(imap)
-            # Mark all existing messages as seen so we only process new ones
             imap.select("INBOX")
-            status, data = imap.uid("search", None, "ALL")
-            if status == "OK" and data and data[0]:
-                for uid in data[0].split():
-                    self._seen_uids.add(uid)
-            # Keep only the most recent UIDs to prevent unbounded growth
-            self._trim_seen_uids()
+            if not self._process_existing:
+                # Mark all existing messages as seen so we only process new ones
+                status, data = imap.uid("search", None, "ALL")
+                if status == "OK" and data and data[0]:
+                    for uid in data[0].split():
+                        self._seen_uids.add(uid)
+                # Keep only the most recent UIDs to prevent unbounded growth
+                self._trim_seen_uids()
+                logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
+            else:
+                logger.info("[Email] EMAIL_PROCESS_EXISTING=1 — will process pre-existing UNSEEN mail on first poll.")
             imap.logout()
-            logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
         except Exception as e:
             logger.error("[Email] IMAP connection failed: %s", e)
             return False
