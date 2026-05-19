@@ -1206,5 +1206,111 @@ class TestImapIdExtensionForNetEase(unittest.TestCase):
         mock_imap.xatom.assert_called_once()
 
 
+class TestSentFolderAppend(unittest.TestCase):
+    """Tests for the EMAIL_SENT_FOLDER / _append_to_sent feature."""
+
+    _BASE_ENV = {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_IMAP_HOST": "imap.test.com",
+        "EMAIL_IMAP_PORT": "993",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+        "EMAIL_SMTP_PORT": "587",
+    }
+
+    def _make_adapter(self, extra_env=None):
+        from gateway.config import PlatformConfig
+        env = dict(self._BASE_ENV)
+        if extra_env:
+            env.update(extra_env)
+        with patch.dict(os.environ, env, clear=False):
+            from gateway.platforms.email import EmailAdapter
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+        return adapter
+
+    def test_append_to_sent_called_on_send(self):
+        """With EMAIL_SENT_FOLDER=Sent, send() must APPEND the message to IMAP."""
+        import asyncio
+        adapter = self._make_adapter({"EMAIL_SENT_FOLDER": "Sent"})
+
+        mock_imap = MagicMock()
+
+        with patch("smtplib.SMTP") as mock_smtp, \
+             patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            mock_smtp.return_value = MagicMock()
+
+            result = asyncio.run(adapter.send("user@test.com", "Hello!"))
+
+        self.assertTrue(result.success)
+        # APPEND must have been called once
+        mock_imap.append.assert_called_once()
+        folder_arg = mock_imap.append.call_args[0][0]
+        self.assertEqual(folder_arg, "Sent")
+        # The payload (4th positional arg) must be bytes
+        payload_arg = mock_imap.append.call_args[0][3]
+        self.assertIsInstance(payload_arg, bytes)
+
+    def test_append_to_sent_disabled_when_empty(self):
+        """With EMAIL_SENT_FOLDER='', no IMAP connection must be opened for APPEND."""
+        import asyncio
+        adapter = self._make_adapter({"EMAIL_SENT_FOLDER": ""})
+
+        with patch("smtplib.SMTP") as mock_smtp, \
+             patch("imaplib.IMAP4_SSL") as mock_imap_cls:
+            mock_smtp.return_value = MagicMock()
+
+            result = asyncio.run(adapter.send("user@test.com", "Hello!"))
+
+        self.assertTrue(result.success)
+        # No IMAP connection should have been opened for APPEND
+        mock_imap_cls.assert_not_called()
+
+    def test_append_failure_does_not_break_send(self):
+        """If IMAP APPEND raises, send() must still return success."""
+        import asyncio
+        adapter = self._make_adapter({"EMAIL_SENT_FOLDER": "Sent"})
+
+        mock_imap = MagicMock()
+        mock_imap.append.side_effect = Exception("IMAP quota exceeded")
+
+        with patch("smtplib.SMTP") as mock_smtp, \
+             patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            mock_smtp.return_value = MagicMock()
+
+            result = asyncio.run(adapter.send("user@test.com", "Hello!"))
+
+        self.assertTrue(result.success)
+
+    def test_append_to_sent_for_send_document(self):
+        """send_document() must also APPEND the message to the Sent folder."""
+        import asyncio
+        import tempfile
+        adapter = self._make_adapter({"EMAIL_SENT_FOLDER": "Sent"})
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"Attachment content")
+            tmp_path = f.name
+
+        mock_imap = MagicMock()
+
+        try:
+            with patch("smtplib.SMTP") as mock_smtp, \
+                 patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+                mock_smtp.return_value = MagicMock()
+
+                result = asyncio.run(
+                    adapter.send_document("user@test.com", tmp_path, "See attached")
+                )
+        finally:
+            os.unlink(tmp_path)
+
+        self.assertTrue(result.success)
+        mock_imap.append.assert_called_once()
+        folder_arg = mock_imap.append.call_args[0][0]
+        self.assertEqual(folder_arg, "Sent")
+        payload_arg = mock_imap.append.call_args[0][3]
+        self.assertIsInstance(payload_arg, bytes)
+
+
 if __name__ == "__main__":
     unittest.main()
