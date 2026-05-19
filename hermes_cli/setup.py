@@ -1592,13 +1592,10 @@ def setup_agent_settings(config: dict):
 # =============================================================================
 
 
-def _setup_telegram_auto() -> str | None:
-    """Attempt automatic Telegram bot creation via Managed Bots (Bot API 9.6).
-
-    Returns the bot token on success, None on failure/skip.
-    """
+def _setup_telegram_auto_result():
+    """Attempt automatic Telegram bot creation via Managed Bots (Bot API 9.6)."""
     try:
-        from hermes_cli.telegram_managed_bot import auto_setup_telegram_bot
+        from hermes_cli.telegram_managed_bot import auto_setup_telegram_bot_result
     except ImportError:
         return None
 
@@ -1612,7 +1609,13 @@ def _setup_telegram_auto() -> str | None:
     except Exception:
         pass
 
-    return auto_setup_telegram_bot(profile_name=profile_name)
+    return auto_setup_telegram_bot_result(profile_name=profile_name)
+
+
+def _setup_telegram_auto() -> str | None:
+    """Attempt automatic Telegram bot creation and return only the token."""
+    result = _setup_telegram_auto_result()
+    return result.token if result else None
 
 
 def _setup_telegram():
@@ -1646,10 +1649,13 @@ def _setup_telegram():
 
     choice = prompt("Choice [1/2]", default="1")
     token = None
+    setup_result = None
 
     if choice.strip() == "1":
-        token = _setup_telegram_auto()
-        if not token:
+        setup_result = _setup_telegram_auto_result()
+        if setup_result:
+            token = setup_result.token
+        else:
             print()
             print_info("Falling back to manual setup...")
             print()
@@ -1669,11 +1675,30 @@ def _setup_telegram():
     print_info("   1. Message @userinfobot on Telegram")
     print_info("   2. It will reply with your numeric ID (e.g., 123456789)")
     print()
-    allowed_users = prompt(
-        "Allowed user IDs (comma-separated, leave empty for open access)"
-    )
+
+    detected_user_id = getattr(setup_result, "owner_user_id", None)
+    if detected_user_id:
+        detected_id = str(detected_user_id)
+        print_success(f"Detected your Telegram user ID: {detected_id}")
+        if prompt_yes_no("Allow this Telegram account to use the bot?", True):
+            extra = prompt("Additional allowed user IDs (comma-separated, optional)")
+            ids = [detected_id]
+            for uid in extra.replace(" ", "").split(","):
+                if uid and uid not in ids:
+                    ids.append(uid)
+            allowed_users = ",".join(ids)
+        else:
+            allowed_users = prompt(
+                "Allowed user IDs (comma-separated, leave empty for open access)"
+            )
+    else:
+        allowed_users = prompt(
+            "Allowed user IDs (comma-separated, leave empty for open access)"
+        )
+
     if allowed_users:
-        save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users.replace(" ", ""))
+        allowed_users = allowed_users.replace(" ", "")
+        save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users)
         print_success("Telegram allowlist configured - only listed users can use the bot")
     else:
         print_info("⚠️  No allowlist set - anyone who finds your bot can use it!")
