@@ -1445,6 +1445,7 @@ class SessionDB:
         reasoning_details: Any = None,
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
+        timestamp: float = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1489,7 +1490,7 @@ class SessionDB:
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
-                    time.time(),
+                    timestamp if timestamp is not None else time.time(),
                     token_count,
                     finish_reason,
                     reasoning,
@@ -1534,7 +1535,7 @@ class SessionDB:
                 (session_id,),
             )
 
-            now_ts = time.time()
+            base_ts = time.time()
             total_messages = 0
             total_tool_calls = 0
             for msg in messages:
@@ -1559,6 +1560,7 @@ class SessionDB:
                 )
                 tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
+                ts = msg.get("timestamp", base_ts)
                 conn.execute(
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -1572,7 +1574,7 @@ class SessionDB:
                         msg.get("tool_call_id"),
                         tool_calls_json,
                         msg.get("tool_name"),
-                        now_ts,
+                        ts,
                         msg.get("token_count"),
                         msg.get("finish_reason"),
                         msg.get("reasoning") if role == "assistant" else None,
@@ -1587,7 +1589,7 @@ class SessionDB:
                     total_tool_calls += (
                         len(tool_calls) if isinstance(tool_calls, list) else 1
                     )
-                now_ts += 1e-6
+                base_ts += 1e-6
 
             conn.execute(
                 "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
