@@ -4092,23 +4092,26 @@ class TestSystemPromptStability:
 
     def test_stored_prompt_marked_stale_when_soul_changed(self):
         from agent.conversation_loop import _stored_system_prompt_stale_for_soul
+        from run_agent import HERMES_AGENT_HELP_GUIDANCE
 
         agent = SimpleNamespace(load_soul_identity=False, skip_context_files=False)
+        stored = f"old SOUL without mapping\n\n{HERMES_AGENT_HELP_GUIDANCE}"
 
         with patch(
             "run_agent.load_soul_md",
             return_value="current SOUL with Feishu bot open_ids",
         ):
             assert (
-                _stored_system_prompt_stale_for_soul(agent, "old SOUL without mapping")
+                _stored_system_prompt_stale_for_soul(agent, stored)
                 is True
             )
 
     def test_stored_prompt_not_stale_when_current_soul_present(self):
         from agent.conversation_loop import _stored_system_prompt_stale_for_soul
+        from run_agent import HERMES_AGENT_HELP_GUIDANCE
 
         agent = SimpleNamespace(load_soul_identity=False, skip_context_files=False)
-        stored = "current SOUL with Feishu bot open_ids\n\nOther system prompt sections"
+        stored = f"current SOUL with Feishu bot open_ids\n\n{HERMES_AGENT_HELP_GUIDANCE}"
 
         with patch(
             "run_agent.load_soul_md",
@@ -4129,6 +4132,16 @@ class TestSystemPromptStability:
                 )
                 is True
             )
+
+    def test_stored_prompt_marked_stale_when_soul_shortened(self):
+        from agent.conversation_loop import _stored_system_prompt_stale_for_soul
+        from run_agent import HERMES_AGENT_HELP_GUIDANCE
+
+        agent = SimpleNamespace(load_soul_identity=False, skip_context_files=False)
+        stored = f"You are Jasper. Be helpful.\n\n{HERMES_AGENT_HELP_GUIDANCE}"
+
+        with patch("run_agent.load_soul_md", return_value="Be helpful."):
+            assert _stored_system_prompt_stale_for_soul(agent, stored) is True
 
     def test_stored_prompt_soul_check_respects_skip_context_files(self):
         from agent.conversation_loop import _stored_system_prompt_stale_for_soul
