@@ -196,9 +196,13 @@ def _handle_send(args):
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
                     f"Use send_message(action='list') to see available targets."
                 })
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Channel name resolution failed for '%s' on %s: %s",
+                target_ref, platform_name, e, exc_info=True,
+            )
             return json.dumps({
-                "error": f"Could not resolve '{target_ref}' on {platform_name}. "
+                "error": f"Could not resolve '{target_ref}' on {platform_name}: {e}. "
                 f"Try using a numeric channel ID instead."
             })
 
