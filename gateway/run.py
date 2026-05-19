@@ -671,6 +671,50 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
+def _build_status_thread_metadata(
+    source: SessionSource,
+    progress_thread_id: Optional[str],
+    event_message_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build routing metadata for status/progress sends."""
+    metadata: Dict[str, Any] = {}
+    if progress_thread_id:
+        metadata["thread_id"] = progress_thread_id
+
+    if (
+        progress_thread_id
+        and source.platform == Platform.TELEGRAM
+        and getattr(source, "chat_type", None) == "dm"
+    ):
+        metadata["telegram_dm_topic_reply_fallback"] = True
+        tid = str(progress_thread_id)
+        if tid and tid not in {"", "1"}:
+            metadata["direct_messages_topic_id"] = tid
+        anchor = event_message_id or getattr(source, "message_id", None)
+        if anchor is not None:
+            metadata["telegram_reply_to_message_id"] = str(anchor)
+
+    if (
+        source.platform == Platform.FEISHU
+        and source.thread_id
+        and event_message_id
+    ):
+        metadata["reply_to_message_id"] = event_message_id
+
+    return metadata or None
+
+
+def _build_exec_approval_metadata(
+    source: SessionSource,
+    status_metadata: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Add approval-only metadata for adapters that render approval prompts."""
+    metadata = dict(status_metadata or {})
+    if source.platform == Platform.DISCORD and not source.is_bot and source.user_id:
+        metadata["requester_user_id"] = str(source.user_id)
+    return metadata or None
+
+
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
@@ -15305,17 +15349,9 @@ class GatewayRunner:
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
-        if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
-            # Feishu topics only keep messages inside the topic when they are
-            # sent via the reply API with reply_in_thread=true. Status/interim,
-            # approval, and stream-consumer paths usually only receive metadata,
-            # so carry the triggering message id as a Feishu-specific fallback.
-            _status_thread_metadata: Optional[Dict[str, Any]] = {
-                "thread_id": _progress_thread_id,
-                "reply_to_message_id": event_message_id,
-            }
-        else:
-            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
+        _status_thread_metadata = _build_status_thread_metadata(
+            source, _progress_thread_id, event_message_id
+        )
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
@@ -15821,7 +15857,9 @@ class GatewayRunner:
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata=_build_exec_approval_metadata(
+                                    source, _status_thread_metadata
+                                ),
                             ),
                             _loop_for_step,
                             logger=logger,

@@ -24,6 +24,8 @@ def _ensure_discord_mock():
     discord_mod.Color = SimpleNamespace(orange=lambda: 1, green=lambda: 2, blue=lambda: 3, red=lambda: 4, purple=lambda: 5)
     discord_mod.Interaction = object
     discord_mod.Embed = MagicMock
+    discord_mod.AllowedMentions = lambda **kwargs: SimpleNamespace(**kwargs)
+    discord_mod.Object = lambda id: SimpleNamespace(id=id)
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
         choices=lambda **kwargs: (lambda fn: fn),
@@ -445,3 +447,150 @@ async def test_typing_stop_cleans_up():
 
     await adapter.stop_typing("12345")
     assert "12345" not in adapter._typing_tasks
+
+
+# ---------------------------------------------------------------------------
+# discord.mention_exec_approval — opt-in requester ping on approval prompts
+# ---------------------------------------------------------------------------
+
+
+def test_discord_ping_exec_approval_defaults_false(monkeypatch):
+    monkeypatch.delenv("DISCORD_MENTION_EXEC_APPROVAL", raising=False)
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+    assert adapter._discord_ping_exec_approval() is False
+
+
+def test_discord_ping_exec_approval_env_true(monkeypatch):
+    monkeypatch.setenv("DISCORD_MENTION_EXEC_APPROVAL", "true")
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+    assert adapter._discord_ping_exec_approval() is True
+
+
+def test_discord_ping_exec_approval_env_overrides_config(monkeypatch):
+    monkeypatch.setenv("DISCORD_MENTION_EXEC_APPROVAL", "false")
+    adapter = DiscordAdapter(
+        PlatformConfig(enabled=True, token="***", extra={"mention_exec_approval": True})
+    )
+    assert adapter._discord_ping_exec_approval() is False
+
+
+def test_discord_ping_exec_approval_string_values(monkeypatch):
+    monkeypatch.delenv("DISCORD_MENTION_EXEC_APPROVAL", raising=False)
+    for raw, expected in (
+        ("true", True), ("True", True), (" yes ", True), ("1", True), ("on", True),
+        ("false", False), ("0", False), ("off", False), ("", False), (" false ", False),
+        ("maybe", False),
+    ):
+        adapter = DiscordAdapter(
+            PlatformConfig(enabled=True, token="***", extra={"mention_exec_approval": raw})
+        )
+        assert adapter._discord_ping_exec_approval() is expected, raw
+
+
+def test_discord_ping_exec_approval_env_string_values(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+    for raw, expected in (
+        ("true", True), ("YES", True), (" on ", True), ("1", True),
+        ("false", False), (" false ", False), ("", False), ("maybe", False),
+    ):
+        monkeypatch.setenv("DISCORD_MENTION_EXEC_APPROVAL", raw)
+        assert adapter._discord_ping_exec_approval() is expected, raw
+
+
+@pytest.mark.asyncio
+async def test_send_exec_approval_pings_requester_when_enabled(monkeypatch):
+    adapter = DiscordAdapter(
+        PlatformConfig(enabled=True, token="***", extra={"mention_exec_approval": True})
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.discord.ExecApprovalView",
+        lambda *a, **kw: SimpleNamespace(session_key=kw.get("session_key")),
+        raising=False,
+    )
+
+    sent = {}
+
+    async def fake_send(**kwargs):
+        sent.update(kwargs)
+        return SimpleNamespace(id=789)
+
+    channel = SimpleNamespace(send=AsyncMock(side_effect=fake_send))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.send_exec_approval(
+        "555", "rm -rf /", "sess",
+        metadata={"thread_id": "555", "requester_user_id": "42"},
+    )
+    assert result.success is True
+    assert sent.get("content") == "<@42> command approval needed"
+    am = sent.get("allowed_mentions")
+    assert am is not None
+    assert am.everyone is False and am.roles is False
+    assert am.replied_user is False
+    assert [u.id for u in am.users] == [42]
+
+
+@pytest.mark.asyncio
+async def test_send_exec_approval_no_ping_when_disabled(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+    monkeypatch.delenv("DISCORD_MENTION_EXEC_APPROVAL", raising=False)
+    monkeypatch.setattr(
+        "gateway.platforms.discord.ExecApprovalView",
+        lambda *a, **kw: SimpleNamespace(session_key=kw.get("session_key")),
+        raising=False,
+    )
+
+    sent = {}
+
+    async def fake_send(**kwargs):
+        sent.update(kwargs)
+        return SimpleNamespace(id=1)
+
+    channel = SimpleNamespace(send=AsyncMock(side_effect=fake_send))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    await adapter.send_exec_approval(
+        "555", "ls", "sess",
+        metadata={"thread_id": "555", "requester_user_id": "42"},
+    )
+    assert "content" not in sent
+    assert "allowed_mentions" not in sent
+
+
+@pytest.mark.asyncio
+async def test_send_exec_approval_rejects_invalid_user_id(monkeypatch, caplog):
+    adapter = DiscordAdapter(
+        PlatformConfig(enabled=True, token="***", extra={"mention_exec_approval": True})
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.discord.ExecApprovalView",
+        lambda *a, **kw: SimpleNamespace(session_key=kw.get("session_key")),
+        raising=False,
+    )
+
+    sent = {}
+
+    async def fake_send(**kwargs):
+        sent.update(kwargs)
+        return SimpleNamespace(id=1)
+
+    channel = SimpleNamespace(send=AsyncMock(side_effect=fake_send))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    with caplog.at_level("WARNING"):
+        await adapter.send_exec_approval(
+            "555", "ls", "sess",
+            metadata={"thread_id": "555", "requester_user_id": "<@everyone>"},
+        )
+    assert "content" not in sent
+    assert "allowed_mentions" not in sent
+    assert any("invalid requester_user_id" in r.message for r in caplog.records)

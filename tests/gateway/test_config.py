@@ -4,6 +4,8 @@ import os
 from unittest.mock import patch
 
 from gateway.config import (
+    DEFAULT_STREAMING_BUFFER_THRESHOLD,
+    DEFAULT_STREAMING_EDIT_INTERVAL,
     GatewayConfig,
     HomeChannel,
     Platform,
@@ -176,8 +178,8 @@ class TestStreamingConfig:
                 "fresh_final_after_seconds": "oops",
             }
         )
-        assert restored.edit_interval == 0.8
-        assert restored.buffer_threshold == 24
+        assert restored.edit_interval == DEFAULT_STREAMING_EDIT_INTERVAL
+        assert restored.buffer_threshold == DEFAULT_STREAMING_BUFFER_THRESHOLD
         assert restored.fresh_final_after_seconds == 60.0
 
 
@@ -428,6 +430,57 @@ class TestLoadGatewayConfig:
 
         assert os.getenv("DISCORD_HISTORY_BACKFILL") == "true"
         assert os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT") == "17"
+
+    def test_bridges_discord_mention_exec_approval_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  mention_exec_approval: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("DISCORD_MENTION_EXEC_APPROVAL", raising=False)
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.DISCORD].extra["mention_exec_approval"] is True
+        assert "DISCORD_MENTION_EXEC_APPROVAL" not in os.environ
+
+    def test_env_var_takes_precedence_over_discord_mention_exec_approval(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  mention_exec_approval: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DISCORD_MENTION_EXEC_APPROVAL", "")
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.DISCORD].extra["mention_exec_approval"] is True
+        assert os.environ["DISCORD_MENTION_EXEC_APPROVAL"] == ""
+
+    def test_discord_mention_exec_approval_yaml_reload_not_stuck_in_env(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("DISCORD_MENTION_EXEC_APPROVAL", raising=False)
+
+        config_path.write_text("discord:\n  mention_exec_approval: true\n", encoding="utf-8")
+        config = load_gateway_config()
+        assert config.platforms[Platform.DISCORD].extra["mention_exec_approval"] is True
+        assert "DISCORD_MENTION_EXEC_APPROVAL" not in os.environ
+
+        config_path.write_text("discord:\n  mention_exec_approval: false\n", encoding="utf-8")
+        config = load_gateway_config()
+        assert config.platforms[Platform.DISCORD].extra["mention_exec_approval"] is False
+        assert "DISCORD_MENTION_EXEC_APPROVAL" not in os.environ
 
     def test_bridges_telegram_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"

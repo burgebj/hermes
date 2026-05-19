@@ -821,6 +821,8 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["reply_in_thread"] = platform_cfg["reply_in_thread"]
                 if "require_mention" in platform_cfg:
                     bridged["require_mention"] = platform_cfg["require_mention"]
+                if plat == Platform.DISCORD and "mention_exec_approval" in platform_cfg:
+                    bridged["mention_exec_approval"] = platform_cfg["mention_exec_approval"]
                 if "free_response_channels" in platform_cfg:
                     bridged["free_response_channels"] = platform_cfg["free_response_channels"]
                 if "mention_patterns" in platform_cfg:

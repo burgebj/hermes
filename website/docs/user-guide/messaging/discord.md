@@ -280,6 +280,7 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_THREAD_REQUIRE_MENTION` | No | `false` | When `true`, the in-thread mention shortcut is disabled — threads are gated the same as channels, requiring `@mention` even after the bot has already participated. Use this when multiple bots share a thread and you want each to fire only on explicit `@mention`. |
 | `DISCORD_FREE_RESPONSE_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds without requiring an `@mention`, even when `DISCORD_REQUIRE_MENTION` is `true`. |
 | `DISCORD_IGNORE_NO_MENTION` | No | `true` | When `true`, the bot stays silent if a message `@mentions` other users but does **not** mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs. |
+| `DISCORD_MENTION_EXEC_APPROVAL` | No | `false` | When `true`, dangerous-command approval prompts prepend `<@user_id> command approval needed` so the original requester gets a notification and won't miss the prompt. The approval message scopes `AllowedMentions` to that single validated user — `@everyone` and role pings remain denied even when `discord.allow_mentions.users` is `false`. |
 | `DISCORD_AUTO_THREAD` | No | `true` | When `true`, automatically creates a new thread for every `@mention` in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected. |
 | `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. |
 | `DISCORD_REACTIONS` | No | `true` | When `true`, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to `false` to disable reactions entirely. |
@@ -308,6 +309,7 @@ The `discord` section in `~/.hermes/config.yaml` mirrors the env vars above. Con
 discord:
   require_mention: true           # Require @mention in server channels
   thread_require_mention: false   # If true, require @mention in threads too (multi-bot threads)
+  mention_exec_approval: false    # Ping the requester on dangerous-command approvals
   free_response_channels: ""      # Comma-separated channel IDs (or YAML list)
   auto_thread: true               # Auto-create threads on @mention
   reactions: true                 # Add emoji reactions during processing
@@ -345,6 +347,16 @@ discord:
   require_mention: true
   thread_require_mention: true    # multi-bot setup
 ```
+
+#### `discord.mention_exec_approval`
+
+**Type:** boolean — **Default:** `false`
+
+When enabled, dangerous-command approval prompts prepend `<@user_id> command approval needed` so the original requester gets a Discord notification while the agent is blocked.
+
+The approval message restricts `AllowedMentions` to a single validated requester user ID, so this intentional ping still works if `discord.allow_mentions.users` is `false` globally. `@everyone` and role pings remain denied.
+
+The user ID is validated to be digit-only before mentioning. If invalid requester metadata arrives, the adapter logs a warning and sends the embed with no mention prefix.
 
 #### `discord.free_response_channels`
 

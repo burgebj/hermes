@@ -3601,6 +3601,30 @@ class DiscordAdapter(BasePlatformAdapter):
             return 32 * 1024 * 1024
         return max(0, value)
 
+    def _discord_ping_exec_approval(self) -> bool:
+        """Return whether Discord exec-approval prompts should @mention the requester.
+
+        Default ``False`` (opt-in) to preserve existing behavior. When enabled,
+        the adapter prepends ``<@user_id> command approval needed`` and restricts
+        that message's ``AllowedMentions`` to the validated requester user ID.
+        Per-message ``AllowedMentions`` keeps the ping explicit while still
+        denying ``@everyone`` and role pings.
+        """
+
+        def _bool(raw: Any) -> bool:
+            if isinstance(raw, bool):
+                return raw
+            if raw is None:
+                return False
+            return str(raw).strip().lower() in ("true", "1", "yes", "on")
+
+        env_raw = os.getenv("DISCORD_MENTION_EXEC_APPROVAL")
+        if env_raw is not None:
+            return _bool(env_raw)
+
+        configured = self.config.extra.get("mention_exec_approval")
+        return _bool(configured)
+
     def _discord_free_response_channels(self) -> set:
         """Return Discord channel IDs where no bot mention is required.
 
@@ -4027,7 +4051,31 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids,
             )
 
-            msg = await channel.send(embed=embed, view=view)
+            mention_user_id: Optional[str] = None
+            if self._discord_ping_exec_approval() and metadata and metadata.get("requester_user_id"):
+                candidate = str(metadata["requester_user_id"]).strip()
+                if candidate.isdigit():
+                    mention_user_id = candidate
+                else:
+                    logger.warning(
+                        "[%s] Skipping Discord exec approval mention for invalid requester_user_id=%r",
+                        self.name,
+                        candidate,
+                    )
+
+            mention_text = f"<@{mention_user_id}> command approval needed" if mention_user_id else None
+            send_kwargs: Dict[str, Any] = {"embed": embed, "view": view}
+            if mention_text:
+                send_kwargs["content"] = mention_text
+                allowed_user = discord.Object(id=int(mention_user_id))
+                send_kwargs["allowed_mentions"] = discord.AllowedMentions(
+                    everyone=False,
+                    roles=False,
+                    users=[allowed_user],
+                    replied_user=False,
+                )
+
+            msg = await channel.send(**send_kwargs)
             return SendResult(success=True, message_id=str(msg.id))
 
         except Exception as e:
