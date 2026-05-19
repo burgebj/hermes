@@ -1276,6 +1276,7 @@ class SessionStore:
                     reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
                     codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
                     codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
+                    timestamp=message.get("timestamp"),
                 )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)

@@ -520,8 +520,126 @@ class TestMessageStorage:
 
 
 # =========================================================================
-# FTS5 search
+# Timestamp preservation
 # =========================================================================
+
+class TestTimestampPreservation:
+    """Tests for the timestamp preservation feature.
+
+    ``append_message()`` and ``replace_messages()`` now accept/forward an
+    optional ``timestamp`` parameter.  These tests verify custom timestamps
+    survive the round trip through the DB and fall back to ``time.time()``
+    when omitted.
+    """
+
+    def test_append_message_with_explicit_timestamp(self, db):
+        """A caller-supplied timestamp is stored and round-tripped."""
+        db.create_session(session_id="s1", source="cli")
+        ts = 1_234_567.0
+        mid = db.append_message("s1", role="user", content="hello",
+                                timestamp=ts)
+        msgs = db.get_messages("s1")
+        assert len(msgs) == 1
+        assert msgs[0]["timestamp"] == ts
+        assert msgs[0]["id"] == mid
+
+    def test_append_message_multiple_timestamps(self, db):
+        """Multiple messages with different explicit timestamps."""
+        db.create_session(session_id="s1", source="cli")
+        timestamps = [1_000_000.0, 2_000_000.0, 3_000_000.0]
+        for i, ts in enumerate(timestamps, 1):
+            db.append_message("s1", role="user", content=f"msg {i}",
+                              timestamp=ts)
+        msgs = db.get_messages("s1")
+        assert [m["timestamp"] for m in msgs] == timestamps
+
+    def test_append_message_without_timestamp_defaults(self, db):
+        """Omitting timestamp stores a recent time.time() value."""
+        db.create_session(session_id="s1", source="cli")
+        before = time.time()
+        db.append_message("s1", role="user", content="hello")
+        after = time.time()
+        msgs = db.get_messages("s1")
+        stored = msgs[0]["timestamp"]
+        assert before <= stored <= after, (
+            f"Expected timestamp between {before} and {after}, got {stored}"
+        )
+
+    def test_append_message_mixed_timestamps(self, db):
+        """Messages with and without explicit timestamps — those without
+        get a current time, those with keep their value."""
+        db.create_session(session_id="s1", source="cli")
+        explicit_ts = 500_000.0
+        db.append_message("s1", role="user", content="explicit",
+                          timestamp=explicit_ts)
+        before = time.time()
+        db.append_message("s1", role="user", content="default")
+        after = time.time()
+        msgs = db.get_messages("s1")
+        assert msgs[0]["timestamp"] == explicit_ts
+        assert before <= msgs[1]["timestamp"] <= after
+
+    def test_replace_messages_preserves_timestamps(self, db):
+        """Message dicts with ``timestamp`` passed to ``replace_messages``
+        retain those timestamps after the rewrite."""
+        db.create_session(session_id="s1", source="cli")
+        msgs_in = [
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 200.0},
+            {"role": "user", "content": "third", "timestamp": 300.0},
+        ]
+        db.replace_messages("s1", msgs_in)
+        msgs_out = db.get_messages("s1")
+        assert [m["timestamp"] for m in msgs_out] == [100.0, 200.0, 300.0]
+
+    def test_replace_messages_fallback_when_no_timestamp(self, db):
+        """Message dicts without ``timestamp`` get auto-incrementing
+        fallback values (starting from ~time.time())."""
+        db.create_session(session_id="s1", source="cli")
+        db.replace_messages("s1", [
+            {"role": "user", "content": "a"},
+            {"role": "user", "content": "b"},
+        ])
+        msgs = db.get_messages("s1")
+        assert len(msgs) == 2
+        t0, t1 = msgs[0]["timestamp"], msgs[1]["timestamp"]
+        assert t1 > t0  # auto-incremented
+
+    def test_replace_messages_mixed_timestamps(self, db):
+        """Some messages with timestamp, some without — a message without
+        timestamp uses the fallback clock, which is larger than any
+        explicit historical timestamp."""
+        db.create_session(session_id="s1", source="cli")
+        old_ts = 1_000.0
+        db.replace_messages("s1", [
+            {"role": "user", "content": "old", "timestamp": old_ts},
+            {"role": "user", "content": "new"},  # no timestamp → time.time()
+        ])
+        msgs = db.get_messages("s1")
+        assert msgs[0]["timestamp"] == old_ts
+        assert msgs[1]["timestamp"] > old_ts
+
+    def test_fork_chain_preserves_timestamps(self, db):
+        """Simulate a /branch fork: copy messages from parent to child
+        via ``append_message(..., timestamp=msg['timestamp'])`` and
+        verify timestamps are preserved in the child."""
+        db.create_session(session_id="parent", source="cli")
+        timestamps = [1_000.0, 2_000.0, 3_000.0]
+        for ts in timestamps:
+            db.append_message("parent", role="user", content=f"msg at {ts}",
+                              timestamp=ts)
+
+        # Fork: create child and copy messages with timestamps
+        db.create_session(session_id="child", source="cli",
+                          parent_session_id="parent")
+        parent_msgs = db.get_messages("parent")
+        for m in parent_msgs:
+            db.append_message("child", role=m["role"], content=m["content"],
+                              timestamp=m["timestamp"])
+
+        child_msgs = db.get_messages("child")
+        assert [m["timestamp"] for m in child_msgs] == timestamps
+        assert child_msgs[0]["content"] == "msg at 1000.0"
 
 class TestFTS5Search:
     def test_search_finds_content(self, db):
