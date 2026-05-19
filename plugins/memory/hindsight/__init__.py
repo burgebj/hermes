@@ -436,6 +436,45 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
         env_values["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(
             _parse_int_setting(idle_timeout, _DEFAULT_IDLE_TIMEOUT)
         )
+
+    # Auto-propagate embedding and reranker env vars that ``hermes setup``
+    # writes to ``~/.hindsight/profiles/<profile>/.env`` or the gateway's
+    # ``os.environ``, but which are not covered by the explicit config.json
+    # keys or ``daemon_env`` dict above.  Without this the daemon silently
+    # falls back to a local sentence-transformers install that may not exist.
+    _extra_prefixes = (
+        "HINDSIGHT_API_EMBEDDINGS_",
+        "HINDSIGHT_API_RERANKER_",
+    )
+    for ek, ev in os.environ.items():
+        if any(ek.startswith(p) for p in _extra_prefixes) and ev and ek not in env_values:
+            env_values[ek] = ev
+
+    # Fallback: read from the profile sub-directory .env (e.g. hermes/.env)
+    # that ``hermes setup`` writes with full embedding/reranker keys which
+    # may not have been loaded into the current process environment.
+    try:
+        from pathlib import Path as _Path
+
+        _profile_sub_env = (
+            _Path.home()
+            / ".hindsight"
+            / "profiles"
+            / _embedded_profile_name(config)
+            / ".env"
+        )
+        if _profile_sub_env.exists():
+            for line in _profile_sub_env.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                ek, ev = line.split("=", 1)
+                ek, ev = ek.strip(), ev.strip()
+                if any(ek.startswith(p) for p in _extra_prefixes) and ev and ek not in env_values:
+                    env_values[ek] = ev
+    except Exception:
+        pass
+
     return env_values
 
 

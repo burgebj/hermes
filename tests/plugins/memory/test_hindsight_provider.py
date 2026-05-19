@@ -273,6 +273,78 @@ class TestConfig:
 
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "42"
 
+    def test_embedded_profile_env_propagates_embedding_vars_from_environ(self, monkeypatch):
+        monkeypatch.setenv("HINDSIGHT_API_EMBEDDINGS_PROVIDER", "openai")
+        monkeypatch.setenv("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY", "sk-test-abc")
+        monkeypatch.setenv("HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL", "text-embedding-3-small")
+        monkeypatch.setenv("HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL", "https://api.example.com/v1")
+
+        env = _build_embedded_profile_env({
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+        })
+
+        assert env["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] == "openai"
+        assert env["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] == "sk-test-abc"
+        assert env["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] == "text-embedding-3-small"
+        assert env["HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL"] == "https://api.example.com/v1"
+
+    def test_embedded_profile_env_propagates_reranker_vars_from_environ(self, monkeypatch):
+        monkeypatch.setenv("HINDSIGHT_API_RERANKER_PROVIDER", "siliconflow")
+        monkeypatch.setenv("HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY", "sk-reranker-xyz")
+
+        env = _build_embedded_profile_env({
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+        })
+
+        assert env["HINDSIGHT_API_RERANKER_PROVIDER"] == "siliconflow"
+        assert env["HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY"] == "sk-reranker-xyz"
+
+    def test_embedded_profile_env_reads_profile_subdir_env(self, tmp_path, monkeypatch):
+        # Create a fake profile sub-directory .env
+        profile_dir = tmp_path / ".hindsight" / "profiles" / "hermes"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / ".env").write_text(
+            "HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=sk-from-subdir\n"
+            "HINDSIGHT_API_RERANKER_PROVIDER=siliconflow\n"
+            "# comment line\n"
+            "HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY=sk-reranker-subdir\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        env = _build_embedded_profile_env({
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+            "profile": "hermes",
+        })
+
+        assert env["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] == "openai"
+        assert env["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] == "sk-from-subdir"
+        assert env["HINDSIGHT_API_RERANKER_PROVIDER"] == "siliconflow"
+        assert env["HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY"] == "sk-reranker-subdir"
+
+    def test_embedded_profile_env_os_environ_takes_priority_over_subdir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY", "sk-from-env")
+
+        profile_dir = tmp_path / ".hindsight" / "profiles" / "hermes"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / ".env").write_text(
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=sk-from-subdir\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        env = _build_embedded_profile_env({
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+            "profile": "hermes",
+        })
+
+        assert env["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] == "sk-from-env"
+
     def test_get_client_passes_idle_timeout_to_hindsight_embedded(self, monkeypatch):
         captured = {}
 
