@@ -532,6 +532,26 @@ class TestTimestampPreservation:
     when omitted.
     """
 
+    @staticmethod
+    def _build_messages(ts_list, contents=None, roles=None):
+        """Build message dicts with explicit timestamps for testing."""
+        if contents is None:
+            contents = [f"msg-{i}" for i in range(len(ts_list))]
+        if roles is None:
+            roles = ["user", "assistant"] * (len(ts_list) // 2 + 1)
+        return [
+            {"role": roles[i], "content": contents[i], "timestamp": ts}
+            for i, ts in enumerate(ts_list)
+        ]
+
+    def _raw_timestamps(self, db, session_id):
+        """Query timestamp column directly from SQLite for verification."""
+        rows = db._conn.execute(
+            "SELECT timestamp FROM messages WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def test_append_message_with_explicit_timestamp(self, db):
         """A caller-supplied timestamp is stored and round-tripped."""
         db.create_session(session_id="s1", source="cli")
@@ -542,6 +562,8 @@ class TestTimestampPreservation:
         assert len(msgs) == 1
         assert msgs[0]["timestamp"] == ts
         assert msgs[0]["id"] == mid
+        raw = self._raw_timestamps(db, "s1")
+        assert raw == [ts]
 
     def test_append_message_multiple_timestamps(self, db):
         """Multiple messages with different explicit timestamps."""
@@ -552,6 +574,7 @@ class TestTimestampPreservation:
                               timestamp=ts)
         msgs = db.get_messages("s1")
         assert [m["timestamp"] for m in msgs] == timestamps
+        assert self._raw_timestamps(db, "s1") == timestamps
 
     def test_append_message_without_timestamp_defaults(self, db):
         """Omitting timestamp stores a recent time.time() value."""
@@ -564,6 +587,8 @@ class TestTimestampPreservation:
         assert before <= stored <= after, (
             f"Expected timestamp between {before} and {after}, got {stored}"
         )
+        raw_stored = self._raw_timestamps(db, "s1")[0]
+        assert before <= raw_stored <= after
 
     def test_append_message_mixed_timestamps(self, db):
         """Messages with and without explicit timestamps — those without
@@ -578,6 +603,9 @@ class TestTimestampPreservation:
         msgs = db.get_messages("s1")
         assert msgs[0]["timestamp"] == explicit_ts
         assert before <= msgs[1]["timestamp"] <= after
+        raw = self._raw_timestamps(db, "s1")
+        assert raw[0] == explicit_ts
+        assert before <= raw[1] <= after
 
     def test_replace_messages_preserves_timestamps(self, db):
         """Message dicts with ``timestamp`` passed to ``replace_messages``
@@ -591,6 +619,7 @@ class TestTimestampPreservation:
         db.replace_messages("s1", msgs_in)
         msgs_out = db.get_messages("s1")
         assert [m["timestamp"] for m in msgs_out] == [100.0, 200.0, 300.0]
+        assert self._raw_timestamps(db, "s1") == [100.0, 200.0, 300.0]
 
     def test_replace_messages_fallback_when_no_timestamp(self, db):
         """Message dicts without ``timestamp`` get auto-incrementing
@@ -603,7 +632,10 @@ class TestTimestampPreservation:
         msgs = db.get_messages("s1")
         assert len(msgs) == 2
         t0, t1 = msgs[0]["timestamp"], msgs[1]["timestamp"]
-        assert t1 > t0  # auto-incremented
+        assert t1 > t0
+        raw = self._raw_timestamps(db, "s1")
+        assert len(raw) == 2
+        assert raw[1] > raw[0]
 
     def test_replace_messages_mixed_timestamps(self, db):
         """Some messages with timestamp, some without — a message without
@@ -613,33 +645,48 @@ class TestTimestampPreservation:
         old_ts = 1_000.0
         db.replace_messages("s1", [
             {"role": "user", "content": "old", "timestamp": old_ts},
-            {"role": "user", "content": "new"},  # no timestamp → time.time()
+            {"role": "user", "content": "new"},
         ])
         msgs = db.get_messages("s1")
         assert msgs[0]["timestamp"] == old_ts
         assert msgs[1]["timestamp"] > old_ts
+        raw = self._raw_timestamps(db, "s1")
+        assert raw[0] == old_ts
+        assert raw[1] > old_ts
 
     def test_fork_chain_preserves_timestamps(self, db):
-        """Simulate a /branch fork: copy messages from parent to child
-        via ``append_message(..., timestamp=msg['timestamp'])`` and
-        verify timestamps are preserved in the child."""
-        db.create_session(session_id="parent", source="cli")
-        timestamps = [1_000.0, 2_000.0, 3_000.0]
-        for ts in timestamps:
-            db.append_message("parent", role="user", content=f"msg at {ts}",
-                              timestamp=ts)
+        """Simulate a /branch fork: copy messages from parent to child,
+        verify timestamps are identical in both via raw SQL."""
+        base_ts = 1_700_000_000.0
+        timestamps = [base_ts + i * 20 for i in range(5)]
+        contents = [
+            "how do I fix a TypeError?",
+            "show me the traceback",
+            "TypeError at line 42",
+            "issue in utils.py",
+            "try int(...)",
+        ]
+        roles = ["user", "assistant", "tool", "user", "assistant"]
+        parent_msgs = self._build_messages(timestamps, contents, roles)
 
-        # Fork: create child and copy messages with timestamps
+        db.create_session(session_id="parent", source="cli")
+        for msg in parent_msgs:
+            db.append_message("parent", role=msg["role"],
+                              content=msg["content"],
+                              timestamp=msg["timestamp"])
+
         db.create_session(session_id="child", source="cli",
                           parent_session_id="parent")
-        parent_msgs = db.get_messages("parent")
-        for m in parent_msgs:
-            db.append_message("child", role=m["role"], content=m["content"],
-                              timestamp=m["timestamp"])
+        for msg in parent_msgs:
+            db.append_message("child", role=msg["role"],
+                              content=msg["content"],
+                              timestamp=msg["timestamp"])
 
-        child_msgs = db.get_messages("child")
-        assert [m["timestamp"] for m in child_msgs] == timestamps
-        assert child_msgs[0]["content"] == "msg at 1000.0"
+        parent_raw = self._raw_timestamps(db, "parent")
+        child_raw = self._raw_timestamps(db, "child")
+        assert parent_raw == timestamps
+        assert child_raw == timestamps
+        assert parent_raw == child_raw
 
 class TestFTS5Search:
     def test_search_finds_content(self, db):
