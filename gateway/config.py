@@ -856,6 +856,12 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["group_user_allowed_commands"] = platform_cfg["group_user_allowed_commands"]
                 if plat in {Platform.DISCORD, Platform.SLACK} and "channel_skill_bindings" in platform_cfg:
                     bridged["channel_skill_bindings"] = platform_cfg["channel_skill_bindings"]
+                # Track 1 — bridge dict-form reactions config (with `inbound_routing` flag)
+                # into extra so the unified trigger framework can opt-in inbound reaction
+                # routing per-deployment. Boolean form remains handled by the env-var
+                # translation below for legacy outbound-emoji control.
+                if plat == Platform.DISCORD and isinstance(platform_cfg.get("reactions"), dict):
+                    bridged["reactions"] = platform_cfg["reactions"]
                 if "channel_prompts" in platform_cfg:
                     channel_prompts = platform_cfg["channel_prompts"]
                     if isinstance(channel_prompts, dict):
@@ -936,8 +942,15 @@ def load_gateway_config() -> GatewayConfig:
                     os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
                 if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
                     os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
-                if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
-                    os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
+                # Boolean form `reactions: true|false` controls legacy outbound emoji
+                # feedback via DISCORD_REACTIONS env var. Dict form `reactions: {...}`
+                # is bridged into extra above for the unified trigger framework — do
+                # NOT stringify the dict into an env var (it would coerce to "False"
+                # since str(dict) is not in the truthy set, silently disabling
+                # outbound emojis).
+                _reactions_val = discord_cfg.get("reactions")
+                if isinstance(_reactions_val, bool) and not os.getenv("DISCORD_REACTIONS"):
+                    os.environ["DISCORD_REACTIONS"] = str(_reactions_val).lower()
                 # ignored_channels: channels where bot never responds (even when mentioned)
                 ic = discord_cfg.get("ignored_channels")
                 if ic is not None and not os.getenv("DISCORD_IGNORED_CHANNELS"):

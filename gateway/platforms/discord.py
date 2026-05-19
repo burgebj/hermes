@@ -529,6 +529,17 @@ def _read_dm_role_auth_guild() -> Optional[int]:
     return guild_id if guild_id > 0 else None
 
 
+def _build_skill_provider():
+    """Return the shared lazy skill snapshotter for the resolver.
+
+    Delegates to :func:`gateway.skill_resolver.snapshot_skills`; the indirection
+    here exists so adapters can swap providers in tests without monkey-patching
+    the resolver module.
+    """
+    from gateway.skill_resolver import snapshot_skills
+    return snapshot_skills
+
+
 class DiscordAdapter(BasePlatformAdapter):
     """
     Discord bot adapter.
@@ -593,6 +604,15 @@ class DiscordAdapter(BasePlatformAdapter):
         # history backfill to skip the full scan on hot paths.  Falls back to
         # scanning channel.history() on cache miss (cold start / restart).
         self._last_self_message_id: Dict[str, str] = {}
+        # Unified trigger framework — composition handler for inbound reactions
+        # (when opt-in flag is set) and @mention events. Skill list is supplied
+        # via callable injection so the resolver does not depend on a fabricated
+        # `_available_skills` attribute on the adapter.
+        from gateway.platforms.discord_interactions import DiscordInteractionsHandler
+        self._interactions = DiscordInteractionsHandler(
+            self,
+            skill_provider=_build_skill_provider(),
+        )
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -665,6 +685,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
             )
             intents.voice_states = True
+            # Unified trigger framework — opt-in inbound reaction routing.
+            # Default false to avoid forcing existing deployments to re-handshake
+            # with Discord. When True, raw reaction add/remove events are
+            # delivered to the bot and routed via DiscordInteractionsHandler.
+            _reactions_inbound = self.config.extra.get("reactions", {}).get(
+                "inbound_routing", False
+            ) if isinstance(self.config.extra.get("reactions"), dict) else False
+            if _reactions_inbound:
+                intents.reactions = True
 
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
@@ -811,6 +840,18 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
 
                 await self._handle_message(message)
+
+            # Inbound reaction routing — only registered when opt-in flag is set
+            # at adapter init. Toggling the flag at runtime requires a bot
+            # restart for these handlers to bind.
+            if _reactions_inbound:
+                @self._client.event
+                async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+                    await adapter_self._interactions.handle_inbound_reaction(payload, action="add")
+
+                @self._client.event
+                async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+                    await adapter_self._interactions.handle_inbound_reaction(payload, action="remove")
 
             @self._client.event
             async def on_voice_state_update(member, before, after):
@@ -4755,6 +4796,83 @@ class DiscordAdapter(BasePlatformAdapter):
         # — the context IS the message, so skip the placeholder.
         if (not event_text or not event_text.strip()) and not _channel_context:
             event_text = "(The user sent a message with no text content)"
+
+        # Vector 3 (token-leak): unified trigger framework — when
+        # ``discord.mentions.inbound_routing`` is enabled and the message is
+        # an actual @mention, route through the skill resolver. On match,
+        # dispatch with auto_skill set (skips general-purpose LLM reasoning).
+        # On no match, early-return iff explicit triggers exist on the
+        # corpus (otherwise fall through to legacy for back-compat).
+        _mentions_cfg = self.config.extra.get("mentions") if isinstance(
+            self.config.extra.get("mentions"), dict
+        ) else None
+        _mentions_inbound = bool(
+            _mentions_cfg.get("inbound_routing", False) if _mentions_cfg else False
+        )
+        _is_actual_mention = (
+            self._client.user is not None
+            and self._client.user in (getattr(message, "mentions", None) or [])
+        )
+        if (
+            _mentions_inbound
+            and _is_actual_mention
+            and self._interactions is not None
+            and msg_type == MessageType.TEXT
+        ):
+            try:
+                _matched = await self._interactions.handle_inbound_mention(
+                    message, normalized_content
+                )
+            except Exception:
+                logger.exception(
+                    "[%s] handle_inbound_mention raised; falling through to legacy",
+                    self.name,
+                )
+                _matched = None
+            if _matched:
+                # Match: dispatch via the existing pipeline with auto_skill set.
+                _chan = message.channel
+                _parent_id = str(getattr(_chan, "parent_id", "") or "")
+                _chan_id = str(getattr(_chan, "id", ""))
+                _channel_prompt = self._resolve_channel_prompt(
+                    _chan_id, _parent_id or None
+                )
+                reply_to_id = None
+                reply_to_text = None
+                if message.reference:
+                    reply_to_id = str(message.reference.message_id)
+                    if message.reference.resolved:
+                        reply_to_text = (
+                            getattr(message.reference.resolved, "content", None)
+                            or None
+                        )
+                event = MessageEvent(
+                    text=event_text,
+                    message_type=msg_type,
+                    source=source,
+                    raw_message=message,
+                    message_id=str(message.id),
+                    media_urls=media_urls,
+                    media_types=media_types,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_text=reply_to_text,
+                    timestamp=message.created_at,
+                    auto_skill=_matched,
+                    channel_prompt=_channel_prompt,
+                )
+                if thread_id:
+                    self._threads.mark(thread_id)
+                await self.handle_message(event)
+                return
+            # No match — early-return only when the corpus actually has
+            # explicit mention triggers configured. Without explicit triggers
+            # the legacy broadcast path is the back-compat default.
+            if self._interactions.explicit_triggers_present():
+                logger.debug(
+                    "[%s] mention had no skill match; explicit triggers present, skipping legacy LLM invoke",
+                    self.name,
+                )
+                return
 
         _chan = message.channel
         _parent_id = str(getattr(_chan, "parent_id", "") or "")

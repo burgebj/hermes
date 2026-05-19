@@ -111,6 +111,17 @@ def _ensure_discord_mock() -> None:
     discord_mod.Interaction = object
     discord_mod.Message = type("Message", (), {})
 
+    # Real Exception subclasses so tools that do `isinstance(exc,
+    # discord.Forbidden)` (e.g., tools/discord_reaction_tool.py) work
+    # when this conftest's mock is
+    # the one in sys.modules at runtime. Without these, the auto-MagicMock
+    # attribute lookup would yield a MagicMock instance, and isinstance()
+    # would TypeError. Required because xdist may collect a gateway test
+    # before any tools test.
+    discord_mod.Forbidden = type("Forbidden", (Exception,), {})
+    discord_mod.NotFound = type("NotFound", (Exception,), {})
+    discord_mod.HTTPException = type("HTTPException", (Exception,), {})
+
     # Embed: accept the kwargs production code / tests use
     # (title, description, color). MagicMock auto-attributes work too,
     # but some tests construct and inspect .title/.description directly.

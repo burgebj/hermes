@@ -2697,6 +2697,37 @@ class FeishuAdapter(BasePlatformAdapter):
             thread_id=None,
             user_id_alt=sender_profile["user_id_alt"],
         )
+        # Unified trigger framework — resolve matching skills BEFORE building
+        # the synthetic event. BC fork (plan §4 step 1):
+        #   - Resolver returns ≥1 match → dispatch with auto_skill set (new behavior).
+        #   - Resolver returns [] AND no skill in the corpus has explicit triggers
+        #     → fall through to broadcast (EXISTING BEHAVIOR for skills without
+        #     `triggers:` frontmatter; preserves Feishu's pre-framework contract).
+        #   - Resolver returns [] AND some skill has explicit triggers → skip
+        #     (the corpus is opt-in to the new schema; this reaction is just
+        #     not interesting to any skill, do not broadcast).
+        matched_skills: list[str] = []
+        try:
+            from gateway.skill_resolver import has_explicit_triggers, resolve_event_skills
+            skills_snapshot = self._reaction_skill_snapshot()
+            resolver_payload = {
+                "emoji": emoji_type,
+                "action": action,
+                "user_id": str(getattr(user_id_obj, "open_id", "") or sender_profile["user_id"] or ""),
+                "channel_id": chat_id,
+                "channel": chat_id,
+                "message_id": message_id,
+            }
+            matched_skills = resolve_event_skills("reaction", resolver_payload, skills_snapshot)
+            if not matched_skills and has_explicit_triggers(skills_snapshot):
+                logger.debug(
+                    "[Feishu] Reaction %s:%s on %s skipped — no skill matched and corpus uses explicit triggers",
+                    action, emoji_type, message_id,
+                )
+                return
+        except Exception:
+            logger.debug("[Feishu] Skill resolver failed; falling back to broadcast", exc_info=True)
+
         synthetic_event = MessageEvent(
             text=synthetic_text,
             message_type=MessageType.TEXT,
@@ -2704,9 +2735,23 @@ class FeishuAdapter(BasePlatformAdapter):
             raw_message=data,
             message_id=message_id,
             timestamp=datetime.now(),
+            auto_skill=matched_skills or None,
         )
-        logger.info("[Feishu] Routing reaction %s:%s on bot message %s as synthetic event", action, emoji_type, message_id)
+        logger.info(
+            "[Feishu] Routing reaction %s:%s on bot message %s as synthetic event (matched=%s)",
+            action, emoji_type, message_id, matched_skills or "BROADCAST",
+        )
         await self._handle_message_with_guards(synthetic_event)
+
+    def _reaction_skill_snapshot(self):
+        """Return a list of (name, frontmatter, triggers) tuples for the resolver.
+
+        Delegates to the shared :func:`gateway.skill_resolver.snapshot_skills`
+        walker; defined as an instance method so subclasses or tests can
+        override the source of truth.
+        """
+        from gateway.skill_resolver import snapshot_skills
+        return snapshot_skills()
 
     def _is_card_action_duplicate(self, token: str) -> bool:
         """Return True if this card action token was already processed within the dedup window."""
