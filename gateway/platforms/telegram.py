@@ -5439,7 +5439,7 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._reactions_enabled():
                 await self._set_reaction(chat_id, message_id, "\U0001f440")
             # Pin the incoming message for the duration of the turn
-            if self._bot:
+            if self._bot and self.config.extra.get("pin_messages", True):
                 try:
                     await self._bot.pin_chat_message(
                         chat_id=int(chat_id),
@@ -5476,7 +5476,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e",
                 )
         # Unpin the message when processing is complete
-        if self._bot:
+        if self._bot and self.config.extra.get("pin_messages", True):
             try:
                 await self._bot.unpin_chat_message(
                     chat_id=int(chat_id),

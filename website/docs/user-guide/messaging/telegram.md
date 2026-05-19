@@ -1097,6 +1097,21 @@ Unlike Discord (where reactions are additive), Telegram's Bot API replaces all b
 If the bot doesn't have permission to add reactions in a group, the reaction calls fail silently and message processing continues normally.
 :::
 
+## Message Pinning
+
+By default, Hermes pins your incoming message at the start of processing and unpins it when the turn completes. This gives a visual indicator that the message is being worked on, but it also creates a service message in the chat history ("Bot pinned a message" / "Bot unpinned a message").
+
+To disable this behavior, set `pin_messages: false` under `platforms.telegram.extra`:
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      pin_messages: false
+```
+
+When disabled, reactions (if enabled) still work — only the pin/unpin step is skipped.
+
 ## Per-Channel Prompts
 
 Assign ephemeral system prompts to specific Telegram groups or forum topics. The prompt is injected at runtime on every turn — never persisted to transcript history — so changes take effect immediately.
