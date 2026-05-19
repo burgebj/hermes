@@ -7530,18 +7530,18 @@ class GatewayRunner:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
             return _agent_result
         finally:
-            # If _run_agent replaced the sentinel with a real agent and
-            # then cleaned it up, this is a no-op.  If we exited early
-            # (exception, command fallthrough, etc.) the sentinel must
-            # not linger or the session would be permanently locked out.
-            if self._running_agents.get(_quick_key) is _AGENT_PENDING_SENTINEL:
-                self._release_running_agent_state(_quick_key)
-            else:
-                # Agent path already cleaned _running_agents; make sure
-                # the paired metadata dicts are gone too.
-                self._running_agents_ts.pop(_quick_key, None)
-                if hasattr(self, "_busy_ack_ts"):
-                    self._busy_ack_ts.pop(_quick_key, None)
+            # Always release the running-agent slot for this turn.
+            # Normal path: _run_agent already released it, so this is a
+            # no-op (pop on an absent key is harmless).
+            # Zombie-prevention: when session_reset bumps the run-generation
+            # while the agent is active, the inner generation-guarded
+            # _release_running_agent_state returns False and leaves a stale
+            # dead-agent reference in _running_agents.  Without this
+            # unconditional pop, subsequent messages are silently dropped
+            # as "agent busy", requiring a gateway restart to recover.
+            # Safe: no new agent for this session_key can start while
+            # this outer frame is still unwinding.
+            self._release_running_agent_state(_quick_key)
 
     async def _prepare_inbound_message_text(
         self,
@@ -8992,6 +8992,11 @@ class GatewayRunner:
         # Get existing session key
         session_key = self._session_key_for_source(source)
         self._invalidate_session_run_generation(session_key, reason="session_reset")
+        # Force-clear any stale agent slot.  The generation bump above makes
+        # the in-flight run's generation-guarded cleanup a no-op, so without
+        # this the dead agent would linger in _running_agents and zombie the
+        # thread — every subsequent message would be silently dropped as busy.
+        self._release_running_agent_state(session_key)
 
         # Snapshot the old entry so on_session_finalize can report the
         # expiring session id before reset_session() rotates it.
