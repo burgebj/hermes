@@ -619,3 +619,102 @@ class TestBusySessionOnboardingHint:
         assert "/busy interrupt" in content
         # Must NOT tell the user to /busy queue when they're already on queue.
         assert "/busy queue" not in content
+
+
+class TestQueueModeTextAccumulation:
+    """Regression tests for #28503 — queue mode must not drop rapid follow-ups.
+
+    Before the fix, ``_queue_or_replace_pending_event`` called
+    ``merge_pending_message_event`` without ``merge_text=True``, so each
+    plain-text follow-up overwrote the previous pending slot.  Three rapid
+    messages A → B → C while the agent was busy would result in only C being
+    processed.
+
+    After the fix, ``merge_text=True`` is forwarded, causing text messages to
+    accumulate (newline-separated) into the same pending slot, so no input is
+    silently dropped.
+    """
+
+    @pytest.mark.asyncio
+    async def test_queue_mode_accumulates_multiple_text_followups(self):
+        """Three rapid text follow-ups in queue mode must all be preserved.
+
+        Before the fix, the second and third messages silently overwrote the
+        first because ``_queue_or_replace_pending_event`` called
+        ``merge_pending_message_event`` without ``merge_text=True``.
+        """
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+
+        adapter = _make_adapter()
+        running_agent = MagicMock()
+
+        # Share the same platform mock so adapter lookup works across all events.
+        shared_platform = MagicMock(value="telegram")
+
+        def _evt(text: str) -> MessageEvent:
+            source = SessionSource(
+                platform=shared_platform,
+                chat_id="123",
+                chat_type="private",
+                user_id="user1",
+            )
+            return MessageEvent(
+                text=text,
+                message_type=MessageType.TEXT,
+                source=source,
+                message_id=f"msg-{text[:8]}",
+            )
+
+        event_a = _evt("message A")
+        sk = build_session_key(event_a.source)
+        runner._running_agents[sk] = running_agent
+        runner.adapters[shared_platform] = adapter
+
+        # First message queued normally.
+        result_a = await GatewayRunner._handle_message(runner, event_a)
+        assert result_a is None
+        assert adapter._pending_messages[sk].text == "message A"
+
+        # Second message — must accumulate, not overwrite.
+        event_b = _evt("message B")
+        result_b = await GatewayRunner._handle_message(runner, event_b)
+        assert result_b is None
+        assert "message A" in adapter._pending_messages[sk].text
+        assert "message B" in adapter._pending_messages[sk].text
+
+        # Third message — still accumulating.
+        event_c = _evt("message C")
+        result_c = await GatewayRunner._handle_message(runner, event_c)
+        assert result_c is None
+        combined = adapter._pending_messages[sk].text
+        assert "message A" in combined
+        assert "message B" in combined
+        assert "message C" in combined
+
+        running_agent.interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queue_mode_single_message_unchanged(self):
+        """A single queued message must still be stored verbatim (no regression)."""
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+
+        adapter = _make_adapter()
+        running_agent = MagicMock()
+
+        event = _make_event(text="only message")
+        sk = build_session_key(event.source)
+        runner._running_agents[sk] = running_agent
+        runner.adapters[event.source.platform] = adapter
+
+        result = await GatewayRunner._handle_message(runner, event)
+
+        assert result is None
+        assert sk in adapter._pending_messages
+        assert adapter._pending_messages[sk].text == "only message"
+        running_agent.interrupt.assert_not_called()

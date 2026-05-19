@@ -3092,7 +3092,11 @@ class GatewayRunner:
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
             return
-        merge_pending_message_event(adapter._pending_messages, session_key, event)
+        # Pass merge_text=True so that rapid plain-text follow-ups in queue
+        # mode are concatenated rather than dropped via single-slot overwrite.
+        # Photo-burst and media merging logic in merge_pending_message_event
+        # takes precedence and is unaffected by this flag.
+        merge_pending_message_event(adapter._pending_messages, session_key, event, merge_text=True)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
