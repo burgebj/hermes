@@ -14184,6 +14184,121 @@ class GatewayRunner:
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
             return "text"
 
+    # ------------------------------------------------------------------
+    # Vision auto-retry tuning (#28972)
+    # ------------------------------------------------------------------
+    # Discord (and occasionally other CDN-mediated platforms) sees the
+    # first ``vision_analyze`` call against a freshly-cached attachment
+    # come back ``success: false``, while the second call against the
+    # exact same local path succeeds.  The failure is transient — empty
+    # vision responses, brief rate-limits, occasional 5xx from the
+    # vision provider — and the agent currently has to detect the
+    # kawaii fallback string and reissue the call manually, costing
+    # ~30s and a wasted tool round-trip per image.
+    #
+    # Mitigate with a small in-line retry: at most one extra attempt
+    # by default, with a brief backoff, and ONLY when the failure
+    # signature looks transient.  Permanent errors (image too large,
+    # insufficient credits, model does not support vision, etc.)
+    # short-circuit the retry so we don't waste API calls.
+    _VISION_AUTO_RETRY_COUNT_DEFAULT = 1
+    _VISION_AUTO_RETRY_INITIAL_BACKOFF_S = 0.6
+    _VISION_AUTO_RETRY_MAX_BACKOFF_S = 3.0
+
+    # Substring hints that indicate a vision failure is permanent.
+    # Matched case-insensitively against both ``error`` and ``analysis``
+    # fields of the JSON result.  Keep in sync with the error-classification
+    # branches inside ``tools.vision_tools.vision_analyze_tool``.
+    _VISION_NONRETRYABLE_HINTS = (
+        "too large",
+        "insufficient credits",
+        "payment required",
+        "billing",
+        "does not support",
+        "not support image",
+        "content_policy",
+        "unsupported",
+        "invalid image source",
+        "ssrf",
+        "interrupted",
+        "permission",
+        "only real image",
+    )
+
+    @staticmethod
+    def _vision_auto_retry_count() -> int:
+        """Per-image vision auto-retry budget.
+
+        ``HERMES_VISION_AUTO_RETRIES=0`` opts out entirely (restores
+        the legacy single-shot behaviour).  Unparsable values fall
+        back to the documented default so a typo never silently
+        disables the safety net.
+        """
+        raw = os.environ.get("HERMES_VISION_AUTO_RETRIES")
+        if raw is None:
+            return GatewayRunner._VISION_AUTO_RETRY_COUNT_DEFAULT
+        try:
+            return max(0, int(str(raw).strip()))
+        except (TypeError, ValueError):
+            return GatewayRunner._VISION_AUTO_RETRY_COUNT_DEFAULT
+
+    @staticmethod
+    def _vision_failure_is_retryable(result: Optional[Dict[str, Any]]) -> bool:
+        """True if a ``success: false`` vision result looks transient."""
+        if not result:
+            return False
+        haystack = " ".join((
+            str(result.get("error") or ""),
+            str(result.get("analysis") or ""),
+        )).lower()
+        return not any(
+            hint in haystack
+            for hint in GatewayRunner._VISION_NONRETRYABLE_HINTS
+        )
+
+    async def _vision_analyze_with_auto_retry(
+        self,
+        path: str,
+        analysis_prompt: str,
+    ) -> Dict[str, Any]:
+        """Call ``vision_analyze_tool`` once, with a bounded retry on
+        transient failure (#28972).
+
+        Returns the parsed JSON result of the last attempt.  Exceptions
+        bubble out so the caller's outer ``try/except`` still owns the
+        "something went wrong" fallback branch.
+        """
+        from tools.vision_tools import vision_analyze_tool
+
+        retries = self._vision_auto_retry_count()
+        last_result: Dict[str, Any] = {}
+        for attempt in range(retries + 1):
+            if attempt > 0:
+                backoff = min(
+                    self._VISION_AUTO_RETRY_INITIAL_BACKOFF_S * (2 ** (attempt - 1)),
+                    self._VISION_AUTO_RETRY_MAX_BACKOFF_S,
+                )
+                logger.info(
+                    "vision_analyze retry %d/%d for %s after transient failure; "
+                    "sleeping %.2fs",
+                    attempt, retries, path, backoff,
+                )
+                await asyncio.sleep(backoff)
+
+            result_json = await vision_analyze_tool(
+                image_url=path,
+                user_prompt=analysis_prompt,
+            )
+            last_result = json.loads(result_json)
+            if last_result.get("success"):
+                return last_result
+            if not self._vision_failure_is_retryable(last_result):
+                # Permanent error — fall back immediately, don't waste
+                # the remaining retry budget.
+                return last_result
+
+        return last_result
+
     async def _enrich_message_with_vision(
         self,
         user_text: str,
@@ -14198,6 +14313,12 @@ class GatewayRunner:
           1. Immediately understand what the user sent (no extra tool call).
           2. Re-examine the image with vision_analyze if it needs more detail.
 
+        Transient vision failures (Discord-cached attachments occasionally
+        come back ``success: false`` on the first call, see #28972) get
+        a bounded retry via ``_vision_analyze_with_auto_retry`` so the
+        agent doesn't have to detect the kawaii fallback string and
+        reissue the call manually.
+
         Args:
             user_text:   The user's original caption / message text.
             image_paths: List of local file paths to cached images.
@@ -14205,7 +14326,6 @@ class GatewayRunner:
         Returns:
             The enriched message string with vision descriptions prepended.
         """
-        from tools.vision_tools import vision_analyze_tool
         from agent.memory_manager import sanitize_context
 
         analysis_prompt = (
@@ -14218,11 +14338,9 @@ class GatewayRunner:
         for path in image_paths:
             try:
                 logger.debug("Auto-analyzing user image: %s", path)
-                result_json = await vision_analyze_tool(
-                    image_url=path,
-                    user_prompt=analysis_prompt,
+                result = await self._vision_analyze_with_auto_retry(
+                    path, analysis_prompt,
                 )
-                result = json.loads(result_json)
                 if result.get("success"):
                     description = result.get("analysis", "")
                     description = sanitize_context(description)
