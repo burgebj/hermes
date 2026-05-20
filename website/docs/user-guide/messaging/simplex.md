@@ -58,7 +58,11 @@ SIMPLEX_HOME_CHANNEL=<contact-id>
 
 ## Find your contact ID
 
-After starting the daemon, open a conversation with your agent contact. The contact ID will appear in session logs or via `hermes send_message action=list`.
+After starting the daemon, open a conversation with your agent contact. The contact ID will appear in session logs or in the discovered messaging targets:
+
+```bash
+hermes send --list simplex
+```
 
 ## Authorization
 
