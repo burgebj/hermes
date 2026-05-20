@@ -504,6 +504,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_FEISHU_DEDUP_CACHE_SIZE` | Size of the Feishu webhook dedup cache (default: `1024`). |
 | `HERMES_WECOM_TEXT_BATCH_DELAY_SECONDS` / `_SPLIT_DELAY_SECONDS` | WeCom batcher tuning. |
 | `HERMES_VISION_DOWNLOAD_TIMEOUT` | Timeout in seconds for downloading an image before handing it to vision models (default: `30`). |
+| `HERMES_VISION_AUTO_RETRIES` | Max in-line retries when the gateway's auto-vision enrichment receives `success: false` from `vision_analyze` on a user-attached image (default: `1`). Set to `0` to opt out and restore the legacy single-shot behaviour. Permanent errors (image too large, insufficient credits, model doesn't support vision, etc.) short-circuit the retry. See [#28972](https://github.com/NousResearch/hermes-agent/issues/28972). |
 | `HERMES_RESTART_DRAIN_TIMEOUT` | Gateway: seconds to wait for active runs to drain on `/restart` before forcing the restart (default: `900`). |
 | `HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT` | Per-platform connect timeout during gateway startup (seconds). |
 | `HERMES_GATEWAY_BUSY_INPUT_MODE` | Default gateway busy-input behavior: `queue`, `steer`, or `interrupt`. Can be overridden per chat with `/busy`. |
