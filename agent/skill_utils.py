@@ -165,7 +165,11 @@ def _normalize_string_set(values) -> Set[str]:
         return set()
     if isinstance(values, str):
         values = [values]
-    return {str(v).strip() for v in values if str(v).strip()}
+    return {
+        str(v).strip()
+        for v in values
+        if v is not None and str(v).strip()
+    }
 
 
 # ── External skills directories ──────────────────────────────────────────

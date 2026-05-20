@@ -1,6 +1,6 @@
 """Tests for agent/skill_utils.py — extract_skill_conditions metadata handling."""
 
-from agent.skill_utils import extract_skill_conditions
+from agent.skill_utils import extract_skill_conditions, _normalize_string_set
 
 
 def test_metadata_as_dict_with_hermes():
@@ -56,3 +56,18 @@ def test_metadata_missing_entirely():
         "fallback_for_tools": [],
         "requires_tools": [],
     }
+
+
+def test_normalize_string_set_drops_none_entries():
+    """``None`` items in the iterable are filtered, not coerced to ``"None"``.
+
+    Regression: ``str(None)`` is ``"None"`` (truthy after .strip()), so the
+    naive ``{str(v).strip() for v in values if str(v).strip()}`` comprehension
+    produced the literal string ``"None"`` in the output set.  Disabled-skill
+    matching against that bogus name silently disabled nothing while making
+    the configured set look populated.
+    """
+    assert _normalize_string_set([None]) == set()
+    assert _normalize_string_set([None, "foo"]) == {"foo"}
+    assert _normalize_string_set([None, None, "bar"]) == {"bar"}
+    assert _normalize_string_set([None, "  ", "baz", ""]) == {"baz"}
