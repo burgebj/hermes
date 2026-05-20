@@ -63,7 +63,7 @@ hermes honcho setup
 ### Проверка
 
 ```bash
-hermes honcho status    # shows resolved config, connection test, peer info
+hermes honcho status    # показывает рассчитанную конфигурацию, проверку соединения и сведения об участнике
 ```
 
 ## Архитектура
@@ -207,7 +207,7 @@ Honcho моделирует разговор как взаимодействие
 | `dialecticReasoningLevel` | `low` | `minimal`, `low`, `medium`, `high`, `max` |
 | `dialecticDynamic` | `true` | Если `true`, модель может передать `reasoning_level` в `honcho_reasoning`, чтобы переопределить значение по умолчанию для конкретного вызова. `false` = всегда использовать `dialecticReasoningLevel`, переопределения от модели игнорируются |
 
-Более высокие уровни дают более богатый синтез, но стоят дороже по токенам на backend Honcho.
+Более высокие уровни дают более богатый синтез, но обходятся дороже по токенам на бэкенде Honcho.
 
 ## Мультипрофильная настройка
 
@@ -221,7 +221,7 @@ Honcho моделирует разговор как взаимодействие
 
 ```bash
 hermes profile create coder --clone
-# creates host block hermes.coder, AI peer "coder", inherits config from default
+# создаёт host block hermes.coder, ИИ-участника "coder", наследует конфигурацию из default
 ```
 
 Что делает `--clone` для Honcho:
@@ -233,7 +233,7 @@ hermes profile create coder --clone
 ### Дозаполнение существующих профилей
 
 ```bash
-hermes honcho sync    # creates host blocks for all profiles that don't have one yet
+hermes honcho sync    # создаёт host block для всех профилей, у которых его ещё нет
 ```
 
 ### Конфигурация на уровне профиля
@@ -292,8 +292,8 @@ hermes honcho sync    # creates host blocks for all profiles that don't have one
 
 Примеры:
 ```
-honcho_profile                        # read user's card
-honcho_profile peer="ai"              # read AI peer's card
+honcho_profile                        # читает карточку пользователя
+honcho_profile peer="ai"              # читает карточку ИИ-участника
 honcho_reasoning query="What does this user care about most?"
 honcho_reasoning query="What are my interaction patterns?" peer="ai" reasoning_level="medium"
 honcho_conclude conclusion="Prefers terse answers"
@@ -392,7 +392,7 @@ honcho_reasoning query="<question>"  → synthesized answer, use when search isn
 
 ### Санитизация memory-context
 
-Honcho санитизирует блок `memory-context` перед внедрением, чтобы предотвратить prompt injection и повреждённый контент:
+Honcho санитизирует блок `memory-context` перед внедрением, чтобы предотвратить prompt-инъекцию и повреждённый контент:
 
 - Удаляет XML/HTML-теги из пользовательских выводов
 - Нормализует пробелы и управляющие символы
