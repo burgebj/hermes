@@ -16,7 +16,7 @@ description: "Ваш первый разговор с Hermes Agent — от ус
   <iframe
     style={{position: 'absolute', top: 0, left: 0, width: '100%', height: '100%'}}
     src="https://www.youtube-nocookie.com/embed/R3YOGfTBcQg"
-    title="Hermes Agent Masterclass: Installation, Setup, Basic Commands"
+    title="Hermes Agent — мастер-класс: установка, настройка, базовые команды"
     frameBorder="0"
     allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
     allowFullScreen
@@ -39,7 +39,7 @@ description: "Ваш первый разговор с Hermes Agent — от ус
 | Хочу, чтобы Hermes просто работал на моей машине | `hermes setup` | Запустите реальный чат и проверьте, что он отвечает |
 | Провайдер уже выбран | `hermes model` | Сохраните конфиг, затем начинайте чат |
 | Нужен бот или режим «всегда онлайн» | `hermes gateway setup` после того, как CLI уже работает | Подключите Telegram, Discord, Slack или другую платформу |
-| Нужна локальная или самостоятельно размещённая модель | `hermes model` → собственный endpoint | Проверьте endpoint, имя модели и длину контекста |
+| Нужна локальная или самостоятельно размещённая модель | `hermes model` → собственная конечная точка | Проверьте конечную точку, имя модели и длину контекста |
 | Нужно резервное переключение между несколькими провайдерами | Сначала `hermes model` | Добавляйте маршрутизацию и резервное переключение только после того, как базовый чат уже работает |
 
 **Практическое правило:** если Hermes не справляется с обычным чатом, не добавляйте пока новые возможности. Сначала добейтесь одного чистого разговора, а потом уже подключайте gateway, cron, навыки, голосовой режим или маршрутизацию провайдеров.
@@ -92,18 +92,18 @@ hermes model
 
 | Провайдер | Что это такое | Как настроить |
 |----------|-----------|---------------|
-| **Nous Portal** | Подписка без лишней настройки | OAuth-логин через `hermes model` |
-| **OpenAI Codex** | ChatGPT OAuth, использует модели Codex | Device code auth через `hermes model` |
-| **Anthropic** | Модели Claude напрямую — либо Max plan + extra usage credits (OAuth), либо API key для pay-per-token | `hermes model` → OAuth-логин (нужны Max + extra credits) или Anthropic API key |
-| **OpenRouter** | Маршрутизация между множеством моделей | Введите API key |
+| **Nous Portal** | Подписка без лишней настройки | OAuth-авторизация через `hermes model` |
+| **OpenAI Codex** | OAuth-авторизация через ChatGPT, доступ к моделям Codex | Авторизация по коду устройства через `hermes model` |
+| **Anthropic** | Модели Claude напрямую — либо план Max + дополнительные кредиты (OAuth), либо API-ключ для оплаты по факту использования | `hermes model` → OAuth-авторизация (нужны Max + extra credits) или API-ключ Anthropic |
+| **OpenRouter** | Маршрутизация между множеством моделей | Укажите API-ключ OpenRouter |
 | **Z.AI** | Модели GLM / Zhipu-hosted | Укажите `GLM_API_KEY` / `ZAI_API_KEY` |
 | **Kimi / Moonshot** | Кодовые и чат-модели Moonshot | Укажите `KIMI_API_KEY` (или `KIMI_CODING_API_KEY` для Kimi-Coding) |
-| **Kimi / Moonshot China** | Moonshot endpoint для китайского региона | Укажите `KIMI_CN_API_KEY` |
+| **Kimi / Moonshot China** | Региональная конечная точка Moonshot для Китая | Укажите `KIMI_CN_API_KEY` |
 | **Arcee AI** | Модели Trinity | Укажите `ARCEEAI_API_KEY` |
 | **GMI Cloud** | Прямой API с несколькими моделями | Укажите `GMI_API_KEY` |
-| **MiniMax (OAuth)** | MiniMax-M2.7 через browser OAuth — без API key | `hermes model` → MiniMax (OAuth) |
-| **MiniMax** | Международный endpoint MiniMax | Укажите `MINIMAX_API_KEY` |
-| **MiniMax China** | Региональный endpoint MiniMax | Укажите `MINIMAX_CN_API_KEY` |
+| **MiniMax (OAuth)** | MiniMax-M2.7 через OAuth в браузере — без API-ключа | `hermes model` → MiniMax (OAuth) |
+| **MiniMax** | Международная конечная точка MiniMax | Укажите `MINIMAX_API_KEY` |
+| **MiniMax China** | Региональная конечная точка MiniMax | Укажите `MINIMAX_CN_API_KEY` |
 | **Alibaba Cloud** | Qwen через DashScope | Укажите `DASHSCOPE_API_KEY` |
 | **Hugging Face** | Более 20 открытых моделей через единый маршрутизатор (Qwen, DeepSeek, Kimi и др.) | Укажите `HF_TOKEN` |
 | **AWS Bedrock** | Claude, Nova, Llama, DeepSeek через нативный Converse API | IAM role или `aws configure` ([руководство](/integrations/providers)) |
@@ -113,9 +113,9 @@ hermes model
 | **DeepSeek** | Прямой доступ к DeepSeek API | Укажите `DEEPSEEK_API_KEY` |
 | **NVIDIA NIM** | Nemotron через build.nvidia.com или локальный NIM | Укажите `NVIDIA_API_KEY` (опционально `NVIDIA_BASE_URL`) |
 | **GitHub Copilot** | Подписка GitHub Copilot (GPT-5.x, Claude, Gemini и др.) | OAuth через `hermes model`, либо `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` |
-| **GitHub Copilot ACP** | Backend Copilot ACP (запускает локальный `copilot` CLI) | `hermes model` (нужны `copilot` CLI + `copilot login`) |
+| **GitHub Copilot ACP** | Бэкенд Copilot ACP (запускает локальный `copilot` CLI) | `hermes model` (нужны `copilot` CLI + `copilot login`) |
 | **Vercel AI Gateway** | Маршрутизация через Vercel AI Gateway | Укажите `AI_GATEWAY_API_KEY` |
-| **Custom Endpoint** | vLLM, SGLang, Ollama или любой OpenAI-совместимый API | Укажите базовый URL и API key |
+| **Собственная конечная точка** | vLLM, SGLang, Ollama или любой OpenAI-совместимый API | Укажите базовую конечную точку и API-ключ |
 
 Для большинства новичков самый простой путь такой: выберите провайдера и принимайте значения по умолчанию, если только не знаете, зачем вам их менять. Полный каталог провайдеров, переменных окружения и шагов настройки находится на странице [Providers](/integrations/providers).
 
@@ -124,7 +124,7 @@ Hermes Agent требует модель минимум с **64 000 токено
 :::
 
 :::tip
-Переключить провайдера можно в любой момент через `hermes model` — никакой привязки нет. Полный список поддерживаемых провайдеров и подробности настройки смотрите на [Провайдеры ИИ](/integrations/providers).
+Провайдера можно сменить в любой момент через `hermes model` — никакой жёсткой привязки нет. Полный список поддерживаемых провайдеров и подробности настройки смотрите на [Провайдеры ИИ](/integrations/providers).
 :::
 
 ### Где хранятся настройки
@@ -154,7 +154,7 @@ hermes --tui      # современный TUI (рекомендуется)
 Вы увидите приветственный баннер с выбранной моделью, доступными инструментами и навыками. Используйте запрос, который легко проверить:
 
 :::tip Выберите интерфейс
-Hermes поставляется с двумя терминальными интерфейсами: классическим `prompt_toolkit` CLI и более новым [TUI](/user-guide/tui) с модальными окнами, выбором мышью и неблокирующим вводом. У них общие сеансы, slash-команды и конфигурация — попробуйте оба варианта: `hermes` и `hermes --tui`.
+Hermes поставляется с двумя терминальными интерфейсами: классическим `prompt_toolkit` CLI и более новым [TUI](/user-guide/tui) с модальными окнами, выбором мышью и неблокирующим вводом. У них общие сеансы, слэш-команды и конфигурация — попробуйте оба варианта: `hermes` и `hermes --tui`.
 :::
 
 ```
@@ -199,7 +199,7 @@ hermes -c            # Краткая форма
 
 Агент выполняет команды в терминале от вашего имени и показывает результат.
 
-### Slash-команды
+### Слэш-команды
 
 Введите `/`, чтобы увидеть автодополнение со всеми командами:
 
@@ -300,8 +300,8 @@ hermes acp
 | Симптом | Вероятная причина | Что делать |
 |---|---|---|
 | Hermes открывается, но отвечает пустым или искажённым текстом | Ошибка в аутентификации провайдера или в выборе модели | Снова запустите `hermes model` и проверьте провайдера, модель и аутентификацию |
-| Пользовательский endpoint «работает», но возвращает бессмысленные ответы | Неверный базовый URL, имя модели или endpoint вообще не OpenAI-совместимый | Сначала проверьте endpoint в отдельном клиенте |
-| Gateway стартует, но никто не может отправить ему сообщения | Не завершена настройка токена бота, списка разрешённых или платформы | Снова запустите `hermes gateway setup` и проверьте `hermes gateway status` |
+| Пользовательская конечная точка «работает», но возвращает бессмысленные ответы | Неверный базовый URL, имя модели или конечная точка вообще не OpenAI-совместимая | Сначала проверьте конечную точку в отдельном клиенте |
+| Шлюз запускается, но никто не может отправить ему сообщения | Не завершена настройка токена бота, списка разрешённых или платформы | Снова запустите `hermes gateway setup` и проверьте `hermes gateway status` |
 | `hermes --continue` не находит старый сеанс | Вы сменили профиль или сеанс не сохранился | Проверьте `hermes sessions list` и убедитесь, что вы в правильном профиле |
 | Модель недоступна или резервное переключение ведёт себя странно | Маршрутизация или резервное переключение слишком агрессивны | Оставьте маршрутизацию выключенной, пока не стабилизируете базового провайдера |
 | `hermes doctor` ругается на проблемы в конфиге | Часть значений отсутствует или устарела | Исправьте конфиг, затем ещё раз проверьте обычный чат, прежде чем подключать новые возможности |
@@ -331,7 +331,7 @@ hermes acp
 | `hermes setup` | Полный мастер настройки (настраивает всё сразу) |
 | `hermes doctor` | Диагностика проблем |
 | `hermes update` | Обновить до последней версии |
-| `hermes gateway` | Запустить messaging gateway |
+| `hermes gateway` | Запустить шлюз обмена сообщениями |
 | `hermes --continue` | Возобновить последнюю сессию |
 
 ## Что делать дальше

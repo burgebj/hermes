@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 ### Windows (нативный PowerShell) — ранняя бета
 
 :::warning РАННЯЯ БЕТА
-Поддержка нативной Windows пока находится в **ранней бете**. Установка работает для типовых сценариев, но её пока не тестировали так же широко, как POSIX-установщики. Если наткнётесь на шероховатости, пожалуйста, [сообщайте о проблемах](https://github.com/NousResearch/hermes-agent/issues). Для самого проверенного варианта на Windows сегодня используйте линейную установку Linux/macOS внутри **WSL2**.
+Поддержка нативной Windows пока находится в **ранней бете**. Установка работает для типовых сценариев, но её пока не тестировали так же широко, как POSIX-установщики. Если наткнётесь на шероховатости, пожалуйста, [сообщайте о проблемах](https://github.com/NousResearch/hermes-agent/issues). Для самого проверенного варианта на Windows сегодня используйте однострочную Linux/macOS-установку внутри **WSL2**.
 :::
 
 Откройте PowerShell и выполните:
@@ -30,19 +30,19 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
 ```
 
-Установщик берёт на себя **всё**: `uv`, Python 3.11, Node.js 22, `ripgrep`, `ffmpeg` и **портативный Git Bash** (PortableGit — самодостаточный дистрибутив Git for Windows, который поставляет `bash.exe` и весь POSIX toolchain, используемый Hermes для shell-команд; на 32-битной Windows установщик переключается на MinGit, где bash нет и функции terminal-tool / agent-browser не работают). Он клонирует репозиторий в `%LOCALAPPDATA%\hermes\hermes-agent`, создаёт виртуальное окружение и добавляет `hermes` в **User PATH**. После установки перезапустите терминал (или откройте новое окно PowerShell), чтобы PATH подхватился.
+Установщик автоматически ставит **всё необходимое**: `uv`, Python 3.11, Node.js 22, `ripgrep`, `ffmpeg` и **портативный Git Bash** (PortableGit — самодостаточный дистрибутив Git for Windows, который поставляет `bash.exe` и весь POSIX toolchain, используемый Hermes для shell-команд; на 32-битной Windows установщик переключается на MinGit, где bash нет и функции terminal-tool / agent-browser не работают). Он клонирует репозиторий в `%LOCALAPPDATA%\hermes\hermes-agent`, создаёт виртуальное окружение и добавляет `hermes` в **пользовательский PATH**. После установки перезапустите терминал (или откройте новое окно PowerShell), чтобы PATH подхватился.
 
 **Как обрабатывается Git:**
 1. Если `git` уже есть в PATH, установщик использует его.
-2. Иначе он скачивает портативный **PortableGit** (~50MB, из официального GitHub-релиза `git-for-windows`) и распаковывает его в `%LOCALAPPDATA%\hermes\git`. Админские права не нужны. Всё изолировано и не конфликтует с системным Git, каким бы он ни был. (На 32-битном Windows установщик откатывается на MinGit, потому что PortableGit публикуется только для 64-bit и ARM64; зависящие от bash возможности Hermes на 32-битных хостах работать не будут.)
+2. Иначе он скачивает портативный **PortableGit** (~50MB, из официального GitHub-релиза `git-for-windows`) и распаковывает его в `%LOCALAPPDATA%\hermes\git`. Админские права не нужны. Всё изолировано и не конфликтует с системным Git, каким бы он ни был. (На 32-битной Windows установщик откатывается на MinGit, потому что PortableGit публикуется только для 64-bit и ARM64; функции Hermes, зависящие от bash, на 32-битных хостах работать не будут.)
 
 **Почему не winget?** Раньше Git ставили через `winget install Git.Git`, но winget часто ломается, если уже установленный системный Git повреждён именно в тот момент, когда пользователю нужен просто рабочий установщик. Портативный Git обходит winget, реестр установщика Windows и любой уже установленный системный Git. Если когда-нибудь сломается сам Git-установщик Hermes, удалите `%LOCALAPPDATA%\hermes\git` и запустите установку заново — без последствий для системы и без сценариев с деинсталляцией.
 
-Установщик также выставляет `HERMES_GIT_BASH_PATH` на найденный `bash.exe`, чтобы Hermes в свежих shell-сессиях детерминированно находил Bash.
+Установщик также задаёт `HERMES_GIT_BASH_PATH` на найденный `bash.exe`, чтобы Hermes в свежих shell-сессиях детерминированно находил Bash.
 
-Если вы предпочитаете WSL2, Linux-установщик выше работает и там; нативная и WSL-установка могут сосуществовать без конфликтов (нативные данные живут в `%LOCALAPPDATA%\hermes`, данные WSL — в `~/.hermes`).
+Если вы предпочитаете WSL2, Linux-установщик выше работает и там; нативная и WSL-установка могут спокойно сосуществовать без конфликтов (нативные данные живут в `%LOCALAPPDATA%\hermes`, данные WSL — в `~/.hermes`).
 
-**Альтернатива: графический установщик.** Для Hermes Desktop также доступен лёгкий GUI-установщик: скачайте Hermes Desktop, запустите `.exe`, и при первом старте он сам вызовет `install.ps1`, чтобы подготовить Python (через `uv`), Node, PortableGit и остальные зависимости. Desktop-приложение и CLI, установленный через PowerShell, используют одни и те же папки установки и данных, так что можно пользоваться любым вариантом или обоими сразу. Подробности см. в [руководстве по Windows (нативный режим)](/user-guide/windows-native).
+**Альтернатива: графический установщик.** Для Hermes Desktop также доступен лёгкий GUI-установщик: скачайте Hermes Desktop, запустите `.exe`, и при первом старте он сам вызовет `install.ps1`, чтобы подготовить Python (через `uv`), Node, PortableGit и остальные зависимости. Desktop-приложение и CLI, установленные через PowerShell, используют одни и те же папки установки и данных, так что можно пользоваться любым вариантом или обоими сразу. Подробности см. в [руководстве по Windows (нативный режим)](/user-guide/windows-native).
 
 ### Android / Termux
 
@@ -63,15 +63,15 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 
 :::note Паритет возможностей Windows (ранняя бета)
 
-Нативная Windows сейчас в **ранней бете**. Всё, кроме встроенного терминала чата в dashboard, запускается нативно на Windows:
+Нативная Windows сейчас в **ранней бете**. Всё, кроме встроенного терминала чата в панели управления, запускается нативно на Windows:
 - **CLI (`hermes chat`, `hermes setup`, `hermes gateway`, …)** — нативно, использует ваш терминал по умолчанию
-- **Gateway (Telegram, Discord, Slack, …)** — нативно, работает как фоновый PowerShell-процесс
+- **Шлюз (Telegram, Discord, Slack, …)** — нативно, работает как фоновый PowerShell-процесс
 - **Cron scheduler** — нативно
 - **Браузерный инструмент** — нативно (Chromium через Node.js)
 - **MCP-серверы** — нативно (поддерживаются и stdio, и HTTP transport)
-- **Dashboard `/chat` terminal pane** — **только WSL2** (использует POSIX PTY; у нативной Windows нет эквивалента). Остальная часть dashboard (сеансы, задачи, метрики) работает нативно — ограничение касается только встроенной PTY-вкладки.
+- **Терминальная панель `/chat` в панели управления** — **только WSL2** (использует POSIX PTY; у нативной Windows нет эквивалента). Остальная часть панели управления (сеансы, задачи, метрики) работает нативно — ограничение касается только встроенной PTY-вкладки.
 
-Если столкнётесь с проблемой кодировки и захотите вернуться к старому cp1252 stdio path, установите `HERMES_DISABLE_WINDOWS_UTF8=1` в окружении. Это удобно для бисектов.
+Если столкнётесь с проблемой кодировки и захотите вернуться к старому `cp1252` stdio path, установите `HERMES_DISABLE_WINDOWS_UTF8=1` в окружении. Это удобно для поиска регрессий, связанных с кодировкой.
 :::
 
 ### Что делает установщик
@@ -88,25 +88,25 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 | Per-user (git installer) | `~/.hermes/hermes-agent/` | `~/.local/bin/hermes` (symlink) | `~/.hermes/` |
 | Root-mode (`sudo curl … \| sudo bash`) | `/usr/local/lib/hermes-agent/` | `/usr/local/bin/hermes` | `/root/.hermes/` (или `$HERMES_HOME`) |
 
-Схема root-mode по **FHS** (`/usr/local/lib/…`, `/usr/local/bin/hermes`) совпадает с тем, как обычно размещают системные инструменты в Linux. Это удобно для развёртываний на общей машине, когда одна системная установка должна обслуживать всех пользователей. Персональные настройки (auth, skills, sessions) по-прежнему живут в `~/.hermes/` каждого пользователя или в явном `HERMES_HOME`.
+Схема root-mode по **FHS** (`/usr/local/lib/…`, `/usr/local/bin/hermes`) совпадает с тем, как обычно размещают системные инструменты в Linux. Это удобно для развёртываний на общей машине, когда одна системная установка должна обслуживать всех пользователей. Персональные настройки (auth, skills, сеансы) по-прежнему живут в `~/.hermes/` каждого пользователя или в явном `HERMES_HOME`.
 
 ### После установки
 
 Перезагрузите shell и начните чат:
 
 ```bash
-source ~/.bashrc   # or: source ~/.zshrc
-hermes             # Start chatting!
+source ~/.bashrc   # или: source ~/.zshrc
+hermes             # Начать общение!
 ```
 
 Чтобы позже изменить отдельные настройки, используйте специальные команды:
 
 ```bash
-hermes model          # Choose your LLM provider and model
-hermes tools          # Configure which tools are enabled
-hermes gateway setup  # Set up messaging platforms
-hermes config set     # Set individual config values
-hermes setup          # Or run the full setup wizard to configure everything at once
+hermes model          # Выбрать провайдера и модель LLM
+hermes tools          # Настроить, какие инструменты включены
+hermes gateway setup  # Настроить платформы обмена сообщениями
+hermes config set     # Задать отдельные значения конфигурации
+hermes setup          # Или запустить полный мастер настройки, чтобы всё сконфигурировать сразу
 ```
 
 ---
@@ -141,7 +141,7 @@ hermes setup          # Or run the full setup wizard to configure everything at 
 
 ## Установка без sudo / для служебного пользователя
 
-Запуск Hermes от отдельного непривилегированного пользователя (например, системной службы под учётной записью `hermes` или любого пользователя без `sudo`) поддерживается. Единственное место, где реально нужен root, — это шаг `--with-deps` у Playwright: он ставит системные библиотеки (`libnss3`, `libxkbcommon` и т. п.), которые использует Chromium. Установщик проверяет наличие sudo и аккуратно деградирует, если его нет: он установит Chromium в локальный кеш Playwright для служебного пользователя и выведет точную команду, которую должен выполнить администратор отдельно.
+Запуск Hermes от отдельного непривилегированного пользователя (например, системной службы под учётной записью `hermes` или любого пользователя без `sudo`) поддерживается. Единственное место, где реально нужен root, — это шаг `--with-deps` у Playwright: он ставит системные библиотеки (`libnss3`, `libxkbcommon` и т. п.), которые использует Chromium. Установщик проверяет наличие sudo и при его отсутствии аккуратно переключается на урезанный сценарий: он установит Chromium в локальный кеш Playwright для служебного пользователя и выведет точную команду, которую должен выполнить администратор отдельно.
 
 **Рекомендуемая схема (Debian/Ubuntu):**
 
@@ -166,7 +166,7 @@ hermes setup          # Or run the full setup wizard to configure everything at 
    # Вариант A — добавить в профиль служебного пользователя
    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
-   # Option B — symlink system-wide (run as an admin)
+   # Вариант B — создать системную символьную ссылку (запускать от имени администратора)
    sudo ln -s /home/hermes/.hermes/hermes-agent/venv/bin/hermes /usr/local/bin/hermes
    ```
 
@@ -181,7 +181,7 @@ hermes setup          # Or run the full setup wizard to configure everything at 
 | Проблема | Решение |
 |---------|----------|
 | `hermes: command not found` | Перезагрузите shell (`source ~/.bashrc`) или проверьте PATH |
-| `API key not set` | Запустите `hermes model`, чтобы настроить провайдера, или `hermes config set OPENROUTER_API_KEY your_key` |
+| `API-ключ не задан` | Запустите `hermes model`, чтобы настроить провайдера, или `hermes config set OPENROUTER_API_KEY your_key` |
 | После обновления пропала конфигурация | Выполните `hermes config check`, затем `hermes config migrate` |
 
 Для более глубокой диагностики запустите `hermes doctor` — он покажет, чего именно не хватает и как это исправить.
