@@ -429,8 +429,9 @@ class TestRootLevelProviderOverride:
 
         assert cfg["model"]["provider"] == "openrouter"
 
-    def test_root_provider_ignored_when_default_model_provider_exists(self, tmp_path, monkeypatch):
-        """Even when model.provider is the default 'auto', root-level provider is ignored."""
+    def test_root_provider_promoted_when_model_provider_is_default_auto(self, tmp_path, monkeypatch):
+        """When model.provider is the built-in default 'auto', root-level provider
+        is promoted so `hermes config set provider X` works under profiles (issue #24433)."""
         import yaml
 
         hermes_home = tmp_path / ".hermes"
@@ -439,9 +440,9 @@ class TestRootLevelProviderOverride:
 
         config_path = hermes_home / "config.yaml"
         config_path.write_text(yaml.safe_dump({
-            "provider": "opencode-go",  # stale root key
+            "provider": "openai-codex",  # root-level key from `hermes config set provider`
             "model": {
-                "default": "google/gemini-3-flash-preview",
+                "default": "gpt-5.5",
                 # no explicit model.provider — defaults provide "auto"
             },
         }))
@@ -450,8 +451,8 @@ class TestRootLevelProviderOverride:
         monkeypatch.setattr(cli, "_hermes_home", hermes_home)
         cfg = cli.load_cli_config()
 
-        # Root-level "opencode-go" must NOT leak through
-        assert cfg["model"]["provider"] != "opencode-go"
+        # Root-level "openai-codex" should be promoted since model.provider is "auto"
+        assert cfg["model"]["provider"] == "openai-codex"
 
     def test_terminal_vercel_runtime_bridged_to_env(self, tmp_path, monkeypatch):
         """Classic CLI must expose terminal.vercel_runtime to terminal_tool.py."""
@@ -553,6 +554,22 @@ class TestRootLevelProviderOverride:
         assert result["model"]["default"] == "my-model"
         assert result["model"]["context_length"] == 128000
         assert "context_length" not in result
+
+    def test_normalize_root_provider_promoted_when_model_provider_is_auto(self):
+        """Root-level provider is promoted when model.provider is the default 'auto'
+        (issue #24433: `hermes config set provider X` writes to root level)."""
+        from hermes_cli.config import _normalize_root_model_keys
+
+        config = {
+            "provider": "openai-codex",
+            "model": {
+                "default": "gpt-5.5",
+                "provider": "auto",
+            },
+        }
+        result = _normalize_root_model_keys(config)
+        assert result["model"]["provider"] == "openai-codex"
+        assert "provider" not in result  # root key cleaned up
 
 
 class TestProviderResolution:

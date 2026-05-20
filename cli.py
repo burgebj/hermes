@@ -436,7 +436,11 @@ def load_cli_config() -> Dict[str, Any]:
             # only used as a FALLBACK when model.provider / model.base_url
             # is not already set — never as an override.  The canonical
             # location is model.provider (written by `hermes model`).
-            if not defaults["model"].get("provider"):
+            # Treat the built-in default "auto" as unset so a root-level
+            # provider written by `hermes config set provider X` is not
+            # silently swallowed (issue #24433).
+            _mp = defaults["model"].get("provider")
+            if not _mp or _mp == "auto":
                 root_provider = file_config.get("provider")
                 if root_provider:
                     defaults["model"]["provider"] = root_provider
