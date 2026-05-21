@@ -357,6 +357,12 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "drag":
+        has_elements = args.get("from_element") is not None and args.get("to_element") is not None
+        has_coords = args.get("from_coordinate") and args.get("to_coordinate")
+        if not has_elements and not has_coords:
+            return json.dumps({
+                "error": "drag requires from_coordinate/to_coordinate or from_element/to_element",
+            })
         res = backend.drag(
             from_element=args.get("from_element"),
             to_element=args.get("to_element"),
@@ -457,7 +463,11 @@ def _maybe_follow_capture(
     if not do_capture:
         return _text_response(res)
     try:
-        cap = backend.capture(mode="som")
+        # Preserve the app context established by the preceding capture/focus_app so
+        # that capture_after=True re-captures the same app rather than the frontmost
+        # window (which may have changed if the action caused a focus shift).
+        last_app = getattr(backend, "_last_app", None)
+        cap = backend.capture(mode="som", app=last_app)
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
