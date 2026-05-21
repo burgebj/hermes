@@ -1286,6 +1286,26 @@ class DiscordAdapter(BasePlatformAdapter):
             mutation_count += 1
             return result
 
+        # Delete stale commands FIRST (commands that exist on Discord but are
+        # no longer in our desired set).  Doing this before creating new
+        # commands ensures the total never exceeds Discord's hard limit of
+        # 100 global application commands.
+        stale_keys = [k for k in existing_by_key if k not in desired_by_key]
+        for key in stale_keys:
+            current = existing_by_key.pop(key)
+            try:
+                await mutate(http.delete_global_command, app_id, current.id)
+                deleted += 1
+            except Exception as e:
+                logger.warning(
+                    "[%s] Failed to delete stale command '%s' (id=%s): %s. "
+                    "Continuing with remaining stale commands.",
+                    self.name, current.name, current.id, e,
+                )
+                # Popped from existing_by_key so the create/update loop
+                # skips it. The stale command remains on Discord but won't
+                # block new commands from being registered.
+
         for key, desired in desired_by_key.items():
             current = existing_by_key.pop(key, None)
             if current is None:
@@ -1308,10 +1328,6 @@ class DiscordAdapter(BasePlatformAdapter):
 
             await mutate(http.edit_global_command, app_id, current.id, desired)
             updated += 1
-
-        for current in existing_by_key.values():
-            await mutate(http.delete_global_command, app_id, current.id)
-            deleted += 1
 
         return {
             "total": len(desired_payloads),

@@ -724,6 +724,142 @@ async def test_safe_sync_slash_commands_paces_mutation_writes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_safe_sync_slash_commands_deletes_stale_before_creating():
+    """Stale commands must be deleted BEFORE any new commands are created,
+    to avoid exceeding Discord's hard limit of 100 global application
+    commands during the sync window."""
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    class _DesiredCommand:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, tree):
+            return dict(self._payload)
+
+    class _ExistingCommand:
+        def __init__(self, command_id, payload):
+            self.id = command_id
+            self.name = payload["name"]
+            self.type = SimpleNamespace(value=payload["type"])
+
+        def to_dict(self):
+            return {"id": self.id, "application_id": 999, **self._payload}
+
+    # Two stale commands that should be deleted
+    stale_a = _ExistingCommand(101, {"name": "old-alpha", "description": "gone", "type": 1})
+    stale_b = _ExistingCommand(102, {"name": "old-beta", "description": "gone", "type": 1})
+    # One new command that should be created
+    desired_new = {"name": "fresh", "description": "new command", "type": 1, "options": []}
+    # One existing command that should be updated
+    desired_updated = {"name": "keep", "description": "updated desc", "type": 1, "options": []}
+    existing_keep = _ExistingCommand(
+        200, {"name": "keep", "description": "old desc", "type": 1, "options": []}
+    )
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [
+            _DesiredCommand(desired_new),
+            _DesiredCommand(desired_updated),
+        ],
+        fetch_commands=AsyncMock(return_value=[stale_a, stale_b, existing_keep]),
+    )
+
+    # Track the order in which HTTP methods are called
+    call_order = []
+
+    async def track_upsert(*_args, **_kwargs):
+        call_order.append("upsert")
+
+    async def track_edit(*_args, **_kwargs):
+        call_order.append("edit")
+
+    async def track_delete(*_args, **_kwargs):
+        call_order.append("delete")
+
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(side_effect=track_upsert),
+        edit_global_command=AsyncMock(side_effect=track_edit),
+        delete_global_command=AsyncMock(side_effect=track_delete),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    await adapter._safe_sync_slash_commands()
+
+    # All deletes must occur before any upsert or edit
+    last_delete = max(i for i, c in enumerate(call_order) if c == "delete")
+    first_non_delete = min(i for i, c in enumerate(call_order) if c != "delete")
+    assert last_delete < first_non_delete, (
+        f"Delete must happen before create/update. Call order: {call_order}"
+    )
+    assert call_order.count("delete") == 2
+    assert call_order.count("upsert") == 1
+    assert call_order.count("edit") == 1
+
+
+@pytest.mark.asyncio
+async def test_safe_sync_slash_commands_deletion_error_does_not_block_sync():
+    """If deleting a stale command fails, the sync should continue with
+    the remaining stale commands and still create/update desired ones."""
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    class _DesiredCommand:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, tree):
+            return dict(self._payload)
+
+    class _ExistingCommand:
+        def __init__(self, command_id, payload):
+            self.id = command_id
+            self.name = payload["name"]
+            self.type = SimpleNamespace(value=payload["type"])
+
+    stale_fail = _ExistingCommand(101, {"name": "broken", "description": "x", "type": 1})
+    stale_ok = _ExistingCommand(102, {"name": "old-two", "description": "x", "type": 1})
+    desired_new = {"name": "fresh", "description": "new", "type": 1, "options": []}
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [_DesiredCommand(desired_new)],
+        fetch_commands=AsyncMock(return_value=[stale_fail, stale_ok]),
+    )
+
+    delete_calls = []
+
+    async def failing_delete(app_id, cmd_id):
+        delete_calls.append(cmd_id)
+        if cmd_id == 101:
+            raise RuntimeError("discord API error")
+
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(),
+        edit_global_command=AsyncMock(),
+        delete_global_command=AsyncMock(side_effect=failing_delete),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands()
+
+    # Both stale commands were attempted for deletion
+    assert set(delete_calls) == {101, 102}
+    # The new command was still created despite the first deletion failing
+    fake_http.upsert_global_command.assert_awaited_once_with(999, desired_new)
+    assert summary["deleted"] == 1  # only the second one succeeded
+    assert summary["created"] == 1
+
+
+@pytest.mark.asyncio
 async def test_safe_sync_reads_permission_attrs_from_existing_command():
     """Regression: AppCommand.to_dict() in discord.py does NOT include
     nsfw, dm_permission, or default_member_permissions — they live only
