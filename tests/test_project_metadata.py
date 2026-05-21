@@ -94,6 +94,22 @@ def test_messaging_extra_includes_qrcode_for_weixin_setup():
     assert any(dep.startswith("qrcode") for dep in messaging_extra)
 
 
+def test_aiohttp_optional_extras_match_patched_lock_version():
+    """Network-adapter extras should not drift behind the locked aiohttp.
+
+    aiohttp 3.13.4 is the locked patched version; stale optional-extra
+    pins can downgrade fresh installs that include messaging/platform extras.
+    """
+    optional_dependencies = _load_optional_dependencies()
+
+    for extra in ("messaging", "slack", "homeassistant", "sms"):
+        aiohttp_pins = [
+            dep for dep in optional_dependencies[extra]
+            if dep.startswith("aiohttp==")
+        ]
+        assert aiohttp_pins == ["aiohttp==3.13.4"]
+
+
 def test_dingtalk_extra_includes_qrcode_for_qr_auth():
     """DingTalk's QR-code device-flow auth (hermes_cli/dingtalk_auth.py)
     needs the qrcode package."""
