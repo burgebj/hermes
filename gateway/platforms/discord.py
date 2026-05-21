@@ -30,6 +30,8 @@ _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+_DISCORD_GLOBAL_COMMAND_LIMIT = 100
+_DISCORD_SKILL_COMMAND_NAME = "skill"
 
 try:
     import discord
@@ -1148,6 +1150,28 @@ class DiscordAdapter(BasePlatformAdapter):
             )
         return "safe"
 
+    def _discord_global_command_limit(self) -> int:
+        """Return the hard Discord global application-command budget.
+
+        Discord caps global application commands at 100 per app.  Keep an
+        env override for tests and emergency local mitigation, but never let
+        it exceed Discord's published limit.
+        """
+        raw = str(os.getenv("DISCORD_GLOBAL_COMMAND_LIMIT", "") or "").strip()
+        if not raw:
+            return _DISCORD_GLOBAL_COMMAND_LIMIT
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "[%s] Invalid DISCORD_GLOBAL_COMMAND_LIMIT=%r; using %d",
+                self.name,
+                raw,
+                _DISCORD_GLOBAL_COMMAND_LIMIT,
+            )
+            return _DISCORD_GLOBAL_COMMAND_LIMIT
+        return max(1, min(value, _DISCORD_GLOBAL_COMMAND_LIMIT))
+
     def _canonicalize_app_command_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Reduce command payloads to the semantic fields Hermes manages."""
         contexts = payload.get("contexts")
@@ -1256,7 +1280,34 @@ class DiscordAdapter(BasePlatformAdapter):
         if not app_id:
             raise RuntimeError("Discord application ID is unavailable for slash command sync")
 
-        desired_payloads = [command.to_dict(tree) for command in tree.get_commands()]
+        all_desired_payloads = [command.to_dict(tree) for command in tree.get_commands()]
+        desired_payloads = list(all_desired_payloads)
+        command_limit = self._discord_global_command_limit()
+        if len(desired_payloads) > command_limit:
+            logger.warning(
+                "[%s] Desired Discord slash command set has %d command(s), "
+                "above Discord's %d-command global limit; trimming overflow "
+                "before sync",
+                self.name,
+                len(desired_payloads),
+                command_limit,
+            )
+            desired_payloads = desired_payloads[:command_limit]
+            if not any(
+                str(payload.get("name", "") or "").lower() == _DISCORD_SKILL_COMMAND_NAME
+                for payload in desired_payloads
+            ):
+                skill_payload = next(
+                    (
+                        payload
+                        for payload in all_desired_payloads
+                        if str(payload.get("name", "") or "").lower()
+                        == _DISCORD_SKILL_COMMAND_NAME
+                    ),
+                    None,
+                )
+                if skill_payload is not None:
+                    desired_payloads[-1] = skill_payload
         desired_by_key = {
             (int(payload.get("type", 1) or 1), str(payload.get("name", "") or "").lower()): payload
             for payload in desired_payloads
@@ -1286,6 +1337,16 @@ class DiscordAdapter(BasePlatformAdapter):
             mutation_count += 1
             return result
 
+        # Delete obsolete commands before creating new ones.  If the app is
+        # already at Discord's 100-command cap, creating first can fail with
+        # error 30032 even when the final desired set is within budget.
+        for key, current in list(existing_by_key.items()):
+            if key in desired_by_key:
+                continue
+            await mutate(http.delete_global_command, app_id, current.id)
+            existing_by_key.pop(key, None)
+            deleted += 1
+
         for key, desired in desired_by_key.items():
             current = existing_by_key.pop(key, None)
             if current is None:
@@ -1308,10 +1369,6 @@ class DiscordAdapter(BasePlatformAdapter):
 
             await mutate(http.edit_global_command, app_id, current.id, desired)
             updated += 1
-
-        for current in existing_by_key.values():
-            await mutate(http.delete_global_command, app_id, current.id)
-            deleted += 1
 
         return {
             "total": len(desired_payloads),
@@ -3122,6 +3179,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 pass
 
             config_overrides = _resolve_config_gates()
+            command_limit = self._discord_global_command_limit()
+            # Reserve one global command slot for the scalable /skill command.
+            # Top-level auto/plugin commands are optional UX sugar; /skill is
+            # the scalable access path for the much larger skill catalog.
+            optional_limit = command_limit
+            if _DISCORD_SKILL_COMMAND_NAME not in already_registered:
+                optional_limit = max(0, command_limit - 1)
+            skipped_auto = 0
 
             for cmd_def in COMMAND_REGISTRY:
                 if not _is_gateway_available(cmd_def, config_overrides):
@@ -3129,6 +3194,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Discord command names: lowercase, hyphens OK, max 32 chars.
                 discord_name = cmd_def.name.lower()[:32]
                 if discord_name in already_registered:
+                    continue
+                if len(already_registered) >= optional_limit:
+                    skipped_auto += 1
                     continue
                 auto_cmd = _build_auto_slash_command(
                     cmd_def.name,
@@ -3147,6 +3215,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 "Discord auto-registered %d commands from COMMAND_REGISTRY",
                 len(already_registered),
             )
+            if skipped_auto:
+                logger.warning(
+                    "[Discord] Skipped %d optional COMMAND_REGISTRY slash "
+                    "command(s) to stay within Discord's %d-command global "
+                    "limit and reserve /%s",
+                    skipped_auto,
+                    command_limit,
+                    _DISCORD_SKILL_COMMAND_NAME,
+                )
         except Exception as e:
             logger.warning("Discord auto-register from COMMAND_REGISTRY failed: %s", e)
 
@@ -3158,9 +3235,17 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from hermes_cli.commands import _iter_plugin_command_entries
 
+            command_limit = self._discord_global_command_limit()
+            optional_limit = command_limit
+            if _DISCORD_SKILL_COMMAND_NAME not in already_registered:
+                optional_limit = max(0, command_limit - 1)
+            skipped_plugins = 0
             for plugin_name, plugin_desc, plugin_args_hint in _iter_plugin_command_entries():
                 discord_name = plugin_name.lower()[:32]
                 if discord_name in already_registered:
+                    continue
+                if len(already_registered) >= optional_limit:
+                    skipped_plugins += 1
                     continue
                 auto_cmd = _build_auto_slash_command(
                     plugin_name,
@@ -3174,6 +3259,15 @@ class DiscordAdapter(BasePlatformAdapter):
                     # Silently skip commands that fail registration (e.g.
                     # name conflict with a subcommand group).
                     pass
+            if skipped_plugins:
+                logger.warning(
+                    "[Discord] Skipped %d optional plugin slash command(s) "
+                    "to stay within Discord's %d-command global limit and "
+                    "reserve /%s",
+                    skipped_plugins,
+                    command_limit,
+                    _DISCORD_SKILL_COMMAND_NAME,
+                )
         except Exception as e:
             logger.warning(
                 "Discord auto-register from plugin commands failed: %s", e
@@ -3182,7 +3276,22 @@ class DiscordAdapter(BasePlatformAdapter):
         # Register skills under a single /skill command group with category
         # subcommand groups.  This uses 1 top-level slot instead of N,
         # supporting up to 25 categories × 25 skills = 625 skills.
-        self._register_skill_group(tree)
+        try:
+            already_registered = {cmd.name for cmd in tree.get_commands()}
+        except Exception:
+            already_registered = set(already_registered)
+        if (
+            _DISCORD_SKILL_COMMAND_NAME not in already_registered
+            and len(already_registered) >= self._discord_global_command_limit()
+        ):
+            logger.warning(
+                "[Discord] Skipping /%s registration because the command tree "
+                "already has %d command(s), Discord's global command limit",
+                _DISCORD_SKILL_COMMAND_NAME,
+                len(already_registered),
+            )
+        else:
+            self._register_skill_group(tree)
 
         # Optional defense-in-depth: hide every slash command from non-admin
         # guild members in Discord's slash picker. Server-side authorization

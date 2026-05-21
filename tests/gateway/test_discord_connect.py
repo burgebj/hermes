@@ -458,6 +458,91 @@ async def test_safe_sync_slash_commands_only_mutates_diffs():
 
 
 @pytest.mark.asyncio
+async def test_safe_sync_slash_commands_deletes_stale_before_create(monkeypatch):
+    """Delete obsolete commands first so apps already at Discord's cap can
+    make room before creating replacement commands.
+    """
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    monkeypatch.setattr(
+        DiscordAdapter,
+        "_command_sync_mutation_interval_seconds",
+        lambda self: 0,
+    )
+
+    class _DesiredCommand:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, tree):
+            assert tree is not None
+            return dict(self._payload)
+
+    class _ExistingCommand:
+        def __init__(self, command_id, payload):
+            self.id = command_id
+            self.name = payload["name"]
+            self.type = SimpleNamespace(value=payload["type"])
+            self._payload = payload
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "application_id": 999,
+                **self._payload,
+                "name_localizations": {},
+                "description_localizations": {},
+            }
+
+    desired_created = {
+        "name": "metricas",
+        "description": "Show Colmeio metrics dashboard",
+        "type": 1,
+        "options": [],
+    }
+    existing_deleted = _ExistingCommand(
+        13,
+        {
+            "name": "old-command",
+            "description": "To be deleted",
+            "type": 1,
+            "options": [],
+        },
+    )
+    events = []
+
+    async def delete_global_command(app_id, command_id):
+        events.append(("delete", app_id, command_id))
+
+    async def upsert_global_command(app_id, payload):
+        events.append(("upsert", app_id, payload["name"]))
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [_DesiredCommand(desired_created)],
+        fetch_commands=AsyncMock(return_value=[existing_deleted]),
+    )
+    fake_http = SimpleNamespace(
+        upsert_global_command=upsert_global_command,
+        edit_global_command=AsyncMock(),
+        delete_global_command=delete_global_command,
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands()
+
+    assert summary["created"] == 1
+    assert summary["deleted"] == 1
+    assert events == [
+        ("delete", 999, 13),
+        ("upsert", 999, "metricas"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_safe_sync_slash_commands_recreates_metadata_only_diffs():
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 

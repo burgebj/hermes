@@ -180,6 +180,23 @@ async def test_auto_registers_missing_gateway_commands(adapter):
 
 
 @pytest.mark.asyncio
+async def test_register_slash_commands_respects_discord_global_limit(monkeypatch, adapter):
+    """Discord caps global app commands at 100; Hermes should trim optional
+    auto/plugin commands before it builds a command tree that Discord rejects.
+    """
+    monkeypatch.setenv("DISCORD_GLOBAL_COMMAND_LIMIT", "30")
+
+    with patch(
+        "hermes_cli.commands.discord_skill_commands_by_category",
+        return_value=({"general": [("dogfood", "Exploratory QA testing", "/dogfood")]}, [], 0),
+    ):
+        adapter._register_slash_commands()
+
+    assert len(adapter._client.tree.commands) <= 30
+    assert "skill" in adapter._client.tree.commands
+
+
+@pytest.mark.asyncio
 async def test_auto_registered_command_dispatches_correctly(adapter):
     """Auto-registered commands should dispatch via _run_simple_slash."""
     adapter._run_simple_slash = AsyncMock()
@@ -980,4 +997,3 @@ def test_register_skill_command_autocomplete_filters_by_name_and_description(ada
     # (covered in other tests). The autocomplete filter itself is exercised
     # via direct function call in the real-discord integration path.
     assert skill_cmd.callback is not None
-
