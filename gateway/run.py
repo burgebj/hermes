@@ -12562,8 +12562,9 @@ class GatewayRunner:
             # List recent titled sessions for this user/platform
             try:
                 user_source = source.platform.value if source.platform else None
+                user_id = source.user_id
                 sessions = self._session_db.list_sessions_rich(
-                    source=user_source, limit=10
+                    source=user_source, user_id=user_id, limit=10
                 )
                 titled = [s for s in sessions if s.get("title")]
                 if not titled:
@@ -12581,7 +12582,11 @@ class GatewayRunner:
                 return t("gateway.resume.list_failed", error=e)
 
         # Resolve the name to a session ID.
-        target_id = self._session_db.resolve_session_by_title(name)
+        user_source = source.platform.value if source.platform else None
+        user_id = source.user_id
+        target_id = self._session_db.resolve_session_by_title(
+            name, source=user_source, user_id=user_id
+        )
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
@@ -12670,6 +12675,7 @@ class GatewayRunner:
             self._session_db.create_session(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
+                user_id=source.user_id,
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
                 parent_session_id=parent_session_id,
             )
