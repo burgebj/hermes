@@ -420,6 +420,106 @@ def _relative_time(ts) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
+def _pad_display(s: str, width: int) -> str:
+    """Pad *s* to at least *width* terminal cells, accounting for CJK double-width chars.
+
+    Python's ``f\"{s:<width}\"`` uses ``len(s)`` for padding, which miscounts
+    CJK/wide characters (2 terminal cells each).  This helper uses
+    ``wcwidth.wcswidth`` to measure the real display width so column alignment
+    stays correct in terminals.
+    """
+    try:
+        from wcwidth import wcswidth
+    except ImportError:
+        return f"{s:<{width}}"
+    disp_w = wcswidth(s)
+    if disp_w < 0:
+        disp_w = len(s)
+    padding = width - disp_w
+    if padding <= 0:
+        return s
+    return s + " " * padding
+
+
+def _truncate_display(s: str, max_width: int, suffix: str = "…") -> str:
+    """Truncate *s* to at most *max_width* display cells, CJK-aware.
+
+    ``s[:N]`` truncates by Python character count, but CJK glyphs are 2 cells
+    wide so ``s[:40]`` can easily produce 80-column text in a 40-column field.
+
+    When truncation occurs and *suffix* is non-empty, it is appended (within
+    the *max_width* budget) so the user can see the text was cut.
+    """
+    try:
+        from wcwidth import wcswidth
+    except ImportError:
+        return s[:max_width]
+    # Fast path: whole string fits
+    if wcswidth(s) <= max_width:
+        return s
+    # Suffix takes priority — reserve its width, truncate the rest
+    if suffix:
+        suffix_w = wcswidth(suffix)
+        if suffix_w < 0:
+            suffix_w = len(suffix)
+        if suffix_w >= max_width:
+            return suffix[:max_width]
+        budget = max_width - suffix_w
+    else:
+        budget = max_width
+    # Accumulate characters until we exhaust the budget
+    width = 0
+    for i, ch in enumerate(s):
+        cw = wcswidth(ch)
+        if cw < 0:
+            cw = 1
+        if width + cw > budget:
+            return s[:i] + (suffix or "")
+        width += cw
+    return s
+
+
+def _compute_session_columns(sessions, has_titles: bool):
+    """Return (title_w, preview_w, last_active_w, extra_w, id_w) adaptive column widths.
+
+    Title and ID are adaptive — sized to fit the widest entry (capped by
+    terminal width).  Preview is fixed-width.  Last Active is fixed at 13.
+    """
+    import shutil
+
+    term_w = shutil.get_terminal_size().columns
+    # Fall back to 120 when stdout is not a real terminal (pipe, redirect, cron)
+    if term_w <= 80:
+        term_w = 120
+    try:
+        from wcwidth import wcswidth
+    except ImportError:
+        wcswidth = len
+
+    # Fixed columns
+    last_active_w = 13
+    prefix = 2  # "  " before first column
+    gutter = 1  # " " between columns
+    safety = 3  # extra buffer to avoid wrapping
+
+    if has_titles:
+        preview_w = 40
+        id_w = max((wcswidth(s.get("id", "")) for s in sessions), default=24)
+        title_w = max((wcswidth(s.get("title") or "—") for s in sessions), default=20)
+        # Cap title so the whole line fits
+        max_title = term_w - prefix - preview_w - last_active_w - id_w - gutter * 3 - safety
+        title_w = max(min(title_w, max_title), 20)
+        return title_w, preview_w, last_active_w, 0, id_w
+    else:
+        extra_w = 6  # Src column
+        preview_w = term_w - prefix - extra_w - last_active_w - max(
+            (wcswidth(s.get("id", "")) for s in sessions), default=24
+        ) - gutter * 3 - safety
+        preview_w = max(preview_w, 30)
+        id_w = max((wcswidth(s.get("id", "")) for s in sessions), default=24)
+        return 0, preview_w, last_active_w, extra_w, id_w
+
+
 def _has_any_provider_configured() -> bool:
     """Check if at least one inference provider is usable."""
     from hermes_cli.config import get_env_path, get_hermes_home, load_config
@@ -565,13 +665,18 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
             name_width = max(20, max_x - fixed_cols)
 
             if title:
-                name = title[:name_width]
+                name = _truncate_display(title, name_width)
             elif preview:
-                name = preview[:name_width]
+                name = _truncate_display(preview, name_width)
             else:
-                name = sid
+                name = _truncate_display(sid, name_width)
 
-            return f"{name:<{name_width}}  {last_active:<10}  {source:<5} {sid}"
+            return (
+                f"{_pad_display(name, name_width)}  "
+                f"{_pad_display(last_active, 10)}  "
+                f"{_pad_display(source, 5)} "
+                f"{sid}"
+            )
 
         def _match(s, query):
             """Check if a session matches the search query (case-insensitive)."""
@@ -627,10 +732,12 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                 except curses.error:
                     pass
 
-                # Column header line
+                # Column header line — must match _format_row column widths.
+                # _format_row is called with max_x - 3 (arrow already accounted for),
+                # so we subtract 3 here to get the same name_width.
                 fixed_cols = 3 + 12 + 6 + 18 + 6
-                name_width = max(20, max_x - fixed_cols)
-                col_header = f"   {'Title / Preview':<{name_width}}  {'Active':<10}  {'Src':<5} {'ID'}"
+                name_width = max(20, max_x - 3 - fixed_cols)
+                col_header = f"   {_pad_display('Title / Preview', name_width)}  {_pad_display('Active', 10)}  {_pad_display('Src', 5)} {'ID'}"
                 try:
                     dim_attr = (
                         curses.color_pair(4) if curses.has_colors() else curses.A_DIM
@@ -12845,26 +12952,52 @@ Examples:
                 print("No sessions found.")
                 return
             has_titles = any(s.get("title") for s in sessions)
+            title_w, preview_w, last_active_w, extra_w, id_w = _compute_session_columns(
+                sessions, has_titles
+            )
             if has_titles:
-                print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-                print("─" * 110)
+                print(
+                    f"{_pad_display('Title', title_w)} "
+                    f"{_pad_display('Preview', preview_w)} "
+                    f"{_pad_display('Last Active', last_active_w)} "
+                    f"{'ID'}"
+                )
+                total_w = title_w + 1 + preview_w + 1 + last_active_w + 1 + id_w
+                print("─" * total_w)
             else:
-                print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
-                print("─" * 95)
+                print(
+                    f"{_pad_display('Preview', preview_w)} "
+                    f"{_pad_display('Last Active', last_active_w)} "
+                    f"{_pad_display('Src', extra_w)} "
+                    f"{'ID'}"
+                )
+                total_w = preview_w + 1 + last_active_w + 1 + extra_w + 1 + id_w
+                print("─" * total_w)
             for s in sessions:
                 last_active = _relative_time(s.get("last_active"))
-                preview = (
-                    s.get("preview", "")[:38]
-                    if has_titles
-                    else s.get("preview", "")[:48]
-                )
                 if has_titles:
-                    title = (s.get("title") or "—")[:30]
+                    # Title: adaptive width, no ellipsis (already capped to fit)
+                    title = _truncate_display(
+                        s.get("title") or "—", title_w, suffix=""
+                    )
+                    # Preview: fixed 40 cols, truncated with ellipsis
+                    preview = _truncate_display(s.get("preview", ""), preview_w - 2)
                     sid = s["id"]
-                    print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
+                    print(
+                        f"{_pad_display(title, title_w)} "
+                        f"{_pad_display(preview, preview_w)} "
+                        f"{_pad_display(last_active, last_active_w)} "
+                        f"{sid}"
+                    )
                 else:
+                    preview = _truncate_display(s.get("preview", ""), preview_w - 2)
                     sid = s["id"]
-                    print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
+                    print(
+                        f"{_pad_display(preview, preview_w)} "
+                        f"{_pad_display(last_active, last_active_w)} "
+                        f"{_pad_display(s['source'], extra_w)} "
+                        f"{sid}"
+                    )
 
         elif action == "export":
             if args.session_id:
