@@ -476,7 +476,7 @@ def _has_any_provider_configured() -> bool:
         except Exception:
             pass
 
-    # Check provider-specific auth fallbacks (for example, Copilot via gh auth).
+    # Check provider-specific auth fallbacks.
     try:
         for provider_id, pconfig in PROVIDER_REGISTRY.items():
             if pconfig.auth_type != "api_key":
@@ -4567,7 +4567,7 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
 
 
 def _model_flow_copilot(config, current_model=""):
-    """GitHub Copilot flow using env vars, gh CLI, or OAuth device code."""
+    """GitHub Copilot flow using env vars or OAuth device code."""
     from hermes_cli.auth import (
         PROVIDER_REGISTRY,
         _prompt_model_selection,
@@ -4663,8 +4663,6 @@ def _model_flow_copilot(config, current_model=""):
     else:
         if source in {"GITHUB_TOKEN", "GH_TOKEN"}:
             print(f"  GitHub token: {api_key[:8]}... ✓ ({source})")
-        elif source == "gh auth token":
-            print("  GitHub token: ✓ (from `gh auth token`)")
         else:
             print("  GitHub token: ✓")
         print()
