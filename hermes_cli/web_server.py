@@ -4046,6 +4046,16 @@ async def set_dashboard_theme(body: ThemeSetBody):
 # Dashboard plugin system
 # ---------------------------------------------------------------------------
 
+def _dashboard_plugin_has_frontend_asset(plugin: Dict[str, Any]) -> bool:
+    entry = plugin.get("entry")
+    if not isinstance(entry, str) or not entry.strip():
+        return False
+
+    base = Path(plugin["_dir"]).resolve()
+    target = (base / entry).resolve()
+    return target.is_relative_to(base) and target.is_file()
+
+
 def _discover_dashboard_plugins() -> list:
     """Scan plugins/*/dashboard/manifest.json for dashboard extensions.
 
@@ -4138,10 +4148,18 @@ def _get_dashboard_plugins(force_rescan: bool = False) -> list:
     return _dashboard_plugins_cache
 
 
+def _get_frontend_dashboard_plugins(force_rescan: bool = False) -> list:
+    return [
+        plugin
+        for plugin in _get_dashboard_plugins(force_rescan=force_rescan)
+        if _dashboard_plugin_has_frontend_asset(plugin)
+    ]
+
+
 @app.get("/api/dashboard/plugins")
 async def get_dashboard_plugins():
     """Return discovered dashboard plugins (excludes user-hidden ones)."""
-    plugins = _get_dashboard_plugins()
+    plugins = _get_frontend_dashboard_plugins()
     # Read user's hidden plugins list from config.
     config = load_config()
     hidden: list = cfg_get(config, "dashboard", "hidden_plugins", default=[]) or []
@@ -4156,7 +4174,7 @@ async def get_dashboard_plugins():
 @app.get("/api/dashboard/plugins/rescan")
 async def rescan_dashboard_plugins():
     """Force re-scan of dashboard plugins."""
-    plugins = _get_dashboard_plugins(force_rescan=True)
+    plugins = _get_frontend_dashboard_plugins(force_rescan=True)
     return {"ok": True, "count": len(plugins)}
 
 
@@ -4183,7 +4201,7 @@ def _merged_plugins_hub() -> Dict[str, Any]:
         _read_manifest as _read_plugin_manifest_at,
     )
 
-    dashboard_list = _get_dashboard_plugins()
+    dashboard_list = _get_frontend_dashboard_plugins()
     dash_by_name = {str(p["name"]): p for p in dashboard_list}
 
     disabled_set = _get_disabled_set()

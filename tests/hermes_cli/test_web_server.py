@@ -2050,6 +2050,22 @@ class TestDashboardPluginManifestExtensions:
             "chat:top",
         ]
 
+    def test_api_only_plugin_is_not_returned_to_frontend_loader(self):
+        """The bundled example plugin is an API fixture and has no JS bundle."""
+        from hermes_cli import web_server
+
+        web_server._dashboard_plugins_cache = None
+        all_plugins = web_server._get_dashboard_plugins(force_rescan=True)
+        api_fixture = next(p for p in all_plugins if p["name"] == "example")
+        assert api_fixture["has_api"] is True
+
+        frontend_names = {
+            p["name"]
+            for p in web_server._get_frontend_dashboard_plugins(force_rescan=True)
+        }
+        assert "example" not in frontend_names
+        assert {"kanban", "hermes-achievements"}.issubset(frontend_names)
+
 
 # ---------------------------------------------------------------------------
 # /api/pty WebSocket — terminal bridge for the dashboard "Chat" tab.

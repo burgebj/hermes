@@ -460,9 +460,11 @@ None of them are required; include only the layers you need.
 | `tab.override` | No | Set to a built-in route path (`"/"`, `"/sessions"`, `"/config"`, ...) to **replace** that page instead of adding a new tab. See [Replacing built-in pages](#replacing-built-in-pages-taboverride). |
 | `tab.hidden` | No | When true, register the component and any slots without adding a tab to the nav. Used by slot-only plugins. See [Slot-only plugins](#slot-only-plugins-tabhidden). |
 | `slots` | No | Named shell slots this plugin populates. **Documentation aid only** — actual registration happens from the JS bundle via `registerSlot()`. Listing slots here makes discovery surfaces more informative. |
-| `entry` | Yes | Path to the JS bundle relative to `dashboard/`. Defaults to `dist/index.js`. |
+| `entry` | Yes for UI plugins | Path to the JS bundle relative to `dashboard/`. Defaults to `dist/index.js` when a UI bundle is expected. Backend-only API fixtures may set `entry` to `null`; they are mounted under `/api/plugins/<name>/` but are not returned by `/api/dashboard/plugins`. |
 | `css` | No | Path to a CSS file to inject as a `<link>` tag. |
 | `api` | No | Path to a Python file with FastAPI routes. Mounted at `/api/plugins/<name>/`. |
+
+Runtime discovery only returns manifests whose declared `entry` file exists under the plugin's `dashboard/` directory. A missing JS bundle is treated as "not a frontend plugin" rather than a broken tab; the backend `api` route still mounts when declared.
 
 #### Available icons
 

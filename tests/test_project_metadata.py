@@ -1,5 +1,6 @@
 """Regression tests for packaging metadata in pyproject.toml."""
 
+import json
 from pathlib import Path
 import tomllib
 
@@ -122,3 +123,24 @@ def test_dashboard_plugin_manifests_and_assets_are_packaged():
     assert "*/dashboard/manifest.json" in plugin_data
     assert "*/dashboard/dist/*" in plugin_data
     assert "*/dashboard/dist/**/*" in plugin_data
+
+
+def test_bundled_dashboard_manifest_declared_assets_exist():
+    """A runtime-discovered dashboard manifest must not point at missing files."""
+    repo_root = Path(__file__).resolve().parents[1]
+    missing: list[str] = []
+
+    for manifest_path in sorted((repo_root / "plugins").glob("*/dashboard/manifest.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for field in ("entry", "css"):
+            asset = manifest.get(field)
+            if asset is None:
+                continue
+            if not isinstance(asset, str) or not asset:
+                missing.append(f"{manifest_path.relative_to(repo_root)}:{field}=<invalid>")
+                continue
+            if not (manifest_path.parent / asset).is_file():
+                rel_manifest = manifest_path.relative_to(repo_root)
+                missing.append(f"{rel_manifest}:{field}={asset}")
+
+    assert not missing, "Missing bundled dashboard plugin assets: " + ", ".join(missing)
