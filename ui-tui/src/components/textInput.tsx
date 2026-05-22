@@ -4,7 +4,7 @@ import { type MutableRefObject, useEffect, useMemo, useRef, useState } from 'rea
 
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { readClipboardText, writeClipboardText } from '../lib/clipboard.js'
-import { cursorLayout, offsetFromPosition } from '../lib/inputMetrics.js'
+import { cursorLayout, offsetFromPosition, visualLineBounds, visualLineNav } from '../lib/inputMetrics.js'
 import {
   DEFAULT_VOICE_RECORD_KEY,
   isActionMod,
@@ -887,7 +887,8 @@ export function TextInput({
       }
 
       if (k.upArrow || k.downArrow) {
-        const next = lineNav(vRef.current, curRef.current, k.upArrow ? -1 : 1)
+        const dir = k.upArrow ? -1 : 1
+        const next = visualLineNav(vRef.current, curRef.current, columns, dir)
 
         if (next !== null) {
           moveCursor(next, k.shift)
@@ -935,12 +936,24 @@ export function TextInput({
       }
 
       if (actionHome) {
-        c = 0
+        // Issue #22008: HOME jumps to the start of the current visual line so
+        // wrapped prompts behave like every other shell. A second press from
+        // the same row collapses to logical 0; explicit Ctrl/Meta also forces
+        // the logical-start jump for keyboards without a dedicated shortcut.
+        const bounds = visualLineBounds(v, c, columns)
+        const visualStart = bounds.start
+        const target = wordMod || c === visualStart ? 0 : visualStart
+        c = target
         moveCursor(c, k.shift)
 
         return
       } else if (actionEnd) {
-        c = v.length
+        // Issue #22008 mirror: END jumps to the end of the current visual
+        // line; a second press snaps to logical end.
+        const bounds = visualLineBounds(v, c, columns)
+        const visualEnd = bounds.end
+        const target = wordMod || c === visualEnd ? v.length : visualEnd
+        c = target
         moveCursor(c, k.shift)
 
         return

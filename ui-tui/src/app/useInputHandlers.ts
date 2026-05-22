@@ -10,6 +10,7 @@ import type {
   SudoRespondResponse,
   VoiceRecordResponse
 } from '../gatewayTypes.js'
+import { isOnFirstVisualLine, isOnLastVisualLine } from '../lib/inputMetrics.js'
 import { isAction, isCopyShortcut, isMac, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
@@ -427,12 +428,18 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return clearSelection()
     }
 
+    // Issue #22009: defer history cycling to the boundary of the *visual*
+    // composer area, not just the logical \n boundaries. A wrapped one-liner
+    // spans multiple rows, so middle rows must let the cursor move instead of
+    // jumping to a previous prompt.
+    const composerCols = ctx.composerColsRef?.current ?? terminal.stdout?.columns ?? 80
+
     if (key.upArrow && !cState.inputBuf.length) {
       const inputSel = getInputSelection()
       const cursor = inputSel && inputSel.start === inputSel.end ? inputSel.start : null
 
       const noLineAbove =
-        !cState.input || (cursor !== null && cState.input.lastIndexOf('\n', Math.max(0, cursor - 1)) < 0)
+        !cState.input || (cursor !== null && isOnFirstVisualLine(cState.input, cursor, composerCols))
 
       if (noLineAbove) {
         cycleQueue(1) || cycleHistory(-1)
@@ -444,7 +451,8 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     if (key.downArrow && !cState.inputBuf.length) {
       const inputSel = getInputSelection()
       const cursor = inputSel && inputSel.start === inputSel.end ? inputSel.start : null
-      const noLineBelow = !cState.input || (cursor !== null && cState.input.indexOf('\n', cursor) < 0)
+      const noLineBelow =
+        !cState.input || (cursor !== null && isOnLastVisualLine(cState.input, cursor, composerCols))
 
       if (noLineBelow || cState.historyIdx !== null) {
         cycleQueue(-1) || cycleHistory(1)

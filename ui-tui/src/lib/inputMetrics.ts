@@ -169,6 +169,56 @@ export function inputVisualHeight(value: string, columns: number) {
   return cursorLayout(value, value.length, columns).line + 1
 }
 
+/**
+ * Word-wrap-aware bounds for the visual line containing `cursor`. `start` is
+ * the offset of the first grapheme on the row; `end` is one past the last
+ * grapheme on the row (excluding the trailing newline, if any).
+ */
+export function visualLineBounds(value: string, cursor: number, cols: number) {
+  const pos = Math.max(0, Math.min(cursor, value.length))
+  const lines = visualLines(value, Math.max(1, cols))
+  let line = lines[0]!
+
+  for (const candidate of lines) {
+    if (candidate.start <= pos) {
+      line = candidate
+    } else {
+      break
+    }
+  }
+
+  return { end: line.end, start: line.start }
+}
+
+/**
+ * Move cursor up or down by one *visual* row, preserving the cursor's column
+ * (clamped to the destination row's length). Returns `null` when the cursor is
+ * already on the first row (dir === -1) or last row (dir === 1) — callers use
+ * that signal to fall through to history cycling instead of consuming the key.
+ */
+export function visualLineNav(value: string, cursor: number, cols: number, dir: -1 | 1): null | number {
+  const w = Math.max(1, cols)
+  const layout = cursorLayout(value, cursor, w)
+  const lines = visualLines(value, w)
+  const target = layout.line + dir
+
+  if (target < 0 || target >= lines.length) {
+    return null
+  }
+
+  return offsetFromPosition(value, target, layout.column, w)
+}
+
+export function isOnFirstVisualLine(value: string, cursor: number, cols: number) {
+  return cursorLayout(value, cursor, Math.max(1, cols)).line === 0
+}
+
+export function isOnLastVisualLine(value: string, cursor: number, cols: number) {
+  const w = Math.max(1, cols)
+
+  return cursorLayout(value, cursor, w).line >= visualLines(value, w).length - 1
+}
+
 export function composerPromptWidth(promptText: string) {
   return Math.max(1, stringWidth(promptText)) + COMPOSER_PROMPT_GAP_WIDTH
 }

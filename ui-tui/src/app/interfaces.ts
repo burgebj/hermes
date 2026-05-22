@@ -201,6 +201,12 @@ export interface InputHandlerContext {
     refs: ComposerRefs
     state: ComposerState
   }
+  /**
+   * Live width of the composer's word-wrapped input area (issue #22009 — used
+   * to decide whether <Up>/<Down> should cycle history vs. move the cursor by
+   * one visual line). Defaults to terminal width when absent.
+   */
+  composerColsRef?: MutableRefObject<number>
   gateway: GatewayServices
   terminal: {
     hasSelection: boolean
