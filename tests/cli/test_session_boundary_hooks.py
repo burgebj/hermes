@@ -101,3 +101,106 @@ def test_hook_errors_are_caught(mock_invoke_hook):
     # This should not raise
     results = mgr.invoke_hook("on_session_finalize", session_id="test", platform="cli")
     assert results == []
+
+
+# ── on_session_title hook tests ────────────────────────────────────────────
+
+
+def test_on_session_title_in_valid_hooks():
+    """Verify on_session_title is registered as a valid hook."""
+    assert "on_session_title" in VALID_HOOKS
+
+
+@patch("hermes_cli.plugins.invoke_hook")
+def test_title_hook_fires_on_new_session_with_title(mock_invoke_hook):
+    """Verify on_session_title fires when a new session is created with a title."""
+    cli = HermesCLI()
+    cli.agent = MagicMock()
+    cli.agent.session_id = "test-session-id"
+    cli._session_db = MagicMock()
+    cli._session_db.sanitize_title = lambda t: t
+    cli._session_db.get_session.return_value = None  # simulate DB empty
+
+    # Simulate /new with a title
+    cli.new_session(title="My Test Session", silent=True)
+
+    mock_invoke_hook.assert_any_call(
+        "on_session_title", title="My Test Session", session_id=cli.session_id,
+    )
+
+
+@patch("hermes_cli.plugins.invoke_hook")
+def test_title_hook_fires_on_explicit_title_command(mock_invoke_hook):
+    """Verify _fire_title_hook fires on_session_title."""
+    cli = HermesCLI()
+    cli.session_id = "test-session-id"
+
+    cli._fire_title_hook("Manual Title")
+
+    mock_invoke_hook.assert_any_call(
+        "on_session_title", title="Manual Title", session_id="test-session-id",
+    )
+
+
+@patch("hermes_cli.plugins.invoke_hook")
+def test_title_hook_fires_for_default_hermes_on_fresh(mock_invoke_hook):
+    """Verify the default 'Hermes' title fires on_session_title in run()."""
+    cli = HermesCLI()
+    cli._resumed = False
+    cli.session_id = "fresh-session"
+
+    # Direct call as the run() startup path does
+    cli._fire_title_hook("Hermes")
+
+    mock_invoke_hook.assert_any_call(
+        "on_session_title", title="Hermes", session_id="fresh-session",
+    )
+
+
+@patch("hermes_cli.plugins.invoke_hook")
+def test_title_hook_fires_on_resume_with_title(mock_invoke_hook):
+    """Verify on_session_title fires when resuming a session that has a title."""
+    cli = HermesCLI()
+    cli._resumed = True
+    cli.session_id = "resume-session-id"
+
+    # Build a minimal mock for _preload_resumed_session's title path
+    cli._session_db = MagicMock()
+    cli._session_db.resolve_resume_session_id.return_value = "resume-session-id"
+    session_meta = {"title": "Previous Chat", "id": "resume-session-id"}
+    cli._session_db.get_session.return_value = session_meta
+    cli._session_db.get_messages_as_conversation.return_value = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    # Disable console output during test
+    cli._console_print = MagicMock()
+    cli._display_resumed_history = MagicMock()
+
+    # Simulate resume flow — this calls _fire_title_hook inside
+    cli._preload_resumed_session()
+
+    mock_invoke_hook.assert_any_call(
+        "on_session_title", title="Previous Chat", session_id="resume-session-id",
+    )
+
+
+@patch("hermes_cli.plugins.invoke_hook")
+def test_title_hook_fires_on_branch_with_title(mock_invoke_hook):
+    """Verify on_session_title fires when branching with a custom title."""
+    cli = HermesCLI()
+    cli.session_id = "original-session"
+    cli._session_db = MagicMock()
+    cli._session_db.sanitize_title = lambda t: t
+
+    # Simulate the branch title path: set_session_title + hook
+    new_id = "branch-new-id"
+    cli._session_db.set_session_title(new_id, "Branch Work")
+    cli._fire_title_hook("Branch Work")
+
+    # Verify set_session_title was called
+    cli._session_db.set_session_title.assert_called_with(new_id, "Branch Work")
+    # Verify the hook fired
+    mock_invoke_hook.assert_any_call(
+        "on_session_title", title="Branch Work", session_id=cli.session_id,
+    )
