@@ -293,7 +293,10 @@ def build_recap(
     if files:
         shown = files[:_MAX_FILES_LISTED]
         extra = len(files) - len(shown)
-        entry = ", ".join(shown)
+        # Gateway delivery auto-uploads bare local paths in normal replies.
+        # Keep recap paths visible while preventing status messages from
+        # being mistaken for file artifacts.
+        entry = ", ".join(f"`{path}`" for path in shown)
         if extra > 0:
             entry += f" (+{extra} more)"
         lines.append(f"  Files touched: {entry}")
