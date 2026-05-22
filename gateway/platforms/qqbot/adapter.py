@@ -87,6 +87,14 @@ class QQCloseError(Exception):
         super().__init__(f"WebSocket closed (code={self.code}, reason={self.reason})")
 
 
+class QQGatewayReconnect(Exception):
+    """Raised when QQ sends an application-level reconnect control opcode."""
+
+    def __init__(self, reason: str = "Server requested reconnect"):
+        self.reason = str(reason) if reason else "Server requested reconnect"
+        super().__init__(self.reason)
+
+
 # ---------------------------------------------------------------------------
 # Constants — imported from the shared constants module.
 # ---------------------------------------------------------------------------
@@ -225,6 +233,8 @@ class QQAdapter(BasePlatformAdapter):
         self._listen_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._heartbeat_interval: float = 30.0  # seconds, updated by Hello
+        self._gateway_reconnect_requested = False
+        self._gateway_reconnect_reason: Optional[str] = None
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
         self._chat_type_map: Dict[str, str] = {}  # chat_id → "c2c"|"group"|"guild"|"dm"
@@ -494,6 +504,30 @@ class QQAdapter(BasePlatformAdapter):
                 quick_disconnect_count = 0
             except asyncio.CancelledError:
                 return
+            except QQGatewayReconnect as exc:
+                if not self._running:
+                    return
+
+                logger.info(
+                    "[%s] Gateway requested reconnect: %s",
+                    self._log_tag,
+                    exc.reason,
+                )
+                self._mark_transport_disconnected()
+                self._fail_pending("Gateway requested reconnect")
+
+                if await self._reconnect(backoff_idx):
+                    backoff_idx = 0
+                    quick_disconnect_count = 0
+                else:
+                    backoff_idx += 1
+                    if backoff_idx >= MAX_RECONNECT_ATTEMPTS:
+                        logger.error(
+                            "[%s] Max reconnect attempts reached (gateway reconnect)",
+                            self._log_tag,
+                        )
+                        self._mark_disconnected()
+                        return
             except QQCloseError as exc:
                 if not self._running:
                     return
@@ -662,6 +696,14 @@ class QQAdapter(BasePlatformAdapter):
                 payload = self._parse_json(msg.data)
                 if payload:
                     self._dispatch_payload(payload)
+                    if self._gateway_reconnect_requested:
+                        reason = (
+                            self._gateway_reconnect_reason
+                            or "Server requested reconnect"
+                        )
+                        self._gateway_reconnect_requested = False
+                        self._gateway_reconnect_reason = None
+                        raise QQGatewayReconnect(reason)
             elif msg.type in {aiohttp.WSMsgType.PING,}:
                 # aiohttp auto-replies with PONG
                 pass
@@ -824,6 +866,26 @@ class QQAdapter(BasePlatformAdapter):
 
         # op 11 = Heartbeat ACK
         if op == 11:
+            return
+
+        # QQ Bot official docs define op 7 Reconnect as:
+        # "服务端通知客户端重新连接" — server tells client to reconnect.
+        # Preserve session_id / seq so the next Hello can send op 6 Resume.
+        if op == 7:
+            logger.info("[%s] Server requested reconnect", self._log_tag)
+            self._gateway_reconnect_requested = True
+            self._gateway_reconnect_reason = "Server requested reconnect"
+            return
+
+        # QQ Bot official docs define op 9 Invalid Session as returned when
+        # Identify or Resume parameters are invalid. Clear resume state so the
+        # next Hello sends Identify instead of retrying an invalid Resume.
+        if op == 9:
+            logger.info("[%s] Invalid session, clearing resume state", self._log_tag)
+            self._session_id = None
+            self._last_seq = None
+            self._gateway_reconnect_requested = True
+            self._gateway_reconnect_reason = "Invalid session"
             return
 
         logger.debug("[%s] Unknown op: %s", self._log_tag, op)

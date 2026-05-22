@@ -410,6 +410,18 @@ class TestQQCloseError:
 
 
 # ---------------------------------------------------------------------------
+# QQGatewayReconnect
+# ---------------------------------------------------------------------------
+
+class TestQQGatewayReconnect:
+    def test_reason(self):
+        from gateway.platforms.qqbot import QQGatewayReconnect
+        err = QQGatewayReconnect("Invalid session")
+        assert err.reason == "Invalid session"
+        assert "Invalid session" in str(err)
+
+
+# ---------------------------------------------------------------------------
 # _dispatch_payload
 # ---------------------------------------------------------------------------
 
@@ -447,6 +459,72 @@ class TestDispatchPayload:
         adapter._dispatch_payload({"op": 0, "t": "READY", "s": 5, "d": {}})
         adapter._dispatch_payload({"op": 0, "t": "SOME_EVENT", "s": 10, "d": {}})
         assert adapter._last_seq == 10
+
+    def test_op7_requests_reconnect_without_clearing_resume_state(self):
+        """QQ docs define op 7 as server-requested Reconnect."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._session_id = "sess_abc"
+        adapter._last_seq = 50
+
+        adapter._dispatch_payload({"op": 7, "d": {}})
+
+        assert adapter._gateway_reconnect_requested is True
+        assert adapter._gateway_reconnect_reason == "Server requested reconnect"
+        assert adapter._session_id == "sess_abc"
+        assert adapter._last_seq == 50
+
+    def test_op9_invalid_session_clears_resume_state_and_requests_reconnect(self):
+        """QQ docs define op 9 as Invalid Session after bad Identify/Resume."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._session_id = "sess_abc"
+        adapter._last_seq = 50
+
+        adapter._dispatch_payload({"op": 9, "d": False})
+
+        assert adapter._gateway_reconnect_requested is True
+        assert adapter._gateway_reconnect_reason == "Invalid session"
+        assert adapter._session_id is None
+        assert adapter._last_seq is None
+
+
+# ---------------------------------------------------------------------------
+# _read_events reconnect op handling
+# ---------------------------------------------------------------------------
+
+class TestReadEventsReconnectOps:
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+        return QQAdapter(_make_config(**extra))
+
+    def test_op7_exits_read_loop_for_reconnect(self):
+        """Server op 7 should break read loop so the listener reconnects."""
+        aiohttp = pytest.importorskip("aiohttp")
+        from gateway.platforms.qqbot import QQGatewayReconnect
+
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._running = True
+        adapter._session_id = "sess_abc"
+        adapter._last_seq = 50
+
+        class FakeMessage:
+            type = aiohttp.WSMsgType.TEXT
+            data = json.dumps({"op": 7, "d": {}})
+
+        class FakeWebSocket:
+            closed = False
+
+            async def receive(self):
+                self.closed = True
+                return FakeMessage()
+
+        adapter._ws = FakeWebSocket()
+
+        with pytest.raises(QQGatewayReconnect) as exc_info:
+            asyncio.run(adapter._read_events())
+
+        assert exc_info.value.reason == "Server requested reconnect"
+        assert adapter._session_id == "sess_abc"
+        assert adapter._last_seq == 50
 
 
 # ---------------------------------------------------------------------------

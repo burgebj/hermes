@@ -18,6 +18,7 @@ New modules:
 from .adapter import (  # noqa: F401
     QQAdapter,
     QQCloseError,
+    QQGatewayReconnect,
     check_qq_requirements,
     _coerce_list,
     _ssrf_redirect_guard,
@@ -59,6 +60,7 @@ __all__ = [
     # adapter
     "QQAdapter",
     "QQCloseError",
+    "QQGatewayReconnect",
     "check_qq_requirements",
     "_coerce_list",
     "_ssrf_redirect_guard",
