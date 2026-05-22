@@ -563,8 +563,20 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     """
     from gateway.config import Platform
     from gateway.platforms.base import BasePlatformAdapter, utf16_len
-    from gateway.platforms.discord import DiscordAdapter
-    from gateway.platforms.slack import SlackAdapter
+
+    # All adapter imports are optional: a missing optional dependency for one
+    # platform must not abort sending to an unrelated platform (#22153).
+    try:
+        from gateway.platforms.discord import DiscordAdapter
+        _discord_available = True
+    except ImportError:
+        _discord_available = False
+
+    try:
+        from gateway.platforms.slack import SlackAdapter
+        _slack_available = True
+    except ImportError:
+        _slack_available = False
 
     # Telegram adapter import is optional (requires python-telegram-bot)
     try:
@@ -582,18 +594,20 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
 
     media_files = media_files or []
 
-    if platform == Platform.SLACK and message:
+    if platform == Platform.SLACK and message and _slack_available:
         try:
             slack_adapter = SlackAdapter.__new__(SlackAdapter)
             message = slack_adapter.format_message(message)
         except Exception:
             logger.debug("Failed to apply Slack mrkdwn formatting in _send_to_platform", exc_info=True)
 
-    # Platform message length limits (from adapter class attributes)
+    # Platform message length limits (from adapter class attributes).
+    # Defaults match each adapter's MAX_MESSAGE_LENGTH so an unrelated
+    # missing adapter does not skew chunking for the requested platform.
     _MAX_LENGTHS = {
         Platform.TELEGRAM: TelegramAdapter.MAX_MESSAGE_LENGTH if _telegram_available else 4096,
-        Platform.DISCORD: DiscordAdapter.MAX_MESSAGE_LENGTH,
-        Platform.SLACK: SlackAdapter.MAX_MESSAGE_LENGTH,
+        Platform.DISCORD: DiscordAdapter.MAX_MESSAGE_LENGTH if _discord_available else 2000,
+        Platform.SLACK: SlackAdapter.MAX_MESSAGE_LENGTH if _slack_available else 39000,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
