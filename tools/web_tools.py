@@ -200,12 +200,20 @@ def _get_capability_backend(capability: str) -> str:
     if specific and _is_backend_available(specific):
         return specific
 
+    configured = (cfg.get("backend") or "").lower().strip()
     backend = _get_backend()
-    if capability in {"extract", "crawl"} and backend in {"searxng", "brave-free", "ddgs"}:
-        # Search-only backends are useful defaults for web_search, but they
-        # should not preempt URL extraction/crawl policy checks merely because
-        # a local package or search key is present. Keep the historic extract
-        # fallback so policy checks and Firecrawl/gateway errors stay reachable.
+    if (
+        capability in {"extract", "crawl"}
+        and not configured
+        and backend in {"searxng", "brave-free", "ddgs"}
+    ):
+        # Search-only backends are useful auto-detected defaults for
+        # web_search, but they should not preempt URL extraction/crawl policy
+        # checks merely because a local package or search key is present. Keep
+        # the historic extract fallback so policy checks and Firecrawl/gateway
+        # errors stay reachable. If the user explicitly configured a
+        # search-only backend, return it unchanged so web_extract can surface
+        # its normal typed "search-only backend" error.
         return "firecrawl"
     return backend
 
