@@ -54,6 +54,15 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+# Explicit "leave the thread untouched" sentinel. When the agent returns this
+# exact string (after trimming surrounding whitespace), the Slack adapter
+# treats the turn as intentional silence and skips the final ``chat_postMessage``
+# instead of posting the literal sentinel into the channel. Mirrors the pattern
+# in ``gateway/platforms/feishu_comment.py`` (``_NO_REPLY_SENTINEL``), but uses
+# an exact post-strip equality so ordinary messages that mention NO_REPLY in
+# longer prose ("I would not use NO_REPLY here") still post normally.
+_NO_REPLY_SENTINEL = "NO_REPLY"
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same
@@ -1065,6 +1074,17 @@ class SlackAdapter(BasePlatformAdapter):
         """Send a message to a Slack channel or DM."""
         if not self._app:
             return SendResult(success=False, error="Not connected")
+
+        if isinstance(content, str) and content.strip() == _NO_REPLY_SENTINEL:
+            logger.debug(
+                "[Slack] Suppressed explicit NO_REPLY sentinel for channel %s",
+                chat_id,
+            )
+            return SendResult(
+                success=True,
+                message_id=None,
+                raw_response={"suppressed": _NO_REPLY_SENTINEL},
+            )
 
         try:
             # Check for a pending slash-command context.  When the user ran a
