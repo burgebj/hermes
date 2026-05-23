@@ -1232,6 +1232,10 @@ class WeixinAdapter(BasePlatformAdapter):
                 self._token = str(persisted.get("token") or "").strip()
                 self._base_url = str(persisted.get("base_url") or self._base_url).strip().rstrip("/")
 
+        # Approval state for exec-approval prompts (numeric reply handling)
+        self._approval_state: Dict[int, Dict[str, str]] = {}  # approval_id -> {session_key, chat_id}
+        self._approval_counter = 0
+
     @staticmethod
     def _coerce_list(value: Any) -> List[str]:
         if value is None:
@@ -1424,6 +1428,14 @@ class WeixinAdapter(BasePlatformAdapter):
         if not text and not media_paths:
             return
 
+        # Handle numeric replies for exec approval prompts
+        # When a user replies with "1", "2", "3", or "0" and there's a pending
+        # approval, resolve it directly instead of passing to the agent.
+        if text and text.strip() in {"0", "1", "2", "3"} and self._approval_state:
+            approval_choice = self._handle_numeric_approval(text.strip(), effective_chat_id)
+            if approval_choice is not None:
+                return
+
         source = self.build_source(
             chat_id=effective_chat_id,
             chat_type=chat_type,
@@ -1449,6 +1461,50 @@ class WeixinAdapter(BasePlatformAdapter):
         if self._dm_policy == "allowlist":
             return sender_id in self._allow_from
         return True
+
+    def _handle_numeric_approval(self, text: str, chat_id: str) -> Optional[str]:
+        """Handle numeric replies (0/1/2/3) for pending exec approval prompts.
+
+        Returns the resolved choice string ("once"/"session"/"always"/"deny")
+        if a pending approval was found and resolved, or None if no matching
+        approval exists for this chat.
+        """
+        # Find the most recent pending approval for this chat_id
+        matching_id = None
+        for aid, state in self._approval_state.items():
+            if state.get("chat_id") == chat_id:
+                matching_id = aid
+
+        if matching_id is None:
+            return None
+
+        state = self._approval_state.pop(matching_id)
+
+        # Map numeric input to approval choices
+        choice_map = {
+            "1": "once",
+            "2": "session",
+            "3": "always",
+            "0": "deny",
+        }
+        choice = choice_map.get(text)
+        if choice is None:
+            return None
+
+        session_key = state.get("session_key", "")
+        try:
+            from tools.approval import resolve_gateway_approval
+            count = resolve_gateway_approval(session_key, choice)
+            logger.info(
+                "[%s] Numeric approval resolved: choice=%s count=%d for chat=%s",
+                self.name, choice, count, _safe_id(chat_id),
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] resolve_gateway_approval failed for session %s: %s",
+                self.name, session_key, exc,
+            )
+        return choice
 
     async def _collect_media(self, item: Dict[str, Any], media_paths: List[str], media_types: List[str]) -> None:
         item_type = item.get("type")
@@ -1767,6 +1823,77 @@ class WeixinAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.debug("[%s] typing stop failed for %s: %s", self.name, _safe_id(chat_id), exc)
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a text-based approval prompt with numeric shortcuts for Weixin.
+
+        Weixin doesn't support interactive buttons like Telegram/Discord, so we
+        use a text-based prompt with numeric options that users can reply with.
+
+        Options:
+          1 - Approve once
+          2 - Approve for this session
+          3 - Approve permanently
+          0 - Deny
+        """
+        if not self._send_session or not self._token:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            # Generate approval ID for tracking user replies
+            self._approval_counter += 1
+            approval_id = self._approval_counter
+
+            # Truncate command if too long
+            cmd_preview = command[:1500] + "..." if len(command) > 1500 else command
+
+            # Build approval message using i18n
+            from agent.i18n import t
+            msg = (
+                f"{t('gateway.approval.header')}\n\n"
+                f"{t('gateway.approval.command_label')}: `{cmd_preview}`\n"
+                f"{t('gateway.approval.reason', desc=description)}\n\n"
+                f"{t('gateway.approval.choose_number')}\n"
+                f"1️⃣ {t('gateway.approval.option_once')}\n"
+                f"2️⃣ {t('gateway.approval.option_session')}\n"
+                f"3️⃣ {t('gateway.approval.option_always')}\n"
+                f"❌ {t('gateway.approval.option_deny')}"
+            )
+
+            # Send the approval message
+            context_token = self._token_store.get(self._account_id, chat_id)
+            client_id = f"hermes-weixin-approval-{approval_id}"
+            await _send_message(
+                self._send_session,
+                base_url=self._base_url,
+                token=self._token,
+                to=chat_id,
+                text=self.format_message(msg),
+                context_token=context_token,
+                client_id=client_id,
+            )
+
+            # Store approval state for reply handling
+            self._approval_state[approval_id] = {
+                "session_key": session_key,
+                "chat_id": chat_id,
+            }
+
+            logger.info(
+                "[%s] Sent exec approval prompt approval_id=%d to=%s",
+                self.name, approval_id, _safe_id(chat_id)
+            )
+            return SendResult(success=True, message_id=client_id)
+        except Exception as exc:
+            logger.error("[%s] send_exec_approval failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
 
     async def send_image(
         self,

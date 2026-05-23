@@ -17,6 +17,19 @@ approval:
 
 gateway:
   approval_expired: "⚠️ Approbation expirée (l'agent n'attend plus). Demandez à l'agent de réessayer."
+
+  # Gateway exec approval prompts (sent when dangerous commands need approval)
+  approval:
+    header: "⚠️ **Dangerous command requires approval:**"
+    reason: "Reason: {desc}"
+    reply_hint: "Reply `/approve` to execute, `/approve session` to approve this pattern for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+    command_label: "Command"
+    choose_number: "Please reply with a number to choose:"
+    option_once: "Approve once"
+    option_session: "Approve for this session"
+    option_always: "Approve permanently"
+    option_deny: "Deny (reply 0 or /deny)"
+
   draining:         "⏳ Vidage de {count} agent(s) actif(s) avant redémarrage..."
   goal_cleared:     "✓ Objectif effacé."
   no_active_goal:   "Aucun objectif actif."

@@ -17,6 +17,19 @@ approval:
 
 gateway:
   approval_expired: "⚠️ A jóváhagyás lejárt (az ügynök már nem vár). Kérd meg az ügynököt, hogy próbálja újra."
+
+  # Gateway exec approval prompts (sent when dangerous commands need approval)
+  approval:
+    header: "⚠️ **Dangerous command requires approval:**"
+    reason: "Reason: {desc}"
+    reply_hint: "Reply `/approve` to execute, `/approve session` to approve this pattern for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+    command_label: "Command"
+    choose_number: "Please reply with a number to choose:"
+    option_once: "Approve once"
+    option_session: "Approve for this session"
+    option_always: "Approve permanently"
+    option_deny: "Deny (reply 0 or /deny)"
+
   draining:         "⏳ {count} aktív ügynök befejezésére várunk az újraindítás előtt..."
   goal_cleared:     "✓ A cél törölve."
   no_active_goal:   "Nincs aktív cél."

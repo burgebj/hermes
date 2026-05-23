@@ -17,6 +17,19 @@ approval:
 
 gateway:
   approval_expired: "⚠️ 批准已逾期（代理不再等待）。請讓代理重試。"
+
+  # Gateway exec approval prompts (sent when dangerous commands need approval)
+  approval:
+    header: "⚠️ **危險命令需要批准：**"
+    reason: "原因：{desc}"
+    reply_hint: "回覆 `/approve` 執行，`/approve session` 本次會話允許，`/approve always` 永久允許，或 `/deny` 取消。"
+    command_label: "命令"
+    choose_number: "請回覆數字選擇："
+    option_once: "僅本次允許"
+    option_session: "本次會話允許"
+    option_always: "永久允許"
+    option_deny: "拒絕（回覆 0 或 /deny）"
+
   draining:         "⏳ 正在等待 {count} 個活躍代理結束後重新啟動..."
   goal_cleared:     "✓ 目標已清除。"
   no_active_goal:   "目前沒有作用中的目標。"

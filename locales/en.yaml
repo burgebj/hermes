@@ -28,7 +28,27 @@ approval:
 gateway:
   # Messenger replies to slash commands and implicit state changes.
   approval_expired: "⚠️ Approval expired (agent is no longer waiting). Ask the agent to try again."
+
+  # Gateway exec approval prompts (sent when dangerous commands need approval)
+  approval:
+    header: "⚠️ **Dangerous command requires approval:**"
+    reason: "Reason: {desc}"
+    reply_hint: "Reply `/approve` to execute, `/approve session` to approve this pattern for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+    command_label: "Command"
+    choose_number: "Please reply with a number to choose:"
+    option_once: "Approve once"
+    option_session: "Approve for this session"
+    option_always: "Approve permanently"
+    option_deny: "Deny (reply 0 or /deny)"
   draining:         "⏳ Draining {count} active agent(s) before restart..."
+  working_status:   "⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+  interrupting_task: "⚡ Interrupting current task{_status_detail}. I'll respond to your message shortly."
+  gateway_queued: "⏳ Gateway is {action} — queued for the next turn after it comes back."
+  gateway_busy: "⏳ Gateway is {action} and is not accepting another turn right now."
+  agent_starting: "Agent still starting — /steer queued for the next turn."
+  no_active_agent: "No active agent — /steer queued for the next turn."
+  request_failed: "The request failed: {error}\nTry again or use /reset to start a fresh session."
+  processing_stopped: "⚠️ Processing stopped: {error}. Try again."
   goal_cleared:     "✓ Goal cleared."
   no_active_goal:   "No active goal."
   config_read_failed: "⚠️ Could not read config.yaml: {error}"

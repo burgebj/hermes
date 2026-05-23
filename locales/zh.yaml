@@ -18,6 +18,26 @@ approval:
 gateway:
   approval_expired: "⚠️ 批准已过期（代理不再等待）。请让代理重试。"
   draining:         "⏳ 正在等待 {count} 个活跃代理结束后重启..."
+  working_status:   "⏳ 正在处理...（已耗时 {_elapsed_mins} 分钟{_status_detail}）"
+  interrupting_task: "⚡ 正在打断当前任务{_status_detail}。稍后会回复你的消息。"
+  gateway_queued: "⏳ Gateway 正在{action}——排队等待下一轮处理。"
+  gateway_busy: "⏳ Gateway 正在{action}，暂时不接受新请求。"
+  agent_starting: "代理正在启动——/steer 已排队等待下一轮。"
+  no_active_agent: "没有活跃代理——/steer 已排队等待下一轮。"
+  request_failed: "请求失败：{error}\n请重试或使用 /reset 开始新会话。"
+  processing_stopped: "⚠️ 处理中断：{error}。请重试。"
+
+  # Gateway exec approval prompts (sent when dangerous commands need approval)
+  approval:
+    header: "⚠️ **危险命令需要批准：**"
+    reason: "原因：{desc}"
+    reply_hint: "回复 `/approve` 执行，`/approve session` 本次会话允许，`/approve always` 永久允许，或 `/deny` 取消。"
+    command_label: "命令"
+    choose_number: "请回复数字选择："
+    option_once: "仅本次允许"
+    option_session: "本次会话允许"
+    option_always: "永久允许"
+    option_deny: "拒绝（回复 0 或 /deny）"
   goal_cleared:     "✓ 目标已清除。"
   no_active_goal:   "当前没有活跃的目标。"
   config_read_failed: "⚠️ 无法读取 config.yaml：{error}"
