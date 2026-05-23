@@ -253,6 +253,11 @@ class QQAdapter(BasePlatformAdapter):
         self._interaction_callback: Optional[
             Callable[[InteractionEvent], Awaitable[None]]
         ] = None
+        # Pending approval buttons are visible inside the chat. Keep the
+        # intended approver and chat bound to each approval session so a
+        # different group member cannot resolve another user's dangerous
+        # command prompt by clicking the inline keyboard.
+        self._approval_context: Dict[str, Dict[str, str]] = {}
 
         # Default interaction dispatcher: routes approval-button clicks to
         # tools.approval.resolve_gateway_approval() and update-prompt clicks
@@ -1087,6 +1092,8 @@ class QQAdapter(BasePlatformAdapter):
                     self._log_tag, decision, session_key,
                 )
                 return
+            if not self._is_approval_click_authorized(session_key, event):
+                return
             try:
                 # Import lazily to keep the adapter importable in tests that
                 # don't exercise the approval subsystem.
@@ -1098,6 +1105,7 @@ class QQAdapter(BasePlatformAdapter):
                     self._log_tag, count, session_key, choice,
                     event.operator_openid,
                 )
+                self._approval_context.pop(session_key, None)
             except Exception as exc:
                 logger.error(
                     "[%s] resolve_gateway_approval failed for session %s: %s",
@@ -1114,6 +1122,74 @@ class QQAdapter(BasePlatformAdapter):
             "[%s] Unrecognised button_data %r from interaction %s",
             self._log_tag, button_data, event.id,
         )
+
+    def _is_approval_click_authorized(
+            self,
+            session_key: str,
+            event: InteractionEvent,
+    ) -> bool:
+        """Return whether a QQ approval-button click may resolve a session.
+
+        QQ group keyboards can be rendered to everyone in the group. The
+        button payload routes to a pending approval session, but the clicker is
+        separately reported as ``operator_openid`` on the interaction event.
+        Dangerous-command approvals must therefore verify the clicker and chat
+        context before resolving the approval.
+        """
+        operator = str(event.operator_openid or "").strip()
+        ctx = self._approval_context.get(session_key)
+        if not ctx:
+            # In a C2C chat the interaction is delivered from the same user
+            # who can see the private approval prompt. Group chats need an
+            # explicit bound operator because every member can see/click the
+            # same keyboard.
+            if event.scene == "c2c":
+                return True
+            logger.warning(
+                "[%s] Rejecting approval button without bound context "
+                "(session=%s, operator=%s, scene=%s)",
+                self._log_tag, session_key, operator, event.scene,
+            )
+            return False
+
+        expected_operator = ctx.get("operator", "")
+        expected_chat_id = ctx.get("chat_id", "")
+        expected_chat_type = ctx.get("chat_type", "")
+        event_chat_id = event.group_openid if event.scene == "group" else event.user_openid
+
+        created_at = float(ctx.get("created_at") or 0.0)
+        if created_at and time.time() - created_at > self._APPROVAL_TIMEOUT_SECONDS:
+            logger.warning(
+                "[%s] Rejecting expired approval button (session=%s, operator=%s)",
+                self._log_tag, session_key, operator,
+            )
+            self._approval_context.pop(session_key, None)
+            return False
+
+        if expected_chat_type and event.scene != expected_chat_type:
+            logger.warning(
+                "[%s] Rejecting approval button from wrong QQ scene "
+                "(session=%s, expected=%s, got=%s, operator=%s)",
+                self._log_tag, session_key, expected_chat_type, event.scene, operator,
+            )
+            return False
+        if expected_chat_id and event_chat_id != expected_chat_id:
+            logger.warning(
+                "[%s] Rejecting approval button from wrong QQ chat "
+                "(session=%s, expected=%s, got=%s, operator=%s)",
+                self._log_tag, session_key, expected_chat_id,
+                event_chat_id or "<missing>", operator,
+            )
+            return False
+        if not expected_operator or operator != expected_operator:
+            logger.warning(
+                "[%s] Rejecting approval button from unauthorized QQ operator "
+                "(session=%s, expected=%s, got=%s)",
+                self._log_tag, session_key, expected_operator or "<missing>",
+                operator or "<missing>",
+            )
+            return False
+        return True
 
     @staticmethod
     def _write_update_response(answer: str, operator: str = "") -> None:
@@ -2604,12 +2680,28 @@ class QQAdapter(BasePlatformAdapter):
         :func:`tools.approval.resolve_gateway_approval` — dispatched by the
         adapter's interaction callback (:meth:`_default_interaction_dispatch`).
         """
-        del metadata  # QQ doesn't have thread_id / DM targeting overrides.
+        metadata = metadata or {}
 
         # Use the reply-to message for passive-message context when we have one.
         # QQ requires a msg_id on outbound messages to a user we've never
         # seen; the last inbound msg_id is the natural choice.
         msg_id = self._last_msg_id.get(chat_id)
+        chat_type = str(metadata.get("chat_type") or self._guess_chat_type(chat_id))
+        expected_operator = str(metadata.get("user_id") or "").strip()
+        if not expected_operator and chat_type == "c2c":
+            expected_operator = chat_id
+        if chat_type == "group" and not expected_operator:
+            return SendResult(
+                success=False,
+                error="QQ group approval requires an expected operator",
+                retryable=False,
+            )
+        self._approval_context[session_key] = {
+            "operator": expected_operator,
+            "chat_id": chat_id,
+            "chat_type": chat_type,
+            "created_at": str(time.time()),
+        }
 
         req = ApprovalRequest(
             session_key=session_key,
@@ -2618,9 +2710,12 @@ class QQAdapter(BasePlatformAdapter):
             command_preview=command,
             timeout_sec=self._APPROVAL_TIMEOUT_SECONDS,
         )
-        return await self.send_approval_request(
+        result = await self.send_approval_request(
             chat_id, req, reply_to=msg_id,
         )
+        if not result.success:
+            self._approval_context.pop(session_key, None)
+        return result
 
     _APPROVAL_TIMEOUT_SECONDS = 300  # matches gateway's default gateway_timeout
 

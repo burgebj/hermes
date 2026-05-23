@@ -16625,7 +16625,11 @@ class GatewayRunner:
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata={
+                                    **(_status_thread_metadata or {}),
+                                    "user_id": source.user_id,
+                                    "chat_type": source.chat_type,
+                                },
                             ),
                             _loop_for_step,
                             logger=logger,
