@@ -166,3 +166,25 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
 
     assert any("Decomposed into" in (c.body or "") for c in comments)
     assert any(ev.kind == "decomposed" for ev in events)
+
+
+def test_decompose_children_inherit_board_default_workdir_without_current_board_switch(
+    kanban_home,
+):
+    kb.create_board("proj", default_workdir="/repo/project")
+
+    with kb.connect(board="proj") as conn:
+        tid = _create_triage(conn, title="board-scoped triage")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orch",
+            children=[{"title": "child", "assignee": "worker"}],
+            author="alice",
+        )
+        child = kb.get_task(conn, child_ids[0] if child_ids else "")
+
+    assert child_ids is not None
+    assert child is not None
+    assert child.workspace_kind == "scratch"
+    assert child.workspace_path == "/repo/project"

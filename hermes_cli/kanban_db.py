@@ -429,6 +429,59 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
     return meta
 
 
+def _board_slug_for_conn(conn: sqlite3.Connection) -> Optional[str]:
+    """Best-effort board slug for an already-open connection."""
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+
+    main_file: Optional[str] = None
+    for row in rows:
+        name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        if name == "main":
+            main_file = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+            break
+    if not main_file:
+        return None
+
+    try:
+        main_path = Path(main_file).resolve()
+    except OSError:
+        return None
+
+    try:
+        if main_path == kanban_db_path(DEFAULT_BOARD).resolve():
+            return DEFAULT_BOARD
+    except OSError:
+        pass
+
+    try:
+        if (
+            main_path.name == "kanban.db"
+            and main_path.parent.parent.resolve() == boards_root().resolve()
+        ):
+            return _normalize_board_slug(main_path.parent.name)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _resolve_board_default_workspace_path(
+    conn: sqlite3.Connection,
+    *,
+    board: Optional[str] = None,
+) -> Optional[str]:
+    """Return the board's default_workdir for this call context, if any."""
+    board_slug = _normalize_board_slug(board)
+    if board_slug is None:
+        board_slug = _board_slug_for_conn(conn) or get_current_board()
+    board_default = read_board_metadata(board_slug).get("default_workdir")
+    if not board_default:
+        return None
+    return str(board_default)
+
+
 def write_board_metadata(
     board: Optional[str],
     *,
@@ -1653,11 +1706,7 @@ def create_task(
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly.
     if workspace_path is None:
-        board_slug = board if board else get_current_board()
-        board_meta = read_board_metadata(board_slug)
-        board_default = board_meta.get("default_workdir")
-        if board_default:
-            workspace_path = str(board_default)
+        workspace_path = _resolve_board_default_workspace_path(conn, board=board)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -3611,6 +3660,7 @@ def decompose_triage_task(
     # write_txn pitfalls. Instead we inline the INSERTs and
     # _append_event calls.
     now = int(time.time())
+    board_workspace_path = _resolve_board_default_workspace_path(conn)
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
@@ -3634,13 +3684,14 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', 'scratch', ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by) "
+                "VALUES (?, ?, ?, ?, 'todo', 'scratch', ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
                     body if isinstance(body, str) else None,
                     assignee,
+                    board_workspace_path,
                     tenant,
                     now,
                     (author or "decomposer"),
