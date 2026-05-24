@@ -3473,6 +3473,57 @@ class HermesCLI:
         except Exception:
             return len(text or "")
 
+    @staticmethod
+    def _pad_display(s: str, width: int) -> str:
+        """Pad *s* to at least *width* terminal cells, for CJK-safe column alignment.
+
+        Python's ``f"{s:<width}"`` uses ``len(s)``, which counts CJK/wide
+        characters as 1 cell instead of the 2 they occupy in a terminal.
+        """
+        try:
+            from wcwidth import wcswidth
+        except ImportError:
+            return f"{s:<{width}}"
+        disp_w = wcswidth(s)
+        if disp_w < 0:
+            disp_w = len(s)
+        padding = width - disp_w
+        if padding <= 0:
+            return s
+        return s + " " * padding
+
+    @staticmethod
+    def _truncate_display(s: str, max_width: int, suffix: str = "…") -> str:
+        """Truncate *s* to at most *max_width* display cells, CJK-aware.
+
+        When truncation occurs and *suffix* is non-empty, it is appended (within
+        the *max_width* budget) so the user can see the text was cut.
+        """
+        try:
+            from wcwidth import wcswidth
+        except ImportError:
+            return s[:max_width]
+        if wcswidth(s) <= max_width:
+            return s
+        if suffix:
+            suffix_w = wcswidth(suffix)
+            if suffix_w < 0:
+                suffix_w = len(suffix)
+            if suffix_w >= max_width:
+                return suffix[:max_width]
+            budget = max_width - suffix_w
+        else:
+            budget = max_width
+        width = 0
+        for i, ch in enumerate(s):
+            cw = wcswidth(ch)
+            if cw < 0:
+                cw = 1
+            if width + cw > budget:
+                return s[:i] + (suffix or "")
+            width += cw
+        return s
+
     @classmethod
     def _trim_status_bar_text(cls, text: str, max_width: int) -> str:
         """Trim status-bar text to a single terminal row."""
@@ -6159,7 +6210,12 @@ class HermesCLI:
         if not sessions:
             return False
 
-        from hermes_cli.main import _relative_time
+        from hermes_cli.main import _relative_time, _compute_session_columns
+
+        # Compute adaptive column widths (titles branch only — this path always has titles)
+        title_w, preview_w, last_active_w, _extra_w, id_w = _compute_session_columns(
+            sessions, has_titles=True
+        )
 
         print()
         if reason == "history":
@@ -6167,13 +6223,29 @@ class HermesCLI:
         else:
             print("  Recent sessions:")
         print()
-        print(f"  {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-        print(f"  {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
+        print(
+            f"  {self._pad_display('Title', title_w)} "
+            f"{self._pad_display('Preview', preview_w)} "
+            f"{self._pad_display('Last Active', last_active_w)} "
+            f"{'ID'}"
+        )
+        print(
+            f"  {'─' * title_w} {'─' * preview_w} {'─' * last_active_w} {'─' * id_w}"
+        )
         for session in sessions:
-            title = (session.get("title") or "—")[:30]
-            preview = (session.get("preview") or "")[:38]
+            title = self._truncate_display(
+                session.get("title") or "—", title_w, suffix=""
+            )
+            preview = self._truncate_display(
+                session.get("preview") or "", preview_w - 2
+            )
             last_active = _relative_time(session.get("last_active"))
-            print(f"  {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+            print(
+                f"  {self._pad_display(title, title_w)} "
+                f"{self._pad_display(preview, preview_w)} "
+                f"{self._pad_display(last_active, last_active_w)} "
+                f"{session['id']}"
+            )
         print()
         print("  Use /resume <session id or title> to continue where you left off.")
         print()
