@@ -1,0 +1,34 @@
+{
+  "hooks": [
+    {
+      "event": "file-edited",
+      "match": "agents/AGENT_REGISTRY.json",
+      "command": "scripts/run_tests.sh tests/test_hermes_skills_mcp_snapshot.py",
+      "description": "Validate MCP snapshot after registry changes"
+    },
+    {
+      "event": "file-edited",
+      "match": "mcp_serve.py",
+      "command": "python3 -c \"import mcp_serve; import hermes_skills_mcp\"",
+      "description": "Verify MCP server imports cleanly after edits"
+    },
+    {
+      "event": "file-edited",
+      "match": "hermes_skills_mcp.py",
+      "command": "python3 -c \"import hermes_skills_mcp\"",
+      "description": "Verify skills MCP module imports cleanly"
+    },
+    {
+      "event": "file-edited",
+      "match": "tools/delegate_tool.py",
+      "command": "scripts/run_tests.sh tests/tools/test_delegate.py",
+      "description": "Run delegate tool tests after safety-critical changes"
+    },
+    {
+      "event": "file-edited",
+      "match": "governance/**",
+      "command": "scripts/run_tests.sh tests/test_decision_ruleset.py",
+      "description": "Validate governance constraints after policy changes"
+    }
+  ]
+}

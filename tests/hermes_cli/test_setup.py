@@ -156,6 +156,35 @@ def test_setup_custom_providers_synced(tmp_path, monkeypatch):
     assert reloaded.get("custom_providers") == [{"name": "Local", "base_url": "http://localhost:8080/v1"}]
 
 
+def test_setup_providers_synced(tmp_path, monkeypatch):
+    """providers written by select_provider_and_model must survive final setup save."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+    _stub_tts(monkeypatch)
+
+    config = load_config()
+
+    def fake_select():
+        _write_model_config(tmp_path, "lmstudio", "http://localhost:1234/v1", "qwen3")
+        cfg = load_config()
+        cfg["providers"] = {
+            "lmstudio": {
+                "default_model": "qwen3",
+                "base_url": "http://localhost:1234/v1",
+            }
+        }
+        save_config(cfg)
+
+    monkeypatch.setattr("hermes_cli.main.select_provider_and_model", fake_select)
+
+    setup_model_provider(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["providers"]["lmstudio"]["default_model"] == "qwen3"
+    assert reloaded["providers"]["lmstudio"]["base_url"] == "http://localhost:1234/v1"
+
+
 def test_setup_gateway_skips_service_install_when_systemctl_missing(monkeypatch, capsys):
     env = {
         "TELEGRAM_BOT_TOKEN": "",

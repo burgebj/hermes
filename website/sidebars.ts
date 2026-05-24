@@ -650,6 +650,7 @@ const sidebars: SidebarsConfig = {
         'integrations/nous-portal',
         'integrations/providers',
         'user-guide/features/mcp',
+        'user-guide/features/cursor-hermes',
         'user-guide/features/acp',
         'user-guide/features/api-server',
         'user-guide/features/honcho',

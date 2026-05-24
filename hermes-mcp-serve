@@ -1,0 +1,45 @@
+#!/bin/bash
+# Hermes MCP Server launcher
+# Activates the venv and starts the MCP server for Cursor/Claude integration
+
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    SOURCE_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    TARGET="$(readlink "$SOURCE")"
+    if [[ "$TARGET" == /* ]]; then
+        SOURCE="$TARGET"
+    else
+        SOURCE="$SOURCE_DIR/$TARGET"
+    fi
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_REPO="${HERMES_REPO:-$SCRIPT_DIR}"
+
+# Prefer the checkout containing this launcher. Fall back to the historical
+# install location for users who symlinked the script into ~/.hermes/bin.
+if [ ! -f "$HERMES_REPO/hermes" ] && [ -d "$HERMES_HOME/hermes-agent" ]; then
+    HERMES_REPO="$HERMES_HOME/hermes-agent"
+fi
+
+if [ -f "$HERMES_REPO/.venv/bin/activate" ]; then
+    source "$HERMES_REPO/.venv/bin/activate"
+elif [ -f "$HERMES_REPO/venv/bin/activate" ]; then
+    source "$HERMES_REPO/venv/bin/activate"
+elif ! command -v hermes >/dev/null 2>&1 && [ ! -x "$HERMES_REPO/hermes" ]; then
+    echo "Error: Hermes is not installed and no venv was found under $HERMES_REPO" >&2
+    echo "Run: cd $HERMES_REPO && ./setup-hermes.sh" >&2
+    exit 1
+fi
+
+cd "$HERMES_REPO"
+
+if command -v hermes >/dev/null 2>&1; then
+    exec hermes mcp serve "$@"
+elif [ -x "$HERMES_REPO/hermes" ]; then
+    exec "$HERMES_REPO/hermes" mcp serve "$@"
+else
+    exec python -m hermes_cli.main mcp serve "$@"
+fi

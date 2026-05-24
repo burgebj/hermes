@@ -530,9 +530,43 @@ Or if you installed Hermes in a specific location:
 }
 ```
 
+#### Cursor
+
+Hermes ships project-level MCP config at `.cursor/mcp.json` in the repo. When you open the **hermes-agent** checkout in Cursor, that file is picked up automatically.
+
+```json
+{
+  "mcpServers": {
+    "hermes": {
+      "command": "${workspaceFolder}/hermes-mcp-serve",
+      "args": []
+    }
+  }
+}
+```
+
+The `hermes-mcp-serve` launcher activates the repo venv and runs `hermes mcp serve`. After `./setup-hermes.sh`, the same script is also on your PATH as `~/.local/bin/hermes-mcp-serve` — use that when your Cursor workspace is **not** the hermes-agent repo:
+
+```json
+{
+  "mcpServers": {
+    "hermes": {
+      "command": "hermes-mcp-serve",
+      "args": []
+    }
+  }
+}
+```
+
+Restart Cursor after changing MCP settings. First connection can take several seconds while the venv starts. Troubleshooting notes live in the repo at `docs/CURSOR_SETUP.md`.
+
 ### Available tools
 
-The MCP server exposes 10 tools, matching OpenClaw's channel bridge surface plus a Hermes-specific channel browser:
+The MCP server exposes **21 tools** when the optional skills module is installed (default in this repo): **10 messaging tools** plus **11 read-only skills/knowledge tools**.
+
+#### Messaging (10 tools)
+
+Matches OpenClaw's channel bridge surface plus a Hermes-specific channel browser:
 
 | Tool | Description |
 |------|-------------|
@@ -544,8 +578,33 @@ The MCP server exposes 10 tools, matching OpenClaw's channel bridge surface plus
 | `events_wait` | Long-poll / block until the next event arrives (near-real-time). |
 | `messages_send` | Send a message through a platform (e.g. `telegram:123456`, `discord:#general`). |
 | `channels_list` | List available messaging targets across all platforms. |
-| `permissions_list_open` | List pending approval requests observed during this bridge session. |
-| `permissions_respond` | Allow or deny a pending approval request. |
+| `permissions_list_open` | List approval requests observed by this MCP bridge process. |
+| `permissions_respond` | Resolve an approval observed by this MCP bridge process. This is best-effort bridge-local state, not a durable gateway approval API. |
+
+#### Skills and knowledge (11 tools, read-only)
+
+Registered from `hermes_skills_mcp` when the module is importable (bundled with `hermes-agent` installs). Paths resolve via `HERMES_AGENTS_DIR`, then `HERMES_REPO`, then `HERMES_HOME`. See [Cursor & Hermes](./cursor-hermes.md) for skills-only vs gateway mode and source-of-truth hierarchy.
+
+| Tool | Description |
+|------|-------------|
+| `fleet_context_snapshot` | One bounded bootstrap payload for Cursor/IDE clients: mode, paths, registry summary, stale heartbeats, HOT memory excerpt, latest-state digest, held-spec flags, gateway reachability, missing layers, warnings, and source-of-truth hierarchy reference. |
+| `agent_health_summary` | Compact actionable health summary: missing layers, stale or missing heartbeats, held-spec flag count, gateway reachability, and warnings. |
+| `town_brief` | Human-facing Cursor/Town status: source-of-truth paths, health counts, held-spec flags, gateway mode, and recommended next MCP calls. |
+| `skills_list` | List custom agent `SOUL.md` files and repo skills. |
+| `skills_read` | Read a skill document or agent `SOUL.md`. |
+| `agents_list` | List agents from `AGENT_REGISTRY.json` with status summary. |
+| `agents_get` | Full agent detail: registry entry, heartbeat, files. |
+| `knowledge_read` | Read knowledge-layer artifacts (e.g. `latest_state`). |
+| `knowledge_query` | Query `artifacts/ops/knowledge_graph` with bounded deterministic keyword matching when graph artifacts are present. |
+| `learnings_read` | Read `.learnings/` memory tiers. |
+| `artifacts_list` | Browse the `artifacts/` directory tree. |
+
+#### MCP diagnostics
+
+`hermes doctor --mcp` and `hermes mcp doctor` validate local setup: venv/import
+health, MCP launcher path, `HERMES_HOME`, `HERMES_REPO`, `HERMES_AGENTS_DIR`,
+registry presence, read-only tool registration, and gateway reachability. They
+print a suggested `.cursor/mcp.json` snippet but do not mutate fleet documents.
 
 ### Event system
 

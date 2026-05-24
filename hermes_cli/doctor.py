@@ -338,6 +338,10 @@ def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
+    if getattr(args, "mcp", False):
+        from hermes_cli.mcp_config import cmd_mcp_doctor
+        cmd_mcp_doctor(args)
+        return
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `hermes`.

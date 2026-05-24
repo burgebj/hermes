@@ -30,7 +30,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
-from toolsets import TOOLSETS
+from toolsets import TOOLSETS, resolve_toolset
 
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
@@ -670,14 +670,55 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
 
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
-    """Remove toolsets that contain only blocked tools."""
+    """Remove toolsets that would expose blocked delegated-child tools."""
     blocked_toolset_names = {
         "delegation",
         "clarify",
         "memory",
         "code_execution",
     }
-    return [t for t in toolsets if t not in blocked_toolset_names]
+    stripped: list[str] = []
+    for toolset_name in toolsets:
+        if toolset_name in blocked_toolset_names:
+            continue
+        try:
+            resolved_tools = set(resolve_toolset(toolset_name))
+        except Exception:
+            resolved_tools = set(TOOLSETS.get(toolset_name, {}).get("tools", []))
+        if resolved_tools & DELEGATE_BLOCKED_TOOLS:
+            continue
+        stripped.append(toolset_name)
+    return stripped
+
+
+def _blocked_child_toolsets_for_role(role: str) -> List[str]:
+    """Toolsets to subtract after composite expansion for a child role."""
+    blocked = ["clarify", "memory", "code_execution", "messaging"]
+    if role != "orchestrator":
+        blocked.append("delegation")
+    return blocked
+
+
+def _filter_blocked_child_tools(child, role: str) -> None:
+    """Defence-in-depth: remove blocked tool names from the final child schema."""
+    allowed_blocked = {"delegate_task"} if role == "orchestrator" else set()
+    blocked_names = DELEGATE_BLOCKED_TOOLS - allowed_blocked
+    child.tools = [
+        tool
+        for tool in (getattr(child, "tools", None) or [])
+        if tool.get("function", {}).get("name") not in blocked_names
+    ]
+    child.valid_tool_names = {
+        tool["function"]["name"]
+        for tool in child.tools
+        if tool.get("function", {}).get("name")
+    }
+    try:
+        import model_tools as _model_tools
+
+        _model_tools._last_resolved_tool_names = list(child.valid_tool_names)
+    except Exception:
+        pass
 
 
 def _build_child_progress_callback(
@@ -954,9 +995,13 @@ def _build_child_agent(
             )
         child_toolsets = _strip_blocked_tools(child_toolsets)
     elif parent_agent and parent_enabled is not None:
-        child_toolsets = _strip_blocked_tools(parent_enabled)
+        child_toolsets = _strip_blocked_tools(
+            sorted(_expand_parent_toolsets(set(parent_enabled)))
+        )
     elif parent_toolsets:
-        child_toolsets = _strip_blocked_tools(sorted(parent_toolsets))
+        child_toolsets = _strip_blocked_tools(
+            sorted(_expand_parent_toolsets(set(parent_toolsets)))
+        )
     else:
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
@@ -1117,6 +1162,7 @@ def _build_child_agent(
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
         fallback_model=parent_fallback,
         enabled_toolsets=child_toolsets,
+        disabled_toolsets=_blocked_child_toolsets_for_role(effective_role),
         quiet_mode=True,
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
@@ -1135,6 +1181,7 @@ def _build_child_agent(
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
     )
+    _filter_blocked_child_tools(child, effective_role)
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = child_depth

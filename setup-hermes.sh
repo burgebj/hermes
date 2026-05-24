@@ -342,11 +342,18 @@ fi
 echo -e "${CYAN}→${NC} Setting up hermes command..."
 
 HERMES_BIN="$SCRIPT_DIR/venv/bin/hermes"
+HERMES_MCP_BIN="$SCRIPT_DIR/venv/bin/hermes-mcp-serve"
 COMMAND_LINK_DIR="$(get_command_link_dir)"
 COMMAND_LINK_DISPLAY_DIR="$(get_command_link_display_dir)"
 mkdir -p "$COMMAND_LINK_DIR"
 ln -sf "$HERMES_BIN" "$COMMAND_LINK_DIR/hermes"
 echo -e "${GREEN}✓${NC} Symlinked hermes → $COMMAND_LINK_DISPLAY_DIR/hermes"
+if [ -x "$HERMES_MCP_BIN" ]; then
+    ln -sf "$HERMES_MCP_BIN" "$COMMAND_LINK_DIR/hermes-mcp-serve"
+else
+    ln -sf "$SCRIPT_DIR/hermes-mcp-serve" "$COMMAND_LINK_DIR/hermes-mcp-serve"
+fi
+echo -e "${GREEN}✓${NC} Symlinked hermes-mcp-serve → $COMMAND_LINK_DISPLAY_DIR/hermes-mcp-serve"
 
 if is_termux; then
     export PATH="$COMMAND_LINK_DIR:$PATH"

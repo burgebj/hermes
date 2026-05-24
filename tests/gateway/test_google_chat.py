@@ -132,6 +132,7 @@ _gc_mod.GOOGLE_CHAT_AVAILABLE = True
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome  # noqa: E402
 from plugins.platforms.google_chat.adapter import (  # noqa: E402
     GoogleChatAdapter,
+    _is_connected,
     _is_google_owned_host,
     _mime_for_message_type,
     _redact_sensitive,
@@ -239,6 +240,14 @@ class TestPlatformRegistration:
     def test_requirements_check_returns_true_when_available(self):
         # The shim flag is True in this test module.
         assert check_google_chat_requirements() is True
+
+    def test_connected_requires_runtime_dependencies(self, monkeypatch):
+        cfg = _base_config()
+        monkeypatch.setattr(_gc_mod, "GOOGLE_CHAT_AVAILABLE", False)
+        try:
+            assert _is_connected(cfg) is False
+        finally:
+            monkeypatch.setattr(_gc_mod, "GOOGLE_CHAT_AVAILABLE", True)
 
 
 # ===========================================================================
@@ -528,7 +537,14 @@ class TestOnPubsubMessage:
             "message_name": "spaces/RELAY/messages/M.M",
         }
         msg = _make_pubsub_message(envelope)
-        with patch.object(adapter, "_submit_on_loop") as submit:
+
+        def fake_submit(coro, *, on_success=None, on_failure=None):
+            coro.close()
+            if on_success is not None:
+                on_success()
+            return True
+
+        with patch.object(adapter, "_submit_on_loop", side_effect=fake_submit) as submit:
             adapter._on_pubsub_message(msg)
             submit.assert_called_once()
         msg.ack.assert_called_once()
@@ -546,10 +562,68 @@ class TestOnPubsubMessage:
     def test_text_message_submits_to_loop(self, adapter):
         env = _make_chat_envelope(text="hola")
         msg = _make_pubsub_message(env)
-        with patch.object(adapter, "_submit_on_loop") as submit:
+
+        def fake_submit(coro, *, on_success=None, on_failure=None):
+            coro.close()
+            if on_success is not None:
+                on_success()
+            return True
+
+        with patch.object(adapter, "_submit_on_loop", side_effect=fake_submit) as submit:
             adapter._on_pubsub_message(msg)
             submit.assert_called_once()
         msg.ack.assert_called_once()
+        msg.nack.assert_not_called()
+
+    def test_text_message_ack_waits_for_dispatch_success(self, adapter):
+        env = _make_chat_envelope(text="hola")
+        msg = _make_pubsub_message(env)
+        callbacks = {}
+
+        def fake_submit(coro, *, on_success=None, on_failure=None):
+            coro.close()
+            callbacks["success"] = on_success
+            callbacks["failure"] = on_failure
+            return True
+
+        with patch.object(adapter, "_submit_on_loop", side_effect=fake_submit):
+            adapter._on_pubsub_message(msg)
+
+        msg.ack.assert_not_called()
+        msg.nack.assert_not_called()
+        callbacks["success"]()
+        msg.ack.assert_called_once()
+        msg.nack.assert_not_called()
+
+    def test_text_message_nacks_when_dispatch_fails(self, adapter):
+        env = _make_chat_envelope(text="hola")
+        msg = _make_pubsub_message(env)
+
+        def fake_submit(coro, *, on_success=None, on_failure=None):
+            coro.close()
+            if on_failure is not None:
+                on_failure()
+            return True
+
+        with patch.object(adapter, "_submit_on_loop", side_effect=fake_submit):
+            adapter._on_pubsub_message(msg)
+
+        msg.ack.assert_not_called()
+        msg.nack.assert_called_once()
+
+    def test_text_message_nacks_when_loop_rejects_handoff(self, adapter):
+        env = _make_chat_envelope(text="hola")
+        msg = _make_pubsub_message(env)
+
+        def fake_submit(coro, *, on_success=None, on_failure=None):
+            coro.close()
+            return False
+
+        with patch.object(adapter, "_submit_on_loop", side_effect=fake_submit) as submit:
+            adapter._on_pubsub_message(msg)
+            submit.assert_called_once()
+        msg.ack.assert_not_called()
+        msg.nack.assert_called_once()
 
     def test_callback_exception_does_not_escape(self, adapter):
         env = _make_chat_envelope(text="hola")
@@ -557,9 +631,10 @@ class TestOnPubsubMessage:
         with patch.object(
             adapter, "_submit_on_loop", side_effect=RuntimeError("boom")
         ):
-            # Must not re-raise (would trigger Pub/Sub infinite redelivery).
+            # Must not re-raise; transient callback failures should redeliver.
             adapter._on_pubsub_message(msg)
-        msg.ack.assert_called_once()
+        msg.ack.assert_not_called()
+        msg.nack.assert_called_once()
 
 
 class TestExtractMessagePayload:

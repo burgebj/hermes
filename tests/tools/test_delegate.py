@@ -836,6 +836,78 @@ class TestBlockedTools(unittest.TestCase):
         for tool in ["delegate_task", "clarify", "memory", "send_message", "execute_code"]:
             self.assertIn(tool, DELEGATE_BLOCKED_TOOLS)
 
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_composite_parent_toolset_filters_blocked_child_tools(self, mock_cfg):
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.tools = [
+                {"function": {"name": "terminal"}},
+                {"function": {"name": "send_message"}},
+                {"function": {"name": "memory"}},
+                {"function": {"name": "execute_code"}},
+                {"function": {"name": "delegate_task"}},
+            ]
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Test composite filtering",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertIn("terminal", kwargs["enabled_toolsets"])
+        self.assertEqual(
+            sorted(kwargs["disabled_toolsets"]),
+            ["clarify", "code_execution", "delegation", "memory", "messaging"],
+        )
+        self.assertEqual(mock_child.valid_tool_names, {"terminal"})
+        for tool in DELEGATE_BLOCKED_TOOLS:
+            self.assertNotIn(tool, mock_child.valid_tool_names)
+
+    @patch("tools.delegate_tool._load_config", return_value={"max_spawn_depth": 2})
+    def test_orchestrator_filters_blocked_tools_but_keeps_delegate_task(self, mock_cfg):
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.tools = [
+                {"function": {"name": "terminal"}},
+                {"function": {"name": "send_message"}},
+                {"function": {"name": "memory"}},
+                {"function": {"name": "execute_code"}},
+                {"function": {"name": "delegate_task"}},
+            ]
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Test orchestrator filtering",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                role="orchestrator",
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertNotIn("delegation", kwargs["disabled_toolsets"])
+        self.assertIn("delegate_task", mock_child.valid_tool_names)
+        self.assertIn("terminal", mock_child.valid_tool_names)
+        for tool in DELEGATE_BLOCKED_TOOLS - {"delegate_task"}:
+            self.assertNotIn(tool, mock_child.valid_tool_names)
+
     def test_constants(self):
         from tools.delegate_tool import (
             _get_max_spawn_depth, _get_orchestrator_enabled,
@@ -847,6 +919,13 @@ class TestBlockedTools(unittest.TestCase):
         self.assertTrue(_get_orchestrator_enabled())      # default
         self.assertEqual(_MIN_SPAWN_DEPTH, 1)
         self.assertEqual(_MAX_SPAWN_DEPTH_CAP, 3)
+
+    def test_composite_toolsets_do_not_reexpose_blocked_tools(self):
+        filtered = _strip_blocked_tools(["hermes-cli", "terminal", "file", "delegation"])
+        self.assertNotIn("hermes-cli", filtered)
+        self.assertNotIn("delegation", filtered)
+        self.assertIn("terminal", filtered)
+        self.assertIn("file", filtered)
 
 
 class TestDelegationCredentialResolution(unittest.TestCase):
@@ -873,7 +952,51 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["base_url"])
         self.assertIsNone(creds["api_key"])
 
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_provider_resolves_full_credentials(self, mock_resolve):
+        """When delegation.provider is set, full credentials are resolved."""
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-test-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "google/gemini-3-flash-preview", "provider": "openrouter"}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["model"], "google/gemini-3-flash-preview")
+        self.assertEqual(creds["provider"], "openrouter")
+        self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(creds["api_key"], "sk-or-test-key")
+        self.assertEqual(creds["api_mode"], "chat_completions")
+        mock_resolve.assert_called_once_with(
+            requested="openrouter",
+            target_model="google/gemini-3-flash-preview",
+        )
 
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_provider_resolution_uses_runtime_model_when_config_model_missing(self, mock_resolve):
+        """Named providers should propagate their runtime default model to children."""
+        mock_resolve.return_value = {
+            "provider": "custom",
+            "base_url": "https://my-server.example/v1",
+            "api_key": "sk-test-key",
+            "api_mode": "chat_completions",
+            "model": "server-default-model",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"provider": "custom:my-server", "model": ""}
+
+        creds = _resolve_delegation_credentials(cfg, parent)
+
+        self.assertEqual(creds["model"], "server-default-model")
+        # Named custom:* providers keep the configured id when runtime resolves as custom.
+        self.assertEqual(creds["provider"], "custom:my-server")
+        self.assertEqual(creds["base_url"], "https://my-server.example/v1")
+        mock_resolve.assert_called_once_with(
+            requested="custom:my-server",
+            target_model=None,
+        )
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
         parent = _make_mock_parent(depth=0)
@@ -979,6 +1102,25 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["api_key"])
         self.assertEqual(creds["provider"], "custom")
 
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_nous_provider_resolves_nous_credentials(self, mock_resolve):
+        """Nous provider resolves Nous Portal base_url and api_key."""
+        mock_resolve.return_value = {
+            "provider": "nous",
+            "base_url": "https://inference-api.nousresearch.com/v1",
+            "api_key": "nous-agent-key-xyz",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "hermes-3-llama-3.1-8b", "provider": "nous"}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "nous")
+        self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
+        self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
+        mock_resolve.assert_called_once_with(
+            requested="nous",
+            target_model="hermes-3-llama-3.1-8b",
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -1792,6 +1934,55 @@ class TestDelegateHeartbeat(unittest.TestCase):
             f"got {len(touch_calls)} touches over 0.4s at 0.05s interval",
         )
 
+    def test_heartbeat_still_trips_idle_stale_when_no_tool(self):
+        """A wedged child with no current_tool still trips the idle threshold.
+
+        Regression guard: the fix for #13041 must not disable stale
+        detection entirely. A child that's hung between turns (no tool
+        running, no iteration progress) must still stop touching the
+        parent so the gateway timeout can fire.
+        """
+        from tools.delegate_tool import _run_single_child
+
+        parent = _make_mock_parent()
+        touch_calls = []
+        parent._touch_activity = lambda desc: touch_calls.append(desc)
+
+        child = MagicMock()
+        # Wedged child: no tool running, iteration frozen.
+        child.get_activity_summary.return_value = {
+            "current_tool": None,
+            "api_call_count": 3,
+            "max_iterations": 50,
+            "last_activity_desc": "waiting for API response",
+        }
+
+        def slow_run(**kwargs):
+            time.sleep(1.0)
+            return {"final_response": "done", "completed": True, "api_calls": 3}
+
+        child.run_conversation.side_effect = slow_run
+
+        # Patch idle ceiling to 5 cycles so this test stays fast/deterministic
+        # (production default is 15 cycles at 30s).
+        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), patch(
+            "tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5
+        ):
+            _run_single_child(
+                task_index=0,
+                goal="Test wedged child",
+                child=child,
+                parent_agent=parent,
+            )
+
+        # With idle threshold=5 + interval=0.05s, touches should cap
+        # around 5. Bound loosely to avoid timing flakes.
+        self.assertLess(
+            len(touch_calls), 9,
+            f"Idle stale detection did not fire: got {len(touch_calls)} "
+            f"touches over 1.0s — expected heartbeat to stop after "
+            f"~5 stale cycles",
+        )
 
 
 class TestDelegationReasoningEffort(unittest.TestCase):

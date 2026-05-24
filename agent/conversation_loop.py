@@ -285,11 +285,13 @@ def run_conversation(
     # Bind the skill write-origin ContextVar for this thread so tool
     # handlers (e.g. skill_manage create) can tell whether they are
     # running inside the background agent-improvement review fork vs.
-    # a foreground user-directed turn. Set at the top of each call;
-    # the review fork runs on its own thread with a fresh context,
-    # so the foreground value here does not leak into it.
+    # a foreground user-directed turn. Normal agent turns are foreground;
+    # "assistant_tool" is only retained in memory-provider metadata.
     from tools.skill_provenance import set_current_write_origin
-    set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
+    _skill_write_origin = getattr(agent, "_memory_write_origin", "assistant_tool")
+    if _skill_write_origin != "background_review":
+        _skill_write_origin = "foreground"
+    set_current_write_origin(_skill_write_origin)
 
     # If the previous turn activated fallback, restore the primary
     # runtime so this turn gets a fresh attempt with the preferred model.
@@ -3988,11 +3990,12 @@ def run_conversation(
                     exc_info=True,
                 )
 
-    # Determine if conversation completed successfully
+    # A toolless max-iteration summary is a successful terminal response
+    # even though the tool-calling loop itself exhausted its budget.
     completed = (
         final_response is not None
-        and api_call_count < agent.max_iterations
         and not failed
+        and not interrupted
     )
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal

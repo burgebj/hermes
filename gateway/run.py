@@ -676,6 +676,19 @@ from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
+_CONFIG_AUTHORITATIVE_ENV_VARS = (
+    "HERMES_MAX_ITERATIONS",
+    "HERMES_AGENT_TIMEOUT",
+    "HERMES_AGENT_TIMEOUT_WARNING",
+    "HERMES_AGENT_NOTIFY_INTERVAL",
+    "HERMES_RESTART_DRAIN_TIMEOUT",
+    "HERMES_AUTO_CONTINUE_FRESHNESS",
+    "HERMES_GATEWAY_BUSY_INPUT_MODE",
+    "HERMES_GATEWAY_BUSY_ACK_ENABLED",
+    "HERMES_TIMEZONE",
+    "HERMES_REDACT_SECRETS",
+)
+
 
 def _reload_runtime_env_preserving_config_authority() -> None:
     """Reload .env for fresh credentials without letting stale .env override config.
@@ -685,6 +698,9 @@ def _reload_runtime_env_preserving_config_authority() -> None:
     settings such as agent.max_turns; otherwise a stale HERMES_MAX_ITERATIONS in
     .env can replace the startup bridge on later turns.
     """
+    prior_config_env = {
+        name: os.environ.get(name) for name in _CONFIG_AUTHORITATIVE_ENV_VARS
+    }
     load_hermes_dotenv(
         hermes_home=_hermes_home,
         project_env=Path(__file__).resolve().parents[1] / '.env',
@@ -700,11 +716,46 @@ def _reload_runtime_env_preserving_config_authority() -> None:
         from hermes_cli.config import _expand_env_vars
         cfg = _expand_env_vars(cfg)
     except Exception:
+        # .env has already been reloaded. Restore config-authoritative env
+        # mirrors to their pre-reload values so a transient config parse error
+        # cannot let stale .env settings shadow the last known-good bridge.
+        for name, value in prior_config_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         return
 
     agent_cfg = cfg.get("agent", {})
-    if isinstance(agent_cfg, dict) and "max_turns" in agent_cfg:
-        os.environ["HERMES_MAX_ITERATIONS"] = str(agent_cfg["max_turns"])
+    if isinstance(agent_cfg, dict):
+        if "max_turns" in agent_cfg:
+            os.environ["HERMES_MAX_ITERATIONS"] = str(agent_cfg["max_turns"])
+        if "gateway_timeout" in agent_cfg:
+            os.environ["HERMES_AGENT_TIMEOUT"] = str(agent_cfg["gateway_timeout"])
+        if "gateway_timeout_warning" in agent_cfg:
+            os.environ["HERMES_AGENT_TIMEOUT_WARNING"] = str(agent_cfg["gateway_timeout_warning"])
+        if "gateway_notify_interval" in agent_cfg:
+            os.environ["HERMES_AGENT_NOTIFY_INTERVAL"] = str(agent_cfg["gateway_notify_interval"])
+        if "restart_drain_timeout" in agent_cfg:
+            os.environ["HERMES_RESTART_DRAIN_TIMEOUT"] = str(agent_cfg["restart_drain_timeout"])
+        if "gateway_auto_continue_freshness" in agent_cfg:
+            os.environ["HERMES_AUTO_CONTINUE_FRESHNESS"] = str(
+                agent_cfg["gateway_auto_continue_freshness"]
+            )
+    display_cfg = cfg.get("display", {})
+    if isinstance(display_cfg, dict):
+        if "busy_input_mode" in display_cfg:
+            os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(display_cfg["busy_input_mode"])
+        if "busy_ack_enabled" in display_cfg:
+            os.environ["HERMES_GATEWAY_BUSY_ACK_ENABLED"] = str(display_cfg["busy_ack_enabled"])
+    timezone_cfg = cfg.get("timezone", "")
+    if timezone_cfg and isinstance(timezone_cfg, str):
+        os.environ["HERMES_TIMEZONE"] = timezone_cfg.strip()
+    security_cfg = cfg.get("security", {})
+    if isinstance(security_cfg, dict):
+        redact = security_cfg.get("redact_secrets")
+        if redact is not None:
+            os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
@@ -1156,6 +1207,14 @@ _CONTROL_INTERRUPT_MESSAGES = frozenset(
         _INTERRUPT_REASON_GATEWAY_RESTART.lower(),
     }
 )
+
+
+def _gateway_draining_message(count: int) -> str:
+    """Return the user-facing drain message with an English fallback."""
+    message = t("gateway.draining", count=count)
+    if message == "gateway.draining":
+        return f"⏳ Draining {count} active agent(s) before restart..."
+    return message
 
 
 def _is_control_interrupt_message(message: Optional[str]) -> bool:
@@ -3344,9 +3403,14 @@ class GatewayRunner:
                 )
             except Exception:
                 pass
-            self._cleanup_agent_resources(agent)
+            self._cleanup_agent_resources(agent, cleanup_shared_default=True)
 
-    def _cleanup_agent_resources(self, agent: Any) -> None:
+    def _cleanup_agent_resources(
+        self,
+        agent: Any,
+        *,
+        cleanup_shared_default: bool = False,
+    ) -> None:
         """Best-effort cleanup for temporary or cached agent instances."""
         if agent is None:
             return
@@ -3374,7 +3438,7 @@ class GatewayRunner:
         # process accumulation.
         try:
             if hasattr(agent, "close"):
-                agent.close()
+                agent.close(cleanup_shared_default=cleanup_shared_default)
         except Exception:
             pass
         # Auxiliary async clients (session_search/web/vision/etc.) live in a
@@ -5747,6 +5811,7 @@ class GatewayRunner:
 
             _drain_started_at = time.monotonic()
             active_agents, timed_out = await self._drain_active_agents(timeout)
+            timed_out_session_keys: set[str] = set()
             logger.info(
                 "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
                 "timed_out=%s, active_at_start=%d, active_now=%d)",
@@ -5804,6 +5869,7 @@ class GatewayRunner:
                 for _sk, _agent in list(self._running_agents.items()):
                     if _agent is _AGENT_PENDING_SENTINEL:
                         continue
+                    timed_out_session_keys.add(_sk)
                     try:
                         self.session_store.mark_resume_pending(_sk, _resume_reason)
                     except Exception as _e:
@@ -5856,7 +5922,10 @@ class GatewayRunner:
                     _agent = (
                         _entry[0] if isinstance(_entry, tuple) else _entry
                     )
-                    self._cleanup_agent_resources(_agent)
+                    self._cleanup_agent_resources(
+                        _agent,
+                        cleanup_shared_default=True,
+                    )
 
             for platform, adapter in list(self.adapters.items()):
                 _adapter_started_at = time.monotonic()
@@ -5967,12 +6036,11 @@ class GatewayRunner:
                 )
 
             # Track sessions that were active at shutdown for stuck-loop
-            # detection (#7536).  On each restart, the counter increments
-            # for sessions that were running.  If a session hits the
-            # threshold (3 consecutive restarts while active), the next
-            # startup auto-suspends it — breaking the loop.
-            if active_agents:
-                self._increment_restart_failure_counts(set(active_agents.keys()))
+            # detection (#7536).  Only sessions still running at drain timeout
+            # are counted; the drain-start snapshot may include sessions that
+            # completed cleanly during the grace window.
+            if timed_out_session_keys:
+                self._increment_restart_failure_counts(timed_out_session_keys)
 
             if self._restart_requested and self._restart_via_service:
                 self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
@@ -9775,7 +9843,7 @@ class GatewayRunner:
         if self._restart_requested or self._draining:
             count = self._running_agent_count()
             if count:
-                return t("gateway.draining", count=count)
+                return _gateway_draining_message(count)
             return EphemeralReply(t("gateway.restart.in_progress"))
 
         # Save the requester's routing info so the new gateway process can
@@ -9829,7 +9897,7 @@ class GatewayRunner:
         else:
             self.request_restart(detached=True, via_service=False)
         if active_agents:
-            return t("gateway.draining", count=active_agents)
+            return _gateway_draining_message(active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))
 
     def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
@@ -16203,9 +16271,6 @@ class GatewayRunner:
             # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
 
-            # Read from env var or use default (same as CLI)
-            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
-            
             # Map platform enum to the platform hint key the agent understands.
             # Platform.LOCAL ("local") maps to "cli"; others pass through as-is.
             platform_key = "cli" if source.platform == Platform.LOCAL else source.platform.value
@@ -16223,6 +16288,9 @@ class GatewayRunner:
             # keys may change without restart). Keep config.yaml authoritative for
             # runtime budget settings bridged into env vars.
             _reload_runtime_env_preserving_config_authority()
+            # Read after reload so config.yaml remains authoritative over stale
+            # .env values for both fresh and cached agents.
+            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
             try:
                 model, runtime_kwargs = self._resolve_session_agent_runtime(
@@ -16381,6 +16449,7 @@ class GatewayRunner:
                             except KeyError:
                                 pass
                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
+                        agent.max_iterations = max_iterations
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:

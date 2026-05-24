@@ -272,6 +272,22 @@ class TestImports:
         assert isinstance(mcp_serve._MCP_SERVER_AVAILABLE, bool)
 
 
+class TestEntryPoint:
+    def test_main_passes_verbose_flag(self, monkeypatch):
+        import mcp_serve
+
+        called = {}
+        monkeypatch.setattr(
+            mcp_serve,
+            "run_mcp_server",
+            lambda *, verbose=False: called.setdefault("verbose", verbose),
+        )
+
+        mcp_serve.main(["--verbose"])
+
+        assert called == {"verbose": True}
+
+
 class TestHelpers:
     def test_get_sessions_dir(self, tmp_path):
         from mcp_serve import _get_sessions_dir
@@ -921,8 +937,22 @@ class TestE2EPermissions:
 
 
 # ---------------------------------------------------------------------------
-# 4. TOOL LISTING — verify all 10 tools are registered
+# 4. TOOL LISTING — messaging tools always; skills tools when module loads
 # ---------------------------------------------------------------------------
+
+_MESSAGING_MCP_TOOLS = frozenset({
+    "conversations_list", "conversation_get", "messages_read",
+    "attachments_fetch", "events_poll", "events_wait",
+    "messages_send", "channels_list",
+    "permissions_list_open", "permissions_respond",
+})
+
+_SKILLS_MCP_TOOLS = frozenset({
+    "fleet_context_snapshot", "agent_health_summary", "town_brief",
+    "skills_list", "skills_read", "agents_list", "agents_get",
+    "knowledge_read", "knowledge_query", "learnings_read", "artifacts_list",
+})
+
 
 class TestToolRegistration:
     def test_all_tools_registered(self, mcp_server_e2e, _event_loop):
@@ -930,13 +960,16 @@ class TestToolRegistration:
         tools = server._tool_manager.list_tools()
         tool_names = {t.name for t in tools}
 
-        expected = {
-            "conversations_list", "conversation_get", "messages_read",
-            "attachments_fetch", "events_poll", "events_wait",
-            "messages_send", "channels_list",
-            "permissions_list_open", "permissions_respond",
-        }
-        assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
+        missing_messaging = _MESSAGING_MCP_TOOLS - tool_names
+        assert not missing_messaging, f"Missing messaging tools: {missing_messaging}"
+
+        # hermes_skills_mcp ships with the repo and registers when importable
+        if _SKILLS_MCP_TOOLS <= tool_names:
+            assert len(tool_names) == len(_MESSAGING_MCP_TOOLS) + len(_SKILLS_MCP_TOOLS)
+        else:
+            assert tool_names == set(_MESSAGING_MCP_TOOLS), (
+                f"Unexpected extra tools: {tool_names - _MESSAGING_MCP_TOOLS}"
+            )
 
     def test_tools_have_descriptions(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
