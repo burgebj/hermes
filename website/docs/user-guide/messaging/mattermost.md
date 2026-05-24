@@ -254,6 +254,20 @@ See also: [admin/user slash command split](../../reference/slash-commands.md#per
 
 ## Troubleshooting
 
+### `/approve` says the slash command is not registered
+
+Mattermost intercepts unknown slash commands before bots can see them. If a
+dangerous-command approval prompt appears in Mattermost, reply without the
+slash:
+
+- `approve` — approve once
+- `approve session` — approve the same pattern for this session
+- `approve always` — approve the same pattern permanently
+- `deny` — cancel
+
+Hermes only accepts these bare aliases while a command approval is actively
+pending, so regular conversation text such as "yes" does not execute anything.
+
 ### Bot is not responding to messages
 
 **Cause**: The bot is not a member of the channel, or `MATTERMOST_ALLOWED_USERS` doesn't include your User ID.
