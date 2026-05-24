@@ -136,8 +136,9 @@ def _chrome_debug_args(port: int) -> list[str]:
 def is_browser_debug_ready(url: str, timeout: float = 1.0) -> bool:
     """Return True when ``url`` exposes a reachable Chrome DevTools endpoint."""
     import socket
-    import urllib.request
     from urllib.parse import urlparse
+
+    from utils import urlopen_bypass_proxy_for_loopback
 
     parsed = urlparse(url if "://" in url else f"http://{url}")
     try:
@@ -161,7 +162,7 @@ def is_browser_debug_ready(url: str, timeout: float = 1.0) -> bool:
     root = f"{scheme}://{parsed.netloc}".rstrip("/")
     for probe in (f"{root}/json/version", f"{root}/json"):
         try:
-            with urllib.request.urlopen(probe, timeout=timeout) as resp:
+            with urlopen_bypass_proxy_for_loopback(probe, timeout=timeout) as resp:
                 if 200 <= getattr(resp, "status", 200) < 300:
                     return True
         except Exception:

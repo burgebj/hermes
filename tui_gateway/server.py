@@ -6196,10 +6196,10 @@ def _is_default_local_cdp(parsed) -> bool:
 
 
 def _http_ok(url: str, timeout: float) -> bool:
-    import urllib.request
+    from utils import urlopen_bypass_proxy_for_loopback
 
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urlopen_bypass_proxy_for_loopback(url, timeout=timeout) as resp:
             return 200 <= getattr(resp, "status", 200) < 300
     except Exception:
         return False
