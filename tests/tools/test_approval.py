@@ -45,6 +45,33 @@ class TestSmartApproval:
         assert mock_call.call_args.kwargs["temperature"] == 0
         assert mock_call.call_args.kwargs["max_tokens"] == 16
 
+    def test_smart_approval_accepts_exact_deny(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="DENY"))]
+        )
+        with mock_patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = _smart_approve("rm -rf /tmp/demo", "recursive delete")
+
+        assert result == "deny"
+
+    def test_smart_approval_does_not_accept_disapprove_substring(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="DISAPPROVE"))]
+        )
+        with mock_patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = _smart_approve("rm -rf /tmp/demo", "recursive delete")
+
+        assert result == "escalate"
+
+    def test_smart_approval_does_not_accept_embedded_approve_phrase(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="DO NOT APPROVE"))]
+        )
+        with mock_patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = _smart_approve("rm -rf /tmp/demo", "recursive delete")
+
+        assert result == "escalate"
+
 
 class TestDetectDangerousRm:
     def test_rm_rf_detected(self):

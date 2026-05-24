@@ -897,10 +897,12 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
         )
 
         answer = (response.choices[0].message.content or "").strip().upper()
+        token_match = re.match(r"([A-Z]+)\b", answer)
+        verdict = token_match.group(1) if token_match else ""
 
-        if "APPROVE" in answer:
+        if verdict == "APPROVE":
             return "approve"
-        elif "DENY" in answer:
+        elif verdict == "DENY":
             return "deny"
         else:
             return "escalate"
