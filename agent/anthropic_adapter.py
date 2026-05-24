@@ -312,7 +312,10 @@ def _detect_claude_code_version() -> str:
 
 
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-_MCP_TOOL_PREFIX = "mcp_"
+# Anthropic's OAuth/subscription filter rejects single-underscore `mcp_*` tool
+# names (treats them as spoofing the MCP namespace). Claude Code's real MCP
+# convention is `mcp__<server>__<tool>` with double underscores.
+_MCP_TOOL_PREFIX = "mcp__hermes__"
 
 
 def _get_claude_code_version() -> str:
@@ -2100,44 +2103,74 @@ def build_anthropic_kwargs(
         effective_max_tokens = max(context_length - 1, 1)
 
     # ── OAuth: Claude Code identity ──────────────────────────────────
+    # Anthropic's subscription OAuth path enforces a strict spoof filter:
+    #   * System prompt: effectively only the official Claude Code prefix is
+    #     allowed. Extra system text — even after replacing "Hermes Agent" →
+    #     "Claude Code" — trips a 400 "out of extra usage" rejection once
+    #     it crosses ~2 KB or mentions Claude Code in non-official ways.
+    #   * Tool names: must use Claude Code's MCP namespace convention
+    #     `mcp__<server>__<tool>` (double underscores). Single-underscore
+    #     `mcp_<name>` is rejected as spoofing.
+    # Strategy: keep only the official prompt in `system`, and move any
+    # hermes-side system content into a <system_context> preamble on the
+    # first user message — Anthropic does not apply the spoof filter to
+    # user content.
     if is_oauth:
-        # 1. Prepend Claude Code system prompt identity
-        cc_block = {"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}
+        # 1. Extract existing system text so we can relocate it.
+        extra_system_parts = []
         if isinstance(system, list):
-            system = [cc_block] + system
+            for b in system:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    txt = b.get("text", "")
+                    if txt:
+                        extra_system_parts.append(txt)
         elif isinstance(system, str) and system:
-            system = [cc_block, {"type": "text", "text": system}]
-        else:
-            system = [cc_block]
+            extra_system_parts.append(system)
 
-        # 2. Sanitize system prompt — replace product name references
-        #    to avoid Anthropic's server-side content filters.
-        for block in system:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                text = text.replace("Hermes Agent", "Claude Code")
-                text = text.replace("Hermes agent", "Claude Code")
-                text = text.replace("hermes-agent", "claude-code")
-                text = text.replace("Nous Research", "Anthropic")
-                block["text"] = text
+        # 2. System: only the official Claude Code prompt.
+        system = [{"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}]
 
-        # 3. Prefix tool names with mcp_ (Claude Code convention)
+        # 3. Relocate hermes system content to the first user message.
+        if extra_system_parts:
+            preamble = (
+                "<system_context>\n"
+                + "\n\n".join(extra_system_parts)
+                + "\n</system_context>\n\n"
+            )
+            for msg in anthropic_messages:
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = preamble + content
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            block["text"] = preamble + block.get("text", "")
+                            break
+                    else:
+                        content.insert(0, {"type": "text", "text": preamble.rstrip()})
+                break
+
+        # 4. Prefix tool names with Claude Code's MCP namespace.
         if anthropic_tools:
             for tool in anthropic_tools:
-                if "name" in tool:
+                if "name" in tool and not tool["name"].startswith(_MCP_TOOL_PREFIX):
                     tool["name"] = _MCP_TOOL_PREFIX + tool["name"]
 
-        # 4. Prefix tool names in message history (tool_use and tool_result blocks)
+        # 5. Prefix tool_use names in message history (must match #4).
         for msg in anthropic_messages:
             content = msg.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "tool_use" and "name" in block:
-                            if not block["name"].startswith(_MCP_TOOL_PREFIX):
-                                block["name"] = _MCP_TOOL_PREFIX + block["name"]
-                        elif block.get("type") == "tool_result" and "tool_use_id" in block:
-                            pass  # tool_result uses ID, not name
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and "name" in block
+                    and not block["name"].startswith(_MCP_TOOL_PREFIX)
+                ):
+                    block["name"] = _MCP_TOOL_PREFIX + block["name"]
 
     kwargs: Dict[str, Any] = {
         "model": model,

@@ -1322,6 +1322,226 @@ class TestBuildAnthropicKwargs:
 
 
 # ---------------------------------------------------------------------------
+# OAuth spoof-filter compliance
+# ---------------------------------------------------------------------------
+# Anthropic's subscription OAuth path enforces a server-side spoof filter
+# that rejects requests with a 400 "out of extra usage" when:
+#   1. tool names use single-underscore mcp_X (must be mcp__server__tool)
+#   2. system text impersonates Claude Code beyond the official prefix
+# These tests pin the contract.
+
+
+class TestOauthSpoofFilterCompliance:
+    OFFICIAL = "You are Claude Code, Anthropic's official CLI for Claude."
+
+    @staticmethod
+    def _tool(name, desc="", props=None):
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": {"type": "object", "properties": props or {}},
+            },
+        }
+
+    def test_mcp_tool_prefix_is_double_underscore_namespace(self):
+        """The shared prefix constant must use Claude Code's MCP namespace."""
+        from agent.anthropic_adapter import _MCP_TOOL_PREFIX
+        assert _MCP_TOOL_PREFIX == "mcp__hermes__", (
+            "Single-underscore mcp_X tool names trigger Anthropic's spoof "
+            "filter — `mcp__hermes__X` is the Claude Code MCP convention."
+        )
+
+    def test_transport_uses_shared_prefix_constant(self):
+        """Receiver-side strip must reuse the adapter's prefix constant, not
+        a literal that can drift out of sync."""
+        from pathlib import Path
+        import agent.transports.anthropic as _ta
+        src = Path(_ta.__file__).read_text(encoding="utf-8")
+        assert "_MCP_TOOL_PREFIX" in src, (
+            "transports/anthropic.py must import _MCP_TOOL_PREFIX from "
+            "anthropic_adapter so the prefix stays in sync."
+        )
+        assert '_MCP_PREFIX' not in src, (
+            "Drop the local _MCP_PREFIX literal — use the imported constant."
+        )
+
+    # ── System prompt handling ───────────────────────────────────────
+
+    def test_oauth_system_reduced_to_official_prefix_only(self):
+        """Hermes-side system text must NOT appear in `system` on OAuth."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[
+                {"role": "system", "content": "You are Hermes Agent, an intelligent AI assistant."},
+                {"role": "user", "content": "hi"},
+            ],
+            tools=None,
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        assert kwargs["system"] == [{"type": "text", "text": self.OFFICIAL}]
+
+    def test_oauth_system_relocated_to_first_user_message(self):
+        """A hermes system prompt becomes a <system_context> preamble."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[
+                {"role": "system", "content": "Be terse."},
+                {"role": "user", "content": "do the thing"},
+            ],
+            tools=None,
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        first_user = kwargs["messages"][0]
+        assert first_user["role"] == "user"
+        content = first_user["content"]
+        text = content if isinstance(content, str) else "".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        )
+        assert "<system_context>" in text
+        assert "Be terse." in text
+        assert "</system_context>" in text
+        assert text.endswith("do the thing")
+
+    def test_oauth_no_extra_system_keeps_user_message_clean(self):
+        """If no hermes-side system content, user message is unchanged."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        assert kwargs["system"] == [{"type": "text", "text": self.OFFICIAL}]
+        content = kwargs["messages"][0]["content"]
+        text = content if isinstance(content, str) else "".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        )
+        assert "<system_context>" not in text
+        assert text == "hi"
+
+    def test_oauth_does_not_include_hermes_identity_string(self):
+        """Regression: spoof filter rejected sanitized hermes identity. Ensure it's gone."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[
+                {"role": "system", "content": "You are Hermes Agent, helpful and direct."},
+                {"role": "user", "content": "x"},
+            ],
+            tools=None,
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        # System must NOT contain the hermes-identity sentence in any form
+        sys_text = "".join(b["text"] for b in kwargs["system"])
+        assert "Hermes Agent" not in sys_text
+        # The pre-patch sanitizer's output ("You are Claude Code, an intelligent
+        # AI assistant created by Anthropic.") was itself the spoof trigger —
+        # make sure we no longer emit that synthetic phrase in `system`.
+        assert "intelligent AI assistant" not in sys_text
+
+    # ── Tool naming ───────────────────────────────────────────────────
+
+    def test_oauth_tools_get_double_underscore_prefix(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                self._tool("browser_back", "Go back"),
+                self._tool("terminal", "Run shell", {"command": {"type": "string"}}),
+            ],
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        names = [t["name"] for t in kwargs["tools"]]
+        assert names == ["mcp__hermes__browser_back", "mcp__hermes__terminal"]
+        # No single-underscore mcp_ prefix should remain
+        for n in names:
+            assert not (n.startswith("mcp_") and not n.startswith("mcp__")), n
+
+    def test_oauth_tool_prefix_is_idempotent(self):
+        """Already-prefixed tools must not be double-prefixed (retry safety)."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[self._tool("mcp__hermes__terminal")],
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        assert kwargs["tools"][0]["name"] == "mcp__hermes__terminal"
+
+    def test_oauth_tool_use_in_history_gets_prefixed(self):
+        """tool_use blocks in prior turns must be renamed to match new tools."""
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[
+                {"role": "user", "content": "list"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "terminal",
+                     "input": {"command": "ls"}},
+                ]},
+                {"role": "tool", "tool_call_id": "tu_1", "content": "a b c"},
+            ],
+            tools=[self._tool("terminal")],
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        # Find the assistant message; its tool_use should now use the prefix.
+        for msg in kwargs["messages"]:
+            if msg.get("role") == "assistant":
+                blocks = msg["content"]
+                if isinstance(blocks, list):
+                    for b in blocks:
+                        if isinstance(b, dict) and b.get("type") == "tool_use":
+                            assert b["name"] == "mcp__hermes__terminal"
+                            break
+
+    # ── Non-OAuth path stays clean ────────────────────────────────────
+
+    def test_non_oauth_system_passes_through_unchanged(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[
+                {"role": "system", "content": "You are Hermes Agent."},
+                {"role": "user", "content": "hi"},
+            ],
+            tools=None,
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=False,
+        )
+        # Non-OAuth: system stays as-is (string), no <system_context> wrap.
+        assert kwargs["system"] == "You are Hermes Agent."
+        content = kwargs["messages"][0]["content"]
+        text = content if isinstance(content, str) else "".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        )
+        assert "<system_context>" not in text
+        assert text == "hi"
+
+    def test_non_oauth_tools_not_prefixed(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[self._tool("terminal")],
+            max_tokens=64,
+            reasoning_config=None,
+            is_oauth=False,
+        )
+        assert kwargs["tools"][0]["name"] == "terminal"
+
+
+# ---------------------------------------------------------------------------
 # Model output limit lookup
 # ---------------------------------------------------------------------------
 
