@@ -15,6 +15,10 @@ from pathlib import Path
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
+from agent.security_patterns import (
+    DISREGARD_RULES_PATTERN,
+    IGNORE_INSTRUCTIONS_PATTERN,
+)
 from agent.skill_utils import (
     extract_skill_conditions,
     extract_skill_description,
@@ -34,10 +38,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _CONTEXT_THREAT_PATTERNS = [
-    (r'ignore\s+(previous|all|above|prior)\s+instructions', "prompt_injection"),
+    (IGNORE_INSTRUCTIONS_PATTERN, "prompt_injection"),
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
     (r'system\s+prompt\s+override', "sys_prompt_override"),
-    (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
+    (DISREGARD_RULES_PATTERN, "disregard_rules"),
     (r'act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(restrictions|limits|rules)', "bypass_restrictions"),
     (r'<!--[^>]*(?:ignore|override|system|secret|hidden)[^>]*-->', "html_comment_injection"),
     (r'<\s*div\s+style\s*=\s*["\'][\s\S]*?display\s*:\s*none', "hidden_div"),
