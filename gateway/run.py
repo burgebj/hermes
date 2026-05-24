@@ -3555,6 +3555,9 @@ class GatewayRunner:
         # current run finishes (or is interrupted).  Skip this for a
         # successful steer — the text already landed inside the run and
         # must NOT also be replayed as a next-turn user message.
+        # Snapshot inbound text before merge: merge_text=True appends to the
+        # pending slot, which may alias the same MessageEvent object.
+        interrupt_text = event.text
         if not steered:
             merge_pending_message_event(
                 adapter._pending_messages,
@@ -3571,7 +3574,7 @@ class GatewayRunner:
         # at the next check point.
         if effective_mode == "interrupt" and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
-                running_agent.interrupt(event.text)
+                running_agent.interrupt(interrupt_text)
             except Exception:
                 pass  # don't let interrupt failure block the ack
 
