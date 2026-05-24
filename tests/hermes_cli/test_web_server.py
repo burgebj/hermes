@@ -327,6 +327,19 @@ class TestWebServerEndpoints:
         # Public endpoints should still work
         resp = unauth_client.get("/api/status")
         assert resp.status_code == 200
+        data = resp.json()
+        assert "version" in data
+        assert "gateway_running" in data
+        for key in (
+            "hermes_home",
+            "config_path",
+            "env_path",
+            "gateway_pid",
+            "gateway_health_url",
+            "gateway_platforms",
+            "active_sessions",
+        ):
+            assert key not in data
 
     def test_path_traversal_blocked(self):
         """Verify URL-encoded path traversal is blocked."""
