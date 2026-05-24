@@ -187,6 +187,38 @@ class TestBusySessionAck:
         assert "Interrupting" not in content
 
     @pytest.mark.asyncio
+    async def test_voice_server_interrupt_suppresses_busy_ack(self):
+        from gateway.config import Platform
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter("voice_server")
+
+        source = SessionSource(
+            platform=Platform.VOICE_SERVER,
+            chat_id="personal-room",
+            chat_type="channel",
+            user_id="caller",
+        )
+        event = MessageEvent(
+            text="actually, stop",
+            message_type=MessageType.VOICE,
+            source=source,
+            message_id="voice-1",
+        )
+        sk = build_session_key(source)
+        runner.adapters[source.platform] = adapter
+
+        agent = MagicMock()
+        runner._running_agents[sk] = agent
+
+        result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        agent.interrupt.assert_called_once_with("actually, stop")
+        adapter._send_with_retry.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_steer_mode_calls_agent_steer_no_interrupt_no_queue(self):
         """busy_input_mode='steer' injects via agent.steer() and skips queueing."""
         runner, sentinel = _make_runner()

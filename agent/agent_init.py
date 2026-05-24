@@ -398,6 +398,7 @@ def init_agent(
     agent.clarify_callback = clarify_callback
     agent.step_callback = step_callback
     agent.stream_delta_callback = stream_delta_callback
+    agent.assistant_message_metadata_callback = None
     agent.interim_assistant_callback = interim_assistant_callback
     agent.status_callback = status_callback
     agent.tool_gen_callback = tool_gen_callback
