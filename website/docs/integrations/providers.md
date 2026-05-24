@@ -1480,7 +1480,9 @@ fallback_providers:
     # api_mode: chat_completions           # optional override
 ```
 
-The legacy single-pair `fallback_model:` dict is still accepted for back-compat:
+### Legacy single-pair `fallback_model:` dict {#fallback-model}
+
+This form is still accepted for back-compat:
 
 ```yaml
 fallback_model:
