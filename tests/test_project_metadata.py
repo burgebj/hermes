@@ -11,11 +11,15 @@ def _load_optional_dependencies():
     return project["optional-dependencies"]
 
 
-def _load_package_data():
+def _load_setuptools_config():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
         tool = tomllib.load(handle)["tool"]
-    return tool["setuptools"]["package-data"]
+    return tool["setuptools"]
+
+
+def _load_package_data():
+    return _load_setuptools_config()["package-data"]
 
 
 def test_matrix_extra_not_in_all():
@@ -154,3 +158,15 @@ def test_nested_bundled_plugin_metadata_is_packaged():
     assert "**/plugin.yaml" in plugin_data
     assert "**/plugin.yml" in plugin_data
     assert "**/README.md" in plugin_data
+
+
+def test_mcp_serve_module_is_packaged_for_registry_launch():
+    """The MCP registry entry launches `hermes mcp serve` from the PyPI wheel.
+
+    `hermes_cli.main` imports the top-level `mcp_serve` module for that
+    subcommand, so the module must be listed explicitly in setuptools'
+    `py-modules` list.
+    """
+    py_modules = _load_setuptools_config()["py-modules"]
+
+    assert "mcp_serve" in py_modules
