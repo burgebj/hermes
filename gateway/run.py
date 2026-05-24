@@ -3002,7 +3002,7 @@ class GatewayRunner:
         # successful steer — the text already landed inside the run and
         # must NOT also be replayed as a next-turn user message.
         if not steered:
-            merge_pending_message_event(adapter._pending_messages, session_key, event)
+            self._enqueue_fifo(session_key, event, adapter)
 
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
