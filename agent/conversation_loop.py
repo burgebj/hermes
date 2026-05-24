@@ -3941,6 +3941,84 @@ def run_conversation(
                     exc_info=True,
                 )
 
+    # File-mutation verifier footer.
+    # If one or more ``write_file`` / ``patch`` calls failed during this
+    # turn and were never superseded by a successful write to the same
+    # path, append an advisory footer to the assistant response.  This
+    # catches the specific case — reported by Ben Eng (#15524-adjacent)
+    # — where a model issues a batch of parallel patches, half of them
+    # fail with "Could not find old_string", and the model summarises
+    # the turn claiming every file was edited.  The user then has to
+    # manually run ``git status`` to catch the lie.  With this footer
+    # the truth is surfaced on every turn, so over-claiming is
+    # structurally impossible past the model.
+    #
+    # Gate: only applied when a real text response exists for this
+    # turn and the user didn't interrupt.  Empty/interrupted turns
+    # already have other surface text that shouldn't be augmented.
+    if final_response and not interrupted:
+        try:
+            _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
+            if _failed and agent._file_mutation_verifier_enabled():
+                footer = agent._format_file_mutation_failure_footer(_failed)
+                if footer:
+                    final_response = final_response.rstrip() + "\n\n" + footer
+        except Exception as _ver_err:
+            logger.debug("file-mutation verifier footer failed: %s", _ver_err)
+
+    # Plugin hook: transform_llm_output
+    # Fired once per turn after the tool-calling loop completes.
+    # Plugins can transform the LLM's output text before it's returned.
+    # First hook to return a string wins; None/empty return leaves text unchanged.
+    if final_response and not interrupted:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _transform_results = _invoke_hook(
+                "transform_llm_output",
+                response_text=final_response,
+                session_id=agent.session_id or "",
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+            for _hook_result in _transform_results:
+                if isinstance(_hook_result, str) and _hook_result:
+                    final_response = _hook_result
+                    break  # First non-empty string wins
+        except Exception as exc:
+            logger.warning("transform_llm_output hook failed: %s", exc)
+
+    # Plugin hook: post_llm_call
+    # Fired once per turn after the tool-calling loop completes.
+    # Plugins can use this to persist conversation data (e.g. sync
+    # to an external memory system) or override the final response.
+    # IMPORTANT: runs BEFORE _persist_session so that any response
+    # overrides are captured in the persisted history (#14894).
+    if final_response and not interrupted:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _hook_results = _invoke_hook(
+                "post_llm_call",
+                session_id=agent.session_id,
+                user_message=original_user_message,
+                assistant_response=final_response,
+                conversation_history=list(messages),
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+            # Apply response override if a plugin returned one
+            if isinstance(_hook_results, list):
+                for _hr in _hook_results:
+                    if isinstance(_hr, dict) and _hr.get("override_response"):
+                        final_response = _hr["override_response"]
+                        # Update the last assistant message so the
+                        # persisted history matches the returned response.
+                        for _m in reversed(messages):
+                            if _m.get("role") == "assistant":
+                                _m["content"] = final_response
+                                break
+        except Exception as exc:
+            logger.warning("post_llm_call hook failed: %s", exc)
+
     # Determine if conversation completed successfully
     completed = (
         final_response is not None
@@ -4005,71 +4083,6 @@ def run_conversation(
         )
     else:
         logger.info(_diag_msg, *_diag_args)
-
-    # File-mutation verifier footer.
-    # If one or more ``write_file`` / ``patch`` calls failed during this
-    # turn and were never superseded by a successful write to the same
-    # path, append an advisory footer to the assistant response.  This
-    # catches the specific case — reported by Ben Eng (#15524-adjacent)
-    # — where a model issues a batch of parallel patches, half of them
-    # fail with "Could not find old_string", and the model summarises
-    # the turn claiming every file was edited.  The user then has to
-    # manually run ``git status`` to catch the lie.  With this footer
-    # the truth is surfaced on every turn, so over-claiming is
-    # structurally impossible past the model.
-    #
-    # Gate: only applied when a real text response exists for this
-    # turn and the user didn't interrupt.  Empty/interrupted turns
-    # already have other surface text that shouldn't be augmented.
-    if final_response and not interrupted:
-        try:
-            _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
-            if _failed and agent._file_mutation_verifier_enabled():
-                footer = agent._format_file_mutation_failure_footer(_failed)
-                if footer:
-                    final_response = final_response.rstrip() + "\n\n" + footer
-        except Exception as _ver_err:
-            logger.debug("file-mutation verifier footer failed: %s", _ver_err)
-
-    # Plugin hook: transform_llm_output
-    # Fired once per turn after the tool-calling loop completes.
-    # Plugins can transform the LLM's output text before it's returned.
-    # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
-        try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _transform_results = _invoke_hook(
-                "transform_llm_output",
-                response_text=final_response,
-                session_id=agent.session_id or "",
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-            for _hook_result in _transform_results:
-                if isinstance(_hook_result, str) and _hook_result:
-                    final_response = _hook_result
-                    break  # First non-empty string wins
-        except Exception as exc:
-            logger.warning("transform_llm_output hook failed: %s", exc)
-
-    # Plugin hook: post_llm_call
-    # Fired once per turn after the tool-calling loop completes.
-    # Plugins can use this to persist conversation data (e.g. sync
-    # to an external memory system).
-    if final_response and not interrupted:
-        try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "post_llm_call",
-                session_id=agent.session_id,
-                user_message=original_user_message,
-                assistant_response=final_response,
-                conversation_history=list(messages),
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-        except Exception as exc:
-            logger.warning("post_llm_call hook failed: %s", exc)
 
     # Extract reasoning from the CURRENT turn only.  Walk backwards
     # but stop at the user message that started this turn — anything
