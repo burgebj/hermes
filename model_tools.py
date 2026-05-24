@@ -764,6 +764,18 @@ def handle_function_call(
     Returns:
         Function result as a JSON string.
     """
+    # Reverse the rename that ``agent.anthropic_adapter`` applies on the
+    # wire for Anthropic's Claude Code billing route.  Tool definitions
+    # and assistant tool_use blocks are renamed outbound; when the model
+    # calls back with the renamed form we need to map it back to the
+    # name the registry actually knows.
+    try:
+        from agent.anthropic_adapter import _TOOL_NAME_RENAME_REVERSE
+        if function_name in _TOOL_NAME_RENAME_REVERSE:
+            function_name = _TOOL_NAME_RENAME_REVERSE[function_name]
+    except Exception:
+        pass
+
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
 

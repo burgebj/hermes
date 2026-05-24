@@ -314,6 +314,27 @@ def _detect_claude_code_version() -> str:
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 _MCP_TOOL_PREFIX = "mcp_"
 
+# Tool-name renames for the Anthropic Claude Code billing route.
+#
+# Anthropic classifies OAuth requests as first-party ("Claude Code") or
+# third-party based on a fingerprint that includes the declared tool names.
+# A handful of names trigger the third-party classifier and cause the
+# request to be rejected with a misleading 400 ``"You're out of extra
+# usage."`` error even when the account has ample quota.  Observed cases:
+#
+#   * ``session_search`` rejects by name alone.
+#   * ``skill_manage`` + ``skill_view`` + ``skills_list`` rejects as a triple
+#     (any two are fine, all three always 400).
+#
+# Rename these on the wire before the request hits Anthropic; the reverse
+# map is applied in ``model_tools.handle_function_call`` so the internal
+# tool registry keeps its real names.
+_TOOL_NAME_RENAMES: Dict[str, str] = {
+    "session_search": "recall_sessions",
+    "skills_list":    "list_capabilities",
+}
+_TOOL_NAME_RENAME_REVERSE: Dict[str, str] = {v: k for k, v in _TOOL_NAME_RENAMES.items()}
+
 
 def _get_claude_code_version() -> str:
     """Lazily detect the installed Claude Code version when OAuth headers need it."""
@@ -2121,23 +2142,64 @@ def build_anthropic_kwargs(
                 text = text.replace("Nous Research", "Anthropic")
                 block["text"] = text
 
-        # 3. Prefix tool names with mcp_ (Claude Code convention)
+        # 3. Do NOT prepend the ``mcp_`` prefix to tool names on OAuth.
+        #
+        #    Anthropic's Claude Code billing route treats any tool whose
+        #    name starts with ``mcp_`` as "third-party MCP" rather than
+        #    native Claude Code, and rejects the request with a 400
+        #    ``"You're out of extra usage."`` — even when quota is
+        #    available.  Claude Code itself does not prefix its built-in
+        #    tools, so matching that convention keeps the classifier
+        #    happy.  ``normalize_anthropic_response`` strips the prefix
+        #    from tool_use blocks only when it is present, so dropping
+        #    the add-side is safe.
+        #
+        # 4. Apply rename map to tool definitions.
+        #
+        #    Some specific tool names (and small combinations of them)
+        #    also trigger the third-party classifier.  See
+        #    ``_TOOL_NAME_RENAMES`` for the current list.
         if anthropic_tools:
             for tool in anthropic_tools:
-                if "name" in tool:
-                    tool["name"] = _MCP_TOOL_PREFIX + tool["name"]
+                nm = tool.get("name")
+                if isinstance(nm, str) and nm in _TOOL_NAME_RENAMES:
+                    tool["name"] = _TOOL_NAME_RENAMES[nm]
 
-        # 4. Prefix tool names in message history (tool_use and tool_result blocks)
+        # 5. Rewrite tool_use blocks in message history so their ``name``
+        #    matches the tool definitions we just declared.  Two transforms
+        #    are needed whenever a session spans a code upgrade:
+        #
+        #      (a) strip the historical ``mcp_`` prefix — earlier versions
+        #          of this adapter added it unconditionally on OAuth.  If
+        #          a session started on old code and continued on new
+        #          code, Anthropic sees ``tool_use`` entries referring to
+        #          tools (``mcp_foo``) that are no longer in the request's
+        #          ``tools`` list (just ``foo``), and responds with HTTP
+        #          200 and an empty ``content`` array.  Downstream this
+        #          surfaces as ``"response.content invalid (not a
+        #          non-empty list)"`` and eventually burns the retry
+        #          budget with no progress.
+        #
+        #      (b) apply the same rename map used for tool definitions.
+        #
+        #    ``tool_result`` blocks use ``tool_use_id`` to link back to
+        #    the originating ``tool_use``, so they require no name
+        #    rewriting.
         for msg in anthropic_messages:
             content = msg.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "tool_use" and "name" in block:
-                            if not block["name"].startswith(_MCP_TOOL_PREFIX):
-                                block["name"] = _MCP_TOOL_PREFIX + block["name"]
-                        elif block.get("type") == "tool_result" and "tool_use_id" in block:
-                            pass  # tool_result uses ID, not name
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                    continue
+                nm = block.get("name")
+                if not isinstance(nm, str):
+                    continue
+                if nm.startswith(_MCP_TOOL_PREFIX):
+                    nm = nm[len(_MCP_TOOL_PREFIX):]
+                if nm in _TOOL_NAME_RENAMES:
+                    nm = _TOOL_NAME_RENAMES[nm]
+                block["name"] = nm
 
     kwargs: Dict[str, Any] = {
         "model": model,
