@@ -76,10 +76,44 @@ class _AuthRunner:
 
 
 # ===========================================================================
+# send — internal tool-output filtering
+# ===========================================================================
+class TestTelegramSendFiltering:
+    """Test that internal tool chatter is not forwarded to Telegram users."""
+
+    @pytest.mark.asyncio
+    async def test_hides_internal_tool_message_before_bot_send(self):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock()
+
+        result = await adapter.send(
+            chat_id="12345",
+            content="💻 terminal: git status --short",
+        )
+
+        assert result.success is True
+        assert result.message_id is None
+        adapter._bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_normal_message_still_sends(self):
+        adapter = _make_adapter()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 77
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        result = await adapter.send(chat_id="12345", content="대표님 보고 완료")
+
+        assert result.success is True
+        assert result.message_id == "77"
+        adapter._bot.send_message.assert_called_once()
+
+
+# ===========================================================================
 # send_exec_approval — inline keyboard buttons
 # ===========================================================================
-
 class TestTelegramExecApproval:
+
     """Test the send_exec_approval method sends InlineKeyboard buttons."""
 
     @pytest.mark.asyncio

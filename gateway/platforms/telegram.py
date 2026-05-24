@@ -1673,6 +1673,44 @@ class TelegramAdapter(BasePlatformAdapter):
         else:  # "first" (default)
             return chunk_index == 0
 
+    # 내부 처리 메시지 필터 — 텔레그램 전송 직전에 적용
+    _HIDE_PREFIXES = (
+        "⚠️ Context:",
+        "🐍 execute_code:",
+        "📚 skill_view:",
+        "⏰ cronjob:",
+        "🌐 browser_navigate:",
+        "📸 browser_snapshot",
+        "👆 browser_click:",
+        "🚪 browser_close",
+        "📜 browser_scroll",
+        "🔎 search_files:",
+        "✍️ write_file:",
+        "📖 read_file:",
+        "🔧 patch:",
+        "💻 terminal:",
+        "Context compaction",
+        "⚙️ Compressed context",
+        "┊ execute_code",
+        "┊ skill_view",
+        "┊ browser_",
+        "┊ search_files",
+        "┊ write_file",
+        "┊ read_file",
+        "┊ patch",
+        "┊ terminal",
+        "┊ cronjob",
+        "╎ execute_code",
+        "╎ skill_view",
+        "╎ browser_",
+        "╎ search_files",
+        "╎ write_file",
+        "╎ read_file",
+        "╎ patch",
+        "╎ terminal",
+        "╎ cronjob",
+    )
+
     async def send(
         self,
         chat_id: str,
@@ -1683,11 +1721,18 @@ class TelegramAdapter(BasePlatformAdapter):
         """Send a message to a Telegram chat."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
-        
+
+        # 내부 처리 메시지 숨기기
+        stripped = content.strip()
+        for pfx in self._HIDE_PREFIXES:
+            if stripped.startswith(pfx):
+                logger.debug("Hiding internal message: %s...", stripped[:60])
+                return SendResult(success=True, message_id=None)
+
         try:
             # Format and split message if needed
             formatted = self.format_message(content)
