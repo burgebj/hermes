@@ -611,6 +611,34 @@ class TestPreloadResumedSession:
         assert "1 user messages" not in output
 
 
+# ── Tests for /resume command display ────────────────────────────────
+
+
+class TestResumeCommandDisplay:
+    """Mid-session /resume should show the resumed transcript immediately."""
+
+    def test_resume_command_displays_resumed_history(self):
+        cli = _make_cli()
+        messages = _simple_history()
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = {"id": "target_session", "title": "Target"}
+        mock_db.resolve_resume_session_id.return_value = "target_session"
+        mock_db.get_messages_as_conversation.return_value = messages
+        cli._session_db = mock_db
+        cli.agent = None
+
+        with (
+            patch("hermes_cli.main._resolve_session_by_name_or_id", return_value="target_session"),
+            patch.object(cli, "_display_resumed_history") as display_history,
+        ):
+            cli._handle_resume_command("/resume Target")
+
+        assert cli.session_id == "target_session"
+        assert cli.conversation_history == messages
+        display_history.assert_called_once_with()
+        mock_db.reopen_session.assert_called_once_with("target_session")
+
+
 # ── Integration: _init_agent skips when preloaded ────────────────────
 
 
