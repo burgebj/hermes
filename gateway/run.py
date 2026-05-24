@@ -6311,10 +6311,39 @@ class GatewayRunner:
         ):
             return True
 
-        # Check pairing store (always checked, regardless of allowlists)
+        # Check pairing store — but only if the user also passes the
+        # platform allowlist (when one is configured). Without this guard,
+        # a user who tapped "Always" on an approval button while an auth
+        # bypass was active could permanently bypass TELEGRAM_ALLOWED_USERS
+        # via the pairing store (issue #23778).
         platform_name = source.platform.value if source.platform else ""
+        _platform_allowlist_env = platform_env_map.get(source.platform, "")
+        _platform_allowlist_set = os.getenv(_platform_allowlist_env, "").strip() if _platform_allowlist_env else ""
+        _global_allowlist_set = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+        _has_allowlist = bool(_platform_allowlist_set or _global_allowlist_set)
         if self.pairing_store.is_approved(platform_name, user_id):
-            return True
+            # Only honor pairing store if no allowlist is configured OR
+            # the user is also in the allowlist.
+            if not _has_allowlist:
+                return True
+            # User is paired AND allowlist exists — verify they are still listed
+            _paired_allowed_ids = set()
+            if _platform_allowlist_set:
+                _paired_allowed_ids.update(uid.strip() for uid in _platform_allowlist_set.split(",") if uid.strip())
+            if _global_allowlist_set:
+                _paired_allowed_ids.update(uid.strip() for uid in _global_allowlist_set.split(",") if uid.strip())
+            if "*" in _paired_allowed_ids or user_id in _paired_allowed_ids:
+                return True
+            # Paired but no longer in allowlist — revoke pairing
+            logger.warning(
+                "[%s] Revoking pairing for user %s — no longer in allowlist",
+                platform_name, user_id,
+            )
+            try:
+                self.pairing_store.revoke(platform_name, user_id)
+            except Exception:
+                pass
+            return False
 
         # Check platform-specific and global allowlists
         platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()
