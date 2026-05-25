@@ -187,15 +187,14 @@ async def _async_call_service(
     url = f"{hass_url}/api/services/{domain}/{service}"
     payload = _build_service_payload(entity_id, data)
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url,
-            headers=_get_headers(hass_token),
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            result = await resp.json()
+    async with aiohttp.ClientSession() as session, session.post(
+        url,
+        headers=_get_headers(hass_token),
+        json=payload,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        resp.raise_for_status()
+        result = await resp.json()
 
     return _parse_service_response(domain, service, result)
 

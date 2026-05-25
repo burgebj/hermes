@@ -50,6 +50,7 @@ from agent.retry_utils import jittered_backoff
 
 # Load .env from HERMES_HOME first, then project root as a dev fallback.
 from hermes_cli.env_loader import load_hermes_dotenv
+import contextlib
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / ".env"
@@ -1463,10 +1464,8 @@ def main(
                         for line in f:
                             line = line.strip()
                             if line:
-                                try:
+                                with contextlib.suppress(json.JSONDecodeError):
                                     entries.append(json.loads(line))
-                                except json.JSONDecodeError:
-                                    pass
                     
                     total_original += len(entries)
                     sample_size = max(1, int(len(entries) * sample_percent / 100))

@@ -25,6 +25,7 @@ from agent.skill_utils import (
     skill_matches_platform,
 )
 from utils import atomic_json_write
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -780,10 +781,8 @@ def build_environment_hints() -> str:
             host_lines.append(f"Host: {platform.system()} ({platform.release()})")
 
         host_lines.append(f"User home directory: {os.path.expanduser('~')}")
-        try:
+        with contextlib.suppress(OSError):
             host_lines.append(f"Current working directory: {os.getcwd()}")
-        except OSError:
-            pass
 
         if sys.platform == "win32" and not is_wsl():
             host_lines.append(
@@ -987,11 +986,7 @@ def _skill_should_show(
     for ts in conditions.get("requires_toolsets", []):
         if ts not in ats:
             return False
-    for t in conditions.get("requires_tools", []):
-        if t not in at:
-            return False
-
-    return True
+    return all(t in at for t in conditions.get("requires_tools", []))
 
 
 def build_skills_system_prompt(
@@ -1349,10 +1344,8 @@ def _load_hermes_md(cwd_path: Path) -> str:
             return ""
         content = _strip_yaml_frontmatter(content)
         rel = hermes_md_path.name
-        try:
+        with contextlib.suppress(ValueError):
             rel = str(hermes_md_path.relative_to(cwd_path))
-        except ValueError:
-            pass
         content = _scan_context_content(content, rel)
         result = f"## {rel}\n\n{content}"
         return _truncate_content(result, ".hermes.md")

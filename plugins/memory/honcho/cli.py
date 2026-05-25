@@ -1318,9 +1318,7 @@ def honcho_command(args) -> None:
         from hermes_cli.memory_setup import cmd_setup_provider
         cmd_setup_provider("honcho")
         return
-    elif sub is None:
-        cmd_status(args)
-    elif sub == "status":
+    elif sub is None or sub == "status":
         cmd_status(args)
     elif sub == "peers":
         cmd_peers(args)

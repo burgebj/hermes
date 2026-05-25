@@ -891,6 +891,7 @@ from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 import sys
+import contextlib
 
 
 # Tool description for LLM
@@ -1347,10 +1348,8 @@ def _stop_cleanup_thread():
     global _cleanup_running
     _cleanup_running = False
     if _cleanup_thread is not None:
-        try:
+        with contextlib.suppress(SystemExit, KeyboardInterrupt):
             _cleanup_thread.join(timeout=5)
-        except (SystemExit, KeyboardInterrupt):
-            pass
 
 
 def get_active_env(task_id: str):

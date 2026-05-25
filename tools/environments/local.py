@@ -13,6 +13,7 @@ from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 from hermes_cli._subprocess_compat import windows_hide_flags
+import contextlib
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -93,9 +94,7 @@ def _build_provider_env_blocklist() -> frozenset:
         from hermes_cli.config import OPTIONAL_ENV_VARS
         for name, metadata in OPTIONAL_ENV_VARS.items():
             category = metadata.get("category")
-            if category in {"tool", "messaging"}:
-                blocked.add(name)
-            elif category == "setting" and metadata.get("password"):
+            if category in {"tool", "messaging"} or category == "setting" and metadata.get("password"):
                 blocked.add(name)
     except ImportError:
         pass
@@ -536,10 +535,8 @@ class LocalEnvironment(BaseEnvironment):
             **_popen_kwargs,
         )
         if not _IS_WINDOWS:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 proc._hermes_pgid = os.getpgid(proc.pid)
-            except ProcessLookupError:
-                pass
 
         if stdin_data is not None:
             _pipe_stdin(proc, stdin_data)
@@ -565,17 +562,13 @@ class LocalEnvironment(BaseEnvironment):
             while time.monotonic() < deadline:
                 # Reap the wrapper promptly. A dead but unreaped group leader
                 # still makes killpg(pgid, 0) report the group as alive.
-                try:
+                with contextlib.suppress(Exception):
                     proc.poll()
-                except Exception:
-                    pass
                 if not _group_alive(pgid):
                     return True
                 time.sleep(0.05)
-            try:
+            with contextlib.suppress(Exception):
                 proc.poll()
-            except Exception:
-                pass
             return not _group_alive(pgid)
 
         try:
@@ -606,15 +599,11 @@ class LocalEnvironment(BaseEnvironment):
                 except ProcessLookupError:
                     return
                 _wait_for_group_exit(pgid, 2.0)
-                try:
+                with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                     proc.wait(timeout=0.2)
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
         except (ProcessLookupError, PermissionError, OSError):
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
 
     def _update_cwd(self, result: dict):
         """Read CWD from temp file (local-only, no round-trip needed).
@@ -671,7 +660,5 @@ class LocalEnvironment(BaseEnvironment):
     def cleanup(self):
         """Clean up temp files."""
         for f in (self._snapshot_path, self._cwd_file):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(f)
-            except OSError:
-                pass

@@ -95,6 +95,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +139,7 @@ def check_dingtalk_requirements() -> bool:
         httpx = _httpx
         DINGTALK_STREAM_AVAILABLE = True
         HTTPX_AVAILABLE = True
-    if not os.getenv("DINGTALK_CLIENT_ID") or not os.getenv("DINGTALK_CLIENT_SECRET"):
-        return False
-    return True
+    return not (not os.getenv("DINGTALK_CLIENT_ID") or not os.getenv("DINGTALK_CLIENT_SECRET"))
 
 
 class DingTalkAdapter(BasePlatformAdapter):
@@ -339,10 +338,8 @@ class DingTalkAdapter(BasePlatformAdapter):
             # Try graceful close first if SDK supports it. The SDK's close()
             # is sync and may block on network I/O, so offload to a thread.
             if hasattr(self._stream_client, "close"):
-                try:
+                with contextlib.suppress(Exception):
                     await asyncio.to_thread(self._stream_client.close)
-                except Exception:
-                    pass
 
             self._stream_task.cancel()
             try:
@@ -640,10 +637,8 @@ class DingTalkAdapter(BasePlatformAdapter):
         )
         if session_webhook and chat_id and _DINGTALK_WEBHOOK_RE.match(session_webhook):
             if len(self._session_webhooks) >= _SESSION_WEBHOOKS_MAX:
-                try:
+                with contextlib.suppress(StopIteration):
                     self._session_webhooks.pop(next(iter(self._session_webhooks)))
-                except StopIteration:
-                    pass
             self._session_webhooks[chat_id] = (
                 session_webhook,
                 session_webhook_expired_time,

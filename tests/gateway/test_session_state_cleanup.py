@@ -20,6 +20,7 @@ import threading
 from unittest.mock import MagicMock
 
 import pytest
+import contextlib
 
 
 def _make_runner():
@@ -222,10 +223,8 @@ class TestSessionDbCloseOnShutdown:
             _db = getattr(_db_holder, "_db", None) if _db_holder else None
             if _db is None or not hasattr(_db, "close"):
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 _db.close()
-            except Exception:
-                pass
 
         flaky_db.close.assert_called_once()
         healthy_db.close.assert_called_once()

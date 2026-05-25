@@ -35,6 +35,7 @@ import time
 import urllib.request
 
 from hermes_constants import get_hermes_home
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -200,10 +201,8 @@ def _clear_install_failed():
     # deletes the binary) surfaces in the log again instead of being
     # silently suppressed by a stale dedupe key from before the fix.
     _reset_spawn_warning_state()
-    try:
+    with contextlib.suppress(OSError):
         os.unlink(_failure_marker_path())
-    except OSError:
-        pass
 
 
 def _hermes_bin_dir() -> str:
@@ -418,10 +417,8 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
                 shutil.copy(src, dest)
             except OSError:
                 # Clean up partial dest to prevent a non-executable retry loop
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(dest)
-                except OSError:
-                    pass
                 return None, "cross_device_copy_failed"
         os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 

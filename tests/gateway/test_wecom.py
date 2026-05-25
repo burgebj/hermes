@@ -11,6 +11,7 @@ import pytest
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import SendResult
+import contextlib
 
 
 class TestWeComRequirements:
@@ -879,10 +880,8 @@ class TestTextBatchFlushRace:
         await asyncio.sleep(0.05)
 
         t2.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await t2
-        except asyncio.CancelledError:
-            pass
 
         # T1 must have returned without processing or removing the event.
         assert handle_calls == [], "superseded task must not call handle_message"

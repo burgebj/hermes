@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Dict, List, Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -336,10 +337,8 @@ class SessionManager:
             session_cwd = "."
             mc = row.get("model_config")
             if mc:
-                try:
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
                     session_cwd = json.loads(mc).get("cwd", ".")
-                except (json.JSONDecodeError, TypeError):
-                    pass
             if normalized_cwd and _normalize_cwd_for_compare(session_cwd) != normalized_cwd:
                 continue
             results.append({

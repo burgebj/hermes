@@ -43,6 +43,7 @@ from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_res
 from agent.trajectory import convert_scratchpad_to_think
 from agent.error_classifier import classify_api_error, FailoverReason
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -703,12 +704,10 @@ def try_recover_primary_transport(
     try:
         # Close existing client to release stale connections
         if getattr(agent, "client", None) is not None:
-            try:
+            with contextlib.suppress(Exception):
                 agent._close_openai_client(
                     agent.client, reason="primary_recovery", shared=True,
                 )
-            except Exception:
-                pass
 
         # Rebuild from primary snapshot
         rt = agent._primary_runtime
@@ -1576,7 +1575,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         )
         # Bridge: notify external memory provider of built-in memory writes
         if agent._memory_manager and function_args.get("action") in {"add", "replace"}:
-            try:
+            with contextlib.suppress(Exception):
                 agent._memory_manager.on_memory_write(
                     function_args.get("action", ""),
                     target,
@@ -1586,8 +1585,6 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                         tool_call_id=tool_call_id,
                     ),
                 )
-            except Exception:
-                pass
         return result
     elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
         return agent._memory_manager.handle_tool_call(function_name, function_args)
@@ -2001,10 +1998,8 @@ def cleanup_dead_connections(agent) -> bool:
             except OSError:
                 dead_count += 1
             finally:
-                try:
+                with contextlib.suppress(OSError):
                     sock.setblocking(True)
-                except OSError:
-                    pass
         if dead_count > 0:
             _ra().logger.warning(
                 "Found %d dead connection(s) in client pool — rebuilding client",
@@ -2040,20 +2035,16 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
                 break
         retry_after = payload.get("retry_after")
         if retry_after not in {None, ""} and "reset_at" not in context:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 context["reset_at"] = time.time() + float(retry_after)
-            except (TypeError, ValueError):
-                pass
 
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)
     if headers:
         retry_after = headers.get("retry-after") or headers.get("Retry-After")
         if retry_after and "reset_at" not in context:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 context["reset_at"] = time.time() + float(retry_after)
-            except (TypeError, ValueError):
-                pass
         ratelimit_reset = headers.get("x-ratelimit-reset")
         if ratelimit_reset and "reset_at" not in context:
             context["reset_at"] = ratelimit_reset

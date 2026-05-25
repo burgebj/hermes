@@ -70,6 +70,7 @@ from hermes_logging import set_session_context
 from tools.schema_sanitizer import strip_pattern_and_format
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         agent._cached_system_prompt = stored_prompt
         return
 
-    if conversation_history and stored_state in ("null", "empty"):
+    if conversation_history and stored_state in {"null", "empty"}:
         # Continuing session whose stored prompt is unusable.  The
         # previous turn's write either never happened or wrote an empty
         # string — either way every turn now rebuilds and the prefix
@@ -944,10 +945,8 @@ def run_conversation(
             agent._emit_status("❌ Ollama runtime context is too small for Hermes tool use")
             api_call_count -= 1
             agent._api_call_count = api_call_count
-            try:
+            with contextlib.suppress(Exception):
                 agent.iteration_budget.refund()
-            except Exception:
-                pass
             break
         
         # Thinking spinner for quiet mode (animated during API call)
@@ -1117,13 +1116,7 @@ def run_conversation(
                 # Provider signaled "stream not supported" on a previous
                 # attempt — switch to non-streaming for the rest of this
                 # session instead of re-failing every retry.
-                if getattr(agent, "_disable_streaming", False):
-                    _use_streaming = False
-                # CopilotACPClient communicates via subprocess stdio and
-                # returns a plain SimpleNamespace — not an iterable
-                # stream.  Mirror the ACP exclusion used for Responses
-                # API upgrade (lines ~1083-1085).
-                elif (
+                if getattr(agent, "_disable_streaming", False) or (
                     agent.provider == "copilot-acp"
                     or str(agent.base_url or "").lower().startswith("acp://copilot")
                     or str(agent.base_url or "").lower().startswith("acp+tcp://")
@@ -1294,10 +1287,8 @@ def run_conversation(
                         if _code_raw is None and isinstance(response.error, dict):
                             _code_raw = response.error.get('code')
                         if _code_raw is not None:
-                            try:
+                            with contextlib.suppress(TypeError, ValueError):
                                 _resp_error_code = int(_code_raw)
-                            except (TypeError, ValueError):
-                                pass
 
                     # Build a human-readable failure hint from the error code
                     # and response time, instead of always assuming rate limiting.
@@ -1973,12 +1964,10 @@ def run_conversation(
                 # error handler.  Expand the phrase list when new
                 # provider wordings are observed in the wild.
                 _err_body = ""
-                try:
+                with contextlib.suppress(Exception):
                     _err_body = str(getattr(api_error, "body", None) or
                                     getattr(api_error, "message", None) or
                                     str(api_error))
-                except Exception:
-                    pass
                 _err_status = getattr(api_error, "status_code", None)
                 _IMAGE_REJECTION_PHRASES = (
                     "only 'text' content type is supported",
@@ -2138,10 +2127,8 @@ def run_conversation(
                     oauth_1m_beta_retry_attempted = True
                     if not getattr(agent, "_oauth_1m_beta_disabled", False):
                         agent._oauth_1m_beta_disabled = True
-                        try:
+                        with contextlib.suppress(Exception):
                             agent._anthropic_client.close()
-                        except Exception:
-                            pass
                         agent._rebuild_anthropic_client()
                         agent._vprint(
                             f"{agent.log_prefix}🔕 OAuth subscription doesn't support "
@@ -3141,15 +3128,11 @@ def run_conversation(
                 # For all agents with a structured callback: emit reasoning.available event.
                 first_line = _think_text.split('\n')[0][:80] if _think_text else ""
                 if first_line and getattr(agent, '_delegate_depth', 0) > 0:
-                    try:
+                    with contextlib.suppress(Exception):
                         agent.tool_progress_callback("_thinking", first_line)
-                    except Exception:
-                        pass
                 elif _think_text:
-                    try:
+                    with contextlib.suppress(Exception):
                         agent.tool_progress_callback("reasoning.available", "_thinking", _think_text[:500], None)
-                    except Exception:
-                        pass
             
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
@@ -3469,10 +3452,8 @@ def run_conversation(
                 # Only signal the display callback — TTS (_stream_callback)
                 # should NOT receive None (it uses None as end-of-stream).
                 if agent.stream_delta_callback:
-                    try:
+                    with contextlib.suppress(Exception):
                         agent.stream_delta_callback(None)
-                    except Exception:
-                        pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 

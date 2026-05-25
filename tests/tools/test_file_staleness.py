@@ -24,6 +24,7 @@ from tools.file_tools import (
     _check_file_staleness,
     _read_tracker,
 )
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +132,8 @@ class TestStalenessCheck(unittest.TestCase):
         new_path = os.path.join(self._tmpdir, "brand_new.txt")
         result = json.loads(write_file_tool(new_path, "content", task_id="t3"))
         self.assertNotIn("_warning", result)
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(new_path)
-        except OSError:
-            pass
 
     @patch("tools.file_tools._get_file_ops")
     def test_different_task_isolated(self, mock_ops):

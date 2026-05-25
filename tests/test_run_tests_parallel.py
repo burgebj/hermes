@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 import pytest
+import contextlib
 
 
 # Both tests share the same handoff file: the leaker writes here, the
@@ -176,10 +177,8 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
     else:
         # Test cleanup: kill the leaked grandchild ourselves so a
         # FAILED assertion doesn't leave a sleep(600) running.
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.kill(grandchild_pid, 9)
-        except ProcessLookupError:
-            pass
         pytest.fail(
             f"grandchild PID {grandchild_pid} survived runner exit; "
             f"diag={diag!r} test_pid={test_pid} test_pgid={test_pgid}; "

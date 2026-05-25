@@ -188,9 +188,7 @@ def is_network_accessible(host: str) -> bool:
             return False
         # ::ffff:127.0.0.1 — Python reports is_loopback=False for mapped
         # addresses, so check the underlying IPv4 explicitly.
-        if getattr(addr, "ipv4_mapped", None) and addr.ipv4_mapped.is_loopback:
-            return False
-        return True
+        return not (getattr(addr, "ipv4_mapped", None) and addr.ipv4_mapped.is_loopback)
     except ValueError:
         # when host variable is a hostname, we should try to resolve below
         pass
@@ -324,10 +322,7 @@ def should_bypass_proxy(target_hosts: str | list[str] | tuple[str, ...] | set[st
     entries = _no_proxy_entries()
     if not entries or not target_hosts:
         return False
-    if isinstance(target_hosts, str):
-        candidates = [target_hosts]
-    else:
-        candidates = list(target_hosts)
+    candidates = [target_hosts] if isinstance(target_hosts, str) else list(target_hosts)
     for candidate in candidates:
         host, port = _split_host_port(str(candidate))
         if not host:
@@ -484,6 +479,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
 from hermes_constants import get_hermes_dir, get_hermes_home
+import contextlib
 
 
 GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
@@ -577,9 +573,7 @@ def _looks_like_image(data: bytes) -> bool:
         return True
     if data[:2] == b"BM":
         return True
-    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
-        return True
-    return False
+    return bool(data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP")
 
 
 def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
@@ -1586,10 +1580,8 @@ class BasePlatformAdapter(ABC):
             logged = getattr(self, "_status_write_logged", None)
             if logged is None:
                 logged = set()
-                try:
+                with contextlib.suppress(Exception):
                     self._status_write_logged = logged
-                except Exception:
-                    pass
             key = (self.platform.value, context)
             if key not in logged:
                 logger.warning(
@@ -2481,10 +2473,8 @@ class BasePlatformAdapter(ABC):
             # stop_typing() cleared the task dict, recreating the loop.
             # Cancelling _keep_typing alone won't clean that up.
             if hasattr(self, "stop_typing"):
-                try:
+                with contextlib.suppress(Exception):
                     await self.stop_typing(chat_id)
-                except Exception:
-                    pass
             self._typing_paused.discard(chat_id)
 
     def pause_typing_for_chat(self, chat_id: str) -> None:
@@ -2505,10 +2495,8 @@ class BasePlatformAdapter(ABC):
             interrupt_event = self._active_sessions.get(session_key)
             if interrupt_event is not None:
                 interrupt_event.set()
-        try:
+        with contextlib.suppress(Exception):
             await self.stop_typing(chat_id)
-        except Exception:
-            pass
 
     def register_post_delivery_callback(
         self,
@@ -3529,10 +3517,8 @@ class BasePlatformAdapter(ABC):
                             telegram_tts_caption and getattr(tts_result, "success", False)
                         )
                     finally:
-                        try:
+                        with contextlib.suppress(OSError):
                             os.remove(_tts_path)
-                        except OSError:
-                            pass
 
                 # Send the text portion
                 if text_content and not _tts_caption_delivered:

@@ -178,7 +178,7 @@ class TestForegroundTimeoutCap:
         from tools.terminal_tool import terminal_tool, FOREGROUND_MAX_TIMEOUT
 
         # 180 < 600, so no rejection
-        assert 180 < FOREGROUND_MAX_TIMEOUT
+        assert FOREGROUND_MAX_TIMEOUT > 180
 
         with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
              patch("tools.terminal_tool._start_cleanup_thread"):

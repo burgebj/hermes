@@ -257,6 +257,4 @@ def is_moonshot_model(model: str | None) -> bool:
     if tail.startswith("kimi-") or tail == "kimi":
         return True
     # Vendor-prefixed forms commonly used on aggregators
-    if "moonshot" in bare or "/kimi" in bare or bare.startswith("kimi"):
-        return True
-    return False
+    return bool("moonshot" in bare or "/kimi" in bare or bare.startswith("kimi"))

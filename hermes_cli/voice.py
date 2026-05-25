@@ -219,6 +219,7 @@ from tools.voice_mode import (
     play_audio_file,
     transcribe_recording,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -238,10 +239,8 @@ def _debug(msg: str) -> None:
     """
     if os.environ.get("HERMES_VOICE_DEBUG", "").strip() != "1":
         return
-    try:
+    with contextlib.suppress(BrokenPipeError, OSError):
         print(f"[voice] {msg}", file=sys.stderr, flush=True)
-    except (BrokenPipeError, OSError):
-        pass
 
 
 def _beeps_enabled() -> bool:
@@ -436,10 +435,8 @@ def start_continuous(
         raise
 
     if on_status:
-        try:
+        with contextlib.suppress(Exception):
             on_status("listening")
-        except Exception:
-            pass
 
     return True
 
@@ -476,10 +473,8 @@ def stop_continuous(force_transcribe: bool = False) -> None:
     if rec is not None:
         if force_transcribe and on_transcript:
             if on_status:
-                try:
+                with contextlib.suppress(Exception):
                     on_status("transcribing")
-                except Exception:
-                    pass
             try:
                 wav_path = rec.stop()
             except Exception as e:
@@ -528,19 +523,15 @@ def stop_continuous(force_transcribe: bool = False) -> None:
                                 if should_halt:
                                     _continuous_no_speech_count = 0
                         if should_halt and on_silent_limit:
-                            try:
+                            with contextlib.suppress(Exception):
                                 on_silent_limit()
-                            except Exception:
-                                pass
 
                     _play_beep(frequency=660, count=2)
                     with _continuous_lock:
                         _continuous_stopping = False
                     if on_status:
-                        try:
+                        with contextlib.suppress(Exception):
                             on_status("idle")
-                        except Exception:
-                            pass
 
             threading.Thread(target=_transcribe_and_cleanup, daemon=True).start()
             return
@@ -560,10 +551,8 @@ def stop_continuous(force_transcribe: bool = False) -> None:
     _play_beep(frequency=660, count=2)
 
     if on_status:
-        try:
+        with contextlib.suppress(Exception):
             on_status("idle")
-        except Exception:
-            pass
 
 
 def is_continuous_active() -> bool:
@@ -597,10 +586,8 @@ def _continuous_on_silence() -> None:
         return
 
     if on_status:
-        try:
+        with contextlib.suppress(Exception):
             on_status("transcribing")
-        except Exception:
-            pass
 
     wav_path = rec.stop()
     # Peak RMS is the critical diagnostic when stop() returns None despite
@@ -667,19 +654,13 @@ def _continuous_on_silence() -> None:
             _continuous_active = False
             _continuous_no_speech_count = 0
         if on_silent_limit:
-            try:
+            with contextlib.suppress(Exception):
                 on_silent_limit()
-            except Exception:
-                pass
-        try:
+        with contextlib.suppress(Exception):
             rec.cancel()
-        except Exception:
-            pass
         if on_status:
-            try:
+            with contextlib.suppress(Exception):
                 on_status("idle")
-            except Exception:
-                pass
         return
 
     # CLI parity (cli.py:10619-10621): wait for any in-flight TTS to
@@ -711,27 +692,21 @@ def _continuous_on_silence() -> None:
             with _continuous_lock:
                 _continuous_active = False
             if on_status:
-                try:
+                with contextlib.suppress(Exception):
                     on_status("idle")
-                except Exception:
-                    pass
             return
 
         if on_status:
-            try:
+            with contextlib.suppress(Exception):
                 on_status("listening")
-            except Exception:
-                pass
     else:
         # Do not auto-restart. Clean up state and notify idle.
         _debug("_continuous_on_silence: auto_restart=False, stopping loop")
         with _continuous_lock:
             _continuous_active = False
         if on_status:
-            try:
+            with contextlib.suppress(Exception):
                 on_status("idle")
-            except Exception:
-                pass
 
 
 # ── TTS API ──────────────────────────────────────────────────────────

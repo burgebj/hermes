@@ -22,6 +22,7 @@ from hermes_constants import get_hermes_home
 
 from plugins.google_meet import process_manager as pm
 from plugins.google_meet.meet_bot import _is_safe_meet_url
+import contextlib
 
 
 def _auth_state_path() -> Path:
@@ -356,10 +357,8 @@ def _cmd_auth() -> int:
             context = browser.new_context()
             page = context.new_page()
             page.goto("https://accounts.google.com/", wait_until="domcontentloaded")
-            try:
+            with contextlib.suppress(EOFError):
                 input("press Enter after you've signed in ... ")
-            except EOFError:
-                pass
             context.storage_state(path=str(path))
             browser.close()
     except Exception as e:

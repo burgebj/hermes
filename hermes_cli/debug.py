@@ -26,6 +26,7 @@ from typing import Optional
 
 from hermes_constants import get_hermes_home
 from utils import atomic_replace
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -179,10 +180,8 @@ def _sweep_expired_pastes(now: Optional[float] = None) -> tuple[int, int]:
 
 def _best_effort_sweep_expired_pastes() -> None:
     """Attempt pending-paste cleanup without letting /debug fail offline."""
-    try:
+    with contextlib.suppress(Exception):
         _sweep_expired_pastes()
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -726,10 +725,8 @@ def run_debug(args):
     # one orphaned Python interpreter per scheduled deletion.  Silent and
     # best-effort — any failure is swallowed so ``hermes debug`` stays
     # reliable even when offline.
-    try:
+    with contextlib.suppress(Exception):
         _sweep_expired_pastes()
-    except Exception:
-        pass
 
     subcmd = getattr(args, "debug_command", None)
     if subcmd == "share":

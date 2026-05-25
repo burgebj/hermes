@@ -281,17 +281,9 @@ def summarize_background_review_actions(
             continue
         message = data.get("message", "")
         target = data.get("target", "")
-        if "created" in message.lower():
+        if "created" in message.lower() or "updated" in message.lower():
             actions.append(message)
-        elif "updated" in message.lower():
-            actions.append(message)
-        elif "added" in message.lower() or (target and "add" in message.lower()):
-            label = "Memory" if target == "memory" else "User profile" if target == "user" else target
-            actions.append(f"{label} updated")
-        elif "Entry added" in message:
-            label = "Memory" if target == "memory" else "User profile" if target == "user" else target
-            actions.append(f"{label} updated")
-        elif "removed" in message.lower() or "replaced" in message.lower():
+        elif "added" in message.lower() or (target and "add" in message.lower()) or "Entry added" in message or "removed" in message.lower() or "replaced" in message.lower():
             label = "Memory" if target == "memory" else "User profile" if target == "user" else target
             actions.append(f"{label} updated")
     return actions
@@ -350,10 +342,8 @@ def _run_review_in_thread(
             command, description,
         )
         return "deny"
-    try:
+    with contextlib.suppress(Exception):
         _set_approval_callback(_bg_review_auto_deny)
-    except Exception:
-        pass
 
     review_agent = None
     review_messages: List[Dict] = []
@@ -487,14 +477,10 @@ def _run_review_in_thread(
             # redirected so background thread teardown (Honcho flush,
             # Hindsight sync, etc.) stays silent.  The finally block
             # below is a safety net for the exception path.
-            try:
+            with contextlib.suppress(Exception):
                 review_agent.shutdown_memory_provider()
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 review_agent.close()
-            except Exception:
-                pass
             review_messages = list(getattr(review_agent, "_session_messages", []))
             review_agent = None
 
@@ -516,12 +502,10 @@ def _run_review_in_thread(
             )
             _bg_cb = agent.background_review_callback
             if _bg_cb:
-                try:
+                with contextlib.suppress(Exception):
                     _bg_cb(
                         f"💾 Self-improvement review: {summary}"
                     )
-                except Exception:
-                    pass
 
     except Exception as e:
         logger.warning("Background memory/skill review failed: %s", e)
@@ -537,22 +521,16 @@ def _run_review_in_thread(
                 with open(os.devnull, "w", encoding="utf-8") as _fn, \
                      contextlib.redirect_stdout(_fn), \
                      contextlib.redirect_stderr(_fn):
-                    try:
+                    with contextlib.suppress(Exception):
                         review_agent.shutdown_memory_provider()
-                    except Exception:
-                        pass
-                    try:
+                    with contextlib.suppress(Exception):
                         review_agent.close()
-                    except Exception:
-                        pass
             except Exception:
                 pass
         # Clear the approval callback on this bg-review thread so a
         # recycled thread-id doesn't inherit a stale reference.
-        try:
+        with contextlib.suppress(Exception):
             _set_approval_callback(None)
-        except Exception:
-            pass
 
 
 def spawn_background_review_thread(

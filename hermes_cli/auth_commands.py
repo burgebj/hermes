@@ -678,10 +678,7 @@ def _interactive_add() -> None:
             type_choice = input("Type [1/2]: ").strip()
         except (EOFError, KeyboardInterrupt):
             return
-        if type_choice == "2":
-            auth_type = "oauth"
-        else:
-            auth_type = "api_key"
+        auth_type = "oauth" if type_choice == "2" else "api_key"
     else:
         auth_type = "api_key"
 

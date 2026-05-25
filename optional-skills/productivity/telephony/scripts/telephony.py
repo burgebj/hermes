@@ -173,10 +173,7 @@ def _quote_env_value(value: str) -> str:
 def _upsert_env_file(updates: dict[str, str], env_path: Path | None = None) -> Path:
     path = env_path or _env_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        lines = path.read_text(encoding="utf-8").splitlines()
-    else:
-        lines = []
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
     seen: set[str] = set()
     new_lines: list[str] = []

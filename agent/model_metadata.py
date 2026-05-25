@@ -969,9 +969,7 @@ def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
     if candidate_id == lookup_model:
         return True
     # Slug match: basename of candidate equals the lookup name
-    if "/" in candidate_id and candidate_id.rsplit("/", 1)[1] == lookup_model:
-        return True
-    return False
+    return bool("/" in candidate_id and candidate_id.rsplit("/", 1)[1] == lookup_model)
 
 
 def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Optional[int]:

@@ -8,6 +8,7 @@ import os
 import sysconfig
 from contextvars import ContextVar, Token
 from pathlib import Path
+import contextlib
 
 
 _profile_fallback_warned: bool = False
@@ -249,10 +250,8 @@ def secure_parent_dir(path: Path) -> None:
     # Refuse root and its direct children (/usr, /home, /var, /tmp, …).
     if parent == Path("/") or len(parent.parts) < 3:
         return
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(parent, 0o700)
-    except OSError:
-        pass
 
 
 def get_subprocess_home() -> str | None:

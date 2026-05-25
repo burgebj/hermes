@@ -216,7 +216,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         # Should contain known env var names
-        assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
+        assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data)
 
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""
@@ -2067,6 +2067,7 @@ class TestDashboardPluginManifestExtensions:
 # ---------------------------------------------------------------------------
 
 import sys
+import contextlib
 
 
 skip_on_windows = pytest.mark.skipif(
@@ -2267,10 +2268,8 @@ class TestPtyWebSocket:
 
         with self.client.websocket_connect(self._url(resume="sess-42")) as conn:
             # Drain briefly so the handler actually invokes the resolver.
-            try:
+            with contextlib.suppress(Exception):
                 conn.receive_bytes()
-            except Exception:
-                pass
         assert captured.get("resume") == "sess-42"
 
     def test_channel_param_propagates_sidecar_url(self, monkeypatch):
@@ -2294,11 +2293,8 @@ class TestPtyWebSocket:
         headers = {"host": "127.0.0.1:9119", "origin": "http://127.0.0.1:9119"}
         with self.client.websocket_connect(
             self._url(channel="abc-123"), headers=headers
-        ) as conn:
-            try:
-                conn.receive_bytes()
-            except Exception:
-                pass
+        ) as conn, contextlib.suppress(Exception):
+            conn.receive_bytes()
 
         url = captured.get("sidecar_url") or ""
         assert url.startswith("ws://127.0.0.1:9119/api/pub?")

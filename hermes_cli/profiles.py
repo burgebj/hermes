@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional
 
 from agent.skill_utils import is_excluded_skill_path
+import contextlib
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -911,9 +912,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         _stop_gateway_process(profile_dir)
 
     # 3. Remove wrapper script
-    if has_wrapper:
-        if remove_wrapper_script(canon):
-            print(f"✓ Removed {wrapper_path}")
+    if has_wrapper and remove_wrapper_script(canon):
+        print(f"✓ Removed {wrapper_path}")
 
     # 4. Remove profile directory
     try:
@@ -940,17 +940,13 @@ def delete_profile(name: str, yes: bool = False) -> Path:
 
             if isinstance(exc, PermissionError):
                 # Make the path writable
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(path, os.stat(path).st_mode | _stat.S_IWUSR)
-                except OSError:
-                    pass
                 # Also make the parent writable (needed for unlink/rmdir)
                 parent = os.path.dirname(path)
                 if parent:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.chmod(parent, os.stat(parent).st_mode | _stat.S_IWUSR)
-                    except OSError:
-                        pass
                 func(path)
             else:
                 raise
@@ -1134,10 +1130,8 @@ def _stop_gateway_process(profile_dir: Path) -> None:
                 print(f"✓ Gateway stopped (PID {pid})")
                 return
         # Force kill
-        try:
+        with contextlib.suppress(ProcessLookupError, OSError):
             _terminate_pid(pid, force=True)
-        except (ProcessLookupError, OSError):
-            pass
         print(f"✓ Gateway force-stopped (PID {pid})")
     except (ProcessLookupError, PermissionError):
         print("✓ Gateway already stopped")
@@ -1231,10 +1225,7 @@ def _default_export_ignore(root_dir: Path):
         ignored: set = set()
         for entry in contents:
             # Universal exclusions (any depth)
-            if entry == "__pycache__" or entry.endswith((".sock", ".tmp")):
-                ignored.add(entry)
-            # npm lockfiles can appear at root
-            elif entry in {"package.json", "package-lock.json"}:
+            if entry == "__pycache__" or entry.endswith((".sock", ".tmp")) or entry in {"package.json", "package-lock.json"}:
                 ignored.add(entry)
         # Root-level exclusions
         if Path(directory) == root_dir:
@@ -1334,10 +1325,8 @@ def _safe_extract_profile_archive(archive: Path, destination: Path) -> None:
             with extracted, open(target, "wb") as dst:
                 shutil.copyfileobj(extracted, dst)
 
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(target, member.mode & 0o777)
-            except OSError:
-                pass
 
 
 def _inspect_profile_archive_roots(archive: Path) -> set[str]:
@@ -1476,10 +1465,8 @@ def _migrate_honcho_profile_host(old_name: str, new_name: str, new_dir: Path) ->
             tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             tmp.replace(path)
         except OSError:
-            try:
+            with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
             continue
 
         print(f"✓ Honcho host updated: {old_host} → {new_host}")

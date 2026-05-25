@@ -29,6 +29,7 @@ import logging
 import os
 import threading
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
+import contextlib
 
 # Errno values that mean "the peer is gone" rather than "the host has a
 # real I/O problem".  Anything outside this set re-raises so it surfaces
@@ -202,10 +203,8 @@ class TeeTransport:
         # Primary first so a slow sidecar (WS publisher) never delays Ink/stdio.
         ok = self._primary.write(obj)
         for sec in self._secondaries:
-            try:
+            with contextlib.suppress(Exception):
                 sec.write(obj)
-            except Exception:
-                pass
         return ok
 
     def close(self) -> None:
@@ -213,7 +212,5 @@ class TeeTransport:
             self._primary.close()
         finally:
             for sec in self._secondaries:
-                try:
+                with contextlib.suppress(Exception):
                     sec.close()
-                except Exception:
-                    pass

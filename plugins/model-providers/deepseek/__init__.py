@@ -39,9 +39,7 @@ def _model_supports_thinking(model: str | None) -> bool:
         # deepseek-v4-*, deepseek-v5-*, etc. — every V4+ generation has
         # thinking. v3 explicitly excluded.
         return True
-    if m == "deepseek-reasoner":
-        return True
-    return False
+    return m == "deepseek-reasoner"
 
 
 class DeepSeekProfile(ProviderProfile):

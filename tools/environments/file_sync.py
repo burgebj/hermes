@@ -26,6 +26,7 @@ from typing import Callable
 
 from hermes_constants import get_hermes_home
 from tools.environments.base import _file_mtime_key
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -289,10 +290,8 @@ class FileSyncManager:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             self._sync_back_impl()
         finally:
-            try:
+            with contextlib.suppress(OSError, IOError):
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
             lock_fd.close()
 
     def _sync_back_impl(self) -> None:

@@ -24,6 +24,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban import run_slash
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -2452,10 +2453,8 @@ def test_pid_alive_detects_zombie(kanban_home):
         # And _pid_alive must see through it.
         assert kb._pid_alive(pid) is False
     finally:
-        try:
+        with contextlib.suppress(Exception):
             proc.wait(timeout=1)
-        except Exception:
-            pass
 
 
 def test_task_ids_dont_collide_at_scale(kanban_home):

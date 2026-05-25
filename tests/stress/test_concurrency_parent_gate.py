@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+import contextlib
 
 WT = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, WT)
@@ -81,10 +82,8 @@ def run() -> int:
                 time.sleep(random.uniform(0.0001, 0.002))
                 # Step 2: add the parent links after the fact.
                 for p in parents:
-                    try:
+                    with contextlib.suppress(Exception):
                         kb.link_tasks(conn, parent_id=p, child_id=child)
-                    except Exception:
-                        pass
                 with created_lock:
                     created_children.append(child)
         finally:

@@ -11,6 +11,7 @@ from gateway.platforms.feishu_comment import (
     _ALLOWED_NOTICE_TYPES,
     _sanitize_comment_text,
 )
+import contextlib
 
 
 def _make_event(
@@ -245,10 +246,8 @@ class TestWikiReverseLookup(unittest.TestCase):
 
         evt = _make_event()
         # Will proceed past access control but fail later — that's OK, we just test the lookup
-        try:
+        with contextlib.suppress(Exception):
             self._run(handle_drive_comment_event(Mock(), evt, self_open_id="ou_bot"))
-        except Exception:
-            pass
 
         mock_lookup.assert_called_once_with(unittest.mock.ANY, "docx", "docx_token")
         self.assertEqual(mock_resolve.call_count, 2)

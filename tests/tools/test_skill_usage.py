@@ -33,10 +33,7 @@ def skills_home(tmp_path, monkeypatch):
 
 def _write_skill(skills_dir: Path, name: str, category: str = ""):
     """Create a minimal SKILL.md with a name: frontmatter field."""
-    if category:
-        d = skills_dir / category / name
-    else:
-        d = skills_dir / name
+    d = skills_dir / category / name if category else skills_dir / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(
         f"""---

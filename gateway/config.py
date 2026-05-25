@@ -18,6 +18,7 @@ from enum import Enum
 
 from hermes_cli.config import get_hermes_home
 from utils import is_truthy_value
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -1456,10 +1457,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             if origins:
                 config.platforms[Platform.API_SERVER].extra["cors_origins"] = origins
         if api_server_port:
-            try:
+            with contextlib.suppress(ValueError):
                 config.platforms[Platform.API_SERVER].extra["port"] = int(api_server_port)
-            except ValueError:
-                pass
         if api_server_host:
             config.platforms[Platform.API_SERVER].extra["host"] = api_server_host
         api_server_model_name = os.getenv("API_SERVER_MODEL_NAME", "")
@@ -1475,10 +1474,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.platforms[Platform.WEBHOOK] = PlatformConfig()
         config.platforms[Platform.WEBHOOK].enabled = True
         if webhook_port:
-            try:
+            with contextlib.suppress(ValueError):
                 config.platforms[Platform.WEBHOOK].extra["port"] = int(webhook_port)
-            except ValueError:
-                pass
         if webhook_secret:
             config.platforms[Platform.WEBHOOK].extra["secret"] = webhook_secret
 
@@ -1507,12 +1504,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         if msgraph_webhook_enabled:
             config.platforms[Platform.MSGRAPH_WEBHOOK].enabled = True
         if msgraph_webhook_port:
-            try:
+            with contextlib.suppress(ValueError):
                 config.platforms[Platform.MSGRAPH_WEBHOOK].extra["port"] = int(
                     msgraph_webhook_port
                 )
-            except ValueError:
-                pass
         if msgraph_webhook_client_state:
             config.platforms[Platform.MSGRAPH_WEBHOOK].extra["client_state"] = (
                 msgraph_webhook_client_state
@@ -1780,17 +1775,13 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
     if idle_minutes:
-        try:
+        with contextlib.suppress(ValueError):
             config.default_reset_policy.idle_minutes = int(idle_minutes)
-        except ValueError:
-            pass
     
     reset_hour = os.getenv("SESSION_RESET_HOUR")
     if reset_hour:
-        try:
+        with contextlib.suppress(ValueError):
             config.default_reset_policy.at_hour = int(reset_hour)
-        except ValueError:
-            pass
 
     # Registry-driven enable for plugin platforms.  Built-ins have explicit
     # blocks above; plugins expose check_fn() which is the single source of

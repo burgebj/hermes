@@ -71,6 +71,7 @@ def get_env_value(name, default=None):
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, prefers_gateway, resolve_openai_audio_api_key
 from tools.xai_http import hermes_xai_user_agent
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Lazy imports -- providers are imported only when actually used to avoid
@@ -684,10 +685,8 @@ def _terminate_command_tts_process_tree(proc: subprocess.Popen) -> None:
     try:
         parent = psutil.Process(proc.pid)
         for child in parent.children(recursive=True):
-            try:
+            with contextlib.suppress(psutil.NoSuchProcess):
                 child.terminate()
-            except psutil.NoSuchProcess:
-                pass
         parent.terminate()
     except psutil.NoSuchProcess:
         return
@@ -703,10 +702,8 @@ def _terminate_command_tts_process_tree(proc: subprocess.Popen) -> None:
     try:
         parent = psutil.Process(proc.pid)
         for child in parent.children(recursive=True):
-            try:
+            with contextlib.suppress(psutil.NoSuchProcess):
                 child.kill()
-            except psutil.NoSuchProcess:
-                pass
         parent.kill()
     except psutil.NoSuchProcess:
         return
@@ -934,10 +931,7 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     model_id = el_config.get("model_id", DEFAULT_ELEVENLABS_MODEL_ID)
 
     # Determine output format based on file extension
-    if output_path.endswith(".ogg"):
-        output_format = "opus_48000_64"
-    else:
-        output_format = "mp3_44100_128"
+    output_format = "opus_48000_64" if output_path.endswith(".ogg") else "mp3_44100_128"
 
     ElevenLabs = _import_elevenlabs()
     client = ElevenLabs(api_key=api_key)
@@ -980,10 +974,7 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
 
     # Determine response format from extension
-    if output_path.endswith(".ogg"):
-        response_format = "opus"
-    else:
-        response_format = "mp3"
+    response_format = "opus" if output_path.endswith(".ogg") else "mp3"
 
     OpenAIClient = _import_openai_client()
     client = OpenAIClient(api_key=api_key, base_url=base_url)
@@ -1495,10 +1486,8 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
             )
             shutil.copyfile(wav_path, output_path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.remove(wav_path)
-        except OSError:
-            pass
 
     return output_path
 
@@ -1738,10 +1727,8 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
         if ffmpeg:
             conv_cmd = [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path]
             subprocess.run(conv_cmd, check=True, timeout=30)
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(wav_path)
-            except OSError:
-                pass
         else:
             # No ffmpeg — keep WAV and return that path
             os.rename(wav_path, output_path)
@@ -2169,9 +2156,7 @@ def check_tts_requirements() -> bool:
         return True
     if _check_kittentts_available():
         return True
-    if _check_piper_available():
-        return True
-    return False
+    return bool(_check_piper_available())
 
 
 def _resolve_openai_audio_client_config() -> tuple[str, str]:
@@ -2373,10 +2358,8 @@ def stream_tts_to_speaker(
                 logger.warning("Temp-file TTS fallback failed: %s", exc)
             finally:
                 if tmp_path:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
 
         while not stop_event.is_set():
             # Read next delta from queue

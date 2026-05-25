@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Dict, List, Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +65,8 @@ def stream_diag_capture_response(agent: Any, diag: Dict[str, Any], http_response
     """
     if http_response is None or not isinstance(diag, dict):
         return
-    try:
+    with contextlib.suppress(Exception):
         diag["http_status"] = getattr(http_response, "status_code", None)
-    except Exception:
-        pass
     try:
         headers = getattr(http_response, "headers", None) or {}
         captured: Dict[str, str] = {}

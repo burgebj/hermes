@@ -591,6 +591,7 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
 
 
 from hermes_constants import is_termux as _is_termux_environment
+import contextlib
 
 
 def _browser_install_hint() -> str:
@@ -931,10 +932,8 @@ def _run_chrome_fallback_command(
             logger.debug("Chrome fallback tmp cmd '%s' error: %s", cmd, exc)
         finally:
             for pth in (stdout_path, stderr_path):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(pth)
-                except OSError:
-                    pass
         return {"success": False, "error": f"Chrome fallback '{cmd}' failed"}
 
     try:
@@ -949,10 +948,8 @@ def _run_chrome_fallback_command(
 
     finally:
         # 5. Tear down the temporary Chrome session.
-        try:
+        with contextlib.suppress(Exception):
             _run_tmp("close", [])
-        except Exception:
-            pass
         # Clean up socket directory
         import shutil as _shutil
         _shutil.rmtree(task_socket_dir, ignore_errors=True)
@@ -2099,10 +2096,8 @@ def _run_browser_command(
 
             # Clean up temp files (best-effort)
             for p in (stdout_path, stderr_path):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(p)
-                except OSError:
-                    pass
 
             # Log stderr for diagnostics — use warning level on failure so it's visible
             if stderr and stderr.strip():
@@ -2913,10 +2908,8 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
         raw_result = resp.get("result") if isinstance(resp, dict) else resp
         parsed = raw_result
         if isinstance(raw_result, str):
-            try:
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
                 parsed = json.loads(raw_result)
-            except (json.JSONDecodeError, ValueError):
-                pass
 
         return json.dumps({
             "success": True,
@@ -3546,10 +3539,9 @@ def _chromium_installed() -> bool:
 
     # 1. AGENT_BROWSER_EXECUTABLE_PATH — explicit user-configured browser
     ab_path = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
-    if ab_path:
-        if os.path.isfile(ab_path) or shutil.which(ab_path):
-            _cached_chromium_installed = True
-            return True
+    if ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)):
+        _cached_chromium_installed = True
+        return True
 
     # 2. System Chrome/Chromium in PATH (common names)
     system_chrome = (
@@ -3646,10 +3638,7 @@ def check_browser_requirements() -> bool:
 
     # Local Chrome mode: agent-browser needs a Chromium build on disk. Without
     # it the CLI hangs on first use until the command timeout fires.
-    if not _chromium_installed():
-        return False
-
-    return True
+    return _chromium_installed()
 
 
 def check_browser_vision_requirements() -> bool:

@@ -164,9 +164,7 @@ class SubdirectoryHintTracker:
                 return False
         except OSError:
             return False
-        if path in self._loaded_dirs:
-            return False
-        return True
+        return path not in self._loaded_dirs
 
     def _load_hints_for_directory(self, directory: Path) -> Optional[str]:
         """Load hint files from a directory. Returns formatted text or None."""

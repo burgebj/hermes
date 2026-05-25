@@ -19,10 +19,7 @@ def _make_skill(
     skills_dir, name, frontmatter_extra="", body="Do the thing.", category=None
 ):
     """Helper to create a minimal skill directory with SKILL.md."""
-    if category:
-        skill_dir = skills_dir / category / name
-    else:
-        skill_dir = skills_dir / name
+    skill_dir = skills_dir / category / name if category else skills_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     content = f"""\
 ---

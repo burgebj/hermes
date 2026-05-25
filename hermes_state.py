@@ -26,6 +26,7 @@ from pathlib import Path
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -398,10 +399,8 @@ class SessionDB:
                         result = fn(self._conn)
                         self._conn.commit()
                     except BaseException:
-                        try:
+                        with contextlib.suppress(Exception):
                             self._conn.rollback()
-                        except Exception:
-                            pass
                         raise
                 # Success — periodic best-effort checkpoint.
                 self._write_count += 1
@@ -455,10 +454,8 @@ class SessionDB:
         """
         with self._lock:
             if self._conn:
-                try:
+                with contextlib.suppress(Exception):
                     self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                except Exception:
-                    pass
                 self._conn.close()
                 self._conn = None
 
@@ -633,15 +630,11 @@ class SessionDB:
                     "messages_fts_trigram_delete",
                     "messages_fts_trigram_update",
                 ):
-                    try:
+                    with contextlib.suppress(sqlite3.OperationalError):
                         cursor.execute(f"DROP TRIGGER IF EXISTS {_trig}")
-                    except sqlite3.OperationalError:
-                        pass
                 for _tbl in ("messages_fts", "messages_fts_trigram"):
-                    try:
+                    with contextlib.suppress(sqlite3.OperationalError):
                         cursor.execute(f"DROP TABLE IF EXISTS {_tbl}")
-                    except sqlite3.OperationalError:
-                        pass
                 # Recreate virtual tables + triggers with the new inline-mode
                 # schema that indexes content || tool_name || tool_calls.
                 cursor.executescript(FTS_SQL)
@@ -1111,10 +1104,7 @@ class SessionDB:
         """
         # Strip existing #N suffix to find the true base
         match = re.match(r'^(.*?) #(\d+)$', base_title)
-        if match:
-            base = match.group(1)
-        else:
-            base = base_title
+        base = match.group(1) if match else base_title
 
         # Find all existing numbered variants
         # Escape SQL LIKE wildcards (%, _) in the base to prevent false matches
@@ -2159,7 +2149,7 @@ class SessionDB:
         # validation.
         if isinstance(sort, str):
             sort_norm = sort.strip().lower()
-            if sort_norm not in ("newest", "oldest"):
+            if sort_norm not in {"newest", "oldest"}:
                 sort_norm = None
         else:
             sort_norm = None
@@ -2527,17 +2517,13 @@ class SessionDB:
             return
         for suffix in (".json", ".jsonl"):
             p = sessions_dir / f"{session_id}{suffix}"
-            try:
+            with contextlib.suppress(OSError):
                 p.unlink(missing_ok=True)
-            except OSError:
-                pass
         # request_dump files use session_id as a prefix component
         try:
             for p in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
-                try:
+                with contextlib.suppress(OSError):
                     p.unlink(missing_ok=True)
-                except OSError:
-                    pass
         except OSError:
             pass
 
@@ -3098,10 +3084,8 @@ class SessionDB:
         # VACUUM cannot be executed inside a transaction.
         with self._lock:
             # Best-effort WAL checkpoint first, then VACUUM.
-            try:
+            with contextlib.suppress(Exception):
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
             self._conn.execute("VACUUM")
 
     def maybe_auto_prune_and_vacuum(

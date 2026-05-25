@@ -126,6 +126,7 @@ MAX_MESSAGE_LENGTH = 4000
 # Store directory for E2EE keys and sync state.
 # Uses get_hermes_home() so each profile gets its own Matrix store.
 from hermes_constants import get_hermes_dir as _get_hermes_dir
+import contextlib
 
 _STORE_DIR = _get_hermes_dir("platforms/matrix/store", "matrix/store")
 _CRYPTO_DB_PATH = _STORE_DIR / "crypto.db"
@@ -969,10 +970,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
         if self._sync_task and not self._sync_task.done():
             self._sync_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._sync_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
         redaction_tasks = list(self._reaction_redaction_tasks)
         for task in redaction_tasks:
@@ -990,10 +989,8 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.debug("Matrix: could not close crypto DB on disconnect: %s", exc)
 
         if self._client:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.api.session.close()
-            except Exception:
-                pass
             self._client = None
 
         logger.info("Matrix: disconnected")
@@ -1102,18 +1099,14 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> None:
         """Send a typing indicator."""
         if self._client:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.set_typing(RoomID(chat_id), timeout=30000)
-            except Exception:
-                pass
 
     async def stop_typing(self, chat_id: str) -> None:
         """Clear the typing indicator."""
         if self._client:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.set_typing(RoomID(chat_id), timeout=0)
-            except Exception:
-                pass
 
 
     async def edit_message(
@@ -1762,15 +1755,14 @@ class MatrixAdapter(BasePlatformAdapter):
             # Prevents infinite reply loops in multi-agent shared rooms
             # where multiple bots all participate in the same thread.
             elif (self._thread_require_mention and in_bot_thread
-                  and not is_free_room):
-                if not is_mentioned:
-                    logger.debug(
-                        "Matrix: ignoring message %s in thread %s — "
-                        "no @mention (thread_require_mention=true)",
-                        event_id,
-                        thread_id,
-                    )
-                    return None
+                  and not is_free_room) and not is_mentioned:
+                logger.debug(
+                    "Matrix: ignoring message %s in thread %s — "
+                    "no @mention (thread_require_mention=true)",
+                    event_id,
+                    thread_id,
+                )
+                return None
 
         # DM mention-thread.
         if is_dm and not thread_id and self._dm_mention_threads and is_mentioned:

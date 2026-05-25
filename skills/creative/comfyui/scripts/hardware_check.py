@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 from typing import Any
+import contextlib
 
 
 # Thresholds (GiB).
@@ -180,10 +181,8 @@ def detect_apple_silicon() -> dict | None:
     m = re.search(r"Apple M(\d+)", chip)
     generation = int(m.group(1)) if m else None
     mem_bytes = 0
-    try:
+    with contextlib.suppress(ValueError):
         mem_bytes = int(_run(["sysctl", "-n", "hw.memsize"]).strip() or 0)
-    except ValueError:
-        pass
     ram_gb = round(mem_bytes / (1024**3), 1) if mem_bytes else 0.0
 
     # Detect chip variant ("Pro", "Max", "Ultra") — affects performance even at same gen

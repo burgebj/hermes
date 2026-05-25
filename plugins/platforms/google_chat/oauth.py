@@ -92,6 +92,7 @@ except (ModuleNotFoundError, ImportError):
             return str(home)
 
 from utils import atomic_replace
+import contextlib
 
 
 def _hermes_home() -> Path:
@@ -329,10 +330,8 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 def _write_private_json(path: Path, data: Any) -> None:
     """Atomically write JSON with 0o600 permissions where supported."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
 
     tmp_path = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
     try:
@@ -346,10 +345,8 @@ def _write_private_json(path: Path, data: Any) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         atomic_replace(tmp_path, path)
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
     finally:
         try:
             if tmp_path.exists():

@@ -21,6 +21,7 @@ import logging
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, List
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +72,8 @@ def run_codex_app_server_turn(
         logger.exception("codex app-server turn failed")
         # Crash → unconditionally drop the session so the next turn
         # respawns from scratch instead of reusing a dead client.
-        try:
+        with contextlib.suppress(Exception):
             agent._codex_session.close()
-        except Exception:
-            pass
         agent._codex_session = None
         return {
             "final_response": (
@@ -98,10 +97,8 @@ def run_codex_app_server_turn(
             "codex app-server session retired (turn error: %s)",
             turn.error,
         )
-        try:
+        with contextlib.suppress(Exception):
             agent._codex_session.close()
-        except Exception:
-            pass
         agent._codex_session = None
 
     # Splice projected messages into the conversation. The projector emits
@@ -207,10 +204,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                             if not first_delta_fired:
                                 first_delta_fired = True
                                 if on_first_delta:
-                                    try:
+                                    with contextlib.suppress(Exception):
                                         on_first_delta()
-                                    except Exception:
-                                        pass
                             agent._fire_stream_delta(delta_text)
                     # Track tool calls to suppress text streaming
                     elif "function_call" in event_type:
@@ -430,10 +425,8 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     finally:
         close_fn = getattr(stream_or_response, "close", None)
         if callable(close_fn):
-            try:
+            with contextlib.suppress(Exception):
                 close_fn()
-            except Exception:
-                pass
 
     if terminal_response is not None:
         return terminal_response

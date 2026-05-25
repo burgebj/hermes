@@ -87,6 +87,7 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
+import contextlib
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -1231,10 +1232,8 @@ class TelegramAdapter(BasePlatformAdapter):
                         os.fsync(f.fileno())
                     atomic_replace(tmp_path, config_path)
                 except BaseException:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
                     raise
                 logger.info(
                     "[%s] Persisted thread_id=%s for topic '%s' in config.yaml",
@@ -2883,14 +2882,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
             except Exception:
                 # Markdown parse failure — retry as plain text
-                try:
+                with contextlib.suppress(Exception):
                     await query.edit_message_text(
                         text=result_text,
                         parse_mode=None,
                         reply_markup=None,
                     )
-                except Exception:
-                    pass
             await query.answer(text="Model switched!")
 
             # Clean up state
@@ -3082,14 +3079,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 await query.answer(text=label)
 
-                try:
+                with contextlib.suppress(Exception):
                     await query.edit_message_text(
                         text=self.format_message(f"{label} by {user_display}"),
                         parse_mode=ParseMode.MARKDOWN_V2,
                         reply_markup=None,
                     )
-                except Exception:
-                    pass
 
                 # Resolve via the module-level primitive.  The runner stored
                 # a handler keyed by session_key; we run it on the event
@@ -3188,14 +3183,12 @@ class TelegramAdapter(BasePlatformAdapter):
                         logger.warning("[%s] mark_awaiting_text failed: %s", self.name, exc)
 
                     await query.answer(text="✏️ Type your answer in the chat.")
-                    try:
+                    with contextlib.suppress(Exception):
                         await query.edit_message_text(
                             text=f"❓ {query.message.text or ''}\n\n<i>Awaiting typed response from {_html.escape(user_display)}…</i>",
                             parse_mode=ParseMode.HTML,
                             reply_markup=None,
                         )
-                    except Exception:
-                        pass
                     return
 
                 # Numeric choice → resolve immediately with the chosen text
@@ -3233,14 +3226,12 @@ class TelegramAdapter(BasePlatformAdapter):
                     resolved = False
 
                 await query.answer(text=f"✓ {resolved_text[:60]}")
-                try:
+                with contextlib.suppress(Exception):
                     await query.edit_message_text(
                         text=f"❓ {_html.escape(query.message.text or '')}\n\n<b>{_html.escape(user_display)}:</b> {_html.escape(resolved_text)}",
                         parse_mode=ParseMode.HTML,
                         reply_markup=None,
                     )
-                except Exception:
-                    pass
 
                 if resolved:
                     logger.info(
@@ -3611,10 +3602,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 def _reset_opened_files() -> None:
                     for fh in opened_files:
-                        try:
+                        with contextlib.suppress(Exception):
                             fh.seek(0)
-                        except Exception:
-                            pass
 
                 await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_media_group,
@@ -3642,10 +3631,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
             finally:
                 for fh in opened_files:
-                    try:
+                    with contextlib.suppress(Exception):
                         fh.close()
-                    except Exception:
-                        pass
 
     async def send_image_file(
         self,
@@ -4333,10 +4320,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if raw is None:
             raw = os.getenv("TELEGRAM_IGNORED_THREADS", "")
 
-        if isinstance(raw, list):
-            values = raw
-        else:
-            values = str(raw).split(",")
+        values = raw if isinstance(raw, list) else str(raw).split(",")
 
         ignored: set[int] = set()
         for value in values:
@@ -4605,9 +4589,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         if self._message_mentions_bot(message):
             return False
-        if self._message_matches_mention_patterns(message):
-            return False
-        return True
+        return not self._message_matches_mention_patterns(message)
 
     def _telegram_group_observe_shared_source(self, source):
         """Return a chat/topic-scoped source for observed Telegram group context."""
@@ -5524,9 +5506,7 @@ class TelegramAdapter(BasePlatformAdapter):
         is_forum_group = getattr(chat, "is_forum", False) is True
         thread_id_str = None
         if thread_id_raw is not None:
-            if chat_type == "group" and (is_topic_message or is_forum_group):
-                thread_id_str = str(thread_id_raw)
-            elif chat_type == "dm" and is_topic_message:
+            if chat_type == "group" and (is_topic_message or is_forum_group) or chat_type == "dm" and is_topic_message:
                 thread_id_str = str(thread_id_raw)
         # For forum groups without an explicit topic, default to the
         # General-topic id so the gateway routes back to the General topic

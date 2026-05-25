@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from typing import Optional
 
 from hermes_cli.fallback_config import get_fallback_chain
@@ -186,10 +186,8 @@ def run_oneshot(
                 use_config_toolsets=use_config_toolsets,
             )
     finally:
-        try:
+        with suppress(Exception):
             devnull.close()
-        except Exception:
-            pass
 
     if response:
         real_stdout.write(response)

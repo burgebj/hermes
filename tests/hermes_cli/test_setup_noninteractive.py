@@ -10,20 +10,20 @@ from hermes_cli.config import DEFAULT_CONFIG, load_config, save_config
 def _make_setup_args(**overrides):
     return Namespace(
         non_interactive=overrides.get("non_interactive", False),
-        section=overrides.get("section", None),
+        section=overrides.get("section"),
         reset=overrides.get("reset", False),
     )
 
 
 def _make_chat_args(**overrides):
     return Namespace(
-        continue_last=overrides.get("continue_last", None),
-        resume=overrides.get("resume", None),
-        model=overrides.get("model", None),
-        provider=overrides.get("provider", None),
-        toolsets=overrides.get("toolsets", None),
+        continue_last=overrides.get("continue_last"),
+        resume=overrides.get("resume"),
+        model=overrides.get("model"),
+        provider=overrides.get("provider"),
+        toolsets=overrides.get("toolsets"),
         verbose=overrides.get("verbose", False),
-        query=overrides.get("query", None),
+        query=overrides.get("query"),
         worktree=overrides.get("worktree", False),
         yolo=overrides.get("yolo", False),
         pass_session_id=overrides.get("pass_session_id", False),

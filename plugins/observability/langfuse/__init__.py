@@ -30,6 +30,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -594,10 +595,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         )
         root_span = root_ctx.__enter__()
 
-    try:
+    with contextlib.suppress(Exception):
         root_span.set_trace_io(input=trace_input)
-    except Exception:
-        pass
 
     _debug(f"started trace {trace_id} for {task_key}")
     return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
@@ -672,10 +671,8 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.flush()
-        except Exception:
-            pass
 
 
 def _assistant_has_tool_calls(message: Any) -> bool:

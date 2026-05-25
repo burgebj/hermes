@@ -102,15 +102,14 @@ class TestMaxTokensRetryHardening:
             patch("agent.auxiliary_client._get_cached_client",
                   return_value=(client, "gpt-5.5")),
             patch("agent.auxiliary_client._validate_llm_response",
-                  side_effect=lambda resp, _task: resp),
+                  side_effect=lambda resp, _task: resp),pytest.raises(RuntimeError)
         ):
-            with pytest.raises(RuntimeError):
-                call_llm(
-                    task="session_search",
-                    messages=[{"role": "user", "content": "hi"}],
-                    temperature=0.3,
-                    # max_tokens omitted on purpose
-                )
+            call_llm(
+                task="session_search",
+                messages=[{"role": "user", "content": "hi"}],
+                temperature=0.3,
+                # max_tokens omitted on purpose
+            )
 
         # Only the initial attempt — no retry because the gate blocked it
         assert client.chat.completions.create.call_count == 1
@@ -129,14 +128,13 @@ class TestMaxTokensRetryHardening:
             patch("agent.auxiliary_client._get_cached_client",
                   return_value=(client, "gpt-5.5")),
             patch("agent.auxiliary_client._validate_llm_response",
-                  side_effect=lambda resp, _task: resp),
+                  side_effect=lambda resp, _task: resp),pytest.raises(RuntimeError)
         ):
-            with pytest.raises(RuntimeError):
-                await async_call_llm(
-                    task="session_search",
-                    messages=[{"role": "user", "content": "hi"}],
-                    temperature=0.3,
-                )
+            await async_call_llm(
+                task="session_search",
+                messages=[{"role": "user", "content": "hi"}],
+                temperature=0.3,
+            )
 
         assert client.chat.completions.create.call_count == 1
 

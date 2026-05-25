@@ -711,7 +711,7 @@ def run_doctor(args):
             # checks elsewhere in doctor, and get_auth_status() returns a bare
             # {logged_in: False} for anything it doesn't explicitly dispatch,
             # which would produce false positives.
-            if runtime_provider and runtime_provider not in ("auto", "custom"):
+            if runtime_provider and runtime_provider not in {"auto", "custom"}:
                 try:
                     if runtime_provider == "openrouter":
                         from hermes_cli.config import get_env_value

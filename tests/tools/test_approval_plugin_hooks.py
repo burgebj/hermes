@@ -19,6 +19,7 @@ from tools.approval import (
     set_current_session_key,
     clear_session,
 )
+import contextlib
 
 
 @pytest.fixture
@@ -42,10 +43,8 @@ def isolated_session(monkeypatch, tmp_path):
     finally:
         _am._permanent_approved.update(_saved_permanent)
         _am._session_approved.update(_saved_session)
-        try:
+        with contextlib.suppress(Exception):
             _am._approval_session_key.reset(token)
-        except Exception:
-            pass
         clear_session(session_key)
 
 

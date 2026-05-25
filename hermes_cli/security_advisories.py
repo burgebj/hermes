@@ -262,9 +262,7 @@ def filter_unacked(hits: list[AdvisoryHit]) -> list[AdvisoryHit]:
 def _term_supports_color() -> bool:
     if os.environ.get("NO_COLOR"):
         return False
-    if not sys.stdout.isatty():
-        return False
-    return True
+    return sys.stdout.isatty()
 
 
 def short_banner_lines(hits: list[AdvisoryHit]) -> list[str]:

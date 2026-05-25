@@ -575,16 +575,15 @@ def test_server_forwards_chat_completions():
         proxy_runner, proxy_base = await _start_runner(create_app(adapter))
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{proxy_base}/v1/chat/completions",
-                    json={"model": "Hermes-4-70B",
-                          "messages": [{"role": "user", "content": "hi"}]},
-                    headers={"Authorization": "Bearer client-dummy-key"},
-                ) as resp:
-                    assert resp.status == 200
-                    data = await resp.json()
-                    assert data["echoed"] is True
+            async with aiohttp.ClientSession() as session, session.post(
+                f"{proxy_base}/v1/chat/completions",
+                json={"model": "Hermes-4-70B",
+                      "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": "Bearer client-dummy-key"},
+            ) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["echoed"] is True
 
             assert len(captured["requests"]) == 1
             req = captured["requests"][0]
@@ -611,14 +610,13 @@ def test_server_retries_once_with_adapter_retry_credential_on_401():
         proxy_runner, proxy_base = await _start_runner(create_app(adapter))
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{proxy_base}/v1/chat/completions",
-                    json={"model": "Hermes-4-70B"},
-                ) as resp:
-                    assert resp.status == 200
-                    data = await resp.json()
-                    assert data["ok"] is True
+            async with aiohttp.ClientSession() as session, session.post(
+                f"{proxy_base}/v1/chat/completions",
+                json={"model": "Hermes-4-70B"},
+            ) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["ok"] is True
 
             assert adapter.retry_calls == 1
             assert [req["auth"] for req in captured["requests"]] == [
@@ -715,13 +713,12 @@ def test_server_strips_client_auth_header():
         adapter = FakeAdapter(f"{upstream_base}/v1", bearer="ours")
         proxy_runner, proxy_base = await _start_runner(create_app(adapter))
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{proxy_base}/v1/chat/completions",
-                    json={},
-                    headers={"Authorization": "Bearer SHOULD_NOT_LEAK"},
-                ) as resp:
-                    await resp.read()
+            async with aiohttp.ClientSession() as session, session.post(
+                f"{proxy_base}/v1/chat/completions",
+                json={},
+                headers={"Authorization": "Bearer SHOULD_NOT_LEAK"},
+            ) as resp:
+                await resp.read()
             assert captured["requests"][0]["auth"] == "Bearer ours"
             assert "SHOULD_NOT_LEAK" not in captured["requests"][0]["auth"]
         finally:

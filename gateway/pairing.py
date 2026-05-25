@@ -34,6 +34,7 @@ from gateway.whatsapp_identity import (
 )
 from hermes_constants import get_hermes_dir
 from utils import atomic_replace
+import contextlib
 
 
 # Unambiguous alphabet -- excludes 0/O, 1/I to prevent confusion
@@ -71,10 +72,8 @@ def _secure_write(path: Path, data: str) -> None:
         except OSError:
             pass  # Windows doesn't support chmod the same way
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 

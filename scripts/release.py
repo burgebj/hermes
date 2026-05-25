@@ -1544,10 +1544,7 @@ def parse_coauthors(body: str) -> list:
 
 def get_commits(since_tag=None):
     """Get commits since a tag (or all commits if None)."""
-    if since_tag:
-        range_spec = f"{since_tag}..HEAD"
-    else:
-        range_spec = "HEAD"
+    range_spec = f"{since_tag}..HEAD" if since_tag else "HEAD"
 
     # Format: hash<US>author_name<US>author_email<US>subject\0body
     # Using %x1f (unit separator) to avoid conflict with | in author names

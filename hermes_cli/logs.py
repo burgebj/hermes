@@ -124,9 +124,8 @@ def _matches_filters(
             if _LEVEL_ORDER.get(level, 0) < _LEVEL_ORDER.get(min_level, 0):
                 return False
 
-    if session_filter is not None:
-        if session_filter not in line:
-            return False
+    if session_filter is not None and session_filter not in line:
+        return False
 
     if component_prefixes is not None:
         if not _line_matches_component(line, component_prefixes):

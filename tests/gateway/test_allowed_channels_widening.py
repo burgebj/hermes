@@ -254,9 +254,7 @@ class TestMattermostAllowedChannels:
             allowed = {str(c).strip() for c in allowed_raw if str(c).strip()}
         else:
             allowed = {c.strip() for c in str(allowed_raw).split(",") if c.strip()}
-        if allowed and channel_id not in allowed:
-            return False
-        return True
+        return not (allowed and channel_id not in allowed)
 
     def test_empty_config_is_no_restriction(self):
         assert self._would_process("chan123", allowed_cfg=None, allowed_env="") is True
@@ -337,9 +335,7 @@ class TestMatrixAllowedRooms:
         def would_process(room_id, is_dm):
             if is_dm:
                 return True
-            if allowed and room_id not in allowed:
-                return False
-            return True
+            return not (allowed and room_id not in allowed)
 
         assert would_process("!blocked:srv", is_dm=False) is False
         assert would_process("!allowed:srv", is_dm=False) is True

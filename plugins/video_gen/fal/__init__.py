@@ -257,14 +257,12 @@ def _build_payload(
     if seed is not None:
         payload["seed"] = seed
 
-    if family.get("aspect_ratios"):
-        if aspect_ratio in family["aspect_ratios"]:
-            payload["aspect_ratio"] = aspect_ratio
+    if family.get("aspect_ratios") and aspect_ratio in family["aspect_ratios"]:
+        payload["aspect_ratio"] = aspect_ratio
         # otherwise let the endpoint auto-crop / use its default
 
-    if family.get("resolutions"):
-        if resolution in family["resolutions"]:
-            payload["resolution"] = resolution
+    if family.get("resolutions") and resolution in family["resolutions"]:
+        payload["resolution"] = resolution
         # else: let the endpoint default
 
     clamped = _clamp_duration(family, duration)

@@ -245,9 +245,7 @@ class ResponsesApiTransport(ProviderTransport):
         if response is None:
             return False
         output = getattr(response, "output", None)
-        if not isinstance(output, list) or not output:
-            return False
-        return True
+        return not (not isinstance(output, list) or not output)
 
     def preflight_kwargs(self, api_kwargs: Any, *, allow_stream: bool = False) -> dict:
         """Validate and sanitize Codex API kwargs before the call.

@@ -234,10 +234,7 @@ def _tool_result_failed(result: Optional[str], tool_name: str | None = None) -> 
     # structured {"error": "..."} payload without an explicit success flag.
     # Keep generic plugin/unknown tool payloads conservative to avoid marking
     # optional diagnostic messages as failed.
-    if tool_name in _POLISHED_TOOLS and data.get("error") and not data.get("content"):
-        return True
-
-    return False
+    return bool(tool_name in _POLISHED_TOOLS and data.get("error") and not data.get("content"))
 
 
 def _truncate_text(text: str, limit: int = 5000) -> str:

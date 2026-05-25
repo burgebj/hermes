@@ -38,6 +38,7 @@ from tools.skills_guard import (
 )
 from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -386,9 +387,7 @@ class GitHubSource(SkillSource):
         _trust_rank = {"builtin": 2, "trusted": 1, "community": 0}
         seen = {}
         for r in results:
-            if r.identifier not in seen:
-                seen[r.identifier] = r
-            elif _trust_rank.get(r.trust_level, 0) > _trust_rank.get(seen[r.identifier].trust_level, 0):
+            if r.identifier not in seen or _trust_rank.get(r.trust_level, 0) > _trust_rank.get(seen[r.identifier].trust_level, 0):
                 seen[r.identifier] = r
         results = list(seen.values())
 
@@ -2728,10 +2727,8 @@ def _write_index_cache(key: str, data: Any) -> None:
     # could include adversarial text (prompt injection via catalog entries).
     ignore_file = HUB_DIR / ".ignore"
     if not ignore_file.exists():
-        try:
+        with contextlib.suppress(OSError):
             ignore_file.write_text("# Exclude hub internals from search tools\n*\n")
-        except OSError:
-            pass
     cache_file = INDEX_CACHE_DIR / f"{key}.json"
     try:
         cache_file.write_text(json.dumps(data, ensure_ascii=False, default=str))
@@ -3447,9 +3444,7 @@ def unified_search(query: str, sources: List[SkillSource],
     _TRUST_RANK = {"builtin": 2, "trusted": 1, "community": 0}
     seen: Dict[str, SkillMeta] = {}
     for r in all_results:
-        if r.identifier not in seen:
-            seen[r.identifier] = r
-        elif _TRUST_RANK.get(r.trust_level, 0) > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+        if r.identifier not in seen or _TRUST_RANK.get(r.trust_level, 0) > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
             seen[r.identifier] = r
     deduped = list(seen.values())
 

@@ -41,10 +41,7 @@ def seed_tasks(conn, kb, n, assignee="bench-worker", with_parents=False):
     """Seed n tasks. Optionally give each task 5 parents."""
     ids = []
     for i in range(n):
-        if with_parents and i >= 5:
-            parents = random.sample(ids[:i], 5)
-        else:
-            parents = ()
+        parents = random.sample(ids[:i], 5) if with_parents and i >= 5 else ()
         tid = kb.create_task(
             conn, title=f"bench {i}", assignee=assignee,
             tenant="bench", parents=parents,

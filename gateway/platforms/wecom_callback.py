@@ -38,6 +38,7 @@ except ImportError:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt, WeComCryptoError
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +155,8 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self._running = False
         if self._poll_task:
             self._poll_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
-            except asyncio.CancelledError:
-                pass
             self._poll_task = None
         await self._cleanup()
         self._mark_disconnected()

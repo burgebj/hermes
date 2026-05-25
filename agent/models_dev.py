@@ -476,10 +476,7 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
     # The older `attachment` flag can be stale or too broad for image routing;
     # fall back to it only when the input modalities are absent/invalid.
     input_mods = entry.get("modalities", {})
-    if isinstance(input_mods, dict):
-        input_mods = input_mods.get("input")
-    else:
-        input_mods = None
+    input_mods = input_mods.get("input") if isinstance(input_mods, dict) else None
     if isinstance(input_mods, list):
         supports_vision = "image" in input_mods
     else:
@@ -521,7 +518,7 @@ def list_provider_models(provider: str) -> List[str]:
     if models is None:
         return []
     return [
-        mid for mid in models.keys()
+        mid for mid in models
         if not _should_hide_from_provider_catalog(provider, mid)
     ]
 
@@ -568,9 +565,7 @@ _GOOGLE_HIDDEN_MODELS = frozenset({
 def _should_hide_from_provider_catalog(provider: str, model_id: str) -> bool:
     provider_lower = (provider or "").strip().lower()
     model_lower = (model_id or "").strip().lower()
-    if provider_lower in {"gemini", "google"} and model_lower in _GOOGLE_HIDDEN_MODELS:
-        return True
-    return False
+    return bool(provider_lower in {"gemini", "google"} and model_lower in _GOOGLE_HIDDEN_MODELS)
 
 
 def list_agentic_models(provider: str) -> List[str]:

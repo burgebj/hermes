@@ -16,6 +16,7 @@ from email.utils import formatdate
 from typing import Dict, Optional
 
 from agent.redact import redact_sensitive_text
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -1065,22 +1066,21 @@ async def _send_whatsapp(extra, chat_id, message):
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
         bridge_port = extra.get("bridge_port", 3000)
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"http://localhost:{bridge_port}/send",
-                json={"chatId": chat_id, "message": message},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "success": True,
-                        "platform": "whatsapp",
-                        "chat_id": chat_id,
-                        "message_id": data.get("messageId"),
-                    }
-                body = await resp.text()
-                return _error(f"WhatsApp bridge error ({resp.status}): {body}")
+        async with aiohttp.ClientSession() as session, session.post(
+            f"http://localhost:{bridge_port}/send",
+            json={"chatId": chat_id, "message": message},
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "success": True,
+                    "platform": "whatsapp",
+                    "chat_id": chat_id,
+                    "message_id": data.get("messageId"),
+                }
+            body = await resp.text()
+            return _error(f"WhatsApp bridge error ({resp.status}): {body}")
     except Exception as e:
         return _error(f"WhatsApp send failed: {e}")
 
@@ -1432,9 +1432,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
                 last_result = await adapter.send_image_file(chat_id, media_path, metadata=metadata)
             elif ext in _VIDEO_EXTS:
                 last_result = await adapter.send_video(chat_id, media_path, metadata=metadata)
-            elif ext in _VOICE_EXTS and is_voice:
-                last_result = await adapter.send_voice(chat_id, media_path, metadata=metadata)
-            elif ext in _AUDIO_EXTS:
+            elif ext in _VOICE_EXTS and is_voice or ext in _AUDIO_EXTS:
                 last_result = await adapter.send_voice(chat_id, media_path, metadata=metadata)
             else:
                 last_result = await adapter.send_document(chat_id, media_path, metadata=metadata)
@@ -1454,10 +1452,8 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     except Exception as e:
         return _error(f"Matrix send failed: {e}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await adapter.disconnect()
-        except Exception:
-            pass
 
 
 async def _send_homeassistant(token, extra, chat_id, message):
@@ -1623,9 +1619,7 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
                 last_result = await adapter.send_image_file(chat_id, media_path, metadata=metadata)
             elif ext in _VIDEO_EXTS:
                 last_result = await adapter.send_video(chat_id, media_path, metadata=metadata)
-            elif ext in _VOICE_EXTS and is_voice:
-                last_result = await adapter.send_voice(chat_id, media_path, metadata=metadata)
-            elif ext in _AUDIO_EXTS:
+            elif ext in _VOICE_EXTS and is_voice or ext in _AUDIO_EXTS:
                 last_result = await adapter.send_voice(chat_id, media_path, metadata=metadata)
             else:
                 last_result = await adapter.send_document(chat_id, media_path, metadata=metadata)

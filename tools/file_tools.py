@@ -139,11 +139,7 @@ def _is_blocked_device(filepath: str) -> bool:
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
     # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
-    if normalized.startswith("/proc/") and normalized.endswith(
-        ("/fd/0", "/fd/1", "/fd/2")
-    ):
-        return True
-    return False
+    return bool(normalized.startswith("/proc/") and normalized.endswith(("/fd/0", "/fd/1", "/fd/2")))
 
 
 # Paths that file tools should refuse to write to without going through the
@@ -209,9 +205,7 @@ def _is_expected_write_exception(exc: Exception) -> bool:
     """Return True for expected write denials that should not hit error logs."""
     if isinstance(exc, PermissionError):
         return True
-    if isinstance(exc, OSError) and exc.errno in _EXPECTED_WRITE_ERRNOS:
-        return True
-    return False
+    return bool(isinstance(exc, OSError) and exc.errno in _EXPECTED_WRITE_ERRNOS)
 
 
 _file_ops_lock = threading.Lock()
@@ -327,10 +321,7 @@ def _is_internal_file_status_text(content: str) -> bool:
         return False
     if stripped == _READ_DEDUP_STATUS_MESSAGE:
         return True
-    if _READ_DEDUP_STATUS_MESSAGE in stripped and \
-            len(stripped) <= 2 * len(_READ_DEDUP_STATUS_MESSAGE):
-        return True
-    return False
+    return bool(_READ_DEDUP_STATUS_MESSAGE in stripped and len(stripped) <= 2 * len(_READ_DEDUP_STATUS_MESSAGE))
 
 
 def _get_file_ops(task_id: str = "default") -> ShellFileOperations:

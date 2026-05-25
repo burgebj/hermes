@@ -24,6 +24,7 @@ from rich.table import Table
 # tools.skills_hub and tools.skills_guard are imported inside functions.
 from hermes_constants import display_hermes_home
 from agent.skill_utils import is_excluded_skill_path
+import contextlib
 
 _console = Console()
 
@@ -1099,10 +1100,8 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
         import re
         match = re.search(r'\n---\s*\n', skill_md[3:])
         if match:
-            try:
+            with contextlib.suppress(yaml.YAMLError):
                 fm = yaml.safe_load(skill_md[3:match.start() + 3]) or {}
-            except yaml.YAMLError:
-                pass
 
     name = fm.get("name", path.name)
     description = fm.get("description", "")
@@ -1437,16 +1436,12 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         i = 0
         while i < len(args):
             if args[i] == "--page" and i + 1 < len(args):
-                try:
+                with contextlib.suppress(ValueError):
                     page = int(args[i + 1])
-                except ValueError:
-                    pass
                 i += 2
             elif args[i] == "--size" and i + 1 < len(args):
-                try:
+                with contextlib.suppress(ValueError):
                     page_size = int(args[i + 1])
-                except ValueError:
-                    pass
                 i += 2
             elif args[i] == "--source" and i + 1 < len(args):
                 source = args[i + 1]
@@ -1468,10 +1463,8 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
                 source = args[i + 1]
                 i += 2
             elif args[i] == "--limit" and i + 1 < len(args):
-                try:
+                with contextlib.suppress(ValueError):
                     limit = int(args[i + 1])
-                except ValueError:
-                    pass
                 i += 2
             else:
                 query_parts.append(args[i])

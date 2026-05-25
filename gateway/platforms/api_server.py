@@ -51,6 +51,7 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +137,8 @@ def _normalize_chat_content(
                 if item_type in {"text", "input_text", "output_text"}:
                     text = item.get("text", "")
                     if text:
-                        try:
+                        with contextlib.suppress(Exception):
                             parts.append(str(text)[:MAX_NORMALIZED_TEXT_LENGTH])
-                        except Exception:
-                            pass
                 # Silently skip image_url / other non-text parts
             elif isinstance(item, list):
                 nested = _normalize_chat_content(item, _max_depth=_max_depth, _depth=_depth + 1)
@@ -464,10 +463,8 @@ class ResponseStore:
 
     def close(self) -> None:
         """Close the database connection."""
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
     def __len__(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
@@ -1491,16 +1488,12 @@ class APIServerAdapter(BasePlatformAdapter):
             # cancel the asyncio task wrapper.
             agent = agent_ref[0] if agent_ref else None
             if agent is not None:
-                try:
+                with contextlib.suppress(Exception):
                     agent.interrupt("SSE client disconnected")
-                except Exception:
-                    pass
             if not agent_task.done():
                 agent_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await agent_task
-                except (asyncio.CancelledError, Exception):
-                    pass
             logger.info("SSE client disconnected; interrupted agent task %s", completion_id)
         except Exception as _exc:
             # Agent crashed mid-stream.  Try to emit an error chunk
@@ -2063,16 +2056,12 @@ class APIServerAdapter(BasePlatformAdapter):
             # making upstream LLM calls, then cancel the task.
             agent = agent_ref[0] if agent_ref else None
             if agent is not None:
-                try:
+                with contextlib.suppress(Exception):
                     agent.interrupt("SSE client disconnected")
-                except Exception:
-                    pass
             if not agent_task.done():
                 agent_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await agent_task
-                except (asyncio.CancelledError, Exception):
-                    pass
             logger.info("SSE client disconnected; interrupted agent task %s", response_id)
         except asyncio.CancelledError:
             # Server-side cancellation (e.g. shutdown, request timeout) —
@@ -2082,10 +2071,8 @@ class APIServerAdapter(BasePlatformAdapter):
             _persist_incomplete_if_needed()
             agent = agent_ref[0] if agent_ref else None
             if agent is not None:
-                try:
+                with contextlib.suppress(Exception):
                     agent.interrupt("SSE task cancelled")
-                except Exception:
-                    pass
             if not agent_task.done():
                 agent_task.cancel()
             logger.info("SSE task cancelled; persisted incomplete snapshot for %s", response_id)
@@ -2852,10 +2839,8 @@ class APIServerAdapter(BasePlatformAdapter):
             q = self._run_streams.get(run_id)
             if q is None:
                 return
-            try:
+            with contextlib.suppress(Exception):
                 loop.call_soon_threadsafe(q.put_nowait, event)
-            except Exception:
-                pass
 
         def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
             ts = time.time()
@@ -2982,15 +2967,13 @@ class APIServerAdapter(BasePlatformAdapter):
         def _text_cb(delta: Optional[str]) -> None:
             if delta is None:
                 return
-            try:
+            with contextlib.suppress(Exception):
                 loop.call_soon_threadsafe(q.put_nowait, {
                     "event": "message.delta",
                     "run_id": run_id,
                     "timestamp": time.time(),
                     "delta": delta,
                 })
-            except Exception:
-                pass
 
         self._set_run_status(
             run_id,
@@ -3025,10 +3008,8 @@ class APIServerAdapter(BasePlatformAdapter):
                         "waiting_for_approval",
                         last_event="approval.request",
                     )
-                    try:
+                    with contextlib.suppress(Exception):
                         loop.call_soon_threadsafe(q.put_nowait, event)
-                    except Exception:
-                        pass
 
                 def _run_sync():
                     from gateway.session_context import clear_session_vars, set_session_vars
@@ -3062,15 +3043,11 @@ class APIServerAdapter(BasePlatformAdapter):
                             unregister_gateway_notify(approval_session_key)
                         finally:
                             if approval_token is not None:
-                                try:
+                                with contextlib.suppress(Exception):
                                     reset_current_session_key(approval_token)
-                                except Exception:
-                                    pass
                             if session_tokens:
-                                try:
+                                with contextlib.suppress(Exception):
                                     clear_session_vars(session_tokens)
-                                except Exception:
-                                    pass
                     u = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -3118,14 +3095,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     "cancelled",
                     last_event="run.cancelled",
                 )
-                try:
+                with contextlib.suppress(Exception):
                     q.put_nowait({
                         "event": "run.cancelled",
                         "run_id": run_id,
                         "timestamp": time.time(),
                     })
-                except Exception:
-                    pass
                 raise
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
@@ -3135,15 +3110,13 @@ class APIServerAdapter(BasePlatformAdapter):
                     error=str(exc),
                     last_event="run.failed",
                 )
-                try:
+                with contextlib.suppress(Exception):
                     q.put_nowait({
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
                         "error": str(exc),
                     })
-                except Exception:
-                    pass
             finally:
                 # If the asyncio wrapper is cancelled (for example via
                 # /stop), the executor thread can still be blocked waiting
@@ -3157,20 +3130,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 except Exception:
                     pass
                 # Sentinel: signal SSE stream to close
-                try:
+                with contextlib.suppress(Exception):
                     q.put_nowait(None)
-                except Exception:
-                    pass
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
 
         task = asyncio.create_task(_run_and_close())
         self._active_run_tasks[run_id] = task
-        try:
+        with contextlib.suppress(TypeError):
             self._background_tasks.add(task)
-        except TypeError:
-            pass
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
 
@@ -3318,7 +3287,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self._set_run_status(run_id, "running", last_event="approval.responded")
         q = self._run_streams.get(run_id)
         if q is not None:
-            try:
+            with contextlib.suppress(Exception):
                 q.put_nowait({
                     "event": "approval.responded",
                     "run_id": run_id,
@@ -3326,8 +3295,6 @@ class APIServerAdapter(BasePlatformAdapter):
                     "choice": choice,
                     "resolved": resolved,
                 })
-            except Exception:
-                pass
 
         return web.json_response({
             "object": "hermes.run.approval_response",
@@ -3352,10 +3319,8 @@ class APIServerAdapter(BasePlatformAdapter):
         self._set_run_status(run_id, "stopping", last_event="run.stopping")
 
         if agent is not None:
-            try:
+            with contextlib.suppress(Exception):
                 agent.interrupt("Stop requested via API")
-            except Exception:
-                pass
 
         if task is not None and not task.done():
             task.cancel()
@@ -3451,10 +3416,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
-            try:
+            with contextlib.suppress(TypeError):
                 self._background_tasks.add(sweep_task)
-            except TypeError:
-                pass
             if hasattr(sweep_task, "add_done_callback"):
                 sweep_task.add_done_callback(self._background_tasks.discard)
 

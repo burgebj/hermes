@@ -355,4 +355,4 @@ def test_file_mutating_tools_set_shape():
     ``append_file``), they should also audit whether the verifier should
     track it.  This test fails loudly on unilateral additions.
     """
-    assert _FILE_MUTATING_TOOLS == frozenset({"write_file", "patch"})
+    assert frozenset({"write_file", "patch"}) == _FILE_MUTATING_TOOLS

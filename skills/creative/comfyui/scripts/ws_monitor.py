@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (  # noqa: E402
     DEFAULT_LOCAL_HOST, ENV_API_KEY, log, new_client_id, resolve_api_key, is_cloud_host,
 )
+import contextlib
 
 
 # Binary frame types from ComfyUI WebSocket protocol
@@ -257,10 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         log("Interrupted")
         return 130
     finally:
-        try:
+        with contextlib.suppress(Exception):
             ws.close()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

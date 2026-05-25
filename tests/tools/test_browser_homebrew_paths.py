@@ -68,12 +68,7 @@ class TestDiscoverHomebrewNodeDirs:
             if p == "/opt/homebrew/opt":
                 return True
             # node@20/bin and node@24/bin exist
-            if p in {
-                "/opt/homebrew/opt/node@20/bin",
-                "/opt/homebrew/opt/node@24/bin",
-            }:
-                return True
-            return False
+            return p in {"/opt/homebrew/opt/node@20/bin", "/opt/homebrew/opt/node@24/bin"}
 
         with patch("os.path.isdir", side_effect=mock_isdir), \
              patch("os.listdir", return_value=entries):
@@ -203,9 +198,8 @@ class TestFindAgentBrowser:
              patch(
                  "tools.browser_tool._discover_homebrew_node_dirs",
                  return_value=[],
-             ):
-            with pytest.raises(FileNotFoundError, match="agent-browser CLI not found"):
-                _find_agent_browser()
+             ), pytest.raises(FileNotFoundError, match="agent-browser CLI not found"):
+            _find_agent_browser()
 
 
 class TestBrowserRequirements:

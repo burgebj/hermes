@@ -18,6 +18,7 @@ from tools.environments.local import (
     LocalEnvironment,
     _resolve_safe_cwd,
 )
+import contextlib
 
 
 class TestResolveSafeCwd:
@@ -86,10 +87,8 @@ def _make_fake_popen(captured: dict, fds: list):
 
 def _close_fds(fds):
     for f in fds:
-        try:
+        with contextlib.suppress(Exception):
             f.close()
-        except Exception:
-            pass
 
 
 class TestRunBashCwdRecovery:

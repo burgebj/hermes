@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent.gemini_schema import sanitize_gemini_tool_parameters
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -836,10 +837,8 @@ class GeminiNativeClient:
 
     def close(self) -> None:
         self.is_closed = True
-        try:
+        with contextlib.suppress(Exception):
             self._http.close()
-        except Exception:
-            pass
 
     def __enter__(self):
         return self

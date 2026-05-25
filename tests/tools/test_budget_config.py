@@ -76,7 +76,7 @@ class TestBudgetConfigDefaults:
 
     def test_default_budget_singleton_matches(self):
         """DEFAULT_BUDGET should equal a freshly constructed BudgetConfig."""
-        assert DEFAULT_BUDGET == BudgetConfig()
+        assert BudgetConfig() == DEFAULT_BUDGET
 
 
 # ---------------------------------------------------------------------------

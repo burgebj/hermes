@@ -188,10 +188,7 @@ def _extract_tool_stats(messages: List[Dict[str, Any]]) -> Dict[str, Dict[str, i
             except (json.JSONDecodeError, ValueError, TypeError):
                 # If not JSON, check if content is empty or explicitly states an error
                 # Note: We avoid simple substring matching to prevent false positives
-                if not content:
-                    is_success = False
-                # Only mark as failure if it explicitly starts with "Error:" or "ERROR:"
-                elif content.strip().lower().startswith("error:"):
+                if not content or content.strip().lower().startswith("error:"):
                     is_success = False
             
             # Update success/failure count

@@ -2149,10 +2149,7 @@ class SlackAdapter(BasePlatformAdapter):
                             display_name = original_filename or f"document{ext}"
                             display_name = re.sub(r'[^\w.\- ]', '_', display_name)
                             injection = f"[Content of {display_name}]:\n{text_content}"
-                            if text:
-                                text = f"{injection}\n\n{text}"
-                            else:
-                                text = injection
+                            text = f"{injection}\n\n{text}" if text else injection
                         except UnicodeDecodeError:
                             pass  # Binary content, skip injection
 

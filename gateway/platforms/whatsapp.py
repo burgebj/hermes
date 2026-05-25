@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, Optional, Any
 
 from hermes_constants import get_hermes_dir
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +49,11 @@ def _kill_port_process(port: int) -> None:
                 if len(parts) >= 5 and parts[3] == "LISTENING":
                     local_addr = parts[1]
                     if local_addr.endswith(f":{port}"):
-                        try:
+                        with contextlib.suppress(subprocess.SubprocessError):
                             subprocess.run(
                                 ["taskkill", "/PID", parts[4], "/F"],
                                 capture_output=True, timeout=5,
                             )
-                        except subprocess.SubprocessError:
-                            pass
         else:
             # Try fuser first (Linux), fall back to lsof (macOS / WSL2)
             killed = False
@@ -79,10 +78,8 @@ def _kill_port_process(port: int) -> None:
                         capture_output=True, text=True, timeout=5,
                     )
                     for pid_str in result.stdout.strip().splitlines():
-                        try:
+                        with contextlib.suppress(ValueError, ProcessLookupError, PermissionError):
                             os.kill(int(pid_str), signal.SIGTERM)
-                        except (ValueError, ProcessLookupError, PermissionError):
-                            pass
                 except FileNotFoundError:
                     pass  # lsof not installed either
     except Exception:
@@ -102,10 +99,8 @@ def _kill_stale_bridge_by_pidfile(session_path: Path) -> None:
     try:
         pid = int(pid_file.read_text().strip())
     except (ValueError, OSError, TypeError):
-        try:
+        with contextlib.suppress(OSError):
             pid_file.unlink()
-        except OSError:
-            pass
         return
     # ``os.kill(pid, 0)`` is NOT a no-op on Windows (bpo-14484) — use the
     # cross-platform existence check before sending a real signal.
@@ -116,18 +111,14 @@ def _kill_stale_bridge_by_pidfile(session_path: Path) -> None:
             logger.info("[whatsapp] Killed stale bridge PID %d from pidfile", pid)
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    try:
+    with contextlib.suppress(OSError):
         pid_file.unlink()
-    except OSError:
-        pass
 
 
 def _write_bridge_pidfile(session_path: Path, pid: int) -> None:
     """Write the bridge PID to a file for later cleanup."""
-    try:
+    with contextlib.suppress(OSError):
         (session_path / "bridge.pid").write_text(str(pid))
-    except OSError:
-        pass
 
 
 def _terminate_bridge_process(proc, *, force: bool = False) -> None:
@@ -161,17 +152,13 @@ def _terminate_bridge_process(proc, *, force: bool = False) -> None:
         children = parent.children(recursive=True)
         if force:
             for child in children:
-                try:
+                with contextlib.suppress(psutil.NoSuchProcess):
                     child.kill()
-                except psutil.NoSuchProcess:
-                    pass
             parent.kill()
         else:
             for child in children:
-                try:
+                with contextlib.suppress(psutil.NoSuchProcess):
                     child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
             parent.terminate()
     except psutil.NoSuchProcess:
         return
@@ -189,6 +176,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_url,
 )
+import contextlib
 
 
 def check_whatsapp_requirements() -> bool:
@@ -338,9 +326,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return True
         # @broadcast suffix covers status@broadcast plus any future
         # broadcast-list variants. @newsletter is the Channel JID suffix.
-        if cid.endswith("@broadcast") or cid.endswith("@newsletter"):
-            return True
-        return False
+        return bool(cid.endswith("@broadcast") or cid.endswith("@newsletter"))
 
     def _is_dm_allowed(self, sender_id: str) -> bool:
         """Check whether a DM from the given sender should be processed."""
@@ -719,10 +705,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
     def _close_bridge_log(self) -> None:
         """Close the bridge log file handle if open."""
         if self._bridge_log_fh:
-            try:
+            with contextlib.suppress(Exception):
                 self._bridge_log_fh.close()
-            except Exception:
-                pass
             self._bridge_log_fh = None
 
     async def _check_managed_bridge_exit(self) -> Optional[str]:
@@ -782,18 +766,14 @@ class WhatsAppAdapter(BasePlatformAdapter):
             print(f"[{self.name}] Disconnecting (external bridge left running)")
 
         # Clean up PID file
-        try:
+        with contextlib.suppress(OSError):
             (self._session_path / "bridge.pid").unlink(missing_ok=True)
-        except OSError:
-            pass
 
         # Cancel the poll task explicitly
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._poll_task
-            except (asyncio.CancelledError, Exception):
-                pass
         self._poll_task = None
 
         # Close the persistent HTTP session
@@ -1260,10 +1240,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                                 if len(parts) >= 3:
                                     display_name = parts[2]
                             injection = f"[Content of {display_name}]:\n{content}"
-                            if body:
-                                body = f"{injection}\n\n{body}"
-                            else:
-                                body = injection
+                            body = f"{injection}\n\n{body}" if body else injection
                             print(f"[{self.name}] Injected text content from: {doc_path}", flush=True)
                         except Exception as e:
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)

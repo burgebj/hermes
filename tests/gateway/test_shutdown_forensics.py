@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from gateway import shutdown_forensics as sf
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +168,8 @@ class TestSpawnAsyncDiagnostic:
             time.sleep(0.1)
 
         # Reap the subprocess so it doesn't show up as a zombie.
-        try:
+        with contextlib.suppress(ChildProcessError, OSError):
             os.waitpid(pid, 0)
-        except (ChildProcessError, OSError):
-            pass
 
         assert log_path.exists()
         contents = log_path.read_text(encoding="utf-8", errors="replace")

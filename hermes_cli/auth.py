@@ -36,7 +36,7 @@ import threading
 import time
 import uuid
 import webbrowser
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -570,9 +570,7 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
     cleaned = value.strip()
     if len(cleaned) < min_length:
         return False
-    if cleaned.lower() in _PLACEHOLDER_SECRET_VALUES:
-        return False
-    return True
+    return cleaned.lower() not in _PLACEHOLDER_SECRET_VALUES
 
 
 def _resolve_api_key_provider_secret(
@@ -955,10 +953,8 @@ def _file_lock(
         finally:
             holder.depth = 0
             if fcntl:
-                try:
+                with suppress(OSError, IOError):
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                except (OSError, IOError):
-                    pass
             elif msvcrt:
                 try:
                     lock_file.seek(0)
@@ -1068,10 +1064,8 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
         except OSError:
             pass
     # Restrict file permissions to owner only
-    try:
+    with suppress(OSError):
         auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
     return auth_file
 
 
@@ -2827,10 +2821,8 @@ def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
     print()
 
     if not _is_remote_session():
-        try:
+        with suppress(Exception):
             webbrowser.open(SPOTIFY_DASHBOARD_URL)
-        except Exception:
-            pass
 
     try:
         raw = input("Spotify Client ID: ").strip()
@@ -4296,10 +4288,8 @@ def _clear_shared_nous_state(reason: str) -> None:
     try:
         with _nous_shared_store_lock():
             path = _nous_shared_store_path()
-            try:
+            with suppress(FileNotFoundError):
                 path.unlink()
-            except FileNotFoundError:
-                pass
         _oauth_trace("nous_shared_store_cleared", reason=reason)
     except Exception as exc:
         logger.debug("Failed to clear shared Nous auth store: %s", exc)
@@ -6607,10 +6597,8 @@ def _xai_oauth_loopback_login(
                 server.server_close()
             except Exception:
                 pass
-            try:
+            with suppress(Exception):
                 thread.join(timeout=1.0)
-            except Exception:
-                pass
             raise
 
     if callback.get("error"):

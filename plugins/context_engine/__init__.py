@@ -24,6 +24,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -131,10 +132,8 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
                     if spec:
                         parent_mod = importlib.util.module_from_spec(spec)
                         sys.modules[parent] = parent_mod
-                        try:
+                        with contextlib.suppress(Exception):
                             spec.loader.exec_module(parent_mod)
-                        except Exception:
-                            pass
 
         # Now load the engine module
         spec = importlib.util.spec_from_file_location(

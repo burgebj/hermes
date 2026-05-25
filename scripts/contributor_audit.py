@@ -62,10 +62,7 @@ def is_ignored(handle: str, email: str = "") -> bool:
     """Return True if this contributor is a bot/AI/machine account."""
     if email in IGNORED_EMAILS:
         return True
-    for pattern in IGNORED_PATTERNS:
-        if pattern.search(handle):
-            return True
-    return False
+    return any(pattern.search(handle) for pattern in IGNORED_PATTERNS)
 
 
 # ---------------------------------------------------------------------------

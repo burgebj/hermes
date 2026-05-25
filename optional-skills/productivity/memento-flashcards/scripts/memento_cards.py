@@ -14,6 +14,7 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import contextlib
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 DATA_DIR = _HERMES_HOME / "skills" / "productivity" / "memento-flashcards" / "data"
@@ -60,10 +61,8 @@ def _save(data: dict) -> None:
             f.write("\n")
         os.replace(tmp, CARDS_FILE)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 

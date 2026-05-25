@@ -52,9 +52,8 @@ def _run_memory_reset(target="all", yes=False, monkeypatch=None, confirm_input="
     if not existing:
         return "nothing"
 
-    if not yes:
-        if confirm_input != "yes":
-            return "cancelled"
+    if not yes and confirm_input != "yes":
+        return "cancelled"
 
     for f, desc in existing:
         (mem_dir / f).unlink()

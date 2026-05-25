@@ -356,6 +356,7 @@ def get_container_exec_info() -> Optional[dict]:
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home  # noqa: F811,E402
 from utils import atomic_replace
+import contextlib
 
 def get_config_path() -> Path:
     """Get the main config file path."""
@@ -389,10 +390,8 @@ def _secure_dir(path):
         mode = int(mode_str, 8) if mode_str else 0o700
     except ValueError:
         mode = 0o700
-    try:
+    with contextlib.suppress(OSError, NotImplementedError):
         os.chmod(path, mode)
-    except (OSError, NotImplementedError):
-        pass
 
 
 def _is_container() -> bool:
@@ -4779,10 +4778,8 @@ def sanitize_env_file() -> int:
             os.fsync(f.fileno())
         atomic_replace(tmp_path, env_path)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
     _secure_file(env_path)
     invalidate_env_cache()
@@ -4872,10 +4869,8 @@ def save_env_value(key: str, value: str):
     # Preserve original permissions so Docker volume mounts aren't clobbered.
     original_mode = None
     if env_path.exists():
-        try:
+        with contextlib.suppress(OSError):
             original_mode = stat.S_IMODE(env_path.stat().st_mode)
-        except OSError:
-            pass
     try:
         with os.fdopen(fd, 'w', **write_kw) as f:
             f.writelines(lines)
@@ -4884,15 +4879,11 @@ def save_env_value(key: str, value: str):
         atomic_replace(tmp_path, env_path)
         # Restore original permissions before _secure_file may tighten them.
         if original_mode is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(env_path, original_mode)
-            except OSError:
-                pass
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
     _secure_file(env_path)
 
@@ -4929,10 +4920,8 @@ def remove_env_value(key: str) -> bool:
         fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
         # Preserve original permissions so Docker volume mounts aren't clobbered.
         original_mode = None
-        try:
+        with contextlib.suppress(OSError):
             original_mode = stat.S_IMODE(env_path.stat().st_mode)
-        except OSError:
-            pass
         try:
             with os.fdopen(fd, 'w', **write_kw) as f:
                 f.writelines(new_lines)
@@ -4940,15 +4929,11 @@ def remove_env_value(key: str) -> bool:
                 os.fsync(f.fileno())
             atomic_replace(tmp_path, env_path)
             if original_mode is not None:
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(env_path, original_mode)
-                except OSError:
-                    pass
         except BaseException:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
         _secure_file(env_path)
 

@@ -45,9 +45,9 @@ def test_call_cron_for_profile_routes_storage_and_restores_globals(isolated_prof
     assert (isolated_profiles["worker_alpha"] / "cron" / "jobs.json").exists()
     assert not (isolated_profiles["default"] / "cron" / "jobs.json").exists()
 
-    assert cron_jobs.CRON_DIR == old_cron_dir
-    assert cron_jobs.JOBS_FILE == old_jobs_file
-    assert cron_jobs.OUTPUT_DIR == old_output_dir
+    assert old_cron_dir == cron_jobs.CRON_DIR
+    assert old_jobs_file == cron_jobs.JOBS_FILE
+    assert old_output_dir == cron_jobs.OUTPUT_DIR
 
 
 @pytest.mark.asyncio

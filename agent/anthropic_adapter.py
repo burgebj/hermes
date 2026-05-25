@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from hermes_constants import get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, normalize_proxy_env_vars
+import contextlib
 
 # NOTE: `import anthropic` is deliberately NOT at module top — the SDK pulls
 # ~220 ms of imports (anthropic.types, anthropic.lib.tools._beta_runner, etc.)
@@ -348,9 +349,7 @@ def _is_oauth_token(key: str) -> bool:
     if key.startswith("eyJ"):
         return True
     # Claude Code OAuth access tokens (opaque, from CLAUDE_CODE_OAUTH_TOKEN)
-    if key.startswith("cc-"):
-        return True
-    return False
+    return bool(key.startswith("cc-"))
 
 
 def _normalize_base_url_text(base_url) -> str:
@@ -438,9 +437,7 @@ def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> 
     for _domain in ("api.kimi.com", "moonshot.ai", "moonshot.cn"):
         if base_url_host_matches(base_url or "", _domain):
             return True
-    if _model_name_is_kimi_family(model):
-        return True
-    return False
+    return bool(_model_name_is_kimi_family(model))
 
 
 def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
@@ -1065,10 +1062,8 @@ def _write_claude_code_credentials(
                 os.fsync(fh.fileno())
             os.replace(_tmp_cred, cred_path)
         except OSError:
-            try:
+            with contextlib.suppress(OSError):
                 _tmp_cred.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise
     except (OSError, IOError) as e:
         logger.debug("Failed to write refreshed credentials: %s", e)
@@ -1356,9 +1351,7 @@ def _is_bedrock_model_id(model: str) -> bool:
     if any(lower.startswith(p) for p in ("global.", "us.", "eu.", "ap.", "jp.")):
         return True
     # Bare Bedrock model IDs: provider.model-family
-    if lower.startswith("anthropic."):
-        return True
-    return False
+    return bool(lower.startswith("anthropic."))
 
 
 def normalize_model_name(model: str, preserve_dots: bool = False) -> str:

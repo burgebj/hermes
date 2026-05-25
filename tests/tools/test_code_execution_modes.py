@@ -283,15 +283,14 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
 
     def _run(self, code, mode, enabled_tools=None, extra_env=None):
         env_overrides = extra_env or {}
-        with _mock_mode(mode):
-            with patch.dict(os.environ, env_overrides):
-                with patch("model_tools.handle_function_call",
-                           side_effect=_mock_handle_function_call):
-                    raw = execute_code(
-                        code=code,
-                        task_id=f"test-{mode}",
-                        enabled_tools=enabled_tools or list(SANDBOX_ALLOWED_TOOLS),
-                    )
+        with _mock_mode(mode), patch.dict(os.environ, env_overrides):
+            with patch("model_tools.handle_function_call",
+                       side_effect=_mock_handle_function_call):
+                raw = execute_code(
+                    code=code,
+                    task_id=f"test-{mode}",
+                    enabled_tools=enabled_tools or list(SANDBOX_ALLOWED_TOOLS),
+                )
         return json.loads(raw)
 
     def test_strict_mode_runs_in_tmpdir(self):
@@ -383,14 +382,13 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
 class TestSecurityInvariantsAcrossModes(unittest.TestCase):
 
     def _run(self, code, mode):
-        with _mock_mode(mode):
-            with patch("model_tools.handle_function_call",
-                       side_effect=_mock_handle_function_call):
-                raw = execute_code(
-                    code=code,
-                    task_id=f"test-sec-{mode}",
-                    enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
-                )
+        with _mock_mode(mode), patch("model_tools.handle_function_call",
+                   side_effect=_mock_handle_function_call):
+            raw = execute_code(
+                code=code,
+                task_id=f"test-sec-{mode}",
+                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+            )
         return json.loads(raw)
 
     def test_api_keys_scrubbed_in_strict_mode(self):

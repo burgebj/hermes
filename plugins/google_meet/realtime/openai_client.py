@@ -19,6 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
+import contextlib
 
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
@@ -105,10 +106,8 @@ class RealtimeSession:
 
     def close(self) -> None:
         if self._ws is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._ws.close()
-            except Exception:
-                pass
             self._ws = None
 
     # ── speaking ──────────────────────────────────────────────────────────

@@ -137,6 +137,7 @@ from plugins.platforms.google_chat.adapter import (  # noqa: E402
     _redact_sensitive,
     check_google_chat_requirements,
 )
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +180,8 @@ def adapter(tmp_path):
         tmp_path / "google_chat_thread_counts.json"
     )
     yield a
-    try:
+    with contextlib.suppress(Exception):
         a._loop.close()
-    except Exception:
-        pass
 
 
 def _make_pubsub_message(data: dict, *, attributes=None):
@@ -1128,10 +1127,8 @@ class TestTypingLifecycle:
         await first_call_started.wait()
         # Simulate wait_for timeout cancelling the awaiter.
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
         # The shielded background create is still running. Release it.
         release_first_call.set()
         # Give the background task time to complete + record.

@@ -52,6 +52,7 @@ def _ensure_discord_mock():
 _ensure_discord_mock()
 
 from gateway.platforms.base import MessageEvent, MessageType, SessionSource
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -2819,10 +2820,8 @@ class TestUDPKeepalive:
             receiver._running = False  # stop loop
             await asyncio.sleep(0.1)
             loop_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await loop_task
-            except asyncio.CancelledError:
-                pass
 
             # send_packet should have been called with silence frame
             mock_conn.send_packet.assert_called_with(b'\xf8\xff\xfe')

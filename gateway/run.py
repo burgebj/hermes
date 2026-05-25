@@ -1183,7 +1183,7 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
         except Exception:
             pass
 
-    if ext in (".ogg", ".opus", ".oga"):
+    if ext in {".ogg", ".opus", ".oga"}:
         try:
             def _ogg_duration() -> float:
                 from mutagen.oggopus import OggOpus
@@ -1522,6 +1522,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
 # Used by tools (e.g. send_message) that need to route through a live
 # adapter for plugin platforms.  Set in GatewayRunner.__init__().
 import weakref as _weakref
+import contextlib
 _gateway_runner_ref: _weakref.ref = lambda: None
 
 
@@ -1586,9 +1587,7 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
         return False
     if agent_result.get("failed") or agent_result.get("partial") or agent_result.get("error"):
         return False
-    if agent_result.get("completed") is False:
-        return False
-    return True
+    return agent_result.get("completed") is not False
 
 
 def _preserve_queued_followup_history_offset(
@@ -2195,9 +2194,7 @@ class GatewayRunner:
         if not self._telegram_topic_mode_enabled(source):
             return False
         tid = str(source.thread_id or "")
-        if not tid or tid in self._TELEGRAM_GENERAL_TOPIC_IDS:
-            return False
-        return True
+        return not (not tid or tid in self._TELEGRAM_GENERAL_TOPIC_IDS)
 
     _TELEGRAM_LOBBY_REMINDER_COOLDOWN_S = 30.0
 
@@ -2709,15 +2706,13 @@ class GatewayRunner:
         # Push next_retry far enough out that even if "paused" is missed
         # by a stale code path, the watcher won't fire on it.
         info["next_retry"] = float("inf")
-        try:
+        with contextlib.suppress(Exception):
             self._update_platform_runtime_status(
                 platform.value,
                 platform_state="paused",
                 error_code=None,
                 error_message=info["pause_reason"],
             )
-        except Exception:
-            pass
         logger.warning(
             "%s paused after %d consecutive failures (%s) — "
             "fix the underlying issue then run `/platform resume %s` "
@@ -2740,15 +2735,13 @@ class GatewayRunner:
         info.pop("pause_reason", None)
         info["attempts"] = 0
         info["next_retry"] = time.monotonic()  # retry on next watcher tick
-        try:
+        with contextlib.suppress(Exception):
             self._update_platform_runtime_status(
                 platform.value,
                 platform_state="retrying",
                 error_code=None,
                 error_message=None,
             )
-        except Exception:
-            pass
         logger.info("%s resumed — retrying on next watcher tick", platform.value)
         return True
 
@@ -3495,10 +3488,8 @@ class GatewayRunner:
         # Keep any entries that are still above 0 even if not active now
         # (they might become active again next restart)
 
-        try:
+        with contextlib.suppress(Exception):
             atomic_json_write(path, new_counts, indent=None)
-        except Exception:
-            pass
 
     def _suspend_stuck_loop_sessions(self) -> int:
         """Suspend sessions that have been active across too many restarts.
@@ -3536,16 +3527,12 @@ class GatewayRunner:
                 pass
 
         if suspended:
-            try:
+            with contextlib.suppress(Exception):
                 self.session_store._save()
-            except Exception:
-                pass
 
         # Clear the file — counters start fresh after suspension
-        try:
+        with contextlib.suppress(Exception):
             path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
         return suspended
 
@@ -3991,10 +3978,8 @@ class GatewayRunner:
         _clean_marker = _hermes_home / ".clean_shutdown"
         if _clean_marker.exists():
             logger.info("Previous gateway exited cleanly — skipping session suspension")
-            try:
+            with contextlib.suppress(Exception):
                 _clean_marker.unlink()
-            except Exception:
-                pass
         else:
             try:
                 suspended = self.session_store.suspend_recently_active()
@@ -4202,7 +4187,7 @@ class GatewayRunner:
         if hook_count:
             logger.info("%s hook(s) loaded", hook_count)
         await self.hooks.emit("gateway:startup", {
-            "platforms": [p.value for p in self.adapters.keys()],
+            "platforms": [p.value for p in self.adapters],
         })
         
         if connected_count > 0:
@@ -4751,7 +4736,7 @@ class GatewayRunner:
                     deliveries: list[dict] = []
                     active_platforms = {
                         getattr(platform, "value", str(platform)).lower()
-                        for platform in self.adapters.keys()
+                        for platform in self.adapters
                     }
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
@@ -5396,10 +5381,8 @@ class GatewayRunner:
                 return None
             finally:
                 if conn is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         conn.close()
-                    except Exception:
-                        pass
 
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
@@ -5447,10 +5430,8 @@ class GatewayRunner:
                     continue
                 finally:
                     if conn is not None:
-                        try:
+                        with contextlib.suppress(Exception):
                             conn.close()
-                        except Exception:
-                            pass
             return False
 
         # Auto-decompose: turn fresh triage tasks into ready workgraphs
@@ -6038,10 +6019,8 @@ class GatewayRunner:
             # suspends those sessions — giving users a clean slate instead
             # of resuming a half-finished tool loop.
             if not timed_out:
-                try:
+                with contextlib.suppress(Exception):
                     (_hermes_home / ".clean_shutdown").touch()
-                except Exception:
-                    pass
             else:
                 logger.info(
                     "Skipping .clean_shutdown marker — drain timed out with "
@@ -6736,10 +6715,7 @@ class GatewayRunner:
                             _recognized_cmd = _cmd_def.name if _cmd_def else None
                         except Exception:
                             _recognized_cmd = None
-                if _recognized_cmd:
-                    response_text = ""
-                else:
-                    response_text = raw
+                response_text = "" if _recognized_cmd else raw
             if response_text:
                 response_path = _hermes_home / ".update_response"
                 prompt_path = _hermes_home / ".update_prompt.json"
@@ -7476,10 +7452,8 @@ class GatewayRunner:
             steer_payload = event.get_command_args().strip()
             if not steer_payload:
                 return "Usage: /steer <prompt>  (no agent is running; sending as a normal message)"
-            try:
+            with contextlib.suppress(Exception):
                 event.text = steer_payload
-            except Exception:
-                pass
             # Do NOT return — fall through to _handle_message_with_agent
             # at the end of this function so the rewritten text is sent
             # to the agent as a regular user turn.
@@ -7996,10 +7970,8 @@ class GatewayRunner:
             return None
         source = cached_sources.get(session_key)
         if source is not None:
-            try:
+            with contextlib.suppress(Exception):
                 cached_sources.move_to_end(session_key)
-            except Exception:
-                pass
         return source
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
@@ -8024,10 +7996,8 @@ class GatewayRunner:
                 source.chat_id, source.user_id, source.thread_id, recovered,
             )
             source = dataclasses.replace(source, thread_id=recovered)
-            try:
+            with contextlib.suppress(Exception):
                 event.source = source
-            except Exception:
-                pass
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
@@ -8256,10 +8226,8 @@ class GatewayRunner:
                         # (same as run_agent.py lines 995-1005)
                         _raw_ctx = _model_cfg.get("context_length")
                         if _raw_ctx is not None:
-                            try:
+                            with contextlib.suppress(TypeError, ValueError):
                                 _hyg_config_context_length = int(_raw_ctx)
-                            except (TypeError, ValueError):
-                                pass
                         # Read provider for accurate context detection
                         _hyg_provider = _model_cfg.get("provider") or None
                         _hyg_base_url = _model_cfg.get("base_url") or None
@@ -9071,10 +9039,8 @@ class GatewayRunner:
                 if isinstance(model_cfg, dict):
                     raw_ctx = model_cfg.get("context_length")
                     if raw_ctx is not None:
-                        try:
+                        with contextlib.suppress(TypeError, ValueError):
                             config_context_length = int(raw_ctx)
-                        except (TypeError, ValueError):
-                            pass
                     provider = model_cfg.get("provider") or None
                     base_url = model_cfg.get("base_url") or None
                 try:
@@ -9528,7 +9494,7 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
 
-        connected_platforms = [p.value for p in self.adapters.keys()]
+        connected_platforms = [p.value for p in self.adapters]
 
         # Check if there's an active agent
         session_key = session_entry.session_key
@@ -9761,7 +9727,7 @@ class GatewayRunner:
 
         if action == "list":
             lines = ["**Gateway platforms**"]
-            connected = sorted(p.value for p in self.adapters.keys())
+            connected = sorted(p.value for p in self.adapters)
             if connected:
                 lines.append("Connected: " + ", ".join(connected))
             else:
@@ -11241,10 +11207,7 @@ class GatewayRunner:
         # When streaming already delivered the text (already_sent=True),
         # the base adapter will receive None and can't run auto-TTS,
         # so the runner must take over.
-        if is_voice_input and not already_sent:
-            return False
-
-        return True
+        return not (is_voice_input and not already_sent)
 
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
@@ -11316,10 +11279,8 @@ class GatewayRunner:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
         finally:
             for p in {audio_path, actual_path} - {None}:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(p)
-                except OSError:
-                    pass
 
     async def _deliver_media_from_response(
         self,
@@ -11666,26 +11627,22 @@ class GatewayRunner:
 
                 # Send extracted images
                 for image_url, alt_text in (images or []):
-                    try:
+                    with contextlib.suppress(Exception):
                         await adapter.send_image(
                             chat_id=source.chat_id,
                             image_url=image_url,
                             caption=alt_text,
                             metadata=_thread_metadata,
                         )
-                    except Exception:
-                        pass
 
                 # Send media files
                 for media_path, _is_voice in (media_files or []):
-                    try:
+                    with contextlib.suppress(Exception):
                         await adapter.send_document(
                             chat_id=source.chat_id,
                             file_path=media_path,
                             metadata=_thread_metadata,
                         )
-                    except Exception:
-                        pass
             else:
                 preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
                 await adapter.send(
@@ -11696,14 +11653,12 @@ class GatewayRunner:
 
         except Exception as e:
             logger.exception("Background task %s failed", task_id)
-            try:
+            with contextlib.suppress(Exception):
                 await adapter.send(
                     chat_id=source.chat_id,
                     content=f"❌ Background task {task_id} failed: {e}",
                     metadata=_thread_metadata,
                 )
-            except Exception:
-                pass
 
     async def _handle_reasoning_command(self, event: MessageEvent) -> str:
         """Handle /reasoning command — manage reasoning effort and display toggle.
@@ -12897,10 +12852,8 @@ class GatewayRunner:
                 pass  # Best-effort copy
 
         # Set title
-        try:
+        with contextlib.suppress(Exception):
             self._session_db.set_session_title(new_session_id, branch_title)
-        except Exception:
-            pass
 
         # Switch the session store entry to the new session
         new_entry = self.session_store.switch_session(session_key, new_session_id)
@@ -14101,14 +14054,12 @@ class GatewayRunner:
             logger.warning("Update watcher timed out after %.0fs", timeout)
             exit_code_path.write_text("124")
             await _flush_buffer()
-            try:
+            with contextlib.suppress(Exception):
                 await adapter.send(
                     chat_id,
                     "❌ Hermes update timed out after 30 minutes.",
                     metadata=metadata,
                 )
-            except Exception:
-                pass
             for p in (pending_path, claimed_path, output_path,
                       exit_code_path, prompt_path):
                 p.unlink(missing_ok=True)
@@ -15461,10 +15412,8 @@ class GatewayRunner:
         # Send typing indicator
         _adapter = self.adapters.get(source.platform)
         if _adapter:
-            try:
+            with contextlib.suppress(Exception):
                 await _adapter.send_typing(source.chat_id, metadata=_thread_metadata)
-            except Exception:
-                pass
 
         # Make the HTTP request with SSE streaming -----------------------
         full_response = ""
@@ -15861,7 +15810,7 @@ class GatewayRunner:
         ) if _progress_thread_id else None
         _progress_reply_to = (
             event_message_id
-            if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
+            if source.platform in {Platform.FEISHU, Platform.MATTERMOST} and source.thread_id and event_message_id
             else None
         )
 
@@ -16167,10 +16116,8 @@ class GatewayRunner:
                                 await _roll_progress_overflow_if_needed()
                                 if can_edit and progress_lines and progress_msg_id:
                                     _pending_text = _progress_text(progress_lines)
-                                    try:
+                                    with contextlib.suppress(Exception):
                                         await _edit_progress_message(progress_msg_id, _pending_text)
-                                    except Exception:
-                                        pass
                                 progress_msg_id = None
                                 progress_lines = []
                                 last_progress_msg[0] = None
@@ -16185,10 +16132,8 @@ class GatewayRunner:
                         await _roll_progress_overflow_if_needed()
                     if can_edit and progress_lines and progress_msg_id:
                         full_text = _progress_text(progress_lines)
-                        try:
+                        with contextlib.suppress(Exception):
                             await _edit_progress_message(progress_msg_id, full_text)
-                        except Exception:
-                            pass
                     return
                 except Exception as e:
                     logger.error("Progress message error: %s", e)
@@ -16466,10 +16411,8 @@ class GatewayRunner:
                         # Refresh LRU order so the cap enforcement evicts
                         # truly-oldest entries, not the one we just used.
                         if hasattr(_cache, "move_to_end"):
-                            try:
+                            with contextlib.suppress(KeyError):
                                 _cache.move_to_end(session_key)
-                            except KeyError:
-                                pass
                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
                         logger.debug("Reusing cached agent for session %s", session_key)
 
@@ -16605,10 +16548,8 @@ class GatewayRunner:
                 # status to obscure the prompt or block the user from typing
                 # an "Other" response on platforms that disable input while
                 # typing is active (Slack Assistant API).
-                try:
+                with contextlib.suppress(Exception):
                     _status_adapter.pause_typing_for_chat(_status_chat_id)
-                except Exception:
-                    pass
 
                 send_ok = False
                 fut = safe_schedule_threadsafe(
@@ -17394,10 +17335,8 @@ class GatewayRunner:
                 _timed_out_agent = agent_holder[0]
                 _activity = {}
                 if _timed_out_agent and hasattr(_timed_out_agent, "get_activity_summary"):
-                    try:
+                    with contextlib.suppress(Exception):
                         _activity = _timed_out_agent.get_activity_summary()
-                    except Exception:
-                        pass
 
                 _last_desc = _activity.get("last_activity_desc", "unknown")
                 _secs_ago = _activity.get("seconds_since_activity", 0)
@@ -17577,10 +17516,8 @@ class GatewayRunner:
                             await asyncio.wait_for(stream_task, timeout=5.0)
                         except (asyncio.TimeoutError, asyncio.CancelledError):
                             stream_task.cancel()
-                            try:
+                            with contextlib.suppress(asyncio.CancelledError):
                                 await stream_task
-                            except asyncio.CancelledError:
-                                pass
                         except Exception as e:
                             logger.debug("Stream consumer wait before queued message failed: %s", e)
                     _previewed = bool(result.get("response_previewed"))
@@ -17665,13 +17602,11 @@ class GatewayRunner:
                 # typing task is still alive but may be stale.
                 _followup_adapter = self.adapters.get(source.platform)
                 if _followup_adapter:
-                    try:
+                    with contextlib.suppress(Exception):
                         await _followup_adapter.send_typing(
                             source.chat_id,
                             metadata=_status_thread_metadata,
                         )
-                    except Exception:
-                        pass
 
                 followup_result = await self._run_agent(
                     message=next_message,
@@ -17707,19 +17642,15 @@ class GatewayRunner:
                 )
                 if not _has_stream_consumer:
                     stream_task.cancel()
-                    try:
+                    with contextlib.suppress(asyncio.CancelledError):
                         await stream_task
-                    except asyncio.CancelledError:
-                        pass
                 else:
                     try:
                         await asyncio.wait_for(stream_task, timeout=5.0)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         stream_task.cancel()
-                        try:
+                        with contextlib.suppress(asyncio.CancelledError):
                             await stream_task
-                        except asyncio.CancelledError:
-                            pass
             
             # Clean up tracking
             tracking_task.cancel()
@@ -17738,10 +17669,8 @@ class GatewayRunner:
             # Wait for cancelled tasks
             for task in [progress_task, interrupt_monitor, tracking_task, _notify_task]:
                 if task:
-                    try:
+                    with contextlib.suppress(asyncio.CancelledError):
                         await task
-                    except asyncio.CancelledError:
-                        pass
 
         # If streaming already delivered the response, mark it so the
         # caller's send() is skipped (avoiding duplicate messages).
@@ -17827,20 +17756,16 @@ class GatewayRunner:
             def _cleanup_temp_bubbles() -> None:
                 async def _delete_all() -> None:
                     for _mid in _ids_snapshot:
-                        try:
+                        with contextlib.suppress(Exception):
                             await _adapter_snapshot.delete_message(
                                 _chat_id_snapshot, _mid
                             )
-                        except Exception:
-                            pass
-                try:
+                with contextlib.suppress(Exception):
                     safe_schedule_threadsafe(
                         _delete_all(), _loop_snapshot,
                         logger=logger,
                         log_message="Temp bubble cleanup scheduling error",
                     )
-                except Exception:
-                    pass
 
             try:
                 _cleanup_adapter.register_post_delivery_callback(
@@ -18033,10 +17958,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             remove_pid_file()
             # remove_pid_file() is a no-op when the PID doesn't match.
             # Force-unlink to cover the old-process-crashed case.
-            try:
+            with contextlib.suppress(Exception):
                 (get_hermes_home() / "gateway.pid").unlink(missing_ok=True)
-            except Exception:
-                pass
             # Clean up any takeover marker the old process didn't consume
             # (e.g. SIGKILL'd before its shutdown handler could read it).
             try:

@@ -882,6 +882,7 @@ class SignManager:
 
 
 from dataclasses import dataclass, field as dc_field
+import contextlib
 
 @dataclass
 class InboundContext:
@@ -2893,18 +2894,14 @@ class ConnectionManager:
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
             self._heartbeat_task = None
 
         if self._recv_task:
             self._recv_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._recv_task
-            except asyncio.CancelledError:
-                pass
             self._recv_task = None
 
         # Fail any pending ACK futures
@@ -3387,10 +3384,8 @@ class ConnectionManager:
         ws = self._ws
         self._ws = None
         if ws is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await ws.close()
-            except Exception:
-                pass
 
 class MediaSendHandler(ABC):
     """Abstract base class for media send strategies.
@@ -3898,10 +3893,8 @@ class HeartbeatManager:
             cancelled = False
         finally:
             if not cancelled:
-                try:
+                with contextlib.suppress(Exception):
                     await self.send_heartbeat_once(chat_id, WS_HEARTBEAT_FINISH)
-                except Exception:
-                    pass
             self._reply_heartbeat_tasks.pop(chat_id, None)
             self._reply_hb_last_active.pop(chat_id, None)
 
@@ -3910,15 +3903,11 @@ class HeartbeatManager:
         task = self._reply_heartbeat_tasks.pop(chat_id, None)
         if task and not task.done():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         if send_finish:
-            try:
+            with contextlib.suppress(Exception):
                 await self.send_heartbeat_once(chat_id, WS_HEARTBEAT_FINISH)
-            except Exception:
-                pass
 
     async def close(self) -> None:
         """Cancel all reply heartbeat tasks."""
@@ -4069,10 +4058,8 @@ class MessageSender:
 
         # Notify outbound coordinator that send is complete (e.g. FINISH heartbeat)
         if self._on_send_finish:
-            try:
+            with contextlib.suppress(Exception):
                 await self._on_send_finish(chat_id)
-            except Exception:
-                pass
         return SendResult(success=True)
 
     async def send_media(
@@ -4685,10 +4672,8 @@ class YuanbaoAdapter(BasePlatformAdapter):
 
     async def send_typing(self, chat_id: str, metadata: Optional[dict] = None) -> None:
         """Send "typing" status heartbeat (RUNNING). Delegates to OutboundManager."""
-        try:
+        with contextlib.suppress(Exception):
             await self._outbound.start_typing(chat_id)
-        except Exception:
-            pass
 
     async def stop_typing(self, chat_id: str) -> None:
         """Stop the RUNNING heartbeat loop without sending FINISH immediately.
@@ -4696,10 +4681,8 @@ class YuanbaoAdapter(BasePlatformAdapter):
         FINISH is sent by send() after actual message delivery to ensure correct ordering:
         RUNNING... -> message arrives -> FINISH.
         """
-        try:
+        with contextlib.suppress(Exception):
             await self._outbound.stop_typing(chat_id, send_finish=False)
-        except Exception:
-            pass
 
     async def _process_message_background(self, event, session_key: str) -> None:
         """Wrap base class processing with a slow-response notifier."""

@@ -600,10 +600,7 @@ def cmd_crypto(symbol: str, vs: str = "USD") -> None:
     vs = vs.upper().strip()
 
     # If user already passed BTC-USD, keep as-is; otherwise append
-    if "-" not in sym:
-        ticker = f"{sym}-{vs}"
-    else:
-        ticker = sym
+    ticker = f"{sym}-{vs}" if "-" not in sym else sym
 
     chart_data = yf_chart(ticker, interval="1d", range_="1d")
 

@@ -11,6 +11,7 @@ import asyncio
 import sys
 import threading
 import warnings
+import contextlib
 
 
 class TestGetRunningLoopReplacement:
@@ -21,10 +22,8 @@ class TestGetRunningLoopReplacement:
         def _thread_target():
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                try:
+                with contextlib.suppress(RuntimeError):
                     asyncio.get_running_loop()
-                except RuntimeError:
-                    pass
                 warnings_caught.extend(w)
 
         t = threading.Thread(target=_thread_target, daemon=True)
@@ -45,10 +44,8 @@ class TestGetRunningLoopReplacement:
         def _test_get_running_loop():
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                try:
+                with contextlib.suppress(RuntimeError):
                     asyncio.get_running_loop()
-                except RuntimeError:
-                    pass
                 caught_from_running.extend(w)
 
         t = threading.Thread(target=_test_get_running_loop, daemon=True)

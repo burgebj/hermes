@@ -66,6 +66,7 @@ def _skin_branding(key: str, fallback: str) -> str:
 # =========================================================================
 
 from hermes_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
+import contextlib
 
 HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
 [bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
@@ -259,10 +260,8 @@ def check_for_updates() -> Optional[int]:
         else:
             behind = _check_via_local_git(repo_dir)
 
-    try:
+    with contextlib.suppress(Exception):
         cache_file.write_text(json.dumps({"ts": now, "behind": behind, "rev": embedded_rev}))
-    except Exception:
-        pass
 
     return behind
 

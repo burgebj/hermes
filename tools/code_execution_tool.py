@@ -46,6 +46,7 @@ import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
+import contextlib
 
 # Availability gate.  On Windows we fall back to loopback TCP for the
 # sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
@@ -254,10 +255,7 @@ def generate_hermes_tools_module(enabled_tools: List[str],
         )
         export_names.append(func_name)
 
-    if transport == "file":
-        header = _FILE_TRANSPORT_HEADER
-    else:
-        header = _UDS_TRANSPORT_HEADER
+    header = _FILE_TRANSPORT_HEADER if transport == "file" else _UDS_TRANSPORT_HEADER
 
     return header + "\n".join(stub_functions)
 
@@ -1457,14 +1455,10 @@ def _kill_process_group(proc, escalate: bool = False):
         parent = psutil.Process(proc.pid)
         children = parent.children(recursive=True)
         for child in children:
-            try:
+            with contextlib.suppress(psutil.NoSuchProcess):
                 child.terminate()
-            except psutil.NoSuchProcess:
-                pass
-        try:
+        with contextlib.suppress(psutil.NoSuchProcess):
             parent.terminate()
-        except psutil.NoSuchProcess:
-            pass
     except psutil.NoSuchProcess:
         pass
     except (PermissionError, OSError) as e:
@@ -1482,14 +1476,10 @@ def _kill_process_group(proc, escalate: bool = False):
             try:
                 parent = psutil.Process(proc.pid)
                 for child in parent.children(recursive=True):
-                    try:
+                    with contextlib.suppress(psutil.NoSuchProcess):
                         child.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                try:
+                with contextlib.suppress(psutil.NoSuchProcess):
                     parent.kill()
-                except psutil.NoSuchProcess:
-                    pass
             except psutil.NoSuchProcess:
                 pass
             except (PermissionError, OSError) as e:
@@ -1700,10 +1690,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
     import_examples = [n for n in ("web_search", "terminal") if n in enabled_sandbox_tools]
     if not import_examples:
         import_examples = sorted(enabled_sandbox_tools)[:2]
-    if import_examples:
-        import_str = ", ".join(import_examples) + ", ..."
-    else:
-        import_str = "..."
+    import_str = ", ".join(import_examples) + ", ..." if import_examples else "..."
 
     # Mode-specific CWD guidance. Project mode is the default and matches
     # terminal()'s filesystem/interpreter; strict mode retains the isolated

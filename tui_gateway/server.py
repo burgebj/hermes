@@ -114,6 +114,7 @@ except Exception:
     pass
 
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
+import contextlib
 
 _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
@@ -258,10 +259,8 @@ class _SlashWorker:
                 self.proc.terminate()
                 self.proc.wait(timeout=1)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 self.proc.kill()
-            except Exception:
-                pass
 
 
 def _load_busy_input_mode() -> str:
@@ -299,10 +298,8 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     else:
         history = list(session.get("history", []))
     if agent is not None and history and hasattr(agent, "commit_memory_session"):
-        try:
+        with contextlib.suppress(Exception):
             agent.commit_memory_session(history)
-        except Exception:
-            pass
 
     session_key = session.get("session_key")
     session_id = getattr(agent, "session_id", None) or session_key
@@ -600,10 +597,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
         finally:
             if _sessions.get(sid) is not current:
                 if worker is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         worker.close()
-                    except Exception:
-                        pass
                 if notify_registered:
                     try:
                         from tools.approval import unregister_gateway_notify
@@ -1072,10 +1067,8 @@ def _tool_progress_enabled(sid: str) -> bool:
 def _restart_slash_worker(session: dict):
     worker = session.get("slash_worker")
     if worker:
-        try:
+        with contextlib.suppress(Exception):
             worker.close()
-        except Exception:
-            pass
     try:
         session["slash_worker"] = _SlashWorker(
             session["session_key"],
@@ -1283,10 +1276,8 @@ def _sync_session_key_after_compress(
             unregister_gateway_notify,
         )
 
-        try:
+        with contextlib.suppress(Exception):
             unregister_gateway_notify(old_key)
-        except Exception:
-            pass
         session["session_key"] = new_session_id
         try:
             yolo_was_on = is_session_yolo_enabled(old_key)
@@ -1298,13 +1289,11 @@ def _sync_session_key_after_compress(
                 disable_session_yolo(old_key)
             except Exception:
                 pass
-        try:
+        with contextlib.suppress(Exception):
             register_gateway_notify(
                 new_session_id,
                 lambda data: _emit("approval.request", sid, data),
             )
-        except Exception:
-            pass
     except Exception:
         # Even if the approval module fails to import, still anchor the
         # session_key on the new continuation id so downstream lookups
@@ -1314,10 +1303,8 @@ def _sync_session_key_after_compress(
     if clear_pending_title:
         session["pending_title"] = None
     if restart_slash_worker:
-        try:
+        with contextlib.suppress(Exception):
             _restart_slash_worker(session)
-        except Exception:
-            pass
 
 
 def _get_usage(agent) -> dict:
@@ -1472,10 +1459,8 @@ def _session_info(agent) -> dict:
         info["mcp_servers"] = get_mcp_status()
     except Exception:
         info["mcp_servers"] = []
-    try:
+    with contextlib.suppress(Exception):
         info["system_prompt"] = getattr(agent, "_cached_system_prompt", "") or ""
-    except Exception:
-        pass
     try:
         from hermes_cli.banner import get_update_result
         from hermes_cli.config import recommended_update_command
@@ -1730,15 +1715,11 @@ def _on_tool_progress(
         ):
             val = _kwargs.get(int_key)
             if val is not None:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     payload[int_key] = int(val)
-                except (TypeError, ValueError):
-                    pass
         if _kwargs.get("cost_usd") is not None:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 payload["cost_usd"] = float(_kwargs["cost_usd"])
-            except (TypeError, ValueError):
-                pass
         if _kwargs.get("files_read"):
             payload["files_read"] = [str(p) for p in _kwargs["files_read"]]
         if _kwargs.get("files_written"):
@@ -2612,12 +2593,10 @@ def _(rid, params: dict) -> dict:
     history = list(session.get("history", []))
     db = _get_db()
     if db is not None and session.get("session_key"):
-        try:
+        with contextlib.suppress(Exception):
             history = db.get_messages_as_conversation(
                 session["session_key"], include_ancestors=True
             )
-        except Exception:
-            pass
     return _ok(
         rid,
         {
@@ -5750,10 +5729,8 @@ def _(rid, params: dict) -> dict:
             payload["warning"] = warning
         return _ok(rid, payload)
     except Exception as e:
-        try:
+        with contextlib.suppress(Exception):
             worker.close()
-        except Exception:
-            pass
         session["slash_worker"] = None
         return _err(rid, 5030, str(e))
 

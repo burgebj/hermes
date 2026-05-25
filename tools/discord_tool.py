@@ -34,6 +34,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.registry import registry
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +91,8 @@ def _discord_request(
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = ""
-        try:
+        with contextlib.suppress(Exception):
             error_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
         raise DiscordAPIError(e.code, error_body) from e
 
 

@@ -51,6 +51,7 @@ from gateway.platforms.base import (
 )
 from gateway.session import SessionSource
 from gateway.config import PlatformConfig, Platform
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +242,8 @@ class IRCAdapter(BasePlatformAdapter):
 
         if self._recv_task and not self._recv_task.done():
             self._recv_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._recv_task
-            except asyncio.CancelledError:
-                pass
 
         self._reader = None
         self._writer = None
@@ -671,10 +670,8 @@ def _env_enablement() -> dict | None:
     }
     port = os.getenv("IRC_PORT", "").strip()
     if port:
-        try:
+        with contextlib.suppress(ValueError):
             seed["port"] = int(port)
-        except ValueError:
-            pass
     nickname = os.getenv("IRC_NICKNAME", "").strip()
     if nickname:
         seed["nickname"] = nickname
@@ -905,10 +902,8 @@ async def _standalone_send(
             return {"error": "IRC standalone send: empty message after stripping"}
 
         await _raw("QUIT :delivered")
-        try:
+        with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(reader.read(1024), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
 
         return {"success": True, "message_id": str(int(time.time() * 1000))}
     except asyncio.CancelledError:

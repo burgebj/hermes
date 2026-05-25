@@ -48,10 +48,7 @@ def _new_should_allow(verdict, trust_level, force):
     if decision == "allow":
         return True
 
-    if force:
-        return True
-
-    return False
+    return bool(force)
 
 
 class TestPolicyPrecedenceForDangerousVerdicts:

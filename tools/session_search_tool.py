@@ -32,6 +32,7 @@ support.
 import json
 import logging
 from typing import Any, Dict, List, Optional, Union
+import contextlib
 
 # Sources that are excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool
@@ -104,7 +105,7 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[s
         entry["anchor"] = True
     # Strip None values to keep payload tight, but always keep content
     # (absent content is meaningful — tool-call-only assistant turns).
-    return {k: v for k, v in entry.items() if v is not None or k in ("content",)}
+    return {k: v for k, v in entry.items() if v is not None or k in {"content",}}
 
 
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
@@ -121,7 +122,7 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
         results = []
         for s in sessions:
             sid = s.get("id", "")
-            if current_root and (sid == current_root or sid == current_session_id):
+            if current_root and (sid in {current_root, current_session_id}):
                 continue
             # Skip child / delegation sessions
             if s.get("parent_session_id"):
@@ -239,10 +240,8 @@ def _scroll(
                             f"around_message_id {around_message_id} lives in {owning} "
                             f"(child of {session_id}); rebound transparently"
                         )
-                        try:
+                        with contextlib.suppress(Exception):
                             session_meta = db.get_session(owning) or session_meta
-                        except Exception:
-                            pass
                         session_id = owning
                 except Exception as e:
                     logging.debug("rebind get_messages_around failed: %s", e, exc_info=True)
@@ -437,7 +436,7 @@ def session_search(
     sort_norm: Optional[str] = None
     if isinstance(sort, str):
         candidate = sort.strip().lower()
-        if candidate in ("newest", "oldest"):
+        if candidate in {"newest", "oldest"}:
             sort_norm = candidate
 
     return _discover(

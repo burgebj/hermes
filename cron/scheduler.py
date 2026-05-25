@@ -17,7 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -833,10 +833,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     scripts_dir_resolved = scripts_dir.resolve()
 
     raw = Path(script_path).expanduser()
-    if raw.is_absolute():
-        path = raw.resolve()
-    else:
-        path = (scripts_dir / raw).resolve()
+    path = raw.resolve() if raw.is_absolute() else (scripts_dir / raw).resolve()
 
     # Guard against path traversal, absolute path injection, and symlink
     # escape — scripts MUST reside within HERMES_HOME/scripts/.
@@ -1192,10 +1189,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             ok, output = _run_job_script(script_path)
         finally:
             if _prior_cwd is not None:
-                try:
+                with suppress(OSError):
                     os.chdir(_prior_cwd)
-                except OSError:
-                    pass
 
         now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1651,10 +1646,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # Build diagnostic summary from the agent's activity tracker.
             _activity = {}
             if hasattr(agent, "get_activity_summary"):
-                try:
+                with suppress(Exception):
                     _activity = agent.get_activity_summary()
-                except Exception:
-                    pass
             _last_desc = _activity.get("last_activity_desc", "unknown")
             _secs_ago = _activity.get("seconds_since_activity", 0)
             _cur_tool = _activity.get("current_tool")
@@ -1956,15 +1949,11 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         return sum(_results)
     finally:
         if fcntl:
-            try:
+            with suppress(OSError, IOError):
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
         elif msvcrt:
-            try:
+            with suppress(OSError, IOError):
                 msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except (OSError, IOError):
-                pass
         lock_fd.close()
 
 

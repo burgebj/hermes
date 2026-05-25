@@ -24,6 +24,7 @@ import os
 import sys
 from collections import Counter
 from pathlib import Path
+import contextlib
 
 
 def _load_json(path: Path | None) -> list[dict]:
@@ -46,10 +47,8 @@ def _normalize_ruff(entries: list[dict]) -> list[dict]:
         code = e.get("code") or "unknown"
         # ruff emits absolute paths; relativize to repo root if possible
         filename = e.get("filename", "")
-        try:
+        with contextlib.suppress(ValueError):
             filename = os.path.relpath(filename)
-        except ValueError:
-            pass
         line = (e.get("location") or {}).get("row", 0)
         out.append(
             {

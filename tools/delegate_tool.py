@@ -39,6 +39,7 @@ _RUNTIME_PROVIDER_CUSTOM = "custom"
 from tools import file_state
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import base_url_hostname, is_truthy_value
+import contextlib
 
 
 # Tools that children must never have access to
@@ -1254,10 +1255,8 @@ def _dump_subagent_timeout_diagnostic(
         tool_names = getattr(child, "valid_tool_names", None)
         if tool_names:
             _w(f"  loaded tool count: {len(tool_names)}")
-            try:
+            with contextlib.suppress(Exception):
                 _w(f"  loaded tools:      {sorted(tool_names)}")
-            except Exception:
-                pass
         _w("")
 
         _w("## Prompt / schema sizes")
@@ -1430,10 +1429,8 @@ def _run_single_child(
                         )
             except Exception:
                 pass
-            try:
+            with contextlib.suppress(Exception):
                 touch(desc)
-            except Exception:
-                pass
 
     _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
 
@@ -1558,7 +1555,7 @@ def _run_single_child(
                     )
 
             if child_progress_cb:
-                try:
+                with contextlib.suppress(Exception):
                     child_progress_cb(
                         "subagent.complete",
                         preview=(
@@ -1570,8 +1567,6 @@ def _run_single_child(
                         duration_seconds=duration,
                         summary="",
                     )
-                except Exception:
-                    pass
 
             if is_timeout:
                 if child_api_calls == 0:
@@ -1802,10 +1797,8 @@ def _run_single_child(
             "output_tail": _output_tail,
         }
         if _cost_usd is not None:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 complete_kwargs["cost_usd"] = float(_cost_usd)
-            except (TypeError, ValueError):
-                pass
 
         if child_progress_cb:
             try:

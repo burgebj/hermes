@@ -60,6 +60,7 @@ from agent.tool_guardrails import (
 )
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -555,10 +556,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         # Any reasoning that wasn't shown during streaming is caught by the
         # CLI post-response display fallback (cli.py _reasoning_shown_this_turn).
         if not agent.stream_delta_callback and not agent._stream_callback:
-            try:
+            with contextlib.suppress(Exception):
                 agent.reasoning_callback(reasoning_text)
-            except Exception:
-                pass
 
     # Sanitize surrogates from API response — some models (e.g. Kimi/GLM via Ollama)
     # can return invalid surrogate code points that crash json.dumps() on persist.
@@ -1271,10 +1270,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         def _fire_first():
             if not first_delta_fired["done"] and on_first_delta:
                 first_delta_fired["done"] = True
-                try:
+                with contextlib.suppress(Exception):
                     on_first_delta()
-                except Exception:
-                    pass
 
         def _bedrock_call():
             try:
@@ -1380,10 +1377,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _fire_first_delta():
         if not first_delta_fired["done"] and on_first_delta:
             first_delta_fired["done"] = True
-            try:
+            with contextlib.suppress(Exception):
                 on_first_delta()
-            except Exception:
-                pass
 
     def _call_chat_completions():
         """Stream a chat completions response."""
@@ -1484,10 +1479,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # bytes aren't exposed by the SDK, but len(repr(chunk)) is
                 # a stable proxy for "how much content arrived" that
                 # survives stub provider differences.
-                try:
+                with contextlib.suppress(Exception):
                     _diag["bytes"] = int(_diag.get("bytes", 0)) + len(repr(chunk))
-                except Exception:
-                    pass
             except Exception:
                 pass
 
@@ -1693,12 +1686,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # ``stream.response``.  Snapshot diagnostic headers
             # immediately so they survive a stream that dies before the
             # first event.
-            try:
+            with contextlib.suppress(Exception):
                 agent._stream_diag_capture_response(
                     _diag, getattr(stream, "response", None)
                 )
-            except Exception:
-                pass
             for event in stream:
                 # Update stale-stream timer on every event so the
                 # outer poll loop knows data is flowing.  Without
@@ -1714,10 +1705,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     _diag["chunks"] = int(_diag.get("chunks", 0)) + 1
                     if _diag.get("first_chunk_at") is None:
                         _diag["first_chunk_at"] = last_chunk_time["t"]
-                    try:
+                    with contextlib.suppress(Exception):
                         _diag["bytes"] = int(_diag.get("bytes", 0)) + len(repr(event))
-                    except Exception:
-                        pass
                 except Exception:
                     pass
 
@@ -1852,21 +1841,17 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # about to be re-streamed.  Structured WARNING is
                         # emitted by ``_emit_stream_drop`` below; no
                         # additional INFO line needed.
-                        try:
+                        with contextlib.suppress(Exception):
                             agent._fire_stream_delta(
                                 "\n\n⚠ Connection dropped mid tool-call; "
                                 "reconnecting…\n\n"
                             )
-                        except Exception:
-                            pass
                         # Reset the streamed-text buffer so the retry's
                         # fresh preamble doesn't get double-recorded in
                         # _current_streamed_assistant_text (which would
                         # pollute the interim-visible-text comparison).
-                        try:
+                        with contextlib.suppress(Exception):
                             agent._reset_stream_delivery_tracking()
-                        except Exception:
-                            pass
                         # Reset in-memory accumulators so the next
                         # attempt's chunks don't concat onto the dead
                         # stream's partial JSON.
@@ -1881,12 +1866,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             diag=request_client_holder.get("diag"),
                         )
                         _close_request_client_once("stream_mid_tool_retry_cleanup")
-                        try:
+                        with contextlib.suppress(Exception):
                             agent._replace_primary_openai_client(
                                 reason="stream_mid_tool_retry_pool_cleanup"
                             )
-                        except Exception:
-                            pass
                         continue
 
                     # SSE error events from proxies (e.g. OpenRouter sends
@@ -1934,12 +1917,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             _close_request_client_once("stream_retry_cleanup")
                             # Also rebuild the primary client to purge
                             # any dead connections from the pool.
-                            try:
+                            with contextlib.suppress(Exception):
                                 agent._replace_primary_openai_client(
                                     reason="stream_retry_pool_cleanup"
                                 )
-                            except Exception:
-                                pass
                             continue
                         # Retries exhausted. Log the final failure with
                         # full diagnostic detail (chain, headers,
@@ -2068,16 +2049,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 f"context: ~{_est_ctx:,} tokens). "
                 f"Reconnecting..."
             )
-            try:
+            with contextlib.suppress(Exception):
                 _close_request_client_once("stale_stream_kill")
-            except Exception:
-                pass
             # Rebuild the primary client too — its connection pool
             # may hold dead sockets from the same provider outage.
-            try:
+            with contextlib.suppress(Exception):
                 agent._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
-            except Exception:
-                pass
             # Reset the timer so we don't kill repeatedly while
             # the inner thread processes the closure.
             last_chunk_time["t"] = time.time()
@@ -2143,10 +2120,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 _partial_text = (_partial_text or "") + _warn
                 # Also fire as a streaming delta so the user sees it now
                 # instead of only in the persisted transcript.
-                try:
+                with contextlib.suppress(Exception):
                     agent._fire_stream_delta(_warn)
-                except Exception:
-                    pass
                 logger.warning(
                     "Partial stream dropped tool call(s) %s after %s chars "
                     "of text; surfaced warning to user: %s",

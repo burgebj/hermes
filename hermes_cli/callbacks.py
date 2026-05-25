@@ -13,6 +13,7 @@ import getpass
 from hermes_cli.banner import cprint, _DIM, _RST
 from hermes_cli.config import save_env_value_secure
 from hermes_constants import display_hermes_home
+import contextlib
 
 
 def clarify_callback(cli, question, choices):
@@ -111,15 +112,11 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
     cli._secret_deadline = _time.monotonic() + timeout
     # Avoid storing stale draft input as the secret when Enter is pressed.
     if hasattr(cli, "_clear_secret_input_buffer"):
-        try:
+        with contextlib.suppress(Exception):
             cli._clear_secret_input_buffer()
-        except Exception:
-            pass
     elif hasattr(cli, "_app") and cli._app:
-        try:
+        with contextlib.suppress(Exception):
             cli._app.current_buffer.reset()
-        except Exception:
-            pass
 
     if hasattr(cli, "_app") and cli._app:
         cli._app.invalidate()
@@ -161,15 +158,11 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
     cli._secret_state = None
     cli._secret_deadline = 0
     if hasattr(cli, "_clear_secret_input_buffer"):
-        try:
+        with contextlib.suppress(Exception):
             cli._clear_secret_input_buffer()
-        except Exception:
-            pass
     elif hasattr(cli, "_app") and cli._app:
-        try:
+        with contextlib.suppress(Exception):
             cli._app.current_buffer.reset()
-        except Exception:
-            pass
     if hasattr(cli, "_app") and cli._app:
         cli._app.invalidate()
     cprint(f"\n{_DIM}  ⏱ Timeout — secret capture cancelled{_RST}")

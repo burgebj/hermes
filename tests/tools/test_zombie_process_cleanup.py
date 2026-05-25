@@ -13,6 +13,7 @@ import time
 import threading
 
 import pytest
+import contextlib
 
 
 def _spawn_sleep(seconds: float = 60) -> subprocess.Popen:
@@ -59,10 +60,8 @@ class TestZombieReproduction:
                 )
         finally:
             for pid in pids:
-                try:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
 
     def test_explicit_terminate_reaps_processes(self):
         """Explicitly terminating+waiting on Popen handles works.

@@ -50,6 +50,7 @@ def _audio_available() -> bool:
 
 
 from hermes_constants import is_termux as _is_termux_environment
+import contextlib
 
 
 def _voice_capture_install_hint() -> str:
@@ -334,16 +335,12 @@ class TermuxAudioRecorder:
         if not path or not os.path.isfile(path):
             return None
         if time.monotonic() - started_at < 0.3:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
             return None
         if os.path.getsize(path) <= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
             return None
         logger.info("Termux voice recording stopped: %s", path)
         return path
@@ -354,15 +351,11 @@ class TermuxAudioRecorder:
             self._recording = False
             self._recording_path = None
             self._current_rms = 0
-        try:
+        with contextlib.suppress(Exception):
             self._stop_termux_recording()
-        except Exception:
-            pass
         if path and os.path.isfile(path):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
         logger.info("Termux voice recording cancelled")
 
     def shutdown(self) -> None:
@@ -554,10 +547,8 @@ class AudioRecorder:
             stream.start()
         except Exception as e:
             if stream is not None:
-                try:
+                with contextlib.suppress(Exception):
                     stream.close()
-                except Exception:
-                    pass
             raise RuntimeError(
                 f"Failed to open audio input stream: {e}. "
                 "Check that a microphone is connected and accessible."
@@ -779,9 +770,7 @@ def is_whisper_hallucination(transcript: str) -> bool:
     if cleaned.rstrip('.!') in WHISPER_HALLUCINATIONS or cleaned in WHISPER_HALLUCINATIONS:
         return True
     # Repetitive patterns (e.g. "Thank you. Thank you. Thank you. you")
-    if _HALLUCINATION_REPEAT_RE.match(cleaned):
-        return True
-    return False
+    return bool(_HALLUCINATION_REPEAT_RE.match(cleaned))
 
 
 # ============================================================================
@@ -914,10 +903,8 @@ def _split_wav_for_transcription(wav_path: str, *, max_file_size: int) -> List[s
                     chunk.writeframes(frames)
                 chunk_paths.append(chunk_path)
             except Exception:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(chunk_path)
-                except OSError:
-                    pass
                 raise
 
     return chunk_paths

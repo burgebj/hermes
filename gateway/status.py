@@ -22,6 +22,7 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Any, Optional
 from utils import atomic_json_write
+import contextlib
 
 if sys.platform == "win32":
     import msvcrt
@@ -295,14 +296,10 @@ def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
     """
     if not cleanup_stale:
         return
-    try:
+    with contextlib.suppress(Exception):
         pid_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         _get_gateway_lock_path(pid_path).unlink(missing_ok=True)
-    except Exception:
-        pass
 
 
 def _write_gateway_lock_record(handle) -> None:
@@ -310,10 +307,8 @@ def _write_gateway_lock_record(handle) -> None:
     handle.truncate()
     json.dump(_build_pid_record(), handle)
     handle.flush()
-    try:
+    with contextlib.suppress(OSError):
         os.fsync(handle.fileno())
-    except OSError:
-        pass
 
 
 def _try_acquire_file_lock(handle) -> bool:
@@ -447,10 +442,8 @@ def release_gateway_runtime_lock() -> None:
         return
     _gateway_lock_handle = None
     _release_file_lock(handle)
-    try:
+    with contextlib.suppress(OSError):
         handle.close()
-    except OSError:
-        pass
 
 
 def is_gateway_runtime_lock_active(lock_path: Optional[Path] = None) -> bool:
@@ -470,10 +463,8 @@ def is_gateway_runtime_lock_active(lock_path: Optional[Path] = None) -> bool:
             return False
         return True
     finally:
-        try:
+        with contextlib.suppress(OSError):
             handle.close()
-        except OSError:
-            pass
 
 
 def write_pid_file() -> None:
@@ -494,10 +485,8 @@ def write_pid_file() -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(record)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
@@ -597,10 +586,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         # stale.  This happens when a previous process was killed between
         # O_CREAT|O_EXCL and the subsequent json.dump() (e.g. DNS failure
         # during rapid Slack reconnect retries).
-        try:
+        with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
     if existing:
         try:
             existing_pid = int(existing["pid"])
@@ -655,10 +642,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     except (OSError, PermissionError):
                         pass
         if stale:
-            try:
+            with contextlib.suppress(OSError):
                 lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
         else:
             return False, existing
 
@@ -670,10 +655,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     return True, None
 
@@ -688,10 +671,8 @@ def release_scoped_lock(scope: str, identity: str) -> None:
         return
     if existing.get("start_time") != _get_process_start_time(os.getpid()):
         return
-    try:
+    with contextlib.suppress(OSError):
         lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def release_all_scoped_locks(
@@ -801,17 +782,13 @@ def _consume_pid_marker_for_self(
         target_start_time = record.get(start_time_field)
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
     if _marker_is_stale(written_at, ttl_s):
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
     our_pid = os.getpid()
@@ -823,10 +800,8 @@ def _consume_pid_marker_for_self(
         and target_start_time == our_start_time
     )
 
-    try:
+    with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
     return matches
 
@@ -877,10 +852,8 @@ def consume_takeover_marker_for_self() -> bool:
 
 def clear_takeover_marker() -> None:
     """Remove the takeover marker unconditionally. Safe to call repeatedly."""
-    try:
+    with contextlib.suppress(OSError):
         _get_takeover_marker_path().unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def write_planned_stop_marker(target_pid: int) -> bool:
@@ -916,10 +889,8 @@ def consume_planned_stop_marker_for_self() -> bool:
 
 def clear_planned_stop_marker() -> None:
     """Remove the planned-stop marker unconditionally."""
-    try:
+    with contextlib.suppress(OSError):
         _get_planned_stop_marker_path().unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def get_running_pid(

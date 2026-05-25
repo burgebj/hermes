@@ -367,9 +367,7 @@ def _looks_like_git_url(s: str) -> bool:
         # tar.gz URLs — git is the only remote transport.
         return True
     # Bare github.com/user/repo shorthand
-    if re.match(r"^github\.com/[\w.-]+/[\w.-]+/?$", s):
-        return True
-    return False
+    return bool(re.match(r"^github\.com/[\w.-]+/[\w.-]+/?$", s))
 
 
 def _git_clone(url: str, dest: Path) -> None:

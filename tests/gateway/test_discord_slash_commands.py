@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from gateway.config import PlatformConfig
+import contextlib
 
 
 def _ensure_discord_mock():
@@ -67,10 +68,8 @@ def _ensure_discord_mock():
     # @app_commands.autocomplete and not every other mock stub exposes it.
     _app = getattr(sys.modules["discord"], "app_commands", None)
     if _app is not None and not hasattr(_app, "autocomplete"):
-        try:
+        with contextlib.suppress(Exception):
             _app.autocomplete = lambda **kwargs: (lambda fn: fn)
-        except Exception:
-            pass
 
 
 _ensure_discord_mock()
@@ -485,7 +484,7 @@ def test_build_slash_event_uses_group_context_for_channels(adapter):
     assert event.source.chat_id == "123"
     assert event.source.chat_type == "group"
     assert event.source.thread_id is None
-    assert "TestGuild / #general" == event.source.chat_name
+    assert event.source.chat_name == "TestGuild / #general"
 
 
 # ------------------------------------------------------------------

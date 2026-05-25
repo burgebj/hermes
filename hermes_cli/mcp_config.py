@@ -314,24 +314,23 @@ def cmd_mcp_add(args):
         print()
         _info(f"Connecting to {url}")
         needs_auth = _confirm("Does this server require authentication?", default=True)
-        if needs_auth:
-            if auth_type == "header" or not auth_type:
-                env_key = _env_key_for_server(name)
-                existing_key = get_env_value(env_key)
-                if existing_key:
-                    _success(f"{env_key}: already configured")
-                    api_key = existing_key
-                else:
-                    api_key = _prompt("API key / Bearer token", password=True)
-                    if api_key:
-                        save_env_value(env_key, api_key)
-                        _success(f"Saved to {display_hermes_home()}/.env as {env_key}")
+        if needs_auth and (auth_type == "header" or not auth_type):
+            env_key = _env_key_for_server(name)
+            existing_key = get_env_value(env_key)
+            if existing_key:
+                _success(f"{env_key}: already configured")
+                api_key = existing_key
+            else:
+                api_key = _prompt("API key / Bearer token", password=True)
+                if api_key:
+                    save_env_value(env_key, api_key)
+                    _success(f"Saved to {display_hermes_home()}/.env as {env_key}")
 
-                # Set header with env var interpolation
-                if api_key or existing_key:
-                    server_config["headers"] = {
-                        "Authorization": f"Bearer ${{{env_key}}}"
-                    }
+            # Set header with env var interpolation
+            if api_key or existing_key:
+                server_config["headers"] = {
+                    "Authorization": f"Bearer ${{{env_key}}}"
+                }
 
     # ── Discovery: connect and list tools ─────────────────────────────
 

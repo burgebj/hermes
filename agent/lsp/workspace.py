@@ -192,9 +192,8 @@ def resolve_workspace_for_file(
     """
     cwd = cwd or os.getcwd()
     cwd_root = find_git_worktree(cwd)
-    if cwd_root is not None:
-        if is_inside_workspace(file_path, cwd_root):
-            return cwd_root, True
+    if cwd_root is not None and is_inside_workspace(file_path, cwd_root):
+        return cwd_root, True
         # File is outside the cwd's worktree — try the file's own
         # location as a secondary anchor.  Useful for monorepos where
         # the user opens an unrelated checkout.

@@ -75,9 +75,8 @@ class TestUploadPasteRs:
         with patch(
             "hermes_cli.debug.urllib.request.urlopen",
             side_effect=urllib.error.URLError("connection refused"),
-        ):
-            with pytest.raises(urllib.error.URLError):
-                _upload_paste_rs("test")
+        ), pytest.raises(urllib.error.URLError):
+            _upload_paste_rs("test")
 
 
 class TestUploadDpasteCom:

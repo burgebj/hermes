@@ -293,10 +293,7 @@ def run_dump(args):
 
     for env_var, label in api_keys:
         val = os.getenv(env_var, "")
-        if show_keys and val:
-            display = _redact(val)
-        else:
-            display = "set" if val else "not set"
+        display = _redact(val) if show_keys and val else "set" if val else "not set"
         lines.append(f"  {label:<20} {display}")
 
     # Features summary

@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
+import contextlib
 
 ServiceManagerKind = Literal["systemd", "launchd", "windows", "s6", "none"]
 
@@ -453,10 +454,8 @@ def _seed_supervise_skeleton(svc_dir: Path) -> None:
     if not control.exists():
         os.mkfifo(control, 0o660)
         control.chmod(0o660)
-        try:
+        with contextlib.suppress(PermissionError):
             os.chown(control, _HERMES_UID, _HERMES_GID)
-        except PermissionError:
-            pass
 
     # If a log/ subdir is present (the canonical s6 logger pattern —
     # see servicedir(7)), it gets its own s6-supervise instance and
@@ -473,10 +472,8 @@ def _seed_supervise_skeleton(svc_dir: Path) -> None:
         if not log_control.exists():
             os.mkfifo(log_control, 0o660)
             log_control.chmod(0o660)
-            try:
+            with contextlib.suppress(PermissionError):
                 os.chown(log_control, _HERMES_UID, _HERMES_GID)
-            except PermissionError:
-                pass
 
 
 class S6Error(RuntimeError):

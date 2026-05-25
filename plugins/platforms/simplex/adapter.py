@@ -53,6 +53,7 @@ from gateway.platforms.base import (
     cache_audio_from_bytes,
     cache_document_from_bytes,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -182,27 +183,21 @@ class SimplexAdapter(BasePlatformAdapter):
 
         if self._ws_task:
             self._ws_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._ws_task
-            except asyncio.CancelledError:
-                pass
 
         if self._health_task:
             self._health_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._health_task
-            except asyncio.CancelledError:
-                pass
 
         for task in self._typing_tasks.values():
             task.cancel()
         self._typing_tasks.clear()
 
         if self._ws:
-            try:
+            with contextlib.suppress(Exception):
                 await self._ws.close()
-            except Exception:
-                pass
             self._ws = None
 
         logger.info("SimpleX: disconnected")
@@ -282,10 +277,8 @@ class SimplexAdapter(BasePlatformAdapter):
                 )
                 self._last_ws_activity = time.time()
                 if self._ws:
-                    try:
+                    with contextlib.suppress(Exception):
                         await self._ws.close()
-                    except Exception:
-                        pass
 
     # ------------------------------------------------------------------
     # Inbound event handling

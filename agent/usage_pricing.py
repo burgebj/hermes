@@ -771,24 +771,22 @@ def estimate_usage_cost(
         return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
     if usage.output_tokens and entry.output_cost_per_million is None:
         return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
-    if usage.cache_read_tokens:
-        if entry.cache_read_cost_per_million is None:
-            return CostResult(
-                amount_usd=None,
-                status="unknown",
-                source=entry.source,
-                label="n/a",
-                notes=("cache-read pricing unavailable for route",),
-            )
-    if usage.cache_write_tokens:
-        if entry.cache_write_cost_per_million is None:
-            return CostResult(
-                amount_usd=None,
-                status="unknown",
-                source=entry.source,
-                label="n/a",
-                notes=("cache-write pricing unavailable for route",),
-            )
+    if usage.cache_read_tokens and entry.cache_read_cost_per_million is None:
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source=entry.source,
+            label="n/a",
+            notes=("cache-read pricing unavailable for route",),
+        )
+    if usage.cache_write_tokens and entry.cache_write_cost_per_million is None:
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source=entry.source,
+            label="n/a",
+            notes=("cache-write pricing unavailable for route",),
+        )
 
     if entry.input_cost_per_million is not None:
         amount += Decimal(usage.input_tokens) * entry.input_cost_per_million / _ONE_MILLION

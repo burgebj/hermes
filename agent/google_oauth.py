@@ -231,10 +231,8 @@ def _credentials_lock(timeout_seconds: float = LOCK_TIMEOUT_SECONDS):
                     try:
                         import msvcrt  # type: ignore[import-not-found]
 
-                        try:
+                        with contextlib.suppress(OSError):
                             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                        except OSError:
-                            pass
                     except ImportError:
                         pass
         finally:
@@ -554,10 +552,8 @@ def _post_form(url: str, data: Dict[str, str], timeout: float) -> Dict[str, Any]
             return json.loads(raw)
     except urllib.error.HTTPError as exc:
         detail = ""
-        try:
+        with contextlib.suppress(Exception):
             detail = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
         # Detect invalid_grant to signal credential revocation
         code = "google_oauth_token_http_error"
         if "invalid_grant" in detail.lower():
@@ -917,14 +913,10 @@ def start_oauth_flow(
             logger.info("Callback server timed out — offering manual paste fallback.")
             code = _prompt_paste_fallback()
     finally:
-        try:
+        with contextlib.suppress(Exception):
             server.shutdown()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             server.server_close()
-        except Exception:
-            pass
         server_thread.join(timeout=2.0)
 
     if not code:

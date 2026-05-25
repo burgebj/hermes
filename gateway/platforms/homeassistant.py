@@ -35,6 +35,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,7 @@ def check_ha_requirements() -> bool:
     """Check if Home Assistant dependencies are available and configured."""
     if not AIOHTTP_AVAILABLE:
         return False
-    if not os.getenv("HASS_TOKEN"):
-        return False
-    return True
+    return os.getenv("HASS_TOKEN")
 
 
 class HomeAssistantAdapter(BasePlatformAdapter):
@@ -198,10 +197,8 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         self._running = False
         if self._listen_task:
             self._listen_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._listen_task
-            except asyncio.CancelledError:
-                pass
             self._listen_task = None
 
         await self._cleanup_ws()

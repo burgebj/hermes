@@ -1574,7 +1574,7 @@ class SlashCommandCompleter(Completer):
         try:
             from hermes_cli.config import load_config
             personalities = load_config().get("agent", {}).get("personalities", {})
-            if "none".startswith(sub_lower) and "none" != sub_lower:
+            if "none".startswith(sub_lower) and sub_lower != "none":
                 yield Completion(
                     "none",
                     start_position=-len(sub_text),

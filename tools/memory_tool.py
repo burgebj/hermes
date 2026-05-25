@@ -29,7 +29,7 @@ import os
 import re
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
@@ -42,10 +42,8 @@ try:
     import fcntl
 except ImportError:
     fcntl = None
-    try:
+    with suppress(ImportError):
         import msvcrt
-    except ImportError:
-        pass
 
 logger = logging.getLogger(__name__)
 
@@ -197,10 +195,8 @@ class MemoryStore:
             yield
         finally:
             if fcntl:
-                try:
+                with suppress(OSError, IOError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                except (OSError, IOError):
-                    pass
             elif msvcrt:
                 try:
                     fd.seek(0)
@@ -557,10 +553,8 @@ class MemoryStore:
                 atomic_replace(tmp_path, path)
             except BaseException:
                 # Clean up temp file on any failure
-                try:
+                with suppress(OSError):
                     os.unlink(tmp_path)
-                except OSError:
-                    pass
                 raise
         except (OSError, IOError) as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")

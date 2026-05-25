@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +80,7 @@ def _should_exclude(rel_path: Path) -> bool:
     if name in _EXCLUDED_NAMES:
         return True
 
-    if name.endswith(_EXCLUDED_SUFFIXES):
-        return True
-
-    return False
+    return bool(name.endswith(_EXCLUDED_SUFFIXES))
 
 
 # ---------------------------------------------------------------------------
@@ -764,10 +762,8 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
     except OSError as exc:
         logger.warning("Full-zip backup: zip write failed: %s", exc)
         # Best-effort cleanup of partial file
-        try:
+        with contextlib.suppress(OSError):
             out_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return None
 
     return out_path

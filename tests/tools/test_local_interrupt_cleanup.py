@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools.environments.local import LocalEnvironment
+import contextlib
 
 
 @pytest.fixture(autouse=True)
@@ -196,7 +197,5 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
             f"propagation after cleanup"
         )
     finally:
-        try:
+        with contextlib.suppress(Exception):
             env.cleanup()
-        except Exception:
-            pass

@@ -50,6 +50,7 @@ from gateway.platforms.signal_rate_limit import (
     _signal_send_timeout,
     get_scheduler,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,7 @@ class SignalAdapter(BasePlatformAdapter):
         if _rm_cfg is not None:
             self.require_mention = bool(_rm_cfg)
         else:
-            self.require_mention = os.getenv("SIGNAL_REQUIRE_MENTION", "false").lower() in ("true", "1", "yes", "on")
+            self.require_mention = os.getenv("SIGNAL_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
 
         # DM allowlist — mirrors SIGNAL_ALLOWED_USERS checked by run.py.
         # Stored here so the reaction hooks can skip unauthorized senders
@@ -300,17 +301,13 @@ class SignalAdapter(BasePlatformAdapter):
 
         if self._sse_task:
             self._sse_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._sse_task
-            except asyncio.CancelledError:
-                pass
 
         if self._health_monitor_task:
             self._health_monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._health_monitor_task
-            except asyncio.CancelledError:
-                pass
 
         # Cancel all typing tasks
         for task in self._typing_tasks.values():
@@ -1383,10 +1380,8 @@ class SignalAdapter(BasePlatformAdapter):
         task = self._typing_tasks.pop(chat_id, None)
         if task:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         # Reset per-chat typing backoff state so the next agent turn starts
         # fresh rather than inheriting a cooldown from a prior conversation.
         self._typing_failures.pop(chat_id, None)

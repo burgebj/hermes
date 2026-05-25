@@ -2320,10 +2320,10 @@ class TestVisionAutoSkipsKimiCoding:
     def test_skip_set_covers_exactly_known_entries(self):
         """Guard against accidental widening of the skip list."""
         from agent.auxiliary_client import _PROVIDERS_WITHOUT_VISION
-        assert _PROVIDERS_WITHOUT_VISION == frozenset({
+        assert frozenset({
             "kimi-coding",
             "kimi-coding-cn",
-        })
+        }) == _PROVIDERS_WITHOUT_VISION
 
 
 class TestCodexAuxiliaryAdapterTimeout:
@@ -2587,12 +2587,11 @@ class TestAuxiliaryClientPoisonedCacheEviction:
             ), patch(
                 "agent.auxiliary_client._try_payment_fallback",
                 return_value=(None, None, ""),
-            ):
-                with pytest.raises(ConnectionError):
-                    call_llm(
-                        task="compression",
-                        messages=[{"role": "user", "content": "x"}],
-                    )
+            ), pytest.raises(ConnectionError):
+                call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "x"}],
+                )
             assert cache_key not in _client_cache, (
                 "connection error must evict cached client so the next call rebuilds"
             )
@@ -2623,12 +2622,11 @@ class TestAuxiliaryClientPoisonedCacheEviction:
             ), patch(
                 "agent.auxiliary_client._try_payment_fallback",
                 return_value=(None, None, ""),
-            ):
-                with pytest.raises(ConnectionError):
-                    await async_call_llm(
-                        task="compression",
-                        messages=[{"role": "user", "content": "x"}],
-                    )
+            ), pytest.raises(ConnectionError):
+                await async_call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "x"}],
+                )
             assert cache_key not in _client_cache
         finally:
             with _client_cache_lock:

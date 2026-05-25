@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+import contextlib
 
 
 # ── _clean_for_display unit tests ────────────────────────────────────────
@@ -1103,10 +1104,8 @@ class TestCancelledConsumerSetsFlags:
 
         # Cancel the task (simulates the 5-second timeout in gateway)
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         # The fix: final_response_sent should be True even though _DONE
         # was never processed, preventing a duplicate message.
@@ -1138,10 +1137,8 @@ class TestCancelledConsumerSetsFlags:
         assert consumer.already_sent is False
 
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         # Without a successful send, final_response_sent should stay False
         # so the normal gateway send path can deliver the response.
@@ -1253,7 +1250,7 @@ class TestFilterAndAccumulate:
         """<think> at start of a new line IS a block boundary."""
         c = _make_consumer()
         c._filter_and_accumulate("Previous line\n<think>reasoning</think>Next")
-        assert "Previous line\nNext" == c._accumulated
+        assert c._accumulated == "Previous line\nNext"
 
     def test_think_with_only_whitespace_before(self):
         """<think> preceded by only whitespace on its line is a boundary."""

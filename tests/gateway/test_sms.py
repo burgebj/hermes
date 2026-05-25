@@ -248,7 +248,7 @@ class TestStartupGuard:
         await adapter.connect()
         assert adapter.has_fatal_error is True
         assert adapter.fatal_error_retryable is False
-        assert "sms_missing_webhook_url" == adapter.fatal_error_code
+        assert adapter.fatal_error_code == "sms_missing_webhook_url"
 
     @pytest.mark.asyncio
     async def test_missing_phone_number_is_non_retryable(self):

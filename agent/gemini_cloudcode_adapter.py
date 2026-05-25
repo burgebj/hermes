@@ -45,6 +45,7 @@ from agent.google_code_assist import (
     ProjectContext,
     resolve_project_context,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -615,10 +616,8 @@ class GeminiCloudCodeClient:
 
     def close(self) -> None:
         self.is_closed = True
-        try:
+        with contextlib.suppress(Exception):
             self._http.close()
-        except Exception:
-            pass
 
     # Implement the OpenAI SDK's context-manager-ish closure check
     def __enter__(self):
@@ -826,10 +825,8 @@ def _gemini_http_error(response: httpx.Response) -> CodeAssistError:
             # retryDelay is a google.protobuf.Duration string like "30s" or "1.5s".
             delay_raw = detail.get("retryDelay")
             if isinstance(delay_raw, str) and delay_raw.endswith("s"):
-                try:
+                with contextlib.suppress(ValueError):
                     retry_delay_seconds = float(delay_raw[:-1])
-                except ValueError:
-                    pass
             elif isinstance(delay_raw, (int, float)):
                 retry_delay_seconds = float(delay_raw)
 

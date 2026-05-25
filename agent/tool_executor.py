@@ -48,6 +48,7 @@ from tools.tool_result_storage import (
     maybe_persist_tool_result,
     enforce_turn_budget,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -207,10 +208,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # the interrupt to our own tid now so is_interrupted() inside
         # the tool returns True on the next poll.
         if agent._interrupt_requested:
-            try:
+            with contextlib.suppress(Exception):
                 _ra()._set_interrupt(True, _worker_tid)
-            except Exception:
-                pass
         # Set the activity callback on THIS worker thread so
         # _wait_for_process (terminal commands) can fire heartbeats.
         # The callback is thread-local; the main thread's callback
@@ -223,15 +222,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # Propagate approval/sudo callbacks to this worker thread.
         # Mirrors cli.py run_agent() pattern (GHSA-qg5c-hvr5-hjgr).
         if _parent_approval_cb is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _set_approval_callback(_parent_approval_cb)
-            except Exception:
-                pass
         if _parent_sudo_cb is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _set_sudo_password_callback(_parent_sudo_cb)
-            except Exception:
-                pass
         start = time.time()
         try:
             result = agent._invoke_tool(
@@ -257,10 +252,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # starts with a clean slate.
         with agent._tool_worker_threads_lock:
             agent._tool_worker_threads.discard(_worker_tid)
-        try:
+        with contextlib.suppress(Exception):
             _ra()._set_interrupt(False, _worker_tid)
-        except Exception:
-            pass
         # Clear thread-local callbacks so a recycled worker thread
         # doesn't hold stale references to a disposed CLI instance.
         try:
@@ -639,7 +632,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             )
             # Bridge: notify external memory provider of built-in memory writes
             if agent._memory_manager and function_args.get("action") in {"add", "replace"}:
-                try:
+                with contextlib.suppress(Exception):
                     agent._memory_manager.on_memory_write(
                         function_args.get("action", ""),
                         target,
@@ -649,8 +642,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                             tool_call_id=getattr(tool_call, "id", None),
                         ),
                     )
-                except Exception:
-                    pass
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")

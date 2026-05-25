@@ -518,7 +518,7 @@ class TestSubprocessCompatHelpers:
 
     def test_is_windows_matches_sys_platform(self):
         from hermes_cli import _subprocess_compat as sc
-        assert sc.IS_WINDOWS == (sys.platform == "win32")
+        assert (sys.platform == "win32") == sc.IS_WINDOWS
 
     def test_resolve_node_command_returns_absolute_on_posix(self):
         """On Linux, resolve_node_command('sh', ['-c','echo hi']) picks up /bin/sh."""

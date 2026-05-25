@@ -97,6 +97,7 @@ from gateway.platforms.base import (
     SendResult,
     cache_image_from_url,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -432,10 +433,8 @@ def _env_enablement() -> dict | None:
     }
     port = os.getenv("TEAMS_PORT", "").strip()
     if port:
-        try:
+        with contextlib.suppress(ValueError):
             seed["port"] = int(port)
-        except ValueError:
-            pass
     service_url = os.getenv("TEAMS_SERVICE_URL", "").strip()
     if service_url:
         seed["service_url"] = service_url
@@ -467,6 +466,7 @@ _ALLOWED_TEAMS_SERVICE_HOSTS = frozenset({
 # ``thread.tacv2`` suffixes; reject anything outside this set so a hostile
 # value cannot path-traverse out of ``/v3/conversations/<id>/activities``.
 import re as _re_teams
+import contextlib
 _TEAMS_CONV_ID_RE = _re_teams.compile(r"^[A-Za-z0-9:@\-_.]+$")
 
 
@@ -1014,10 +1014,8 @@ class TeamsAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         if not self._app:
             return
-        try:
+        with contextlib.suppress(Exception):
             await self._app.send(chat_id, TypingActivityInput())
-        except Exception:
-            pass
 
     async def send_image(
         self,

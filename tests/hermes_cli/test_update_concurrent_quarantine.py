@@ -451,9 +451,8 @@ def test_cmd_update_aborts_on_concurrent_instance(_winp, tmp_path, capsys):
         cli_main, "_install_hangup_protection", return_value={}
     ), patch.object(
         cli_main, "_finalize_update_output"
-    ):
-        with pytest.raises(SystemExit) as excinfo:
-            cli_main.cmd_update(args)
+    ), pytest.raises(SystemExit) as excinfo:
+        cli_main.cmd_update(args)
 
     assert excinfo.value.code == 2
     # The pre-update backup runs AFTER the concurrent check; should not have
@@ -496,9 +495,8 @@ def test_cmd_update_force_bypasses_concurrent_check(_winp, tmp_path):
         cli_main, "_install_hangup_protection", return_value={}
     ), patch.object(
         cli_main, "_finalize_update_output"
-    ):
-        with pytest.raises(RuntimeError, match="reached post-gate body"):
-            cli_main.cmd_update(args)
+    ), pytest.raises(RuntimeError, match="reached post-gate body"):
+        cli_main.cmd_update(args)
 
     # When --force is set, we should not have even consulted psutil.
     detect.assert_not_called()

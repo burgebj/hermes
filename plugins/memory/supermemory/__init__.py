@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -231,10 +232,8 @@ def _format_prefetch_context(static_facts: list, dynamic_facts: list, search_res
             if rel:
                 prefix_bits.append(f"[{rel}]")
             if similarity is not None:
-                try:
+                with contextlib.suppress(Exception):
                     prefix_bits.append(f"[{round(float(similarity) * 100)}%]")
-                except Exception:
-                    pass
             prefix = " ".join(prefix_bits)
             lines.append(f"- {prefix} {memory}".strip())
         if lines:
@@ -720,10 +719,8 @@ class SupermemoryMemoryProvider(MemoryProvider):
             for item in results:
                 entry: dict[str, Any] = {"id": item.get("id", ""), "content": item.get("memory", "")}
                 if item.get("similarity") is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         entry["similarity"] = round(float(item["similarity"]) * 100)
-                    except Exception:
-                        pass
                 formatted.append(entry)
             resp: dict[str, Any] = {"results": formatted, "count": len(formatted)}
             if tag:

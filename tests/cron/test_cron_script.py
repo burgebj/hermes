@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import contextlib
 
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -533,10 +534,8 @@ class TestRunJobEnvVarCleanup:
         from cron.scheduler import run_job
 
         # Expect it to fail (no model/API key), but env vars must be cleaned
-        try:
+        with contextlib.suppress(Exception):
             run_job(job)
-        except Exception:
-            pass
 
         # Verify env vars were cleaned up by the finally block
         assert os.environ.get("HERMES_SESSION_PLATFORM") is None

@@ -29,6 +29,7 @@ import logging
 from typing import Any
 
 from tui_gateway import server
+import contextlib
 
 _log = logging.getLogger(__name__)
 
@@ -172,7 +173,5 @@ async def handle_ws(ws: Any) -> None:
             if sess.get("transport") is transport:
                 sess["transport"] = server._stdio_transport
 
-        try:
+        with contextlib.suppress(Exception):
             await ws.close()
-        except Exception:
-            pass

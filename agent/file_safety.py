@@ -142,10 +142,7 @@ def is_write_denied(path: str) -> bool:
             pass
 
     safe_root = get_safe_write_root()
-    if safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
-        return True
-
-    return False
+    return bool(safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)))
 
 
 def get_read_block_error(path: str) -> Optional[str]:

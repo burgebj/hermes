@@ -1001,7 +1001,7 @@ def test_explicit_openrouter_honors_openrouter_base_url_over_pool(monkeypatch):
     assert resolved["base_url"] == "https://mirror.example.com/v1"
     # mirror.example.com is set via OPENROUTER_BASE_URL env — api_key should come from env too
     # (pool is bypassed when OPENROUTER_BASE_URL env override is present)
-    assert resolved["api_key"] in ("mirror-key", "")
+    assert resolved["api_key"] in {"mirror-key", ""}
     assert resolved["source"] == "env/config"
     assert resolved.get("credential_pool") is None
 

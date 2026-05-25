@@ -96,6 +96,7 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 from gateway.session import SessionSource
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -811,25 +812,19 @@ class LineAdapter(BasePlatformAdapter):
         self._mark_disconnected()
 
         if self._site is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._site.stop()
-            except Exception:
-                pass
             self._site = None
         if self._runner is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._runner.cleanup()
-            except Exception:
-                pass
             self._runner = None
         self._app = None
 
         # Cleanup any tracked tempfiles.
         for path in list(self._media_temp_paths):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
         self._media_temp_paths.clear()
         self._media_tokens.clear()
 
@@ -1027,16 +1022,12 @@ class LineAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.warning("LINE: postback ERROR reply failed: %s", exc)
         elif entry.state is State.DELIVERED:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.reply(reply_token, [_text_message(self.delivered_text)])
-            except Exception:
-                pass
         elif entry.state is State.PENDING:
             # Still working — re-issue the wait notice.
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.reply(reply_token, [_text_message(self.pending_text)])
-            except Exception:
-                pass
 
     async def _download_media(self, message_id: str, msg_type: str) -> Optional[str]:
         if not self._client or not message_id:
@@ -1204,10 +1195,8 @@ class LineAdapter(BasePlatformAdapter):
         finally:
             if not post_task.done():
                 post_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await post_task
-                except (asyncio.CancelledError, Exception):
-                    pass
 
     async def interrupt_session_activity(self, session_key: str, chat_id: str) -> None:
         """Resolve any orphan PENDING postback so the button doesn't loop."""
@@ -1230,10 +1219,8 @@ class LineAdapter(BasePlatformAdapter):
                 self._media_tokens.pop(token, None)
                 if path in self._media_temp_paths:
                     self._media_temp_paths.discard(path)
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(path)
-                    except OSError:
-                        pass
 
         resolved = str(Path(file_path).resolve())
         token = secrets.token_urlsafe(32)
@@ -1249,10 +1236,7 @@ class LineAdapter(BasePlatformAdapter):
         else:
             host = self.webhook_host
             port = self.webhook_port
-            if port == 443:
-                base = f"https://{host}"
-            else:
-                base = f"https://{host}:{port}"
+            base = f"https://{host}" if port == 443 else f"https://{host}:{port}"
         safe_name = _urlquote(filename, safe="")
         return f"{base}{DEFAULT_MEDIA_PATH_PREFIX}/{token}/{safe_name}"
 
@@ -1391,10 +1375,8 @@ class LineAdapter(BasePlatformAdapter):
                 preview_token = self._register_media(tmp.name, cleanup=True)
                 preview_filename = "preview.png"
             except Exception:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp.name)
-                except OSError:
-                    pass
                 raise
 
         video_token = self._register_media(str(path.resolve()))
@@ -1503,10 +1485,8 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         return None
     seeded: Dict[str, Any] = {}
     if os.getenv("LINE_PORT"):
-        try:
+        with contextlib.suppress(ValueError):
             seeded["port"] = int(os.environ["LINE_PORT"])
-        except ValueError:
-            pass
     if os.getenv("LINE_HOST"):
         seeded["host"] = os.environ["LINE_HOST"]
     if os.getenv("LINE_PUBLIC_URL"):

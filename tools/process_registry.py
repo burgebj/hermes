@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -474,28 +475,22 @@ class ProcessRegistry:
                     creationflags=windows_hide_flags(),
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                try:
+                with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGTERM)
-                except (OSError, ProcessLookupError, PermissionError):
-                    pass
             return
 
         import psutil
         try:
             parent = psutil.Process(pid)
             for child in parent.children(recursive=True):
-                try:
+                with contextlib.suppress(psutil.NoSuchProcess):
                     child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
             parent.terminate()
         except psutil.NoSuchProcess:
             return
         except (OSError, PermissionError):
-            try:
+            with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGTERM)
-            except (OSError, ProcessLookupError, PermissionError):
-                pass
 
     # ----- Spawn -----
 
@@ -640,10 +635,8 @@ class ProcessRegistry:
                     proc.kill()
             except Exception:
                 pass
-            try:
+            with contextlib.suppress(Exception):
                 proc.wait(timeout=5)
-            except Exception:
-                pass
             raise
 
         return session
@@ -951,10 +944,8 @@ class ProcessRegistry:
                 except (BlockingIOError, OSError, ValueError):
                     pass
                 finally:
-                    try:
+                    with contextlib.suppress(Exception):
                         fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-                    except Exception:
-                        pass
             except Exception as e:
                 logger.debug("Non-blocking drain failed for %s: %s", session.id, e)
 
@@ -1142,10 +1133,8 @@ class ProcessRegistry:
                         try:
                             parent = psutil.Process(session.process.pid)
                             for child in parent.children(recursive=True):
-                                try:
+                                with contextlib.suppress(psutil.NoSuchProcess):
                                     child.terminate()
-                                except psutil.NoSuchProcess:
-                                    pass
                             parent.terminate()
                         except psutil.NoSuchProcess:
                             pass

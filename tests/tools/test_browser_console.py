@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import contextlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -164,10 +165,8 @@ class TestBrowserVisionAnnotate:
         ):
             mock_cmd.return_value = {"success": True, "data": {}}
             # Will fail at screenshot file read, but we can check the command
-            try:
+            with contextlib.suppress(Exception):
                 browser_vision("test", annotate=False, task_id="test")
-            except Exception:
-                pass
 
             if mock_cmd.called:
                 args = mock_cmd.call_args[0]
@@ -184,10 +183,8 @@ class TestBrowserVisionAnnotate:
             patch("tools.browser_tool._get_vision_model", return_value="test-model"),
         ):
             mock_cmd.return_value = {"success": True, "data": {}}
-            try:
+            with contextlib.suppress(Exception):
                 browser_vision("test", annotate=True, task_id="test")
-            except Exception:
-                pass
 
             if mock_cmd.called:
                 args = mock_cmd.call_args[0]

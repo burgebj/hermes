@@ -22,6 +22,7 @@ from typing import Any
 
 from tools.environments.base import BaseEnvironment
 from tools.interrupt import is_interrupted
+import contextlib
 
 
 @dataclass(frozen=True)
@@ -113,10 +114,8 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
 
         while True:
             if is_interrupted():
-                try:
+                with contextlib.suppress(Exception):
                     self._cancel_modal_exec(start.handle)
-                except Exception:
-                    pass
                 return self._result(self._interrupt_output, 130)
 
             try:
@@ -128,10 +127,8 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
                 return result
 
             if deadline is not None and time.monotonic() >= deadline:
-                try:
+                with contextlib.suppress(Exception):
                     self._cancel_modal_exec(start.handle)
-                except Exception:
-                    pass
                 return self._timeout_result_for_modal(prepared.timeout)
 
             # Periodic activity touch so the gateway knows we're alive

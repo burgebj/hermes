@@ -33,6 +33,7 @@ from agent.video_gen_provider import (
     error_response,
     success_response,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -358,10 +359,8 @@ class XAIVideoGenProvider(VideoGenProvider):
                 )
             except httpx.HTTPStatusError as exc:
                 detail = ""
-                try:
+                with contextlib.suppress(Exception):
                     detail = exc.response.text[:500]
-                except Exception:
-                    pass
                 return error_response(
                     error=f"xAI submit failed ({exc.response.status_code}): {detail or exc}",
                     error_type="api_error",

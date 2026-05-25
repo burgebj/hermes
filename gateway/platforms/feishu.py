@@ -142,6 +142,7 @@ from gateway.platforms.base import (
 from gateway.status import acquire_scoped_lock, release_scoped_lock
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -1331,14 +1332,10 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
             task.cancel()
         if pending:
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        try:
+        with contextlib.suppress(Exception):
             loop.stop()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             loop.close()
-        except Exception:
-            pass
         adapter._ws_thread_loop = None
 
 
@@ -2802,10 +2799,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         synthetic_text = f"/card {action_tag}"
         if action_value:
-            try:
+            with contextlib.suppress(Exception):
                 synthetic_text += f" {json.dumps(action_value, ensure_ascii=False)}"
-            except Exception:
-                pass
 
         sender_id = SimpleNamespace(open_id=open_id, user_id=None, union_id=None)
         sender_profile = await self._resolve_sender_profile(sender_id)
@@ -4402,10 +4397,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 uuid_value=str(uuid.uuid4()),
             )
             # Detect whether chat_id is a user open_id (DM) or a chat_id (group).
-            if chat_id.startswith("ou_"):
-                receive_id_type = "open_id"
-            else:
-                receive_id_type = "chat_id"
+            receive_id_type = "open_id" if chat_id.startswith("ou_") else "chat_id"
             request = self._build_create_message_request(receive_id_type, body)
         return await asyncio.to_thread(self._client.im.v1.message.create, request)
 

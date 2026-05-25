@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import websockets
 from websockets.asyncio.client import ClientConnection
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -362,19 +363,15 @@ class CDPSupervisor:
                 ws = self._ws
                 self._ws = None
                 if ws is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         await ws.close()
-                    except Exception:
-                        pass
 
             try:
                 from agent.async_utils import safe_schedule_threadsafe
                 fut = safe_schedule_threadsafe(_close_ws(), loop)
                 if fut is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         fut.result(timeout=2.0)
-                    except Exception:
-                        pass
             except RuntimeError:
                 pass  # loop already shutting down
         if self._thread is not None:
@@ -574,10 +571,8 @@ class CDPSupervisor:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             except Exception:
                 pass
-            try:
+            with contextlib.suppress(Exception):
                 loop.close()
-            except Exception:
-                pass
             with self._state_lock:
                 self._active = False
 
@@ -652,20 +647,16 @@ class CDPSupervisor:
                     self._active = False
                 if not reader_task.done():
                     reader_task.cancel()
-                    try:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await reader_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
                 for handle in list(self._dialog_watchdogs.values()):
                     handle.cancel()
                 self._dialog_watchdogs.clear()
                 ws = self._ws
                 self._ws = None
                 if ws is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         await ws.close()
-                    except Exception:
-                        pass
 
             if self._stop_requested:
                 return
@@ -754,15 +745,13 @@ class CDPSupervisor:
             )
         # Also try to inject into the already-loaded document so existing
         # pages pick up the override on reconnect. Best-effort.
-        try:
+        with contextlib.suppress(Exception):
             await self._cdp(
                 "Runtime.evaluate",
                 {"expression": _DIALOG_BRIDGE_SCRIPT, "returnByValue": True},
                 session_id=session_id,
                 timeout=3.0,
             )
-        except Exception:
-            pass
 
     async def _cdp(
         self,
@@ -1045,13 +1034,11 @@ class CDPSupervisor:
         # intercepted requests if patterns were ever broadened.
         if DIALOG_BRIDGE_HOST not in url:
             # Not ours — forward unchanged so the page sees its own request.
-            try:
+            with contextlib.suppress(Exception):
                 await self._cdp(
                     "Fetch.continueRequest", {"requestId": request_id},
                     session_id=session_id, timeout=3.0,
                 )
-            except Exception:
-                pass
             return
 
         # Parse query string for dialog metadata. Use urllib to be robust.

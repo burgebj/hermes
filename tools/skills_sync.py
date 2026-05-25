@@ -30,6 +30,7 @@ from hermes_constants import get_bundled_skills_dir, get_hermes_home
 from agent.skill_utils import is_excluded_skill_path
 from typing import Dict, List, Tuple
 from utils import atomic_replace
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +101,8 @@ def _write_manifest(entries: Dict[str, str]):
                 os.fsync(f.fileno())
             atomic_replace(tmp_path, MANIFEST_FILE)
         except BaseException:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
     except Exception as e:
         logger.debug("Failed to write skills manifest %s: %s", MANIFEST_FILE, e, exc_info=True)

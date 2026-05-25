@@ -61,6 +61,7 @@ from agent.lsp.protocol import (
     make_response,
     read_message,
 )
+import contextlib
 
 logger = logging.getLogger("agent.lsp.client")
 
@@ -398,14 +399,10 @@ class LSPClient:
         self._stopping = True
         try:
             if self.is_running:
-                try:
+                with contextlib.suppress(asyncio.TimeoutError, LSPRequestError, LSPProtocolError):
                     await asyncio.wait_for(self._send_request("shutdown", None), timeout=2.0)
-                except (asyncio.TimeoutError, LSPRequestError, LSPProtocolError):
-                    pass
-                try:
+                with contextlib.suppress(Exception):
                     await self._send_notification("exit", None)
-                except Exception:
-                    pass
         finally:
             self._state = "stopped"
             await self._cleanup_process()

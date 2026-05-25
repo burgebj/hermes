@@ -21,6 +21,7 @@ from hermes_cli.config import (
     sanitize_env_file,
     _sanitize_env_lines,
 )
+import contextlib
 
 
 class TestGetHermesHome:
@@ -304,10 +305,8 @@ class TestSaveConfigAtomicity:
             save_config(config)
 
             with patch("utils.yaml.dump", side_effect=OSError("disk full")):
-                try:
+                with contextlib.suppress(OSError):
                     save_config(config)
-                except OSError:
-                    pass
 
             # No .tmp files should remain
             tmp_files = list(tmp_path.glob(".*config*.tmp"))

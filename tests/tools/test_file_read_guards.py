@@ -26,6 +26,7 @@ from tools.file_tools import (
     _read_tracker,
     notify_other_tool_call,
 )
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -717,10 +718,8 @@ class TestWriteInvalidatesDedup(unittest.TestCase):
         self.assertTrue(r2.get("dedup"),
                         "Unrelated file should still dedup after writing another file")
 
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(other)
-        except OSError:
-            pass
 
     @patch("tools.file_tools._get_file_ops")
     def test_write_does_not_invalidate_other_tasks(self, mock_ops):

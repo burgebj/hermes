@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 from agent.skill_utils import is_excluded_skill_path
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -271,10 +272,8 @@ def snapshot_skills(reason: str = "manual") -> Optional[Path]:
     except (OSError, tarfile.TarError) as e:
         logger.debug("Curator snapshot failed: %s", e, exc_info=True)
         # Clean up partial snapshot
-        try:
+        with contextlib.suppress(OSError):
             shutil.rmtree(dest, ignore_errors=True)
-        except OSError:
-            pass
         return None
 
     _prune_old(keep=get_keep())
@@ -590,14 +589,10 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
     except OSError as e:
         # Best-effort rollback of the move
         for orig, dest in moved:
-            try:
+            with contextlib.suppress(OSError):
                 shutil.move(str(dest), str(orig))
-            except OSError:
-                pass
-        try:
+        with contextlib.suppress(OSError):
             shutil.rmtree(staged, ignore_errors=True)
-        except OSError:
-            pass
         return (False, f"failed to stage current skills: {e}", None)
 
     # Step 4: extract the snapshot into skills/
@@ -620,22 +615,16 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
     except (OSError, tarfile.TarError) as e:
         # Best-effort recover: move staged contents back
         for orig, dest in moved:
-            try:
+            with contextlib.suppress(OSError):
                 shutil.move(str(dest), str(orig))
-            except OSError:
-                pass
-        try:
+        with contextlib.suppress(OSError):
             shutil.rmtree(staged, ignore_errors=True)
-        except OSError:
-            pass
         return (False, f"snapshot extract failed (state restored): {e}", None)
 
     # Extract succeeded — the staging dir has served its purpose. The
     # user's undo handle is the safety snapshot tarball we took earlier.
-    try:
+    with contextlib.suppress(OSError):
         shutil.rmtree(staged, ignore_errors=True)
-    except OSError:
-        pass
 
     # Reconcile cron skill-links. Surgical: only the skills/skill fields
     # on jobs matched by id. Everything else in jobs.json is live state

@@ -167,10 +167,7 @@ HEDGE_PATTERNS = [
 
 def is_refusal(content):
     """Check if response is a refusal."""
-    for pattern in REFUSAL_PATTERNS:
-        if pattern.search(content):
-            return True
-    return False
+    return any(pattern.search(content) for pattern in REFUSAL_PATTERNS)
 
 
 def count_hedges(content):

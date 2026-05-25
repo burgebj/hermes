@@ -204,6 +204,7 @@ from agent.tool_dispatch_helpers import (
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 from hermes_cli.config import cfg_get
+import contextlib
 
 
 
@@ -690,10 +691,8 @@ class AIAgent:
         This helper never raises — exceptions are swallowed so it cannot
         interrupt the retry/fallback logic.
         """
-        try:
+        with contextlib.suppress(Exception):
             self._vprint(f"{self.log_prefix}{message}", force=True)
-        except Exception:
-            pass
         if self.status_callback:
             try:
                 self.status_callback("lifecycle", message)
@@ -707,10 +706,8 @@ class AIAgent:
         such as auxiliary compression or memory flushes where the main turn can
         continue but the user needs to know something important failed.
         """
-        try:
+        with contextlib.suppress(Exception):
             self._vprint(f"{self.log_prefix}{message}", force=True)
-        except Exception:
-            pass
         if self.status_callback:
             try:
                 self.status_callback("warn", message)
@@ -1026,9 +1023,7 @@ class AIAgent:
         if last in '.!?:)"\']}。！？：）】」』》^':
             return True
         # Emoji ranges (Misc Symbols, Dingbats, Emoticons, Supplemental, etc.)
-        if ord(last) >= 0x1F300:
-            return True
-        return False
+        return ord(last) >= 127744
 
     def _is_ollama_glm_backend(self) -> bool:
         """Detect the narrow backend family affected by Ollama/GLM stop misreports."""
@@ -1417,9 +1412,7 @@ class AIAgent:
             return True
         if "out of available resources" in haystack and "grok" in haystack:
             return True
-        if "does not have permission" in haystack and "grok" in haystack:
-            return True
-        return False
+        return bool("does not have permission" in haystack and "grok" in haystack)
 
     @staticmethod
     def _summarize_api_error(error: Exception) -> str:
@@ -1716,10 +1709,8 @@ class AIAgent:
             with _tracker_lock:
                 _worker_tids = list(_tracker)
             for _wtid in _worker_tids:
-                try:
+                with contextlib.suppress(Exception):
                     _set_interrupt(True, _wtid)
-                except Exception:
-                    pass
         # Propagate interrupt to any running child agents (subagent delegation)
         with self._active_children_lock:
             children_copy = list(self._active_children)
@@ -1751,10 +1742,8 @@ class AIAgent:
             with _tracker_lock:
                 _worker_tids = list(_tracker)
             for _wtid in _worker_tids:
-                try:
+                with contextlib.suppress(Exception):
                     _set_interrupt(False, _wtid)
-                except Exception:
-                    pass
         # A hard interrupt supersedes any pending /steer — the steer was
         # meant for the agent's next tool-call iteration, which will no
         # longer happen. Drop it instead of surprising the user with a
@@ -1996,23 +1985,17 @@ class AIAgent:
         session expiry, etc.
         """
         if self._memory_manager:
-            try:
+            with contextlib.suppress(Exception):
                 self._memory_manager.on_session_end(messages or [])
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 self._memory_manager.shutdown_all()
-            except Exception:
-                pass
         # Notify context engine of session end (flush DAG, close DBs, etc.)
         if hasattr(self, "context_compressor") and self.context_compressor:
-            try:
+            with contextlib.suppress(Exception):
                 self.context_compressor.on_session_end(
                     self.session_id or "",
                     messages or [],
                 )
-            except Exception:
-                pass
 
     def commit_memory_session(self, messages: list = None) -> None:
         """Trigger end-of-session extraction without tearing providers down.
@@ -2020,10 +2003,8 @@ class AIAgent:
         providers keep their state and continue running under the old
         session_id — they just flush pending extraction now."""
         if self._memory_manager:
-            try:
+            with contextlib.suppress(Exception):
                 self._memory_manager.on_session_end(messages or [])
-            except Exception:
-                pass
         # Notify context engine of session end too — same lifecycle moment as
         # the memory manager's on_session_end. Without this, engines that
         # accumulate per-session state (DAGs, summaries) leak that state from
@@ -2031,13 +2012,11 @@ class AIAgent:
         # compressor instance. Mirrors the call in shutdown_memory_provider().
         # See issue #22394.
         if hasattr(self, "context_compressor") and self.context_compressor:
-            try:
+            with contextlib.suppress(Exception):
                 self.context_compressor.on_session_end(
                     self.session_id or "",
                     messages or [],
                 )
-            except Exception:
-                pass
 
     def _sync_external_memory_for_turn(
         self,
@@ -2119,10 +2098,8 @@ class AIAgent:
                     child.release_clients()
                 except Exception:
                     # Fall back to full close on children; they're per-turn.
-                    try:
+                    with contextlib.suppress(Exception):
                         child.close()
-                    except Exception:
-                        pass
         except Exception:
             pass
 
@@ -2158,16 +2135,12 @@ class AIAgent:
             pass
 
         # 2. Clean terminal sandbox environments
-        try:
+        with contextlib.suppress(Exception):
             cleanup_vm(task_id)
-        except Exception:
-            pass
 
         # 3. Clean browser daemon sessions
-        try:
+        with contextlib.suppress(Exception):
             cleanup_browser(task_id)
-        except Exception:
-            pass
 
         # 4. Close active child agents
         try:
@@ -2175,10 +2148,8 @@ class AIAgent:
                 children = list(self._active_children)
                 self._active_children.clear()
             for child in children:
-                try:
+                with contextlib.suppress(Exception):
                     child.close()
-                except Exception:
-                    pass
         except Exception:
             pass
 
@@ -2329,9 +2300,7 @@ class AIAgent:
             return True
         # reasoning_details list form
         rd = msg.get("reasoning_details")
-        if isinstance(rd, list) and rd:
-            return True
-        return False
+        return bool(isinstance(rd, list) and rd)
 
     @staticmethod
     def _drop_thinking_only_and_merge_users(
@@ -2744,10 +2713,7 @@ class AIAgent:
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
 
-        if not self._replace_primary_openai_client(reason=f"{self.provider}_credential_refresh"):
-            return False
-
-        return True
+        return self._replace_primary_openai_client(reason=f"{self.provider}_credential_refresh")
 
     def _try_refresh_nous_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "chat_completions" or self.provider != "nous":
@@ -2787,10 +2753,7 @@ class AIAgent:
         # Nous requests should not inherit OpenRouter-only attribution headers.
         self._client_kwargs.pop("default_headers", None)
 
-        if not self._replace_primary_openai_client(reason="nous_credential_refresh"):
-            return False
-
-        return True
+        return self._replace_primary_openai_client(reason="nous_credential_refresh")
 
     def _try_refresh_copilot_client_credentials(self) -> bool:
         """Refresh Copilot credentials and rebuild the shared OpenAI client.
@@ -2854,10 +2817,8 @@ class AIAgent:
         if new_token == self._anthropic_api_key:
             return False
 
-        try:
+        with contextlib.suppress(Exception):
             self._anthropic_client.close()
-        except Exception:
-            pass
 
         try:
             self._anthropic_client = build_anthropic_client(
@@ -2928,10 +2889,8 @@ class AIAgent:
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
 
-            try:
+            with contextlib.suppress(Exception):
                 self._anthropic_client.close()
-            except Exception:
-                pass
 
             self._anthropic_api_key = runtime_key
             self._anthropic_base_url = runtime_base
@@ -3036,10 +2995,8 @@ class AIAgent:
                 if think_tail:
                     callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
                     for cb in callbacks:
-                        try:
+                        with contextlib.suppress(Exception):
                             cb(think_tail)
-                        except Exception:
-                            pass
                     self._record_streamed_assistant_text(think_tail)
         # Flush any benign partial-tag tail held by the context scrubber so it
         # reaches the UI before we clear state for the next model call.  If
@@ -3050,10 +3007,8 @@ class AIAgent:
             if tail:
                 callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
                 for cb in callbacks:
-                    try:
+                    with contextlib.suppress(Exception):
                         cb(tail)
-                    except Exception:
-                        pass
                 self._record_streamed_assistant_text(tail)
         self._current_streamed_assistant_text = ""
 
@@ -3153,10 +3108,8 @@ class AIAgent:
         """Fire reasoning callback if registered."""
         cb = self.reasoning_callback
         if cb is not None:
-            try:
+            with contextlib.suppress(Exception):
                 cb(text)
-            except Exception:
-                pass
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -3168,10 +3121,8 @@ class AIAgent:
         """
         cb = self.tool_gen_callback
         if cb is not None:
-            try:
+            with contextlib.suppress(Exception):
                 cb(tool_name)
-            except Exception:
-                pass
 
     def _has_stream_consumers(self) -> bool:
         """Return True if any streaming consumer is registered."""
@@ -3237,10 +3188,8 @@ class AIAgent:
         except Exception:
             # delete=False means a corrupt/unsupported data URL would otherwise
             # leak a zero-byte temp file on every failed materialization.
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp.name)
-            except OSError:
-                pass
             raise
         path = Path(tmp.name)
         return str(path), path
@@ -3279,10 +3228,8 @@ class AIAgent:
             description = f"Image analysis failed: {e}"
         finally:
             if cleanup_path and cleanup_path.exists():
-                try:
+                with contextlib.suppress(OSError):
                     cleanup_path.unlink()
-                except OSError:
-                    pass
 
         if not description:
             description = "Image analysis failed."

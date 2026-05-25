@@ -172,10 +172,7 @@ def todo_tool(
     if store is None:
         return tool_error("TodoStore not initialized")
 
-    if todos is not None:
-        items = store.write(todos, merge)
-    else:
-        items = store.read()
+    items = store.write(todos, merge) if todos is not None else store.read()
 
     # Build summary counts
     pending = sum(1 for i in items if i["status"] == "pending")

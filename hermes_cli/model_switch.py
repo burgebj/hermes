@@ -42,6 +42,7 @@ from agent.models_dev import (
     get_model_info,
     list_provider_models,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -388,27 +389,21 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
             elif ch == ".":
                 if "." in num_buf:
                     # Second dot — flush current number, start new component
-                    try:
+                    with contextlib.suppress(ValueError):
                         nums.append(float(num_buf.rstrip(".")))
-                    except ValueError:
-                        pass
                     num_buf = ""
                 else:
                     num_buf += ch
             elif ch in "-_.":
                 if num_buf:
-                    try:
+                    with contextlib.suppress(ValueError):
                         nums.append(float(num_buf.rstrip(".")))
-                    except ValueError:
-                        pass
                     num_buf = ""
                 state = "between"
             else:
                 if num_buf:
-                    try:
+                    with contextlib.suppress(ValueError):
                         nums.append(float(num_buf.rstrip(".")))
-                    except ValueError:
-                        pass
                     num_buf = ""
                 state = "in_suffix"
                 suffix_buf += ch
@@ -428,10 +423,8 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
 
     # Flush remaining buffer (strip trailing dots — "5.4." → "5.4")
     if num_buf and state == "in_version":
-        try:
+        with contextlib.suppress(ValueError):
             nums.append(float(num_buf.rstrip(".")))
-        except ValueError:
-            pass
 
     suffix = suffix_buf.lower().strip("-_.")
     suffix = suffix.strip()
@@ -1497,11 +1490,7 @@ def list_authenticated_providers(
             # (see hermes_cli/main.py::_save_custom_provider); older
             # configs or hand-edited files may still use a list.
             cfg_models = ep_cfg.get("models", [])
-            if isinstance(cfg_models, dict):
-                for m in cfg_models:
-                    if m and m not in models_list:
-                        models_list.append(m)
-            elif isinstance(cfg_models, list):
+            if isinstance(cfg_models, (dict, list)):
                 for m in cfg_models:
                     if m and m not in models_list:
                         models_list.append(m)
@@ -1637,11 +1626,7 @@ def list_authenticated_providers(
                 groups[group_key]["models"].append(default_model)
 
             cfg_models = entry.get("models", {})
-            if isinstance(cfg_models, dict):
-                for m in cfg_models:
-                    if m and m not in groups[group_key]["models"]:
-                        groups[group_key]["models"].append(m)
-            elif isinstance(cfg_models, list):
+            if isinstance(cfg_models, (dict, list)):
                 for m in cfg_models:
                     if m and m not in groups[group_key]["models"]:
                         groups[group_key]["models"].append(m)

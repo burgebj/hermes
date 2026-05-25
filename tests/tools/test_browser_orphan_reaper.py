@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import contextlib
 
 
 @pytest.fixture
@@ -371,10 +372,8 @@ class TestOwnerPidCrossProcess:
         monkeypatch.setattr(bt, "_write_owner_pid", _spy)
 
         with patch("tools.browser_tool._socket_safe_tmpdir", return_value=str(fake_tmpdir)):
-            try:
+            with contextlib.suppress(Exception):
                 bt._run_browser_command(task_id="test_task", command="goto", args=[])
-            except Exception:
-                pass
 
         assert calls, "_run_browser_command must call _write_owner_pid"
         # First positional arg is the socket_dir, second is the session_name

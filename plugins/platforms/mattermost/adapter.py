@@ -29,6 +29,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -232,10 +233,8 @@ class MattermostAdapter(BasePlatformAdapter):
 
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._ws_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()

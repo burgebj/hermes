@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_constants import get_hermes_home
+import contextlib
 
 # File + directory layout (under $HERMES_HOME):
 #
@@ -63,10 +64,8 @@ def _write_active(data: Dict[str, Any]) -> None:
 
 
 def _clear_active() -> None:
-    try:
+    with contextlib.suppress(FileNotFoundError):
         _active_file().unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -127,10 +126,8 @@ def start(
     for name in ("transcript.txt", "status.json"):
         f = out / name
         if f.exists():
-            try:
+            with contextlib.suppress(OSError):
                 f.unlink()
-            except OSError:
-                pass
 
     env = os.environ.copy()
     env["HERMES_MEET_URL"] = url
@@ -199,10 +196,8 @@ def status() -> Dict[str, Any]:
     status_path = Path(active.get("out_dir", "")) / "status.json"
     bot_status: Dict[str, Any] = {}
     if status_path.is_file():
-        try:
+        with contextlib.suppress(Exception):
             bot_status = json.loads(status_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
 
     return {
         "ok": True,
@@ -300,10 +295,8 @@ def stop(*, reason: str = "requested") -> Dict[str, Any]:
     transcript_path = Path(out_dir) / "transcript.txt" if out_dir else None
 
     if pid and _pid_alive(pid):
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
         for _ in range(20):
             if not _pid_alive(pid):
                 break

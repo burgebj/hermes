@@ -34,6 +34,7 @@ def _ensure_telegram_mock():
 _ensure_telegram_mock()
 
 from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+import contextlib
 
 
 @pytest.fixture(autouse=True)
@@ -82,10 +83,8 @@ async def test_reconnect_self_schedules_on_start_polling_failure():
     # Clean up — cancel the pending retry so it doesn't run after the test
     for t in pending:
         t.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await t
-        except (asyncio.CancelledError, Exception):
-            pass
 
 
 @pytest.mark.asyncio
@@ -144,10 +143,8 @@ async def test_reconnect_success_resets_error_count():
     pending = [t for t in adapter._background_tasks if not t.done()]
     for t in pending:
         t.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await t
-        except (asyncio.CancelledError, Exception):
-            pass
 
 
 @pytest.mark.asyncio
@@ -469,7 +466,5 @@ async def test_reconnect_schedules_heartbeat_probe_on_success():
     pending = [t for t in adapter._background_tasks if not t.done()]
     for t in pending:
         t.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await t
-        except (asyncio.CancelledError, Exception):
-            pass

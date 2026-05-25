@@ -1504,9 +1504,7 @@ class TestCopilotACPStreamingDecision:
         ):
             # Verify the decision logic correctly disables streaming
             _use_streaming = True
-            if getattr(agent, "_disable_streaming", False):
-                _use_streaming = False
-            elif (
+            if getattr(agent, "_disable_streaming", False) or (
                 agent.provider == "copilot-acp"
                 or str(agent.base_url or "").lower().startswith("acp://copilot")
                 or str(agent.base_url or "").lower().startswith("acp+tcp://")
@@ -1576,9 +1574,7 @@ class TestCopilotACPStreamingDecision:
         agent.api_mode = "chat_completions"
 
         _use_streaming = True
-        if getattr(agent, "_disable_streaming", False):
-            _use_streaming = False
-        elif (
+        if getattr(agent, "_disable_streaming", False) or (
             agent.provider == "copilot-acp"
             or str(agent.base_url or "").lower().startswith("acp://copilot")
             or str(agent.base_url or "").lower().startswith("acp+tcp://")

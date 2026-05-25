@@ -64,7 +64,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,18 +194,17 @@ def register_from_config(
                 continue
             already_allowlisted = _is_allowlisted(spec.event, spec.command)
 
-        if not already_allowlisted:
-            if not _prompt_and_record(
-                spec.event, spec.command, accept_hooks=effective_accept,
-            ):
-                logger.warning(
-                    "shell hook for %s (%s) not allowlisted — skipped. "
-                    "Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / "
-                    "hooks_auto_accept: true, or approve at the TTY "
-                    "prompt next run.",
-                    spec.event, spec.command,
-                )
-                continue
+        if not already_allowlisted and not _prompt_and_record(
+            spec.event, spec.command, accept_hooks=effective_accept,
+        ):
+            logger.warning(
+                "shell hook for %s (%s) not allowlisted — skipped. "
+                "Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / "
+                "hooks_auto_accept: true, or approve at the TTY "
+                "prompt next run.",
+                spec.event, spec.command,
+            )
+            continue
 
         with _registered_lock:
             if key in _registered:
@@ -579,10 +578,8 @@ def save_allowlist(data: Dict[str, Any]) -> None:
                 fh.write(json.dumps(data, indent=2, sort_keys=True))
             atomic_replace(tmp_path, p)
         except Exception:
-            try:
+            with suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
     except OSError as exc:
         logger.warning(
@@ -632,10 +629,8 @@ def _locked_update_approvals() -> Iterator[Dict[str, Any]]:
             yield data
             save_allowlist(data)
         finally:
-            try:
+            with suppress(OSError, IOError):
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
 
 
 def _prompt_and_record(

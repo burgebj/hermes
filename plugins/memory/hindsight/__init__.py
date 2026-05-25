@@ -44,6 +44,7 @@ from agent.memory_provider import MemoryProvider
 from hermes_constants import get_hermes_home
 from tools.registry import tool_error
 from hermes_cli.config import cfg_get
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -356,10 +357,7 @@ def _normalize_retain_tags(value: Any) -> List[str]:
                 parsed = json.loads(text)
             except Exception:
                 parsed = None
-            if isinstance(parsed, list):
-                raw_items = parsed
-            else:
-                raw_items = text.split(",")
+            raw_items = parsed if isinstance(parsed, list) else text.split(",")
         else:
             raw_items = text.split(",")
     else:
@@ -620,10 +618,8 @@ class HindsightMemoryProvider(MemoryProvider):
         config_path = config_dir / "config.json"
         existing = {}
         if config_path.exists():
-            try:
+            with contextlib.suppress(Exception):
                 existing = json.loads(config_path.read_text())
-            except Exception:
-                pass
         existing.update(values)
         config_path.write_text(json.dumps(existing, indent=2))
 
@@ -805,10 +801,8 @@ class HindsightMemoryProvider(MemoryProvider):
         if mode == "local_embedded":
             materialized_config = dict(provider_config)
             config_path = Path(hermes_home) / "hindsight" / "config.json"
-            try:
+            with contextlib.suppress(Exception):
                 materialized_config = json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
 
             llm_api_key = env_writes.get("HINDSIGHT_LLM_API_KEY", "")
             if not llm_api_key:
@@ -1701,10 +1695,8 @@ class HindsightMemoryProvider(MemoryProvider):
         # the daemon is wedged.
         writer = self._writer_thread
         if writer is not None and writer.is_alive():
-            try:
+            with contextlib.suppress(Exception):
                 self._retain_queue.put(_WRITER_SENTINEL)
-            except Exception:
-                pass
             writer.join(timeout=10.0)
             if writer.is_alive():
                 logger.warning(
@@ -1726,14 +1718,10 @@ class HindsightMemoryProvider(MemoryProvider):
                     inner_client = getattr(self._client, "_client", None)
                     if inner_client is not None and hasattr(inner_client, "aclose"):
                         _run_sync(inner_client.aclose())
-                        try:
+                        with contextlib.suppress(Exception):
                             self._client._client = None
-                        except Exception:
-                            pass
-                    try:
+                    with contextlib.suppress(RuntimeError):
                         self._client.close()
-                    except RuntimeError:
-                        pass
                 else:
                     self._run_sync(self._client.aclose())
             except Exception:

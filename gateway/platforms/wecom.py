@@ -68,6 +68,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
     cache_image_from_bytes,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -236,18 +237,14 @@ class WeComAdapter(BasePlatformAdapter):
 
         if self._listen_task:
             self._listen_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._listen_task
-            except asyncio.CancelledError:
-                pass
             self._listen_task = None
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
             self._heartbeat_task = None
 
         self._fail_pending_responses(RuntimeError("WeCom adapter disconnected"))

@@ -22,6 +22,7 @@ from typing import IO, Callable, Protocol
 
 from hermes_constants import get_hermes_home
 from tools.interrupt import is_interrupted
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +86,7 @@ def get_sandbox_dir() -> Path:
     Configurable via TERMINAL_SANDBOX_DIR. Defaults to {HERMES_HOME}/sandboxes/.
     """
     custom = os.getenv("TERMINAL_SANDBOX_DIR")
-    if custom:
-        p = Path(custom)
-    else:
-        p = get_hermes_home() / "sandboxes"
+    p = Path(custom) if custom else get_hermes_home() / "sandboxes"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -231,18 +229,14 @@ class _ThreadedProcessHandle:
                 output, exit_code = exec_fn()
                 self._returncode = exit_code
                 # Write output into the pipe so drain thread picks it up.
-                try:
+                with contextlib.suppress(OSError):
                     os.write(self._write_fd, output.encode("utf-8", errors="replace"))
-                except OSError:
-                    pass
             except Exception as exc:
                 self._error = exc
                 self._returncode = 1
             finally:
-                try:
+                with contextlib.suppress(OSError):
                     os.close(self._write_fd)
-                except OSError:
-                    pass
                 self._done.set()
 
         t = threading.Thread(target=_worker, daemon=True)
@@ -261,10 +255,8 @@ class _ThreadedProcessHandle:
 
     def kill(self):
         if self._cancel_fn:
-            try:
+            with contextlib.suppress(Exception):
                 self._cancel_fn()
-            except Exception:
-                pass
 
     def wait(self, timeout: float | None = None) -> int:
         self._done.wait(timeout=timeout)
@@ -701,10 +693,8 @@ class BaseEnvironment(ABC):
         # it means the non-blocking loop itself stopped cooperating.
         drain_thread.join(timeout=2)
 
-        try:
+        with contextlib.suppress(Exception):
             proc.stdout.close()
-        except Exception:
-            pass
 
         if _DEBUG_INTERRUPT:
             logger.info(
@@ -719,10 +709,8 @@ class BaseEnvironment(ABC):
 
     def _kill_process(self, proc: ProcessHandle):
         """Terminate a process. Subclasses may override for process-group kill."""
-        try:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             proc.kill()
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
 
     # ------------------------------------------------------------------
     # CWD extraction
@@ -841,10 +829,8 @@ class BaseEnvironment(ABC):
         self.cleanup()
 
     def __del__(self):
-        try:
+        with contextlib.suppress(Exception):
             self.cleanup()
-        except Exception:
-            pass
 
     def _prepare_command(self, command: str) -> tuple[str, str | None]:
         """Transform sudo commands if SUDO_PASSWORD is available."""

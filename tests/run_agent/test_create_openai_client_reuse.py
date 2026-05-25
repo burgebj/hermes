@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from run_agent import AIAgent
+import contextlib
 
 
 def _make_agent():
@@ -54,10 +55,8 @@ def _make_fake_openai_factory(constructed):
             self._closed = True
             hc = self._http_client
             if hc is not None and hasattr(hc, "close"):
-                try:
+                with contextlib.suppress(Exception):
                     hc.close()
-                except Exception:
-                    pass
 
     return _FakeOpenAI
 

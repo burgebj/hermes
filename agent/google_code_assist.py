@@ -36,6 +36,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +160,8 @@ def _post_json(
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = ""
-        try:
+        with contextlib.suppress(Exception):
             detail = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
         # Special case: VPC-SC violation should be distinguishable
         if _is_vpc_sc_violation(detail):
             raise CodeAssistError(

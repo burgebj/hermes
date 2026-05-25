@@ -35,6 +35,7 @@ import logging
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -254,20 +255,16 @@ def save_url_image(
             bytes_written += len(chunk)
             if bytes_written > max_bytes:
                 fh.close()
-                try:
+                with contextlib.suppress(OSError):
                     path.unlink()
-                except OSError:
-                    pass
                 raise ValueError(
                     f"Image at {url} exceeds {max_bytes // (1024 * 1024)}MB cap; refusing to cache."
                 )
             fh.write(chunk)
 
     if bytes_written == 0:
-        try:
+        with contextlib.suppress(OSError):
             path.unlink()
-        except OSError:
-            pass
         raise ValueError(f"Image at {url} returned 0 bytes; refusing to cache.")
 
     return path

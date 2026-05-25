@@ -66,6 +66,7 @@ from gateway.platforms.base import (
     SUPPORTED_DOCUMENT_TYPES,
 )
 from tools.url_safety import is_safe_url
+import contextlib
 
 
 def _clean_discord_id(entry: str) -> str:
@@ -210,10 +211,8 @@ class VoiceReceiver:
     def stop(self):
         """Stop listening and clean up."""
         self._running = False
-        try:
+        with contextlib.suppress(Exception):
             self._vc._connection.remove_socket_listener(self._on_packet)
-        except Exception:
-            pass
         with self._lock:
             self._buffers.clear()
             self._last_packet_time.clear()
@@ -496,10 +495,8 @@ class VoiceReceiver:
                 timeout=10,
             )
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(pcm_path)
-            except OSError:
-                pass
 
 
 def _read_dm_role_auth_guild() -> Optional[int]:
@@ -722,10 +719,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 # any raw usernames in DISCORD_ALLOWED_USERS for numeric
                 # IDs (otherwise on_message's author.id lookup can miss).
                 if not adapter_self._ready_event.is_set():
-                    try:
+                    with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(adapter_self._ready_event.wait(), timeout=30.0)
-                    except asyncio.TimeoutError:
-                        pass
 
                 # Dedup: Discord RESUME replays events after reconnects (#4777)
                 if adapter_self._dedup.is_duplicate(str(message.id)):
@@ -885,10 +880,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
         if self._post_connect_task and not self._post_connect_task.done():
             self._post_connect_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._post_connect_task
-            except asyncio.CancelledError:
-                pass
 
         self._running = False
         self._client = None
@@ -903,10 +896,8 @@ class DiscordAdapter(BasePlatformAdapter):
         from hermes_constants import get_hermes_home
 
         directory = get_hermes_home() / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
-        try:
+        with contextlib.suppress(Exception):
             directory.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
         return directory / _DISCORD_COMMAND_SYNC_STATE_FILENAME
 
     def _read_command_sync_state(self) -> dict:
@@ -1048,9 +1039,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return True
         response = getattr(exc, "response", None)
         status = getattr(response, "status", None) or getattr(response, "status_code", None)
-        if status == 429:
-            return True
-        return False
+        return status == 429
 
     def _command_sync_mutation_interval_seconds(self) -> float:
         return _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS
@@ -1777,10 +1766,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
             finally:
                 if aiohttp_session is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         await aiohttp_session.close()
-                    except Exception:
-                        pass
 
     async def play_tts(
         self,
@@ -2022,17 +2009,13 @@ class DiscordAdapter(BasePlatformAdapter):
         await self.leave_voice_channel(guild_id)
         # Notify the runner so it can clean up voice_mode state
         if self._on_voice_disconnect and text_ch_id:
-            try:
+            with contextlib.suppress(Exception):
                 self._on_voice_disconnect(str(text_ch_id))
-            except Exception:
-                pass
         if text_ch_id and self._client:
             ch = self._client.get_channel(text_ch_id)
             if ch:
-                try:
+                with contextlib.suppress(Exception):
                     await ch.send("Left voice channel (inactivity timeout).")
-                except Exception:
-                    pass
 
     def is_in_voice_channel(self, guild_id: int) -> bool:
         """Check if the bot is connected to a voice channel in this guild."""
@@ -2185,10 +2168,8 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("Voice input processing failed: %s", e, exc_info=True)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(wav_path)
-            except OSError:
-                pass
 
     def _is_allowed_user(
         self,
@@ -2762,10 +2743,8 @@ class DiscordAdapter(BasePlatformAdapter):
         task = self._typing_tasks.pop(chat_id, None)
         if task:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get information about a Discord channel."""
@@ -3118,10 +3097,8 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from hermes_cli.commands import COMMAND_REGISTRY, _is_gateway_available, _resolve_config_gates
 
-            try:
+            with contextlib.suppress(Exception):
                 already_registered = {cmd.name for cmd in tree.get_commands()}
-            except Exception:
-                pass
 
             config_overrides = _resolve_config_gates()
 
@@ -3261,10 +3238,8 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         try:
             existing_names = set()
-            try:
+            with contextlib.suppress(Exception):
                 existing_names = {cmd.name for cmd in tree.get_commands()}
-            except Exception:
-                pass
 
             # Populate the instance-level entries/lookup so the
             # autocomplete + handler callbacks below always read the
@@ -3311,10 +3286,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 choices: list = []
                 for name, desc, _key in self._skill_entries:
                     if not q or q in name.lower() or (desc and q in desc.lower()):
-                        if desc:
-                            label = f"{name} — {desc}"
-                        else:
-                            label = name
+                        label = f"{name} — {desc}" if desc else name
                         # Discord's Choice.name is capped at 100 chars.
                         if len(label) > 100:
                             label = label[:97] + "..."
@@ -4440,15 +4412,14 @@ class DiscordAdapter(BasePlatformAdapter):
         from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-        async with aiohttp.ClientSession(**_sess_kw) as session:
-            async with session.get(
-                att.url,
-                timeout=aiohttp.ClientTimeout(total=30),
-                **_req_kw,
-            ) as resp:
-                if resp.status != 200:
-                    raise Exception(f"HTTP {resp.status}")
-                return await resp.read()
+        async with aiohttp.ClientSession(**_sess_kw) as session, session.get(
+            att.url,
+            timeout=aiohttp.ClientTimeout(total=30),
+            **_req_kw,
+        ) as resp:
+            if resp.status != 200:
+                raise Exception(f"HTTP {resp.status}")
+            return await resp.read()
 
     async def _handle_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""
@@ -5615,10 +5586,8 @@ def _define_discord_view_classes() -> None:
                     self.clarify_id,
                     exc_info=True,
                 )
-                try:
+                with contextlib.suppress(Exception):
                     await interaction.response.defer()
-                except Exception:
-                    pass
 
             # Resolve via the gateway clarify primitive — same mechanism as
             # Telegram. Look up the canonical choice text from the entry so
@@ -5692,10 +5661,8 @@ def _define_discord_view_classes() -> None:
             try:
                 await interaction.response.edit_message(embed=embed, view=self)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     await interaction.response.defer()
-                except Exception:
-                    pass
 
         async def on_timeout(self):
             self.resolved = True

@@ -48,10 +48,7 @@ def _has_system_browser() -> bool:
         names = ("chrome", "msedge", "chromium")
     else:
         names = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
-    for name in names:
-        if shutil.which(name):
-            return True
-    return False
+    return any(shutil.which(name) for name in names)
 
 
 def _has_hermes_agent_browser() -> bool:
@@ -126,7 +123,7 @@ def ensure_dependency(
             reply = input(f"{desc} is not installed. Install now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
-        if reply not in ("", "y", "yes"):
+        if reply not in {"", "y", "yes"}:
             return False
 
     if shell == "powershell":

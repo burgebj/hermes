@@ -235,7 +235,7 @@ class TestRoleFilter:
         # The FTS5 match should be on the user message, not the tool message
         if result["count"] > 0:
             matched_role = result["results"][0]["matched_role"]
-            assert matched_role in ("user", "assistant")
+            assert matched_role in {"user", "assistant"}
 
     def test_explicit_tool_role_includes_tool(self, db):
         db.create_session("s1", source="cli")

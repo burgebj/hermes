@@ -23,6 +23,7 @@ from typing import Any
 
 from agent.file_safety import get_read_block_error, is_write_denied
 from agent.redact import redact_sensitive_text
+import contextlib
 
 ACP_MARKER_BASE_URL = "acp://copilot"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
@@ -370,10 +371,8 @@ class CopilotACPClient:
             proc.terminate()
             proc.wait(timeout=2)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
 
     def _create_chat_completion(
         self,

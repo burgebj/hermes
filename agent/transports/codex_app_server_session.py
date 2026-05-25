@@ -829,10 +829,7 @@ def _has_turn_aborted_marker(text: str) -> bool:
     """
     if not text:
         return False
-    for marker in _TURN_ABORTED_MARKERS:
-        if marker in text:
-            return True
-    return False
+    return any(marker in text for marker in _TURN_ABORTED_MARKERS)
 
 
 def _get_hermes_version() -> str:

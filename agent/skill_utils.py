@@ -164,7 +164,7 @@ def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
         if running_in_termux and mapped == "linux":
             return True
         # Explicit termux/android tags match a Termux session too.
-        if running_in_termux and mapped in ("termux", "android"):
+        if running_in_termux and mapped in {"termux", "android"}:
             return True
     return False
 
@@ -305,10 +305,7 @@ def get_external_skills_dirs() -> List[Path]:
         expanded = os.path.expanduser(os.path.expandvars(entry))
         p = Path(expanded)
         # Resolve relative paths against HERMES_HOME, not cwd
-        if not p.is_absolute():
-            p = (hermes_home / p).resolve()
-        else:
-            p = p.resolve()
+        p = (hermes_home / p).resolve() if not p.is_absolute() else p.resolve()
         if p == local_skills:
             continue
         if p in seen:

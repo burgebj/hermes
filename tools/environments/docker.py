@@ -16,6 +16,7 @@ from typing import Optional
 
 from tools.environments.base import BaseEnvironment, _popen_bash
 from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -644,13 +645,11 @@ class DockerEnvironment(BaseEnvironment):
 
             if not self._persistent:
                 # Also schedule removal (stop only leaves it as stopped)
-                try:
+                with contextlib.suppress(Exception):
                     subprocess.Popen(
                         f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
                         shell=True,
                     )
-                except Exception:
-                    pass
             self._container_id = None
 
         if not self._persistent:

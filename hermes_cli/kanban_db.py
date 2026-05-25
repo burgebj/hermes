@@ -277,10 +277,8 @@ def set_current_board(slug: str) -> Path:
 
 def clear_current_board() -> None:
     """Remove ``<root>/kanban/current`` so the active board reverts to ``default``."""
-    try:
+    with contextlib.suppress(FileNotFoundError):
         current_board_path().unlink()
-    except FileNotFoundError:
-        pass
 
 
 def board_dir(board: Optional[str] = None) -> Path:
@@ -1155,10 +1153,7 @@ def connect(
       ``HERMES_KANBAN_DB`` env → ``HERMES_KANBAN_BOARD`` env →
       ``<root>/kanban/current`` → ``default``.
     """
-    if db_path is not None:
-        path = db_path
-    else:
-        path = kanban_db_path(board=board)
+    path = db_path if db_path is not None else kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
     # and other invalid-header cases without opening a sqlite connection.
@@ -1214,10 +1209,7 @@ def init_db(
     external tools that upgrade an old DB file — can call this to
     force re-migration.
     """
-    if db_path is not None:
-        path = db_path
-    else:
-        path = kanban_db_path(board=board)
+    path = db_path if db_path is not None else kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved = str(path.resolve())
     # Clear the cache entry so the underlying connect() re-runs the
@@ -2046,7 +2038,7 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
                 kind=r["kind"],
                 payload=payload,
                 created_at=r["created_at"],
-                run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+                run_id=(int(r["run_id"]) if "run_id" in r and r["run_id"] is not None else None),
             )
         )
     return out
@@ -2268,7 +2260,7 @@ def recompute_ready(conn: sqlite3.Connection) -> int:
                 "WHERE l.child_id = ?",
                 (task_id,),
             ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            if all(p["status"] in {"done", "archived"} for p in parents):
                 # Blocked tasks also get their failure counters reset —
                 # this is effectively an auto-unblock (circuit-breaker
                 # recovery; worker-initiated blocks are skipped above).
@@ -2790,11 +2782,7 @@ def _verify_created_cards(
             phantom.append(cid)
             continue
         # Accept if any of the three trust conditions holds.
-        if completing_assignee and created_by == completing_assignee:
-            verified.append(cid)
-        elif created_by == completing_task_id:
-            verified.append(cid)
-        elif cid in linked_children:
+        if completing_assignee and created_by == completing_assignee or created_by == completing_task_id or cid in linked_children:
             verified.append(cid)
         else:
             phantom.append(cid)
@@ -3076,19 +3064,15 @@ def _is_managed_scratch_path(p: Path) -> bool:
     roots: list[Path] = []
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
     if override:
-        try:
+        with contextlib.suppress(OSError):
             roots.append(Path(override).expanduser().resolve(strict=False))
-        except OSError:
-            pass
     try:
         home = kanban_home()
     except OSError:
         home = None
     if home is not None:
-        try:
+        with contextlib.suppress(OSError):
             roots.append((home / "kanban" / "workspaces").resolve(strict=False))
-        except OSError:
-            pass
         try:
             boards_parent = (home / "kanban" / "boards").resolve(strict=False)
         except OSError:
@@ -3425,7 +3409,7 @@ def promote_task(
         return False, f"task {task_id} not found"
 
     cur_status = row["status"]
-    if cur_status not in ("todo", "blocked"):
+    if cur_status not in {"todo", "blocked"}:
         return False, (
             f"task {task_id} is {cur_status!r}; promote only applies to "
             f"'todo' or 'blocked'"
@@ -3440,7 +3424,7 @@ def promote_task(
         ).fetchall()
         unsatisfied = [
             p["id"] for p in parents
-            if p["status"] not in ("done", "archived")
+            if p["status"] not in {"done", "archived"}
         ]
         if unsatisfied:
             return False, (
@@ -4393,10 +4377,8 @@ def enforce_max_runtime(
             os.kill if hasattr(os, "kill") else None
         )
         if kill is not None:
-            try:
+            with contextlib.suppress(ProcessLookupError, OSError):
                 kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
             # Short polling wait — no time.sleep on the write txn.
             for _ in range(10):
                 if not _pid_alive(pid):
@@ -4805,7 +4787,7 @@ def _record_task_failure(
         # Per-task override wins over both caller-supplied and default
         # thresholds. None (the common case) falls through.
         task_override = (
-            row["max_retries"] if "max_retries" in row.keys() else None
+            row.get("max_retries", None)
         )
         if task_override is not None:
             effective_limit = int(task_override)
@@ -5054,10 +5036,7 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     except Exception:
         # Can't introspect — assume spawnable, preserve legacy behavior.
         return True
-    for row in rows:
-        if profile_exists(row["assignee"]):
-            return True
-    return False
+    return any(profile_exists(row["assignee"]) for row in rows)
 
 
 def has_spawnable_review(conn: sqlite3.Connection) -> bool:
@@ -5079,10 +5058,7 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
         from hermes_cli.profiles import profile_exists  # local import: avoids cycle
     except Exception:
         return True
-    for row in rows:
-        if profile_exists(row["assignee"]):
-            return True
-    return False
+    return any(profile_exists(row["assignee"]) for row in rows)
 
 
 def dispatch_once(
@@ -5462,10 +5438,8 @@ def _rotate_worker_log(
             src = _rotated_log_path(log_path, generation)
             if not src.exists():
                 continue
-            try:
+            with contextlib.suppress(OSError):
                 src.rename(_rotated_log_path(log_path, generation + 1))
-            except OSError:
-                pass
         log_path.rename(_rotated_log_path(log_path, 1))
     except OSError:
         pass
@@ -5853,10 +5827,8 @@ def run_daemon(
         for sig_name in ("SIGINT", "SIGTERM"):
             sig = getattr(signal, sig_name, None)
             if sig is not None:
-                try:
+                with contextlib.suppress(ValueError, OSError):
                     signal.signal(sig, _handle)
-                except (ValueError, OSError):
-                    pass
 
     while not stop_event.is_set():
         try:
@@ -5867,10 +5839,8 @@ def run_daemon(
                     failure_limit=failure_limit,
                 )
             if on_tick is not None:
-                try:
+                with contextlib.suppress(Exception):
                     on_tick(res)
-                except Exception:
-                    pass
         except Exception:
             # Don't let any single tick kill the daemon.
             import traceback
@@ -6282,7 +6252,7 @@ def unseen_events_for_sub(
         out.append(Event(
             id=r["id"], task_id=r["task_id"], kind=r["kind"],
             payload=payload, created_at=r["created_at"],
-            run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+            run_id=(int(r["run_id"]) if "run_id" in r and r["run_id"] is not None else None),
         ))
         max_id = max(max_id, int(r["id"]))
     return max_id, out
@@ -6574,9 +6544,8 @@ def list_runs(
     """
     if (state_type is None) ^ (state_name is None):
         raise ValueError("state_type and state_name must both be set or both omitted")
-    if state_type is not None:
-        if state_type not in ("status", "outcome"):
-            raise ValueError("state_type must be 'status' or 'outcome'")
+    if state_type is not None and state_type not in {"status", "outcome"}:
+        raise ValueError("state_type must be 'status' or 'outcome'")
     q = "SELECT * FROM task_runs WHERE task_id = ?"
     params: list[Any] = [task_id]
     if not include_active:

@@ -38,6 +38,7 @@ import sys
 import termios
 import time
 from typing import Optional, Sequence
+import contextlib
 
 try:
     import ptyprocess  # type: ignore
@@ -194,10 +195,8 @@ class PtyBridge:
             return
         # struct winsize: rows, cols, xpixel, ypixel (all unsigned short)
         winsize = struct.pack("HHHH", max(1, rows), max(1, cols), 0, 0)
-        try:
+        with contextlib.suppress(OSError):
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, winsize)
-        except OSError:
-            pass
 
     # -- teardown ---------------------------------------------------------
 
@@ -216,18 +215,14 @@ class PtyBridge:
         for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
             if not self._proc.isalive():
                 break
-            try:
+            with contextlib.suppress(Exception):
                 self._proc.kill(sig)
-            except Exception:
-                pass
             deadline = time.monotonic() + 0.5
             while self._proc.isalive() and time.monotonic() < deadline:
                 time.sleep(0.02)
 
-        try:
+        with contextlib.suppress(Exception):
             self._proc.close(force=True)
-        except Exception:
-            pass
 
     # Context-manager sugar — handy in tests and ad-hoc scripts.
     def __enter__(self) -> "PtyBridge":

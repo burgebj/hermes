@@ -50,6 +50,7 @@ from hermes_cli.config import (
 )
 from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
+import contextlib
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -1696,10 +1697,8 @@ def _save_anthropic_oauth_creds(access_token: str, refresh_token: str, expires_a
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_path, _HERMES_OAUTH_FILE)
-        try:
+        with contextlib.suppress(OSError):
             _HERMES_OAUTH_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
     finally:
         try:
             if tmp_path.exists():
@@ -1721,10 +1720,8 @@ def _save_anthropic_oauth_creds(access_token: str, refresh_token: str, expires_a
         # Avoid duplicate entries: delete any prior dashboard-issued OAuth entry
         existing = [e for e in pool.entries() if getattr(e, "source", "").startswith(f"{SOURCE_MANUAL}:dashboard_pkce")]
         for e in existing:
-            try:
+            with contextlib.suppress(Exception):
                 pool.remove_entry(getattr(e, "id", ""))
-            except Exception:
-                pass
         entry = PooledCredential(
             provider="anthropic",
             id=uuid.uuid4().hex[:6],
@@ -3290,6 +3287,7 @@ async def get_models_analytics(days: int = 30):
 
 import re
 import asyncio
+import contextlib
 
 # PTY bridge is POSIX-only (depends on fcntl/termios/ptyprocess).  On native
 # Windows the import raises; catch and leave PtyBridge=None so the rest of
@@ -3548,10 +3546,8 @@ async def pty_ws(ws: WebSocket) -> None:
         pass
     finally:
         reader_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await reader_task
-        except (asyncio.CancelledError, Exception):
-            pass
         bridge.close()
 
 

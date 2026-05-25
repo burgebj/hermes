@@ -31,6 +31,7 @@ from gateway.config import (
     DEFAULT_STREAMING_BUFFER_THRESHOLD as _DEFAULT_STREAMING_BUFFER_THRESHOLD,
     DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR,
 )
+import contextlib
 
 logger = logging.getLogger("gateway.stream_consumer")
 
@@ -628,10 +629,8 @@ class GatewayStreamConsumer:
             # Best-effort final edit on cancellation
             _best_effort_ok = False
             if self._accumulated and self._message_id:
-                try:
+                with contextlib.suppress(Exception):
                     _best_effort_ok = bool(await self._send_or_edit(self._accumulated))
-                except Exception:
-                    pass
             # Only confirm final delivery if the best-effort send above
             # actually succeeded OR if the final response was already
             # confirmed before we were cancelled.  Previously this

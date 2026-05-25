@@ -141,9 +141,8 @@ def test_bridge_refresh_exits_cleanly_on_network_error(bridge_module):
     with patch(
         "urllib.request.urlopen",
         side_effect=urllib.error.URLError("timed out"),
-    ):
-        with pytest.raises(SystemExit) as exc_info:
-            bridge_module.get_valid_token()
+    ), pytest.raises(SystemExit) as exc_info:
+        bridge_module.get_valid_token()
 
     assert exc_info.value.code == 1
 

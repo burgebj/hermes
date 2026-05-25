@@ -1123,9 +1123,7 @@ def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
     hostname = base_url_hostname(normalized)
     if hostname == "api.anthropic.com":
         return True
-    if hostname == "api.kimi.com" and "/coding" in normalized:
-        return True
-    return False
+    return bool(hostname == "api.kimi.com" and "/coding" in normalized)
 
 
 def _maybe_wrap_anthropic(
@@ -2255,18 +2253,17 @@ def _is_payment_error(exc: Exception) -> bool:
     # but sometimes wrap them in 429 or other codes.
     # Daily quota exhaustion from Bedrock, Vertex AI, and similar providers
     # uses different language but is semantically identical to credit exhaustion.
-    if status in {402, 429, None}:
-        if any(kw in err_lower for kw in (
-            "credits", "insufficient funds",
-            "can only afford", "billing",
-            "payment required",
-            # Daily / monthly quota exhaustion keywords
-            "quota exceeded", "quota_exceeded",
-            "too many tokens per day", "daily limit",
-            "tokens per day", "daily quota",
-            "resource exhausted",  # Vertex AI / gRPC quota errors
-        )):
-            return True
+    if status in {402, 429, None} and any(kw in err_lower for kw in (
+        "credits", "insufficient funds",
+        "can only afford", "billing",
+        "payment required",
+        # Daily / monthly quota exhaustion keywords
+        "quota exceeded", "quota_exceeded",
+        "too many tokens per day", "daily limit",
+        "tokens per day", "daily quota",
+        "resource exhausted",  # Vertex AI / gRPC quota errors
+    )):
+        return True
     return False
 
 

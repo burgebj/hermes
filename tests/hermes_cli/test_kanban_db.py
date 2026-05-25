@@ -3104,7 +3104,7 @@ def test_detect_stale_does_not_tick_failure_counter(kanban_home, monkeypatch):
             row = conn.execute(
                 "SELECT consecutive_failures FROM tasks WHERE id = ?", (t,)
             ).fetchone()
-            assert row["consecutive_failures"] in (0, None)
+            assert row["consecutive_failures"] in {0, None}
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
         stale = kb.detect_stale_running(
@@ -3117,7 +3117,7 @@ def test_detect_stale_does_not_tick_failure_counter(kanban_home, monkeypatch):
         row = conn.execute(
             "SELECT consecutive_failures FROM tasks WHERE id = ?", (t,)
         ).fetchone()
-        assert row["consecutive_failures"] in (0, None), (
+        assert row["consecutive_failures"] in {0, None}, (
             f"Stale reclaim ticked consecutive_failures to "
             f"{row['consecutive_failures']!r}; should remain 0/NULL."
         )

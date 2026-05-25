@@ -60,6 +60,7 @@ from agent.lsp.workspace import (
     is_inside_workspace,
     resolve_workspace_for_file,
 )
+import contextlib
 
 logger = logging.getLogger("agent.lsp.manager")
 
@@ -125,10 +126,8 @@ class _BackgroundLoop:
         loop = self._loop
         if loop is None:
             return
-        try:
+        with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(loop.stop)
-        except RuntimeError:
-            pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         self._loop = None
@@ -279,9 +278,7 @@ class LSPService:
             per_server_root = srv.resolve_root(file_path, ws_root) or ws_root
         except Exception:  # noqa: BLE001
             per_server_root = ws_root
-        if (srv.server_id, per_server_root) in self._broken:
-            return False
-        return True
+        return (srv.server_id, per_server_root) not in self._broken
 
     def snapshot_baseline(self, file_path: str) -> None:
         """Snapshot current diagnostics for ``file_path`` as the delta baseline.

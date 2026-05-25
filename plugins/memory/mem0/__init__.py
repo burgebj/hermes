@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +151,8 @@ class Mem0MemoryProvider(MemoryProvider):
         config_path = Path(hermes_home) / "mem0.json"
         existing = {}
         if config_path.exists():
-            try:
+            with contextlib.suppress(Exception):
                 existing = json.loads(config_path.read_text())
-            except Exception:
-                pass
         existing.update(values)
         config_path.write_text(json.dumps(existing, indent=2))
 

@@ -89,42 +89,39 @@ class TestFirecrawlClientConfig:
         with patch.dict(os.environ, {
             "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
             "TOOL_GATEWAY_SCHEME": "http",
-        }):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                with patch("tools.web_tools.Firecrawl") as mock_fc:
-                    from tools.web_tools import _get_firecrawl_client
-                    result = _get_firecrawl_client()
-                    mock_fc.assert_called_once_with(
-                        api_key="nous-token",
-                        api_url="http://firecrawl-gateway.nousresearch.com",
-                    )
-                    assert result is mock_fc.return_value
+        }), patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
+            with patch("tools.web_tools.Firecrawl") as mock_fc:
+                from tools.web_tools import _get_firecrawl_client
+                result = _get_firecrawl_client()
+                mock_fc.assert_called_once_with(
+                    api_key="nous-token",
+                    api_url="http://firecrawl-gateway.nousresearch.com",
+                )
+                assert result is mock_fc.return_value
 
     def test_invalid_tool_gateway_scheme_raises(self):
         """Unexpected shared gateway schemes should fail fast."""
         with patch.dict(os.environ, {
             "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
             "TOOL_GATEWAY_SCHEME": "ftp",
-        }):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                from tools.web_tools import _get_firecrawl_client
-                with pytest.raises(ValueError, match="TOOL_GATEWAY_SCHEME"):
-                    _get_firecrawl_client()
+        }), patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
+            from tools.web_tools import _get_firecrawl_client
+            with pytest.raises(ValueError, match="TOOL_GATEWAY_SCHEME"):
+                _get_firecrawl_client()
 
     def test_explicit_firecrawl_gateway_url_takes_precedence(self):
         """An explicit Firecrawl gateway origin should override the shared domain."""
         with patch.dict(os.environ, {
             "FIRECRAWL_GATEWAY_URL": "https://firecrawl-gateway.localhost:3009/",
             "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
-        }):
-            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
-                with patch("tools.web_tools.Firecrawl") as mock_fc:
-                    from tools.web_tools import _get_firecrawl_client
-                    _get_firecrawl_client()
-                    mock_fc.assert_called_once_with(
-                        api_key="nous-token",
-                        api_url="https://firecrawl-gateway.localhost:3009",
-                    )
+        }), patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
+            with patch("tools.web_tools.Firecrawl") as mock_fc:
+                from tools.web_tools import _get_firecrawl_client
+                _get_firecrawl_client()
+                mock_fc.assert_called_once_with(
+                    api_key="nous-token",
+                    api_url="https://firecrawl-gateway.localhost:3009",
+                )
 
     def test_default_gateway_domain_targets_nous_production_origin(self):
         """Default gateway origin should point at the Firecrawl vendor hostname."""

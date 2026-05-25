@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.config import cfg_get
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -1138,10 +1139,8 @@ def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
                         attr = curses.A_BOLD
                         if curses.has_colors():
                             attr |= curses.color_pair(1)
-                    try:
+                    with contextlib.suppress(curses.error):
                         stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
                     y += 1
 
             # --- Separator ---
@@ -1170,10 +1169,8 @@ def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
                         attr = curses.A_BOLD
                         if curses.has_colors():
                             attr |= curses.color_pair(3)
-                    try:
+                    with contextlib.suppress(curses.error):
                         stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
                     y += 1
 
             stdscr.refresh()

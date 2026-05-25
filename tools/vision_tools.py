@@ -99,10 +99,7 @@ def _validate_image_url(url: str) -> bool:
 
     # Block private/internal addresses to prevent SSRF
     from tools.url_safety import is_safe_url
-    if not is_safe_url(url):
-        return False
-
-    return True
+    return is_safe_url(url)
 
 
 def _detect_image_mime_type(image_path: Path) -> Optional[str]:
@@ -466,9 +463,7 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
         if not isinstance(model, str):
             return False
         m = model.strip().lower()
-        if "gemini-3" in m or "gemini-pro-3" in m or "gemini-flash-3" in m:
-            return True
-        return False
+        return bool("gemini-3" in m or "gemini-pro-3" in m or "gemini-flash-3" in m)
 
     # Other vision-capable provider stacks. Conservative default: False.
     # Add explicit entries here as we verify each provider's tool-result

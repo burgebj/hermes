@@ -40,6 +40,7 @@ from agent.file_safety import (
     get_safe_write_root as _shared_get_safe_write_root,
     is_write_denied as _shared_is_write_denied,
 )
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -1378,10 +1379,7 @@ class ShellFileOperations(FileOperations):
         except Exception:  # noqa: BLE001
             return False
         ext_lower = ext.lower()
-        for srv in SERVERS:
-            if ext_lower in srv.extensions:
-                return True
-        return False
+        return any(ext_lower in srv.extensions for srv in SERVERS)
 
     def _lsp_will_handle(self, path: str) -> bool:
         """Return True iff the LSP service is active AND will lint this file.
@@ -1765,10 +1763,8 @@ class ShellFileOperations(FileOperations):
                 if ':' in line:
                     parts = line.rsplit(':', 1)
                     if len(parts) == 2:
-                        try:
+                        with contextlib.suppress(ValueError):
                             counts[parts[0]] = int(parts[1])
-                        except ValueError:
-                            pass
             return SearchResult(counts=counts, total_count=sum(counts.values()))
         
         else:
@@ -1864,10 +1860,8 @@ class ShellFileOperations(FileOperations):
                 if ':' in line:
                     parts = line.rsplit(':', 1)
                     if len(parts) == 2:
-                        try:
+                        with contextlib.suppress(ValueError):
                             counts[parts[0]] = int(parts[1])
-                        except ValueError:
-                            pass
             return SearchResult(counts=counts, total_count=sum(counts.values()))
         
         else:

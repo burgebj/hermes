@@ -29,6 +29,7 @@ from tools.file_tools import (
     write_file_tool,
     patch_tool,
 )
+import contextlib
 
 
 def _tmp_file(content: str = "initial\n") -> str:
@@ -47,10 +48,8 @@ class FileStateRegistryUnitTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         for p in self._tmpfiles:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(p)
-            except OSError:
-                pass
         file_state.get_registry().clear()
 
     def _mk(self, content: str = "x\n") -> str:

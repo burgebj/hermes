@@ -42,6 +42,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.config import Platform, PlatformConfig
+import contextlib
 
 logger = logging.getLogger(__name__)
 # Automated sender patterns — emails from these are silently ignored
@@ -105,9 +106,7 @@ def check_email_requirements() -> bool:
     pwd = os.getenv("EMAIL_PASSWORD")
     imap = os.getenv("EMAIL_IMAP_HOST")
     smtp = os.getenv("EMAIL_SMTP_HOST")
-    if not all([addr, pwd, imap, smtp]):
-        return False
-    return True
+    return all([addr, pwd, imap, smtp])
 
 
 def _decode_header_value(raw: str) -> str:
@@ -335,10 +334,8 @@ class EmailAdapter(BasePlatformAdapter):
         self._running = False
         if self._poll_task:
             self._poll_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
-            except asyncio.CancelledError:
-                pass
             self._poll_task = None
         logger.info("[Email] Disconnected.")
 
@@ -420,10 +417,8 @@ class EmailAdapter(BasePlatformAdapter):
                         "date": msg.get("Date", ""),
                     })
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     imap.logout()
-                except Exception:
-                    pass
         except Exception as e:
             logger.error("[Email] IMAP fetch error: %s", e)
         return results

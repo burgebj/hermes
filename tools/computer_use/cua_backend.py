@@ -37,6 +37,7 @@ from tools.computer_use.backend import (
     ComputerUseBackend,
     UIElement,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -186,10 +187,8 @@ class _AsyncBridge:
             try:
                 self._loop.run_forever()
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     self._loop.close()
-                except Exception:
-                    pass
 
         self._thread = threading.Thread(target=_run, daemon=True, name="cua-driver-loop")
         self._thread.start()

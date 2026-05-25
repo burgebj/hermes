@@ -444,9 +444,8 @@ class HonchoSessionManager:
         elif wf == "session":
             # Accumulate; caller must call flush_all() at session end
             pass
-        elif isinstance(wf, int) and wf > 0:
-            if self._turn_counter % wf == 0:
-                self._flush_session(session)
+        elif isinstance(wf, int) and wf > 0 and self._turn_counter % wf == 0:
+            self._flush_session(session)
 
     def flush_all(self) -> None:
         """Flush all pending unsynced messages for all cached sessions.

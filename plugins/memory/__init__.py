@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 from hermes_cli.config import cfg_get
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +146,7 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
         available = True
         try:
             provider = _load_provider_from_dir(child)
-            if provider:
-                available = provider.is_available()
-            else:
-                available = False
+            available = provider.is_available() if provider else False
         except Exception:
             available = False
 
@@ -219,10 +217,8 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
                     if spec:
                         parent_mod = importlib.util.module_from_spec(spec)
                         sys.modules[parent] = parent_mod
-                        try:
+                        with contextlib.suppress(Exception):
                             spec.loader.exec_module(parent_mod)
-                        except Exception:
-                            pass
 
         # Now load the provider module
         spec = importlib.util.spec_from_file_location(

@@ -21,6 +21,7 @@ from agent.lsp.servers import (
     SpawnSpec,
     find_server_for_file,
 )
+import contextlib
 
 
 MOCK_SERVER = str(Path(__file__).parent / "_mock_lsp_server.py")
@@ -72,10 +73,8 @@ def mock_pyright(monkeypatch, tmp_path):
     gen = _install_mock_server(monkeypatch, "errors", "pyright")
     next(gen)
     yield repo
-    try:
+    with contextlib.suppress(StopIteration):
         next(gen)
-    except StopIteration:
-        pass
 
 
 def test_service_returns_empty_when_disabled(tmp_path):

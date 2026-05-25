@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from hermes_constants import get_hermes_home
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,8 @@ def _max_mtime(files: List[Path]) -> float:
     base = _bundles_dir()
     mtimes = []
     if base.exists():
-        try:
+        with contextlib.suppress(OSError):
             mtimes.append(base.stat().st_mtime)
-        except OSError:
-            pass
     for f in files:
         try:
             mtimes.append(f.stat().st_mtime)

@@ -541,7 +541,7 @@ class TestComponentPrefixes:
         # The gateway component captures both core gateway logs and the
         # hermes_plugins facility (plugin-installed gateway adapters log
         # under that prefix).
-        assert ("gateway", "hermes_plugins") == hermes_logging.COMPONENT_PREFIXES["gateway"]
+        assert hermes_logging.COMPONENT_PREFIXES["gateway"] == ("gateway", "hermes_plugins")
 
     def test_agent_prefix(self):
         prefixes = hermes_logging.COMPONENT_PREFIXES["agent"]
@@ -550,7 +550,7 @@ class TestComponentPrefixes:
         assert "model_tools" in prefixes
 
     def test_tools_prefix(self):
-        assert ("tools",) == hermes_logging.COMPONENT_PREFIXES["tools"]
+        assert hermes_logging.COMPONENT_PREFIXES["tools"] == ("tools",)
 
     def test_cli_prefix(self):
         prefixes = hermes_logging.COMPONENT_PREFIXES["cli"]
@@ -558,7 +558,7 @@ class TestComponentPrefixes:
         assert "cli" in prefixes
 
     def test_cron_prefix(self):
-        assert ("cron",) == hermes_logging.COMPONENT_PREFIXES["cron"]
+        assert hermes_logging.COMPONENT_PREFIXES["cron"] == ("cron",)
 
 
 class TestSetupVerboseLogging:

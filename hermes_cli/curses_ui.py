@@ -8,6 +8,7 @@ import sys
 from typing import Callable, List, Optional, Set
 
 from hermes_cli.colors import Colors, color
+import contextlib
 
 
 def flush_stdin() -> None:
@@ -117,10 +118,8 @@ def curses_checklist(
                         attr = curses.A_BOLD
                         if curses.has_colors():
                             attr |= curses.color_pair(1)
-                    try:
+                    with contextlib.suppress(curses.error):
                         stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
 
                 # Status bar (bottom row, right-aligned)
                 if status_fn:
@@ -257,10 +256,8 @@ def curses_radiolist(
                         attr = curses.A_BOLD
                         if curses.has_colors():
                             attr |= curses.color_pair(1)
-                    try:
+                    with contextlib.suppress(curses.error):
                         stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
 
                 stdscr.refresh()
                 key = stdscr.getch()
@@ -380,10 +377,8 @@ def curses_single_select(
                         attr = curses.A_BOLD
                         if curses.has_colors():
                             attr |= curses.color_pair(1)
-                    try:
+                    with contextlib.suppress(curses.error):
                         stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
 
                 stdscr.refresh()
                 key = stdscr.getch()

@@ -17,6 +17,7 @@ from agent.skill_preprocessing import (
     load_skills_config as _load_skills_config,
     substitute_template_vars as _substitute_template_vars,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +65,8 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         if identifier_path.is_absolute():
             normalized = None
             trusted_roots = [SKILLS_DIR]
-            try:
+            with contextlib.suppress(Exception):
                 trusted_roots.extend(get_external_skills_dirs())
-            except Exception:
-                pass
 
             # Prefer the lexical path under a trusted skill root before
             # resolving symlinks.  Slash-command discovery can legitimately

@@ -39,7 +39,7 @@ class TestGoogleWorkspaceCredentialFiles:
             (e["path"] if isinstance(e, dict) else e)
             for e in entries
         }
-        assert _EXPECTED_PATHS <= paths, (
+        assert paths >= _EXPECTED_PATHS, (
             f"Missing entries in required_credential_files: {_EXPECTED_PATHS - paths}"
         )
 

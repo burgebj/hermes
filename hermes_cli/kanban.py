@@ -26,6 +26,7 @@ from typing import Any, Optional
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name, get_profile_dir, seed_profile_skills
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -2271,10 +2272,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         )
     finally:
         if pidfile:
-            try:
+            with contextlib.suppress(OSError):
                 Path(pidfile).unlink()
-            except OSError:
-                pass
     print("(dispatcher stopped)")
     return 0
 

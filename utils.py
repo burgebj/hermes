@@ -10,6 +10,7 @@ from typing import Any, Union
 from urllib.parse import urlparse
 
 import yaml
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,8 @@ def _restore_file_mode(path: Path, mode: "int | None") -> None:
     """
     if mode is None:
         return
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, mode)
-    except OSError:
-        pass
 
 
 def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
@@ -129,10 +128,8 @@ def atomic_json_write(
     except BaseException:
         # Intentionally catch BaseException so temp-file cleanup still runs for
         # KeyboardInterrupt/SystemExit before re-raising the original signal.
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 
@@ -181,10 +178,8 @@ def atomic_yaml_write(
     except BaseException:
         # Match atomic_json_write: cleanup must also happen for process-level
         # interruptions before we re-raise them.
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 
@@ -245,10 +240,8 @@ def atomic_roundtrip_yaml_update(
         real_path = atomic_replace(tmp_path, path)
         _restore_file_mode(real_path, original_mode)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 

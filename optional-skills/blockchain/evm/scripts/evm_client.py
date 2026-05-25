@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Chain registry
@@ -341,10 +342,8 @@ def _http_post(url: str, payload: Any, retries: int = 5, timeout: int = 20) -> A
                 last_err = e
                 continue
             body_text = ""
-            try:
+            with contextlib.suppress(Exception):
                 body_text = e.read().decode()
-            except Exception:
-                pass
             raise RuntimeError(f"HTTP {e.code}: {body_text}") from e
         except Exception as e:
             last_err = e
@@ -369,10 +368,8 @@ def _http_get(url: str, retries: int = 5, timeout: int = 20) -> Any:
                 last_err = e
                 continue
             body_text = ""
-            try:
+            with contextlib.suppress(Exception):
                 body_text = e.read().decode()
-            except Exception:
-                pass
             raise RuntimeError(f"HTTP {e.code}: {body_text}") from e
         except Exception as e:
             last_err = e

@@ -15,6 +15,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+import contextlib
 
 
 def _make_runner():
@@ -918,10 +919,8 @@ class TestAgentCacheSpilloverLive:
 
         # Clean up so pytest doesn't leak resources.
         for a in agents + [newcomer]:
-            try:
+            with contextlib.suppress(Exception):
                 a.close()
-            except Exception:
-                pass
 
     def test_spillover_all_active_keeps_cache_over_cap(self, monkeypatch, caplog):
         """Every slot active: cache goes over cap, no one gets torn down."""
@@ -951,10 +950,8 @@ class TestAgentCacheSpilloverLive:
         assert any("mid-turn" in r.message for r in caplog.records)
 
         for a in agents + [newcomer]:
-            try:
+            with contextlib.suppress(Exception):
                 a.close()
-            except Exception:
-                pass
 
 
     def test_evicted_session_next_turn_gets_fresh_agent(self, monkeypatch):
@@ -997,10 +994,8 @@ class TestAgentCacheSpilloverLive:
         assert a0_new.client is not None
 
         for a in (a0, a1, a2, a0_new):
-            try:
+            with contextlib.suppress(Exception):
                 a.close()
-            except Exception:
-                pass
 
 
 class TestAgentCacheIdleResume:
@@ -1047,10 +1042,8 @@ class TestAgentCacheIdleResume:
             agent.release_clients()
         finally:
             _pr.process_registry.kill_all = original_kill_all
-            try:
+            with contextlib.suppress(Exception):
                 agent.close()
-            except Exception:
-                pass
 
         assert kill_all_calls == [], (
             f"release_clients() called process_registry.kill_all — would "
@@ -1082,10 +1075,8 @@ class TestAgentCacheIdleResume:
         finally:
             _tt.cleanup_vm = original_vm
             _bt.cleanup_browser = original_browser
-            try:
+            with contextlib.suppress(Exception):
                 agent.close()
-            except Exception:
-                pass
 
         assert vm_calls == [], (
             f"release_clients() tore down terminal sandbox — user's cwd, "
@@ -1152,10 +1143,8 @@ class TestAgentCacheIdleResume:
             agent_b.close()              # session expiry
         finally:
             _ra.cleanup_vm = original_vm
-            try:
+            with contextlib.suppress(Exception):
                 agent_a.close()
-            except Exception:
-                pass
 
         # Only agent_b's task_id should appear in cleanup calls.
         assert "hard-session" in vm_calls
@@ -1211,10 +1200,8 @@ class TestAgentCacheIdleResume:
         # And it has a fresh working client.
         assert new_agent.client is not None
 
-        try:
+        with contextlib.suppress(Exception):
             new_agent.close()
-        except Exception:
-            pass
 
 
 _FAKE_NOW = 10_000.0  # Fixed epoch for deterministic time assertions

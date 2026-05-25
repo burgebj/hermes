@@ -251,9 +251,8 @@ def test_chrome_fake_audio_flags_windows_raises():
     from plugins.google_meet.audio_bridge import chrome_fake_audio_flags
 
     with patch("plugins.google_meet.audio_bridge.platform.system",
-               return_value="Windows"):
-        with pytest.raises(RuntimeError):
-            chrome_fake_audio_flags({"platform": "windows"})
+               return_value="Windows"), pytest.raises(RuntimeError):
+        chrome_fake_audio_flags({"platform": "windows"})
 
 
 def test_property_access_before_setup_raises():

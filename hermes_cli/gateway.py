@@ -38,6 +38,7 @@ from hermes_cli.setup import (
     prompt, prompt_choice, prompt_yes_no,
 )
 from hermes_cli.colors import Colors, color
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -326,9 +327,7 @@ def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> li
         # HERMES_HOME= in argv is.
         if "--profile " in command or " -p " in command:
             return False
-        if "HERMES_HOME=" in command and f"HERMES_HOME={current_home}" not in command:
-            return False
-        return True
+        return not ("HERMES_HOME=" in command and f"HERMES_HOME={current_home}" not in command)
 
     try:
         if is_windows():
@@ -390,10 +389,8 @@ def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> li
                     if any(p in current_cmd for p in patterns) and (
                         all_profiles or _matches_current_profile(current_cmd)
                     ):
-                        try:
+                        with contextlib.suppress(ValueError):
                             _append_unique_pid(pids, int(pid_str), exclude_pids)
-                        except ValueError:
-                            pass
                     current_cmd = ""
         else:
             # Try /proc first (works in Docker without procps installed),
@@ -1185,6 +1182,7 @@ def is_linux() -> bool:
 
 
 from hermes_constants import is_container, is_termux, is_wsl
+import contextlib
 
 
 def _wsl_systemd_operational() -> bool:
@@ -1227,9 +1225,7 @@ def _container_systemd_operational() -> bool:
     """
     if _systemd_operational(system=False):
         return True
-    if _systemd_operational(system=True):
-        return True
-    return False
+    return bool(_systemd_operational(system=True))
 
 
 def supports_systemd_services() -> bool:
@@ -1746,10 +1742,8 @@ def remove_legacy_hermes_units(
             remaining.append(path)
 
     if user_units:
-        try:
+        with contextlib.suppress(RuntimeError):
             _run_systemctl(["daemon-reload"], system=False, check=False, timeout=30)
-        except RuntimeError:
-            pass
 
     # System-scope removal (needs root)
     if system_units:
@@ -1771,10 +1765,8 @@ def remove_legacy_hermes_units(
                     print(f"  ⚠ Could not remove {path}: {e}")
                     remaining.append(path)
 
-            try:
+            with contextlib.suppress(RuntimeError):
                 _run_systemctl(["daemon-reload"], system=True, check=False, timeout=30)
-            except RuntimeError:
-                pass
 
     print()
     if remaining:
@@ -5105,7 +5097,7 @@ def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
 
     if detect_service_manager() != "s6":
         return False
-    if action not in ("stop", "restart"):
+    if action not in {"stop", "restart"}:
         return False
     mgr = get_service_manager()
     profiles = mgr.list_profile_gateways()

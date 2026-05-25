@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+import contextlib
 
 log = logging.getLogger(__name__)
 
@@ -473,7 +474,7 @@ def get_board(
 
         return {
             "columns": [
-                {"name": name, "tasks": columns[name]} for name in columns.keys()
+                {"name": name, "tasks": columns[name]} for name in columns
             ],
             "tenants": tenants,
             "assignees": assignees,
@@ -507,7 +508,7 @@ def get_task(
                 status_code=400,
                 detail="run_state_type and run_state_name must be passed together or omitted",
             )
-        if run_state_type is not None and run_state_type not in ("status", "outcome"):
+        if run_state_type is not None and run_state_type not in {"status", "outcome"}:
             raise HTTPException(
                 status_code=400,
                 detail="run_state_type must be 'status' or 'outcome'",
@@ -666,7 +667,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
             elif s == "ready":
                 # Re-open a blocked/scheduled task, or just an explicit status set.
                 current = kanban_db.get_task(conn, task_id)
-                if current and current.status in ("blocked", "scheduled"):
+                if current and current.status in {"blocked", "scheduled"}:
                     ok = kanban_db.unblock_task(conn, task_id)
                 else:
                     # Direct status write for drag-drop (todo -> ready etc).
@@ -678,7 +679,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     status_code=400,
                     detail="Cannot set status to 'running' directly; use the dispatcher/claim path",
                 )
-            elif s in ("todo", "triage", "scheduled"):
+            elif s in {"todo", "triage", "scheduled"}:
                 ok = _set_status_direct(conn, task_id, s)
             else:
                 raise HTTPException(status_code=400, detail=f"unknown status: {s}")
@@ -1006,7 +1007,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                         ok = kanban_db.block_task(conn, tid)
                     elif s == "ready":
                         cur = kanban_db.get_task(conn, tid)
-                        if cur and cur.status in ("blocked", "scheduled"):
+                        if cur and cur.status in {"blocked", "scheduled"}:
                             ok = kanban_db.unblock_task(conn, tid)
                         else:
                             ok = _set_status_direct(conn, tid, "ready")
@@ -2211,7 +2212,5 @@ async def stream_events(ws: WebSocket):
         return
     except Exception as exc:  # defensive: never crash the dashboard worker
         log.warning("Kanban event stream error: %s", exc)
-        try:
+        with contextlib.suppress(Exception):
             await ws.close()
-        except Exception:
-            pass

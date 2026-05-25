@@ -34,6 +34,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+import contextlib
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -464,10 +465,8 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
                 os.waitpid(pid, 0)
         except (ProcessLookupError, ChildProcessError):
             pass
-        try:
+        with contextlib.suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
 
     time.sleep(0.2)
     return summarize(log, since_ms)
@@ -545,10 +544,8 @@ def loop_mode(args: argparse.Namespace) -> int:
                 continue
             for path in root.rglob("*"):
                 if path.suffix in {".ts", ".tsx"} and "__tests__" not in str(path):
-                    try:
+                    with contextlib.suppress(OSError):
                         mtimes[str(path)] = path.stat().st_mtime
-                    except OSError:
-                        pass
         return mtimes
 
     previous_metrics: dict[str, float] | None = None

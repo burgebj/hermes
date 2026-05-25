@@ -325,6 +325,7 @@ import time as _time
 from datetime import datetime
 
 from hermes_cli import __version__, __release_date__
+import contextlib
 logger = logging.getLogger(__name__)
 
 
@@ -667,10 +668,8 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                 max_y, max_x = stdscr.getmaxyx()
                 if max_y < 5 or max_x < 40:
                     # Terminal too small
-                    try:
+                    with contextlib.suppress(curses.error):
                         stdscr.addstr(0, 0, "Terminal too small")
-                    except curses.error:
-                        pass
                     stdscr.refresh()
                     stdscr.getch()
                     return
@@ -686,10 +685,8 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                     header_attr = curses.A_BOLD
                     if curses.has_colors():
                         header_attr |= curses.color_pair(2)
-                try:
+                with contextlib.suppress(curses.error):
                     stdscr.addnstr(0, 0, header, max_x - 1, header_attr)
-                except curses.error:
-                    pass
 
                 # Column header line
                 fixed_cols = 3 + 12 + 6 + 18 + 6
@@ -740,10 +737,8 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                             attr = curses.A_BOLD
                             if curses.has_colors():
                                 attr |= curses.color_pair(1)
-                        try:
+                        with contextlib.suppress(curses.error):
                             stdscr.addnstr(y, 0, row, max_x - 1, attr)
-                        except curses.error:
-                            pass
 
                 # Footer
                 footer_y = max_y - 1
@@ -753,7 +748,7 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                         footer += f" (filtered from {len(sessions)})"
                 else:
                     footer = f"  0/{len(sessions)} sessions"
-                try:
+                with contextlib.suppress(curses.error):
                     stdscr.addnstr(
                         footer_y,
                         0,
@@ -761,8 +756,6 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                         max_x - 1,
                         curses.color_pair(4) if curses.has_colors() else curses.A_DIM,
                     )
-                except curses.error:
-                    pass
 
                 stdscr.refresh()
                 key = stdscr.getch()
@@ -852,10 +845,8 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
         pass
     finally:
         if db is not None:
-            try:
+            with contextlib.suppress(Exception):
                 db.close()
-            except Exception:
-                pass
     return None
 
 
@@ -998,10 +989,8 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
         if resolved_id:
             # Project forward through compression chain so resumes land on
             # the live tip instead of a dead compressed parent.
-            try:
+            with contextlib.suppress(Exception):
                 resolved_id = db.get_compression_tip(resolved_id) or resolved_id
-            except Exception:
-                pass
 
         db.close()
         return resolved_id
@@ -1575,15 +1564,11 @@ def _launch_tui(
         if code in {0, 130}:
             _print_tui_exit_summary(resume_session_id, active_session_file)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(active_session_file)
-        except OSError:
-            pass
         if wt_info:
-            try:
+            with contextlib.suppress(Exception):
                 _cleanup_worktree(wt_info)
-            except Exception:
-                pass
 
     # Exit code 42 = TUI requested an update. Relaunch as `hermes update` so
     # the user sees update output directly and gets the new version.
@@ -1726,10 +1711,8 @@ def cmd_chat(args):
             pass
 
     # Sync bundled skills on every CLI launch (fast -- skips unchanged skills)
-    try:
+    with contextlib.suppress(Exception):
         _sync_bundled_skills_for_startup()
-    except Exception:
-        pass
 
     # --yolo: bypass all dangerous command approvals
     if getattr(args, "yolo", False):
@@ -2007,13 +1990,11 @@ def cmd_whatsapp(args):
     print("─" * 50)
     print()
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         subprocess.run(
             ["node", str(bridge_script), "--pair-only", "--session", str(session_dir)],
             cwd=str(bridge_dir),
         )
-    except KeyboardInterrupt:
-        pass
 
     # ── Step 7: Post-pairing ─────────────────────────────────────────────
     print()
@@ -4138,7 +4119,7 @@ def _model_flow_azure_foundry(config, current_model=""):
             except (KeyboardInterrupt, EOFError):
                 print("\nCancelled.")
                 return
-            if ans and ans not in ("y", "yes"):
+            if ans and ans not in {"y", "yes"}:
                 print("Cancelled.")
                 return
 
@@ -6185,7 +6166,7 @@ def cmd_doctor(args):
 def cmd_security(args):
     """Dispatch `hermes security <subcmd>`."""
     sub = getattr(args, "security_command", None)
-    if sub in ("audit", None):
+    if sub in {"audit", None}:
         from hermes_cli.security_audit import cmd_security_audit
 
         # Default subcommand is `audit` when no subcmd is given.
@@ -6686,10 +6667,8 @@ def _find_stale_dashboard_pids() -> list[int]:
                         any(p in current_cmd for p in patterns)
                         and int(pid_str) != self_pid
                     ):
-                        try:
+                        with contextlib.suppress(ValueError):
                             dashboard_pids.append(int(pid_str))
-                        except ValueError:
-                            pass
         else:
             # Linux / macOS: scan the process table via ps and match against
             # the same explicit patterns list used on Windows.  Using ps
@@ -8229,10 +8208,8 @@ class _UpdateOutputStream:
 
     def flush(self):
         if self._log is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._log.flush()
-            except Exception:
-                pass
         if self._original_broken:
             return
         try:
@@ -8343,14 +8320,10 @@ def _finalize_update_output(state):
     if not state:
         return
     if state.get("installed"):
-        try:
+        with contextlib.suppress(Exception):
             sys.stdout = state.get("prev_stdout", sys.stdout)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             sys.stderr = state.get("prev_stderr", sys.stderr)
-        except Exception:
-            pass
     log_file = state.get("log_file")
     if log_file is not None:
         try:
@@ -9270,10 +9243,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # regardless of how we die.
         if gateway_mode:
             _exit_code_path = get_hermes_home() / ".update_exit_code"
-            try:
+            with contextlib.suppress(OSError):
                 _exit_code_path.write_text("0")
-            except OSError:
-                pass
 
         # Auto-restart ALL gateways after update.
         # The code update (git pull) is shared across all profiles, so every
@@ -9411,10 +9382,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # --- Systemd services (Linux) ---
             # Discover all hermes-gateway* units (default + profiles)
             if supports_systemd_services():
-                try:
+                with contextlib.suppress(Exception):
                     _ensure_user_systemd_env()
-                except Exception:
-                    pass
 
                 for scope, scope_cmd in [
                     ("user", ["systemctl", "--user"]),
@@ -9703,10 +9672,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     drain_timeout=_drain_budget,
                 )
                 if not drained:
-                    try:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.kill(pid, _signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError):
-                        pass
                 # Wait for the old process to fully exit before the watcher
                 # spawns the new gateway.  Telegram holds the previous
                 # getUpdates long-poll session open on its servers for up to
@@ -11009,10 +10976,8 @@ def main():
     # Sweep stale ``hermes.exe.old.*`` quarantine files left by previous
     # ``hermes update`` runs on Windows. Silent no-op on non-Windows or when
     # there's nothing to clean. See ``_quarantine_running_hermes_exe``.
-    try:
+    with contextlib.suppress(Exception):
         _cleanup_quarantined_exes()
-    except Exception:
-        pass
 
     if _try_termux_fast_tui_launch():
         return
@@ -11144,7 +11109,7 @@ def main():
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
-        if sub in ("bitwarden", "bw") and bw_sub is not None:
+        if sub in {"bitwarden", "bw"} and bw_sub is not None:
             return args.func(args)
         secrets_parser.print_help()
         return 0
@@ -12891,13 +12856,11 @@ Examples:
             path = shutil.which("cua-driver")
             if path:
                 version = ""
-                try:
+                with contextlib.suppress(Exception):
                     version = subprocess.run(
                         ["cua-driver", "--version"],
                         capture_output=True, text=True, timeout=5,
                     ).stdout.strip()
-                except Exception:
-                    pass
                 if version:
                     print(f"cua-driver: installed at {path} ({version})")
                 else:
@@ -13146,12 +13109,11 @@ Examples:
             if not resolved_session_id:
                 print(f"Session '{args.session_id}' not found.")
                 return
-            if not args.yes:
-                if not _confirm_prompt(
-                    f"Delete session '{resolved_session_id}' and all its messages? [y/N] "
-                ):
-                    print("Cancelled.")
-                    return
+            if not args.yes and not _confirm_prompt(
+                f"Delete session '{resolved_session_id}' and all its messages? [y/N] "
+            ):
+                print("Cancelled.")
+                return
             sessions_dir = get_hermes_home() / "sessions"
             if db.delete_session(resolved_session_id, sessions_dir=sessions_dir):
                 print(f"Deleted session '{resolved_session_id}'.")
@@ -13161,12 +13123,11 @@ Examples:
         elif action == "prune":
             days = args.older_than
             source_msg = f" from '{args.source}'" if args.source else ""
-            if not args.yes:
-                if not _confirm_prompt(
-                    f"Delete all ended sessions older than {days} days{source_msg}? [y/N] "
-                ):
-                    print("Cancelled.")
-                    return
+            if not args.yes and not _confirm_prompt(
+                f"Delete all ended sessions older than {days} days{source_msg}? [y/N] "
+            ):
+                print("Cancelled.")
+                return
             sessions_dir = get_hermes_home() / "sessions"
             count = db.prune_sessions(
                 older_than_days=days, source=args.source, sessions_dir=sessions_dir

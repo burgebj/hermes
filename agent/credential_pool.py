@@ -632,7 +632,7 @@ class CredentialPool:
                 "inference_base_url": state.get("inference_base_url"),
             }
             should_sync = any(
-                value not in (None, "") and getattr(entry, key, None) != value
+                value not in {None, ""} and getattr(entry, key, None) != value
                 for key, value in comparable_updates.items()
             )
             if should_sync:
@@ -1427,9 +1427,8 @@ def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, p
         if key in _field_names:
             if getattr(existing, key) != value:
                 field_updates[key] = value
-        elif key in _EXTRA_KEYS:
-            if existing.extra.get(key) != value:
-                extra_updates[key] = value
+        elif key in _EXTRA_KEYS and existing.extra.get(key) != value:
+            extra_updates[key] = value
     if field_updates or extra_updates:
         if extra_updates:
             field_updates["extra"] = {**existing.extra, **extra_updates}

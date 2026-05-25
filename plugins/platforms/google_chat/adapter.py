@@ -139,6 +139,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
     cache_video_from_bytes,
 )
+import contextlib
 
 
 # Pin the logger name to the legacy module path so operator log filters,
@@ -212,9 +213,7 @@ def _is_retryable_error(exc: BaseException) -> bool:
         return True
     if "connection" in text and ("reset" in text or "refused" in text or "aborted" in text):
         return True
-    if "broken pipe" in text or "remote disconnected" in text:
-        return True
-    return False
+    return bool("broken pipe" in text or "remote disconnected" in text)
 
 # Sentinel kept in ``_typing_messages`` after ``send()`` patches the typing
 # marker into the agent's real response. Two purposes:
@@ -918,10 +917,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._shutting_down = True
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(self._supervisor_task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
         if self._streaming_pull_future is not None:
             try:
                 self._streaming_pull_future.cancel()
@@ -930,10 +927,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 pass
             self._streaming_pull_future = None
         if self._subscriber is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.to_thread(self._subscriber.close)
-            except Exception:
-                pass
             self._subscriber = None
         self._mark_disconnected()
         logger.info("[GoogleChat] Disconnected")
@@ -1251,10 +1246,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
             message.ack()
         except Exception:
             logger.exception("[GoogleChat] Error in _on_pubsub_message")
-            try:
+            with contextlib.suppress(Exception):
                 message.ack()
-            except Exception:
-                pass
 
     async def _dispatch_message(self, msg: Dict[str, Any], envelope: Dict[str, Any]) -> None:
         """Translate a Chat message payload to a MessageEvent and hand off.
@@ -1745,10 +1738,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # Cache based on MIME. Upstream's cache_* helpers expect `ext` for
         # media (image/audio/video) and a positional `filename` for docs.
         filename = name.split("/")[-1] if name else "attachment"
-        if "." in filename:
-            ext = "." + filename.rsplit(".", 1)[-1].lower()
-        else:
-            ext = ""
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if mime.startswith("image/"):
             local = cache_image_from_bytes(data, ext=ext or ".jpg")
         elif mime.startswith("audio/"):
@@ -2278,13 +2268,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # it to finish so we honor the contract "if called, the card
             # is up by the time we return". Bounded wait — if the
             # background task is stuck, _keep_typing will retry.
-            try:
+            with contextlib.suppress(asyncio.TimeoutError, KeyError):
                 await asyncio.wait_for(
                     self._typing_card_inflight[chat_id].wait(),
                     timeout=5.0,
                 )
-            except (asyncio.TimeoutError, KeyError):
-                pass
             return
 
         thread_id = self._resolve_thread_id(

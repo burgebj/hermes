@@ -92,6 +92,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
     resolved_env = dict(env or {})
 
     if os.sep not in resolved_command:
-        path_arg = resolved_env["PATH"] if "PATH" in resolved_env else None
+        path_arg = resolved_env.get("PATH")
         which_hit = shutil.which(resolved_command, path=path_arg)
         if which_hit:
             resolved_command = which_hit
@@ -1243,10 +1244,8 @@ class MCPServerTask:
             for t in (shutdown_task, reconnect_task):
                 if not t.done():
                     t.cancel()
-                    try:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
 
         if self._shutdown_event.is_set():
             return "shutdown"
@@ -1485,18 +1484,17 @@ class MCPServerTask:
                 _http_kwargs["auth"] = _oauth_auth
             async with streamablehttp_client(url, **_http_kwargs) as (
                 read_stream, write_stream, _get_session_id,
-            ):
-                async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                    self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
-                    reason = await self._wait_for_lifecycle_event()
-                    if reason == "reconnect":
-                        logger.info(
-                            "MCP server '%s': reconnect requested — "
-                            "tearing down legacy HTTP session", self.name,
-                        )
+            ), ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
+                self.initialize_result = await session.initialize()
+                self.session = session
+                await self._discover_tools()
+                self._ready.set()
+                reason = await self._wait_for_lifecycle_event()
+                if reason == "reconnect":
+                    logger.info(
+                        "MCP server '%s': reconnect requested — "
+                        "tearing down legacy HTTP session", self.name,
+                    )
 
     async def _discover_tools(self):
         """Discover tools from the connected session."""
@@ -1695,10 +1693,8 @@ class MCPServerTask:
                     self.name,
                 )
                 self._task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await self._task
-                except asyncio.CancelledError:
-                    pass
         if self._pending_refresh_tasks:
             for task in list(self._pending_refresh_tasks):
                 task.cancel()
@@ -2785,7 +2781,7 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
             if "properties" not in repaired or not isinstance(
                 repaired.get("properties"), dict
             ):
-                repaired["properties"] = {} if "properties" not in repaired else repaired["properties"]
+                repaired["properties"] = repaired.get("properties", {})
                 if not isinstance(repaired.get("properties"), dict):
                     repaired["properties"] = {}
 
@@ -3583,10 +3579,8 @@ def _stop_mcp_loop():
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
             thread.join(timeout=5)
-        try:
+        with contextlib.suppress(Exception):
             loop.close()
-        except Exception:
-            pass
         # After closing the loop, any stdio subprocesses that survived the
         # graceful shutdown are now orphaned — include active PIDs too
         # since the loop is gone and no session can still be in flight.

@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from agent.model_metadata import estimate_request_tokens_rough
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -242,10 +243,8 @@ def replay_compression_warning(agent: Any) -> None:
     """
     msg = getattr(agent, "_compression_warning", None)
     if msg and agent.status_callback:
-        try:
+        with contextlib.suppress(Exception):
             agent.status_callback("lifecycle", msg)
-        except Exception:
-            pass
 
 
 def compress_context(
@@ -307,10 +306,8 @@ def compress_context(
 
     # Notify external memory provider before compression discards context
     if agent._memory_manager:
-        try:
+        with contextlib.suppress(Exception):
             agent._memory_manager.on_pre_compress(messages)
-        except Exception:
-            pass
 
     try:
         compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
@@ -548,10 +545,8 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
                     max_base64_bytes=target_bytes,
                 )
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     Path(tmp.name).unlink(missing_ok=True)
-                except Exception:
-                    pass
             if not resized or len(resized) >= len(url):
                 # Shrink didn't help (or made it bigger — corrupt input?).
                 return None

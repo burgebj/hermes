@@ -31,6 +31,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Optional
+import contextlib
 
 
 _USAGE_EXIT = 2
@@ -231,10 +232,8 @@ def _load_hermes_env() -> None:
         try:
             load_dotenv(str(env_path), override=True, encoding="utf-8")
         except UnicodeDecodeError:
-            try:
+            with contextlib.suppress(Exception):
                 load_dotenv(str(env_path), override=True, encoding="latin-1")
-            except Exception:
-                pass
         except Exception:
             pass
 

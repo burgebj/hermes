@@ -39,7 +39,7 @@ import uuid
 import textwrap
 from collections import deque
 from urllib.parse import unquote, urlparse
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -737,10 +737,8 @@ try:
             # Disarm before delegating so the recursive find_spec call
             # below doesn't loop through us.
             self._armed = False
-            try:
+            with suppress(ValueError):
                 _httpx_neuter_sys.meta_path.remove(self)
-            except ValueError:
-                pass
             spec = _httpx_neuter_imp_util.find_spec(fullname)
             if spec is None or spec.loader is None:
                 return None
@@ -912,14 +910,10 @@ def _run_cleanup():
         return
     _cleanup_done = True
 
-    try:
+    with suppress(Exception):
         _cleanup_all_terminals()
-    except Exception:
-        pass
-    try:
+    with suppress(Exception):
         _cleanup_all_browsers()
-    except Exception:
-        pass
     try:
         from tools.mcp_tool import shutdown_mcp_servers
         shutdown_mcp_servers()
@@ -1577,10 +1571,8 @@ def _query_osc11_background() -> str | None:
         r, g, b = norm(m.group(1)), norm(m.group(2)), norm(m.group(3))
         return f"#{r:02X}{g:02X}{b:02X}"
     finally:
-        try:
+        with suppress(Exception):
             termios.tcsetattr(fd, termios.TCSANOW, old)
-        except Exception:
-            pass
 
 
 def _detect_light_mode() -> bool:
@@ -2025,10 +2017,8 @@ def _cprint(text: str):
             # Fallback when stdout is not a real console (e.g. subprocess
             # worker logging to a file). prompt_toolkit raises
             # NoConsoleScreenBufferError (Windows) or OSError (other).
-            try:
+            with suppress(Exception):
                 print(text)
-            except Exception:
-                pass
         return
 
     try:
@@ -2084,10 +2074,8 @@ def _cprint(text: str):
     try:
         loop.call_soon_threadsafe(_schedule)
     except Exception:
-        try:
+        with suppress(Exception):
             _pt_print(_PT_ANSI(text))
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2442,10 +2430,8 @@ def _bind_prompt_submit_keys(kb, handler) -> None:
 
 def _disable_prompt_toolkit_cpr_warning(app) -> None:
     """Let prompt_toolkit fall back from CPR without printing into the prompt."""
-    try:
+    with suppress(Exception):
         app.renderer.cpr_not_supported_callback = None
-    except Exception:
-        pass
 
 
 def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
@@ -2779,10 +2765,8 @@ def save_config_value(key_path: str, value: any) -> bool:
         atomic_roundtrip_yaml_update(config_path, key_path, value)
         
         # Enforce owner-only permissions on config files (contain API keys)
-        try:
+        with suppress(OSError, NotImplementedError):
             os.chmod(config_path, 0o600)
-        except (OSError, NotImplementedError):
-            pass
         
         return True
     except Exception as e:
@@ -3217,10 +3201,8 @@ class HermesCLI:
             return
         self._clear_prompt_toolkit_screen(app)
         _replay_output_history()
-        try:
+        with suppress(Exception):
             app.invalidate()
-        except Exception:
-            pass
 
     def _clear_prompt_toolkit_screen(self, app, *, rebuild_scrollback: bool = False) -> None:
         """Clear the terminal and reset prompt_toolkit renderer state."""
@@ -3230,10 +3212,8 @@ class HermesCLI:
             out.reset_attributes()
             out.erase_screen()
             if rebuild_scrollback:
-                try:
+                with suppress(Exception):
                     out.write_raw("\x1b[3J")
-                except Exception:
-                    pass
             out.cursor_goto(0, 0)
             out.flush()
             # Drop prompt_toolkit's cached screen + cursor state so the
@@ -3266,14 +3246,10 @@ class HermesCLI:
         next prompt restores the bar cleanly.
         """
         self._status_bar_suppressed_after_resize = True
-        try:
+        with suppress(Exception):
             app.renderer.reset(leave_alternate_screen=False)
-        except Exception:
-            pass
-        try:
+        with suppress(Exception):
             app.invalidate()
-        except Exception:
-            pass
         original_on_resize()
 
     def _schedule_resize_recovery(self, app, original_on_resize, delay: float = 0.12) -> None:
@@ -3308,10 +3284,8 @@ class HermesCLI:
 
             with lock:
                 if old_timer is not None:
-                    try:
+                    with suppress(Exception):
                         old_timer.cancel()
-                    except Exception:
-                        pass
                 self._resize_recovery_pending = True
                 timer = threading.Timer(delay, lambda: _timer_fired(timer))
                 timer.daemon = True
@@ -5754,10 +5728,7 @@ class HermesCLI:
             model_short = model_short[:27] + "..."
 
         # Get API status indicator
-        if self.api_key:
-            api_indicator = "[green bold]●[/]"
-        else:
-            api_indicator = "[red bold]●[/]"
+        api_indicator = "[green bold]●[/]" if self.api_key else "[red bold]●[/]"
 
         # Build status line with proper markup — skin-aware colors
         try:
@@ -6280,10 +6251,8 @@ class HermesCLI:
 
         old_session_id = self.session_id
         if self._session_db and old_session_id:
-            try:
+            with suppress(Exception):
                 self._session_db.end_session(old_session_id, "new_session")
-            except Exception:
-                pass
 
         self.session_start = datetime.now()
         timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
@@ -6512,10 +6481,8 @@ class HermesCLI:
             _time.sleep(0.5)
 
         # Timed out. Clear the pending flag so the user can retry.
-        try:
+        with suppress(Exception):
             self._session_db.fail_handoff(self.session_id, "timed out waiting for gateway")
-        except Exception:
-            pass
         _cprint("  Timed out waiting for the gateway. Is `hermes gateway` running?")
         _cprint("  Your CLI session is intact.")
         return True
@@ -6580,10 +6547,8 @@ class HermesCLI:
 
         old_session_id = self.session_id
         # End current session
-        try:
+        with suppress(Exception):
             self._session_db.end_session(self.session_id, "resumed_other")
-        except Exception:
-            pass
 
         # Switch to the target session
         self.session_id = target_id
@@ -6597,10 +6562,8 @@ class HermesCLI:
         self.conversation_history = restored
 
         # Re-open the target session so it's not marked as ended
-        try:
+        with suppress(Exception):
             self._session_db.reopen_session(target_id)
-        except Exception:
-            pass
 
         # Sync the agent if already initialised
         if self.agent:
@@ -6717,10 +6680,8 @@ class HermesCLI:
         parent_session_id = self.session_id
 
         # End the old session
-        try:
+        with suppress(Exception):
             self._session_db.end_session(self.session_id, "branched")
-        except Exception:
-            pass
 
         # Create the new session with parent link
         try:
@@ -6754,10 +6715,8 @@ class HermesCLI:
                 pass  # Best-effort copy
 
         # Set title on the branch
-        try:
+        with suppress(Exception):
             self._session_db.set_session_title(new_session_id, branch_title)
-        except Exception:
-            pass
 
         # Switch to the new session
         self.session_id = new_session_id
@@ -6947,10 +6906,8 @@ class HermesCLI:
         result = [None]
 
         def _ask():
-            try:
+            with suppress(KeyboardInterrupt, EOFError):
                 result[0] = input(prompt_text).strip() or None
-            except (KeyboardInterrupt, EOFError):
-                pass
 
         in_main_thread = threading.current_thread() is threading.main_thread()
 
@@ -6965,10 +6922,8 @@ class HermesCLI:
                 # WSL / Warp / certain terminal emulators silently drop the
                 # scheduled coroutine.  Fall back to a direct input() so the
                 # user's keystrokes don't leak into the agent buffer.
-                try:
+                with suppress(Exception):
                     _ask()
-                except Exception:
-                    pass
             finally:
                 self._status_bar_visible = was_visible
                 self._app.invalidate()
@@ -8604,10 +8559,8 @@ class HermesCLI:
         def run_background():
             set_sudo_password_callback(self._sudo_password_callback)
             set_approval_callback(self._approval_callback)
-            try:
+            with suppress(Exception):
                 set_secret_capture_callback(self._secret_capture_callback)
-            except Exception:
-                pass
             try:
                 bg_agent = AIAgent(
                     model=turn_route["model"],
@@ -8926,10 +8879,8 @@ class HermesCLI:
                 print(f"   Endpoint: {current}")
 
                 _port = 9222
-                try:
+                with suppress(ValueError, IndexError):
                     _port = int(current.rsplit(":", 1)[-1].split("/")[0])
-                except (ValueError, IndexError):
-                    pass
                 try:
                     import socket
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -9074,10 +9025,8 @@ class HermesCLI:
         )
         # Kick the loop off immediately so the user doesn't have to send a
         # separate message after setting the goal.
-        try:
+        with suppress(Exception):
             self._pending_input.put(state.goal)
-        except Exception:
-            pass
 
     def _handle_subgoal_command(self, cmd: str) -> None:
         """Dispatch /subgoal subcommands.
@@ -10825,10 +10774,8 @@ class HermesCLI:
         # Shut down the persistent audio stream in background
         if recorder is not None:
             def _bg_shutdown(rec=recorder):
-                try:
+                with suppress(Exception):
                     rec.shutdown()
-                except Exception:
-                    pass
             threading.Thread(target=_bg_shutdown, daemon=True).start()
             self._voice_recorder = None
 
@@ -11182,10 +11129,7 @@ class HermesCLI:
                 num_prefix = '0'
             else:
                 num_prefix = ' '  # No number for items beyond 10th
-            if i == selected:
-                prefix = f'❯ {num_prefix}. '
-            else:
-                prefix = f'  {num_prefix}. '
+            prefix = f'❯ {num_prefix}. ' if i == selected else f'  {num_prefix}. '
             for wrapped in _wrap_panel_text(f"{prefix}{label}", inner_text_width, subsequent_indent="    "):
                 choice_wrapped.append((i, wrapped))
 
@@ -11307,10 +11251,8 @@ class HermesCLI:
 
     def _clear_secret_input_buffer(self) -> None:
         if getattr(self, "_app", None):
-            try:
+            with suppress(Exception):
                 self._app.current_buffer.reset()
-            except Exception:
-                pass
 
     def chat(self, message, images: list = None) -> Optional[str]:
         """
@@ -11542,10 +11484,8 @@ class HermesCLI:
                 # by acp_adapter/server.py for ACP sessions.
                 set_sudo_password_callback(self._sudo_password_callback)
                 set_approval_callback(self._approval_callback)
-                try:
+                with suppress(Exception):
                     set_secret_capture_callback(self._secret_capture_callback)
-                except Exception:
-                    pass
                 agent_message = _voice_prefix + message if _voice_prefix else message
                 # Prepend pending model switch note so the model knows about the switch
                 _msn = getattr(self, '_pending_model_switch_note', None)
@@ -11904,10 +11844,8 @@ class HermesCLI:
             # net for exception paths that skip it.  Duplicate sentinels are
             # harmless — stream_tts_to_speaker exits on the first None.
             if text_queue is not None:
-                try:
+                with suppress(Exception):
                     text_queue.put_nowait(None)
-                except Exception:
-                    pass
             if stop_event is not None:
                 stop_event.set()
             if tts_thread is not None and tts_thread.is_alive():
@@ -11933,10 +11871,8 @@ class HermesCLI:
             # Look up session title for resume-by-name hint
             session_title = None
             if self._session_db:
-                try:
+                with suppress(Exception):
                     session_title = self._session_db.get_session_title(self.session_id)
-                except Exception:
-                    pass
 
             print("Resume this session with:")
             print(f"  hermes --resume {self.session_id}")
@@ -12182,10 +12118,8 @@ class HermesCLI:
         # Detect light/dark terminal mode now (before pt grabs the tty).
         # Caches the result so subsequent _hex_to_ansi / style calls
         # don't risk re-querying mid-render.
-        try:
+        with suppress(Exception):
             _detect_light_mode()
-        except Exception:
-            pass
         # Push the entire TUI to the bottom of the terminal so the banner,
         # responses, and prompt all appear pinned to the bottom — empty
         # space stays above, not below.  This prints enough blank lines to
@@ -12203,9 +12137,8 @@ class HermesCLI:
         self._show_security_advisories()
         # If resuming a session, load history and display it immediately
         # so the user has context before typing their first message.
-        if self._resumed:
-            if self._preload_resumed_session():
-                self._display_resumed_history()
+        if self._resumed and self._preload_resumed_session():
+            self._display_resumed_history()
 
         try:
             from hermes_cli.skin_engine import get_active_skin
@@ -14437,16 +14370,12 @@ class HermesCLI:
             # process will exit once the main thread finishes, but interrupting
             # avoids wasted API calls and lets run_conversation clean up).
             if self.agent and getattr(self, '_agent_running', False):
-                try:
+                with suppress(Exception):
                     self.agent.interrupt()
-                except Exception:
-                    pass
             # Shut down voice recorder (release persistent audio stream)
             if hasattr(self, '_voice_recorder') and self._voice_recorder:
-                try:
+                with suppress(Exception):
                     self._voice_recorder.shutdown()
-                except Exception:
-                    pass
                 self._voice_recorder = None
             # Clean up old temp voice recordings
             try:

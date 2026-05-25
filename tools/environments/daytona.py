@@ -23,6 +23,7 @@ from tools.environments.file_sync import (
     quoted_rm_command,
     unique_parent_dirs,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -224,11 +225,8 @@ class DaytonaEnvironment(BaseEnvironment):
         lock = self._lock
 
         def cancel():
-            with lock:
-                try:
-                    sandbox.stop()
-                except Exception:
-                    pass
+            with lock, contextlib.suppress(Exception):
+                sandbox.stop()
 
         if login:
             shell_cmd = f"bash -l -c {shlex.quote(cmd_string)}"

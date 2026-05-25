@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from agent.memory_manager import sanitize_context
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -253,10 +254,8 @@ class HonchoMemoryProvider(MemoryProvider):
         config_path = Path(hermes_home) / "honcho.json"
         existing = {}
         if config_path.exists():
-            try:
+            with contextlib.suppress(Exception):
                 existing = json.loads(config_path.read_text())
-            except Exception:
-                pass
         existing.update(values)
         config_path.write_text(json.dumps(existing, indent=2))
 
@@ -1007,9 +1006,7 @@ class HonchoMemoryProvider(MemoryProvider):
             return True
         if stripped.startswith("/"):
             return True
-        if cls._TRIVIAL_PROMPT_RE.match(stripped):
-            return True
-        return False
+        return bool(cls._TRIVIAL_PROMPT_RE.match(stripped))
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         """Track turn count for cadence and injection_frequency logic."""
@@ -1211,9 +1208,8 @@ class HonchoMemoryProvider(MemoryProvider):
             return tool_error("Honcho is not active (cron context).")
 
         # Port #1957: ensure session is initialized for tools-only mode
-        if not self._session_initialized:
-            if not self._ensure_session():
-                return tool_error("Honcho session could not be initialized.")
+        if not self._session_initialized and not self._ensure_session():
+            return tool_error("Honcho session could not be initialized.")
 
         if not self._manager or not self._session_key:
             return tool_error("Honcho is not active for this session.")
@@ -1313,10 +1309,8 @@ class HonchoMemoryProvider(MemoryProvider):
                 t.join(timeout=5.0)
         # Flush any remaining messages
         if self._manager:
-            try:
+            with contextlib.suppress(Exception):
                 self._manager.flush_all()
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------

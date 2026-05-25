@@ -68,6 +68,7 @@ from gateway.platforms.base import (
 )
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
+import contextlib
 
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
@@ -248,10 +249,8 @@ def save_weixin_account(
     }
     path = _account_file(hermes_home, account_id)
     atomic_json_write(path, payload)
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(0o600)
-    except OSError:
-        pass
 
 
 def load_weixin_account(hermes_home: str, account_id: str) -> Optional[Dict[str, Any]]:
@@ -866,9 +865,7 @@ def _looks_like_chatty_line_for_weixin(line: str) -> bool:
         return False
     if re.match(r"^\*\*[^*]+\*\*$", stripped):
         return False
-    if re.match(r"^\d+\.\s", stripped):
-        return False
-    return True
+    return not re.match(r"^\d+\.\s", stripped)
 
 
 def _looks_like_heading_line_for_weixin(line: str) -> bool:
@@ -1295,10 +1292,8 @@ class WeixinAdapter(BasePlatformAdapter):
         self._running = False
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
-            except asyncio.CancelledError:
-                pass
         self._poll_task = None
         if self._poll_session and not self._poll_session.closed:
             await self._poll_session.close()
@@ -1788,10 +1783,8 @@ class WeixinAdapter(BasePlatformAdapter):
             return await self.send_document(chat_id, file_path, caption=caption, metadata=metadata)
         finally:
             if cleanup and file_path and os.path.exists(file_path):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(file_path)
-                except OSError:
-                    pass
 
     async def send_image_file(
         self,

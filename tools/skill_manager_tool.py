@@ -628,7 +628,7 @@ def _patch_skill(
         }
 
     # Check size limit on the result
-    target_label = "SKILL.md" if not file_path else file_path
+    target_label = file_path if file_path else "SKILL.md"
     err = _validate_content_size(new_content, label=target_label)
     if err:
         return {"success": False, "error": err}
@@ -653,7 +653,7 @@ def _patch_skill(
 
     return {
         "success": True,
-        "message": f"Patched {'SKILL.md' if not file_path else file_path} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
+        "message": f"Patched {file_path if file_path else 'SKILL.md'} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
     }
 
 

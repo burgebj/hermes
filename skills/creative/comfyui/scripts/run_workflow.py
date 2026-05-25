@@ -66,6 +66,7 @@ from _common import (  # noqa: E402
     media_type_from_filename, new_client_id, resolve_api_key, resolve_url,
     safe_path_join, unwrap_workflow,
 )
+import contextlib
 
 
 # =============================================================================
@@ -330,10 +331,8 @@ class ComfyRunner:
                     error_payload = {"interrupted": True, **mdata}
                     break
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 ws.close()
-            except Exception:
-                pass
 
         if error_payload is not None:
             return {"status": "error", "data": error_payload}

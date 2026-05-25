@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import io
 import os
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, suppress
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -72,11 +72,8 @@ def test_aborted_setup_does_not_enable_whatsapp(isolated_home, monkeypatch):
     # No node, no bridge script — we shouldn't reach those steps anyway.
 
     buf = io.StringIO()
-    with redirect_stdout(buf):
-        try:
-            cmd_whatsapp(MagicMock())
-        except KeyboardInterrupt:
-            pass
+    with redirect_stdout(buf), suppress(KeyboardInterrupt):
+        cmd_whatsapp(MagicMock())
 
     assert _env_value(isolated_home, "WHATSAPP_ENABLED") is None, (
         "Setup aborted before pairing — WHATSAPP_ENABLED must not be set. "

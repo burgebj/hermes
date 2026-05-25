@@ -29,6 +29,7 @@ import urllib.request
 from typing import Optional
 
 from utils import base_url_hostname, normalize_proxy_url
+import contextlib
 
 
 # Cached at module level so we only pay the OpenAI SDK import cost once
@@ -91,10 +92,8 @@ class _SafeWriter:
             return len(data) if isinstance(data, str) else 0
 
     def flush(self):
-        try:
+        with contextlib.suppress(OSError, ValueError):
             self._inner.flush()
-        except (OSError, ValueError):
-            pass
 
     def fileno(self):
         return self._inner.fileno()

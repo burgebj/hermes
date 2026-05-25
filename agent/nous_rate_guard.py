@@ -19,6 +19,7 @@ import tempfile
 import time
 from typing import Any, Mapping, Optional
 from utils import atomic_replace
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +123,8 @@ def record_nous_rate_limit(
             atomic_replace(tmp_path, path)
         except Exception:
             # Clean up temp file on failure
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
 
         logger.info(
@@ -151,10 +150,8 @@ def nous_rate_limit_remaining() -> Optional[float]:
         if remaining > 0:
             return remaining
         # Expired — clean up
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(path)
-        except OSError:
-            pass
         return None
     except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
         return None
@@ -238,10 +235,7 @@ def is_genuine_nous_rate_limit(
     # Signal 2: last-known-good state from a recent successful response.
     # Accepts either a RateLimitState (dataclass from rate_limit_tracker)
     # or a dict of bucket snapshots.
-    if last_known_state is not None and _has_exhausted_bucket_in_object(last_known_state):
-        return True
-
-    return False
+    return bool(last_known_state is not None and _has_exhausted_bucket_in_object(last_known_state))
 
 
 def _parse_buckets_from_headers(

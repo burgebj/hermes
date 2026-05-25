@@ -29,6 +29,7 @@ from _common import (  # noqa: E402
     DEFAULT_LOCAL_HOST, ENV_API_KEY, emit_json, http_get, parse_model_list,
     resolve_api_key, resolve_url, unwrap_workflow,
 )
+import contextlib
 
 
 def comfy_cli_status() -> dict:
@@ -125,10 +126,8 @@ def smoke_test(host: str, headers: dict, ckpt_name: str | None) -> dict:
 
     # Cancel so we don't actually waste compute on the smoke test.
     cancelled = False
-    try:
+    with contextlib.suppress(Exception):
         cancelled = runner.cancel(pid)
-    except Exception:
-        pass
 
     return {
         "ran": True, "submitted": True, "prompt_id": pid,

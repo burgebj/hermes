@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+import contextlib
 
 try:
     from hermes_constants import get_hermes_home
@@ -1050,12 +1051,8 @@ async def reset_state():
     _SCAN_STATUS["finished_at"] = None
     _SCAN_STATUS["last_error"] = None
     _SCAN_STATUS["last_duration_ms"] = None
-    try:
+    with contextlib.suppress(Exception):
         snapshot_path().unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         checkpoint_path().unlink(missing_ok=True)
-    except Exception:
-        pass
     return {"ok": True}

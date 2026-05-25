@@ -164,11 +164,11 @@ def _platform_asset_name() -> str:
         return f"bws-macos-universal-{_BWS_VERSION}.zip"
 
     if system == "Windows":
-        arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
+        arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
         return f"bws-{arch}-pc-windows-msvc-{_BWS_VERSION}.zip"
 
     if system == "Linux":
-        arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
+        arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
         libc = "gnu"
         # ldd --version writes to stderr on glibc, stdout on musl.  We
         # don't need bullet-proof detection — getting it wrong falls

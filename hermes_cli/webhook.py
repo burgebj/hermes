@@ -22,6 +22,7 @@ from typing import Dict
 from hermes_constants import display_hermes_home
 from utils import atomic_replace
 from hermes_cli.config import cfg_get
+import contextlib
 
 
 _SUBSCRIPTIONS_FILENAME = "webhook_subscriptions.json"
@@ -73,10 +74,8 @@ def _save_subscriptions(subs: Dict[str, dict]) -> None:
         # broader mode and atomic_replace preserved it.
         os.chmod(path, _SUBSCRIPTIONS_FILE_MODE)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 

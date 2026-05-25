@@ -301,14 +301,12 @@ def _windows_save(dest: Path) -> bool:
 
 def _linux_save(dest: Path) -> bool:
     """Try clipboard backends in priority order: WSL → Wayland → X11."""
-    if _is_wsl():
-        if _wsl_save(dest):
-            return True
+    if _is_wsl() and _wsl_save(dest):
+        return True
         # Fall through — WSLg might have wl-paste or xclip working
 
-    if os.environ.get("WAYLAND_DISPLAY"):
-        if _wayland_save(dest):
-            return True
+    if os.environ.get("WAYLAND_DISPLAY") and _wayland_save(dest):
+        return True
 
     return _xclip_save(dest)
 

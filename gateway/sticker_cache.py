@@ -15,6 +15,7 @@ import time
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
+import contextlib
 
 
 CACHE_PATH = get_hermes_home() / "sticker_cache.json"
@@ -49,10 +50,8 @@ def _save_cache(cache: dict) -> None:
             os.fsync(f.fileno())
         os.replace(tmp_path, str(CACHE_PATH))
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 

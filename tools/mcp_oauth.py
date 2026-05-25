@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from hermes_constants import secure_parent_dir
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +148,7 @@ def _can_open_browser() -> bool:
     except AttributeError:
         pass
     # Linux/other posix: need DISPLAY or WAYLAND_DISPLAY
-    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
-        return True
-    return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _read_json(path: Path) -> dict | None:
@@ -193,10 +192,8 @@ def _write_json(path: Path, data: dict) -> None:
             os.fsync(fh.fileno())
         os.replace(tmp, path)
     except OSError:
-        try:
+        with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 

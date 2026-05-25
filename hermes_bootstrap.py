@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import sys
+import contextlib
 
 _IS_WINDOWS = sys.platform == "win32"
 _bootstrap_applied = False
@@ -113,10 +114,8 @@ def apply_windows_utf8_bootstrap() -> bool:
     if stdin is not None:
         reconfigure = getattr(stdin, "reconfigure", None)
         if reconfigure is not None:
-            try:
+            with contextlib.suppress(OSError, ValueError):
                 reconfigure(encoding="utf-8", errors="replace")
-            except (OSError, ValueError):
-                pass
 
     _bootstrap_applied = True
     return True

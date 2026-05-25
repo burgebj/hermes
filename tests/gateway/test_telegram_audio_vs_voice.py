@@ -119,16 +119,15 @@ async def test_audio_attachment_context_note_format():
     with patch(
         "tools.transcription_tools.transcribe_audio",
         side_effect=AssertionError("must not be called"),
+    ), patch(
+        "tools.credential_files.to_agent_visible_cache_path",
+        side_effect=lambda p: p,
     ):
-        with patch(
-            "tools.credential_files.to_agent_visible_cache_path",
-            side_effect=lambda p: p,
-        ):
-            result = await runner._prepare_inbound_message_text(
-                event=event,
-                source=source,
-                history=[],
-            )
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
 
     assert "my_song.mp3" in result
     assert "audio file attachment" in result.lower()
@@ -150,16 +149,15 @@ async def test_audio_attachment_skips_stt_when_stt_disabled():
     with patch(
         "tools.transcription_tools.transcribe_audio",
         side_effect=AssertionError("must not be called"),
+    ), patch(
+        "tools.credential_files.to_agent_visible_cache_path",
+        side_effect=lambda p: p,
     ):
-        with patch(
-            "tools.credential_files.to_agent_visible_cache_path",
-            side_effect=lambda p: p,
-        ):
-            result = await runner._prepare_inbound_message_text(
-                event=event,
-                source=source,
-                history=[],
-            )
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
 
     # Should NOT see the "transcription is disabled" note — that's only for VOICE
     assert "transcription is disabled" not in result.lower()

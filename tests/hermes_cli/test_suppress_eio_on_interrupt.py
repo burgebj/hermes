@@ -110,7 +110,7 @@ class TestOuterExceptEIO:
     def test_other_oserror_reraises(self):
         """Other OSError variants must not match the EIO guard."""
         exc = OSError(errno.EACCES, "Permission denied")
-        assert not (getattr(exc, "errno", None) == errno.EIO)
+        assert getattr(exc, "errno", None) != errno.EIO
         assert "is not registered" not in str(exc)
         assert "Bad file descriptor" not in str(exc)
 

@@ -47,6 +47,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Tuple
+import contextlib
 
 
 # Default test discovery roots.
@@ -240,10 +241,8 @@ def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
                 pass
 
     # Belt-and-suspenders: ensure subprocess.communicate() sees the exit.
-    try:
+    with contextlib.suppress(ProcessLookupError, OSError):
         proc.kill()
-    except (ProcessLookupError, OSError):
-        pass
 
 
 def _run_one_file(
@@ -447,10 +446,7 @@ def _print_progress(
         n_tests = test_counts.get(file, 0)
         test_str = f"{n_tests} tests, " if n_tests else ""
     # Show subprocess time when available; fall back to queue-inclusive dur.
-    if subproc_wall is not None:
-        time_str = f"{subproc_wall:.1f}s"
-    else:
-        time_str = f"{dur:.1f}s"
+    time_str = f"{subproc_wall:.1f}s" if subproc_wall is not None else f"{dur:.1f}s"
     msg = (
         f"[{pct:5.1f}% | {tests_done:>5}/{total_tests}"
         f" | ✓{tests_passed:>{fw}} | ✗{tests_failed:>{fw}}] "

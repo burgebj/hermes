@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -44,10 +44,8 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - platform-specific fallback
     fcntl = None
-    try:
+    with suppress(ImportError):
         import msvcrt
-    except ImportError:
-        pass
 
 
 STATE_ACTIVE = "active"
@@ -87,10 +85,8 @@ def _usage_file_lock():
         yield
     finally:
         if fcntl:
-            try:
+            with suppress(OSError, IOError):
                 fcntl.flock(fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
         elif msvcrt:
             try:
                 fd.seek(0)
@@ -192,7 +188,7 @@ def _read_hub_installed_names() -> Set[str]:
         if isinstance(data, dict):
             installed = data.get("installed") or {}
             if isinstance(installed, dict):
-                names = {str(k) for k in installed.keys()}
+                names = {str(k) for k in installed}
                 skills_dir = _skills_dir()
                 for entry in installed.values():
                     if not isinstance(entry, dict):
@@ -355,10 +351,8 @@ def save_usage(data: Dict[str, Dict[str, Any]]) -> None:
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
         except BaseException:
-            try:
+            with suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
     except Exception as e:
         logger.debug("Failed to write %s: %s", path, e, exc_info=True)

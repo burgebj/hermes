@@ -80,6 +80,7 @@ from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
 from utils import env_var_enabled
 from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -775,10 +776,8 @@ def _serve_plugin_skill(
         )
 
     parsed_frontmatter: Dict[str, Any] = {}
-    try:
+    with contextlib.suppress(Exception):
         parsed_frontmatter, _ = _parse_frontmatter(content)
-    except Exception:
-        pass
 
     if not skill_matches_platform(parsed_frontmatter):
         return json.dumps(
@@ -1063,10 +1062,8 @@ def skill_view(
         # (local skills dir + configured external_dirs are all trusted)
         _outside_skills_dir = True
         _trusted_dirs = [SKILLS_DIR.resolve()]
-        try:
+        with contextlib.suppress(Exception):
             _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
-        except Exception:
-            pass
         for _td in _trusted_dirs:
             try:
                 skill_md.resolve().relative_to(_td)

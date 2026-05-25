@@ -235,10 +235,7 @@ class SmsAdapter(BasePlatformAdapter):
             return True
 
         variant = self._port_variant_url(url)
-        if variant and self._check_signature(variant, post_params, signature):
-            return True
-
-        return False
+        return bool(variant and self._check_signature(variant, post_params, signature))
 
     def _check_signature(
         self, url: str, post_params: dict, signature: str,

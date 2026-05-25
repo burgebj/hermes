@@ -22,6 +22,7 @@ import defusedxml.minidom
 
 
 import re
+import contextlib
 
 
 def get_slides_in_sldidlst(unpacked_dir: Path) -> set[str]:
@@ -117,10 +118,8 @@ def get_slide_referenced_files(unpacked_dir: Path) -> set:
             if not target:
                 continue
             target_path = (rels_file.parent.parent / target).resolve()
-            try:
+            with contextlib.suppress(ValueError):
                 referenced.add(target_path.relative_to(unpacked_dir.resolve()))
-            except ValueError:
-                pass
 
     return referenced
 
@@ -160,10 +159,8 @@ def get_referenced_files(unpacked_dir: Path) -> set:
             if not target:
                 continue
             target_path = (rels_file.parent.parent / target).resolve()
-            try:
+            with contextlib.suppress(ValueError):
                 referenced.add(target_path.relative_to(unpacked_dir.resolve()))
-            except ValueError:
-                pass
 
     return referenced
 
@@ -228,10 +225,9 @@ def update_content_types(unpacked_dir: Path, removed_files: list[str]) -> None:
 
     for override in list(dom.getElementsByTagName("Override")):
         part_name = override.getAttribute("PartName").lstrip("/")
-        if part_name in removed_files:
-            if override.parentNode:
-                override.parentNode.removeChild(override)
-                changed = True
+        if part_name in removed_files and override.parentNode:
+            override.parentNode.removeChild(override)
+            changed = True
 
     if changed:
         with open(ct_path, "wb") as f:

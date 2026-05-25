@@ -62,10 +62,7 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
         # dir for project plugins), so that's where we opt in.
         import os
         hermes_home_str = os.environ.get("HERMES_HOME")
-        if hermes_home_str:
-            hermes_home = Path(hermes_home_str)
-        else:
-            hermes_home = base.parent
+        hermes_home = Path(hermes_home_str) if hermes_home_str else base.parent
         hermes_home.mkdir(parents=True, exist_ok=True)
         cfg_path = hermes_home / "config.yaml"
         cfg: dict = {}

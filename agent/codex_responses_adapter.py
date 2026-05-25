@@ -441,10 +441,7 @@ def _chat_messages_to_responses_input(
                 converted = _chat_content_to_responses_parts(
                     tool_content, role="user",
                 )
-                if converted:
-                    output_value = converted
-                else:
-                    output_value = ""
+                output_value = converted or ""
             else:
                 output_value = str(tool_content or "")
 
@@ -1065,9 +1062,7 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
 
     if tool_calls:
         finish_reason = "tool_calls"
-    elif leaked_tool_call_text:
-        finish_reason = "incomplete"
-    elif has_incomplete_items or (saw_commentary_phase and not saw_final_answer_phase):
+    elif leaked_tool_call_text or has_incomplete_items or (saw_commentary_phase and not saw_final_answer_phase):
         finish_reason = "incomplete"
     elif reasoning_items_raw and not final_text:
         # Response contains only reasoning (encrypted thinking state) with

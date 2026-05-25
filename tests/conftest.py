@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import contextlib
 
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -451,10 +452,8 @@ def _ensure_current_event_loop(request):
         return
 
     loop = None
-    try:
+    with contextlib.suppress(RuntimeError):
         loop = asyncio.get_running_loop()
-    except RuntimeError:
-        pass
 
     if loop is None and sys.version_info < (3, 12):
         try:

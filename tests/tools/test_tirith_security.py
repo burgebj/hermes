@@ -1210,12 +1210,11 @@ class TestSpawnWarningDedup:
 
         with patch(
             "tools.tirith_security._resolve_tirith_path", return_value=None
-        ):
-            with caplog.at_level("WARNING", logger="tools.tirith_security"):
-                for _ in range(10):
-                    result = check_command_security("echo")
-                    assert result["action"] == "allow"
-                    assert "tirith path unavailable" in result["summary"]
+        ), caplog.at_level("WARNING", logger="tools.tirith_security"):
+            for _ in range(10):
+                result = check_command_security("echo")
+                assert result["action"] == "allow"
+                assert "tirith path unavailable" in result["summary"]
 
         none_warnings = [
             rec for rec in caplog.records

@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 
 from hermes_constants import get_hermes_home
 from tools import skill_usage
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +107,8 @@ def save_state(data: Dict[str, Any]) -> None:
                 os.fsync(f.fileno())
             os.replace(tmp, path)
         except BaseException:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
     except Exception as e:
         logger.debug("Failed to save curator state: %s", e, exc_info=True)
@@ -1412,10 +1411,8 @@ def run_curator_review(
             from agent import curator_backup
             snap = curator_backup.snapshot_skills(reason="pre-curator-run")
             if snap is not None and on_summary:
-                try:
+                with contextlib.suppress(Exception):
                     on_summary(f"curator: snapshot created ({snap.name})")
-                except Exception:
-                    pass
         except Exception as e:
             logger.debug("Curator pre-run snapshot failed: %s", e, exc_info=True)
         counts = apply_automatic_transitions(now=start)
@@ -1536,10 +1533,8 @@ def run_curator_review(
         save_state(state2)
 
         if on_summary:
-            try:
+            with contextlib.suppress(Exception):
                 on_summary(f"curator: {final_summary}")
-            except Exception:
-                pass
 
     if synchronous:
         _llm_pass()
@@ -1749,10 +1744,8 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         result_meta["summary"] = result_meta["error"]
     finally:
         if review_agent is not None:
-            try:
+            with contextlib.suppress(Exception):
                 review_agent.close()
-            except Exception:
-                pass
     return result_meta
 
 

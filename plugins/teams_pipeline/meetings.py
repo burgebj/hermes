@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 from plugins.teams_pipeline.models import MeetingArtifact, TeamsMeetingRef
 from tools.microsoft_graph_client import MicrosoftGraphAPIError, MicrosoftGraphClient
+import contextlib
 
 
 class TeamsMeetingError(RuntimeError):
@@ -212,10 +213,8 @@ async def download_transcript_text(
             ),
         ) from exc
     finally:
-        try:
+        with contextlib.suppress(OSError):
             destination.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     if not text:
         raise TeamsMeetingArtifactNotFoundError(

@@ -135,6 +135,7 @@ from gateway.platforms.qqbot.keyboards import (
     parse_interaction_event,
     parse_update_prompt_button_data,
 )
+import contextlib
 
 
 def check_qq_requirements() -> bool:
@@ -338,18 +339,14 @@ class QQAdapter(BasePlatformAdapter):
 
         if self._listen_task:
             self._listen_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._listen_task
-            except asyncio.CancelledError:
-                pass
             self._listen_task = None
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
             self._heartbeat_task = None
 
         await self._cleanup()
@@ -1804,9 +1801,7 @@ class QQAdapter(BasePlatformAdapter):
             ".speex",
             ".flac",
         )
-        if any(fn.endswith(ext) for ext in _VOICE_EXTENSIONS):
-            return True
-        return False
+        return bool(any(fn.endswith(ext) for ext in _VOICE_EXTENSIONS))
 
     def _qq_media_headers(self) -> Dict[str, str]:
         """Return Authorization headers for QQ multimedia CDN downloads.
@@ -1924,10 +1919,8 @@ class QQAdapter(BasePlatformAdapter):
             transcript = await self._call_stt(wav_path)
 
             # 5. Cleanup temp file
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(wav_path)
-            except OSError:
-                pass
 
             if transcript:
                 logger.debug("[%s] STT success: %r", self._log_tag, transcript[:100])
@@ -1986,10 +1979,8 @@ class QQAdapter(BasePlatformAdapter):
             result = await self._convert_raw_to_wav(audio_data, wav_path)
 
         # Cleanup source file
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(src_path)
-        except OSError:
-            pass
 
         return result
 
@@ -2065,10 +2056,8 @@ class QQAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[%s] pilk .silk conversion failed: %s", self._log_tag, exc)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(silk_path)
-            except OSError:
-                pass
 
         return None
 
@@ -2290,10 +2279,8 @@ class QQAdapter(BasePlatformAdapter):
         except Exception:
             return cache_document_from_bytes(audio_data, f"qq_voice{ext}")
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(src_path)
-            except OSError:
-                pass
 
         # Verify output and cache
         try:
@@ -2431,9 +2418,8 @@ class QQAdapter(BasePlatformAdapter):
         """
         del metadata
 
-        if not self.is_connected:
-            if not await self._wait_for_reconnection():
-                return SendResult(success=False, error="Not connected", retryable=True)
+        if not self.is_connected and not await self._wait_for_reconnection():
+            return SendResult(success=False, error="Not connected", retryable=True)
 
         if not content or not content.strip():
             return SendResult(success=True)
@@ -2579,11 +2565,10 @@ class QQAdapter(BasePlatformAdapter):
         Guild (channel) chats don't support inline keyboards; returns a
         non-retryable failure for those.
         """
-        if not self.is_connected:
-            if not await self._wait_for_reconnection():
-                return SendResult(
-                    success=False, error="Not connected", retryable=True
-                )
+        if not self.is_connected and not await self._wait_for_reconnection():
+            return SendResult(
+                success=False, error="Not connected", retryable=True
+            )
 
         chat_type = self._guess_chat_type(chat_id)
         formatted = self.format_message(content)
@@ -2848,9 +2833,8 @@ class QQAdapter(BasePlatformAdapter):
           complete). Handles files up to the platform's ~100 MB per-file
           limit without the ~10 MB inline-base64 cap of the old adapter.
         """
-        if not self.is_connected:
-            if not await self._wait_for_reconnection():
-                return SendResult(success=False, error="Not connected", retryable=True)
+        if not self.is_connected and not await self._wait_for_reconnection():
+            return SendResult(success=False, error="Not connected", retryable=True)
 
         chat_type = self._guess_chat_type(chat_id)
         if chat_type == "guild":

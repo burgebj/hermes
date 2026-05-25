@@ -37,6 +37,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+import contextlib
 
 # Match ``https://meet.google.com/abc-defg-hij`` or ``.../lookup/...`` — the
 # short three-segment code or a lookup URL. Anything else is rejected.
@@ -689,37 +690,27 @@ def run_bot() -> int:  # noqa: C901 — orchestration, explicit branches
                 time.sleep(1.0)
 
             # Try to leave cleanly — click "Leave call" button if present.
-            try:
+            with contextlib.suppress(Exception):
                 page.evaluate(
                     "() => { const b = document.querySelector('button[aria-label*=\"eave call\"]');"
                     " if (b) b.click(); }"
                 )
-            except Exception:
-                pass
 
             context.close()
             browser.close()
             # v2: teardown realtime speaker + audio bridge.
             if rt["speaker_stop"]:
-                try:
+                with contextlib.suppress(Exception):
                     rt["speaker_stop"]()
-                except Exception:
-                    pass
             if rt["speaker_thread"] is not None:
-                try:
+                with contextlib.suppress(Exception):
                     rt["speaker_thread"].join(timeout=5.0)
-                except Exception:
-                    pass
             if rt["session"]:
-                try:
+                with contextlib.suppress(Exception):
                     rt["session"].close()
-                except Exception:
-                    pass
             if rt["bridge"]:
-                try:
+                with contextlib.suppress(Exception):
                     rt["bridge"].teardown()
-                except Exception:
-                    pass
             state.set(in_call=False, captioning=False, exited=True)
             return 0
 
@@ -808,9 +799,7 @@ def _looks_like_human_speaker(speaker: str, bot_guest_name: str) -> bool:
     if not speaker or not speaker.strip():
         return False
     spk = speaker.strip().lower()
-    if spk in {"unknown", "you", bot_guest_name.strip().lower()}:
-        return False
-    return True
+    return spk not in {"unknown", "you", bot_guest_name.strip().lower()}
 
 
 def _click_join(page, state: _BotState) -> None:

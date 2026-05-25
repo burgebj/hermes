@@ -24,6 +24,7 @@ import tempfile
 import time
 
 import pytest
+import contextlib
 
 
 pytestmark = pytest.mark.skipif(
@@ -54,10 +55,7 @@ def chrome_cdp(request):
     # Under subprocess-per-file isolation there's no xdist, so we fall back
     # to "master" via the session-scoped fixture below.
     worker_id = request.getfixturevalue("worker_id") if "worker_id" in request.fixturenames else "master"
-    if worker_id == "master":
-        port_offset = 0
-    else:
-        port_offset = int(worker_id.lstrip("gw"))
+    port_offset = 0 if worker_id == "master" else int(worker_id.lstrip("gw"))
     port = 9225 + port_offset
     profile = tempfile.mkdtemp(prefix="hermes-supervisor-test-")
     proc = subprocess.Popen(
@@ -546,10 +544,8 @@ def test_bridge_captures_prompt_and_returns_reply_text(chrome_cdp, supervisor_re
                 assert resp["ok"] is True
 
                 # Wait for nav to complete + read back
-                try:
+                with contextlib.suppress(Exception):
                     await _asyncio.wait_for(nav_fut, timeout=10)
-                except Exception:
-                    pass
                 await _asyncio.sleep(0.5)
                 r = await call(
                     "Runtime.evaluate",
@@ -559,8 +555,7 @@ def test_bridge_captures_prompt_and_returns_reply_text(chrome_cdp, supervisor_re
                 return r.get("result", {}).get("result", {}).get("value")
             finally:
                 rd.cancel()
-                try: await rd
-                except BaseException: pass
+                with contextlib.suppress(BaseException): await rd
 
     value = asyncio.run(nav_and_read())
     assert value == "AGENT-SUPPLIED-REPLY", f"expected AGENT-SUPPLIED-REPLY, got {value!r}"

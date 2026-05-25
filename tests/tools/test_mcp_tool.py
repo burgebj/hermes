@@ -426,9 +426,8 @@ class TestRunOnMcpLoop:
                 with patch(
                     "agent.async_utils.asyncio.run_coroutine_threadsafe",
                     side_effect=RuntimeError("scheduler down"),
-                ):
-                    with pytest.raises(RuntimeError):
-                        mcp._run_on_mcp_loop(factory)
+                ), pytest.raises(RuntimeError):
+                    mcp._run_on_mcp_loop(factory)
                 gc.collect()
 
         assert created["coro"] is not None

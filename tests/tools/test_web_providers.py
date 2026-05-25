@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 import pytest
 
 from tests.tools.conftest import register_all_web_providers
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +259,8 @@ class TestWebSearchUsesSearchBackend:
 
         # The function will fail at Firecrawl client level but we just
         # need to verify _get_search_backend was called
-        try:
+        with contextlib.suppress(Exception):
             web_tools.web_search_tool("test", 1)
-        except Exception:
-            pass
 
         assert len(called_with) > 0
         assert called_with[0][0] == "search"

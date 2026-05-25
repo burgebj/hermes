@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from hermes_constants import get_config_path, get_hermes_home
+import contextlib
 
 # Sentinel to track whether setup_logging() has already run.  The function
 # is idempotent — calling it twice is safe but the second call is a no-op
@@ -312,10 +313,8 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
 
     def _chmod_if_managed(self):
         if self._managed:
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(self.baseFilename, 0o660)
-            except OSError:
-                pass
 
     def _open(self):
         stream = super()._open()

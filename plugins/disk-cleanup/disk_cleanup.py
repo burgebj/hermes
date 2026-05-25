@@ -76,9 +76,7 @@ def is_safe_path(path: Path) -> bool:
         pass
     # Allow /tmp/hermes-* explicitly
     parts = path.parts
-    if len(parts) >= 3 and parts[1] == "tmp" and parts[2].startswith("hermes-"):
-        return True
-    return False
+    return bool(len(parts) >= 3 and parts[1] == "tmp" and parts[2].startswith("hermes-"))
 
 
 # ---------------------------------------------------------------------------
@@ -226,17 +224,9 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
         cat = item["category"]
         size = item["size"]
 
-        if cat == "test":
+        if cat == "test" or cat == "temp" and age > 7 or cat == "cron-output" and age > 14:
             auto.append(item)
-        elif cat == "temp" and age > 7:
-            auto.append(item)
-        elif cat == "cron-output" and age > 14:
-            auto.append(item)
-        elif cat == "research" and age > 30:
-            prompt.append(item)
-        elif cat == "chrome-profile" and age > 14:
-            prompt.append(item)
-        elif size > 500 * 1024 * 1024:
+        elif cat == "research" and age > 30 or cat == "chrome-profile" and age > 14 or size > 500 * 1024 * 1024:
             prompt.append(item)
 
     return auto, prompt

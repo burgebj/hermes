@@ -67,6 +67,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -289,10 +290,8 @@ class NtfyAdapter(BasePlatformAdapter):
 
         if self._stream_task:
             self._stream_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._stream_task
-            except asyncio.CancelledError:
-                pass
             self._stream_task = None
 
         if self._http_client:
@@ -466,7 +465,7 @@ def _env_enablement() -> dict | None:
         seed["token"] = token
     markdown = os.getenv("NTFY_MARKDOWN", "").strip().lower()
     if markdown:
-        seed["markdown"] = markdown in ("1", "true", "yes")
+        seed["markdown"] = markdown in {"1", "true", "yes"}
     home = os.getenv("NTFY_HOME_CHANNEL", "").strip() or topic
     if home:
         seed["home_channel"] = {
@@ -517,7 +516,7 @@ async def _standalone_send(
 
     token = extra.get("token") or os.getenv("NTFY_TOKEN", "")
     markdown_env = os.getenv("NTFY_MARKDOWN", "").strip().lower()
-    markdown_enabled = bool(extra.get("markdown")) or markdown_env in ("1", "true", "yes")
+    markdown_enabled = bool(extra.get("markdown")) or markdown_env in {"1", "true", "yes"}
 
     headers = {"Content-Type": "text/plain; charset=utf-8", **_build_auth_header(token)}
     if markdown_enabled:

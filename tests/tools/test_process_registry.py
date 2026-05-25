@@ -18,6 +18,7 @@ from tools.process_registry import (
     FINISHED_TTL_SECONDS,
     MAX_PROCESSES,
 )
+import contextlib
 
 
 @pytest.fixture()
@@ -161,10 +162,8 @@ class TestOrphanedPipeReconciliation:
         assert s.id not in registry._running
 
         # Clean up the orphaned descendant.
-        try:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
 
     def test_reconcile_noop_when_child_still_running(self, registry):
         """Reconcile must NOT flip exited when the direct child is alive."""
@@ -225,10 +224,8 @@ class TestOrphanedPipeReconciliation:
             f"wait() should return ~immediately via reconcile; took {elapsed:.1f}s"
         )
 
-        try:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
 
 
 # =========================================================================

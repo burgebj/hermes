@@ -21,6 +21,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+import contextlib
 
 
 async def _hanging_run(self, cfg):
@@ -54,10 +55,8 @@ class TestCancelledErrorPropagation:
                     # If we hit this, the reconnect loop swallowed the cancel
                     # and stayed wedged — the exact #9930 bug.
                     task.cancel()
-                    try:
+                    with contextlib.suppress(Exception):
                         await task
-                    except Exception:
-                        pass
                     return "wedged"
                 return "clean_return"
 
@@ -82,10 +81,8 @@ class TestCancelledErrorPropagation:
                 await asyncio.sleep(0.05)
                 server._shutdown_event.set()
                 server._task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                     await asyncio.wait_for(server._task, timeout=2.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
                 return server._task.done()
 
         done = asyncio.run(drive())

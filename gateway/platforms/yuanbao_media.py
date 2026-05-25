@@ -189,11 +189,10 @@ def _parse_webp_size(buf: bytes) -> Optional[dict[str, int]]:
             w = (bits & 0x3FFF) + 1
             h = ((bits >> 14) & 0x3FFF) + 1
             return {"width": w, "height": h}
-    elif chunk == "VP8X":
-        if len(buf) >= 30:
-            w = (buf[24] | (buf[25] << 8) | (buf[26] << 16)) + 1
-            h = (buf[27] | (buf[28] << 8) | (buf[29] << 16)) + 1
-            return {"width": w, "height": h}
+    elif chunk == "VP8X" and len(buf) >= 30:
+        w = (buf[24] | (buf[25] << 8) | (buf[26] << 16)) + 1
+        h = (buf[27] | (buf[28] << 8) | (buf[29] << 16)) + 1
+        return {"width": w, "height": h}
     return None
 
 

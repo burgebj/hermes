@@ -20,6 +20,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import contextlib
 
 
 async def _noop_initialize():
@@ -92,7 +93,7 @@ class TestSSEReadTimeout:
             with patch.object(MCPServerTask, "_wait_for_lifecycle_event",
                               new=AsyncMock(return_value="shutdown")), \
                  patch.object(MCPServerTask, "_discover_tools", new=AsyncMock()):
-                try:
+                with contextlib.suppress(asyncio.TimeoutError, StopAsyncIteration, Exception):
                     await asyncio.wait_for(
                         server._run_http({
                             "url": "https://example.com/mcp/sse",
@@ -101,8 +102,6 @@ class TestSSEReadTimeout:
                         }),
                         timeout=2.0,
                     )
-                except (asyncio.TimeoutError, StopAsyncIteration, Exception):
-                    pass
 
         asyncio.run(drive())
 
@@ -123,7 +122,7 @@ class TestSSEReadTimeout:
             with patch.object(MCPServerTask, "_wait_for_lifecycle_event",
                               new=AsyncMock(return_value="shutdown")), \
                  patch.object(MCPServerTask, "_discover_tools", new=AsyncMock()):
-                try:
+                with contextlib.suppress(asyncio.TimeoutError, StopAsyncIteration, Exception):
                     await asyncio.wait_for(
                         server._run_http({
                             "url": "https://example.com/mcp/sse",
@@ -132,8 +131,6 @@ class TestSSEReadTimeout:
                         }),
                         timeout=2.0,
                     )
-                except (asyncio.TimeoutError, StopAsyncIteration, Exception):
-                    pass
 
         asyncio.run(drive())
 
@@ -157,7 +154,7 @@ class TestSSEOAuthForwarding:
                               new=AsyncMock(return_value="shutdown")), \
                  patch.object(MCPServerTask, "_discover_tools", new=AsyncMock()), \
                  patch("tools.mcp_oauth_manager.get_manager", return_value=fake_manager):
-                try:
+                with contextlib.suppress(asyncio.TimeoutError, StopAsyncIteration, Exception):
                     await asyncio.wait_for(
                         server._run_http({
                             "url": "https://example.com/mcp/sse",
@@ -167,8 +164,6 @@ class TestSSEOAuthForwarding:
                         }),
                         timeout=2.0,
                     )
-                except (asyncio.TimeoutError, StopAsyncIteration, Exception):
-                    pass
 
         asyncio.run(drive())
 
@@ -189,7 +184,7 @@ class TestSSEOAuthForwarding:
             with patch.object(MCPServerTask, "_wait_for_lifecycle_event",
                               new=AsyncMock(return_value="shutdown")), \
                  patch.object(MCPServerTask, "_discover_tools", new=AsyncMock()):
-                try:
+                with contextlib.suppress(asyncio.TimeoutError, StopAsyncIteration, Exception):
                     await asyncio.wait_for(
                         server._run_http({
                             "url": "https://example.com/mcp/sse",
@@ -198,8 +193,6 @@ class TestSSEOAuthForwarding:
                         }),
                         timeout=2.0,
                     )
-                except (asyncio.TimeoutError, StopAsyncIteration, Exception):
-                    pass
 
         asyncio.run(drive())
 

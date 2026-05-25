@@ -47,7 +47,7 @@ def test_auxiliary_client_nous_extra_body_uses_helper():
     from agent.auxiliary_client import NOUS_EXTRA_BODY
     from agent.portal_tags import nous_portal_tags
 
-    assert NOUS_EXTRA_BODY == {"tags": nous_portal_tags()}
+    assert {"tags": nous_portal_tags()} == NOUS_EXTRA_BODY
 
 
 def test_nous_provider_profile_uses_helper():

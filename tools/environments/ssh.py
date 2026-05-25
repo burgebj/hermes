@@ -17,6 +17,7 @@ from tools.environments.file_sync import (
     quoted_rm_command,
     unique_parent_dirs,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +303,5 @@ class SSHEnvironment(BaseEnvironment):
                 subprocess.run(cmd, capture_output=True, timeout=5)
             except (OSError, subprocess.SubprocessError):
                 pass
-            try:
+            with contextlib.suppress(OSError):
                 self.control_socket.unlink()
-            except OSError:
-                pass

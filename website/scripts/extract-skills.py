@@ -85,10 +85,7 @@ def _extract_overview(body: str) -> str:
         if len(p) > 500:
             cut = p[:500]
             last_period = cut.rfind(". ")
-            if last_period > 200:
-                p = cut[: last_period + 1]
-            else:
-                p = cut.rstrip() + "…"
+            p = cut[:last_period + 1] if last_period > 200 else cut.rstrip() + "…"
         return p
     return ""
 

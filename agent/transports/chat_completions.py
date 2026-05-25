@@ -17,6 +17,7 @@ from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
+import contextlib
 
 
 def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
@@ -565,10 +566,8 @@ class ChatCompletionsTransport(ProviderTransport):
                     extra = (tc.model_extra or {}).get("extra_content")
                 if extra is not None:
                     if hasattr(extra, "model_dump"):
-                        try:
+                        with contextlib.suppress(Exception):
                             extra = extra.model_dump()
-                        except Exception:
-                            pass
                     tc_provider_data["extra_content"] = extra
                 tool_calls.append(
                     ToolCall(
@@ -621,9 +620,7 @@ class ChatCompletionsTransport(ProviderTransport):
             return False
         if not hasattr(response, "choices") or response.choices is None:
             return False
-        if not response.choices:
-            return False
-        return True
+        return response.choices
 
     def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
         """Extract OpenRouter/OpenAI cache stats from prompt_tokens_details."""

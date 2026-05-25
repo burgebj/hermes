@@ -58,10 +58,7 @@ def prompt(
     display = color(f"  {question}{suffix}: ", Colors.YELLOW)
 
     try:
-        if password:
-            value = getpass.getpass(display)
-        else:
-            value = input(display)
+        value = getpass.getpass(display) if password else input(display)
         value = value.strip()
         return value if value else (default or "")
     except (KeyboardInterrupt, EOFError):

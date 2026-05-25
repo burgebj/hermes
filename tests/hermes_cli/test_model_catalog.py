@@ -216,9 +216,8 @@ class TestDisabled:
                 "ttl_hours": 24.0,
                 "providers": {},
             },
-        ):
-            with patch.object(model_catalog, "_fetch_manifest") as fetch:
-                result = model_catalog.get_catalog()
+        ), patch.object(model_catalog, "_fetch_manifest") as fetch:
+            result = model_catalog.get_catalog()
         assert result == {}
         fetch.assert_not_called()
 
@@ -252,9 +251,8 @@ class TestProviderOverride:
                 "ttl_hours": 24.0,
                 "providers": {"openrouter": {"url": "http://override"}},
             },
-        ):
-            with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
-                result = model_catalog.get_curated_openrouter_models()
+        ), patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            result = model_catalog.get_curated_openrouter_models()
 
         assert result == [("override/model", "custom")]
 

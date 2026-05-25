@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 from hermes_time import now as _hermes_now
 from utils import atomic_replace
+import contextlib
 
 try:
     from croniter import croniter
@@ -442,10 +443,8 @@ def save_jobs(jobs: List[Dict[str, Any]]):
         atomic_replace(tmp_path, JOBS_FILE)
         _secure_file(JOBS_FILE)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 
@@ -1077,10 +1076,8 @@ def save_job_output(job_id: str, output: str):
         atomic_replace(tmp_path, output_file)
         _secure_file(output_file)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
     
     return output_file

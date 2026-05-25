@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from utils import atomic_replace
+import contextlib
 
 
 # Env var name suffixes that indicate credential values.  These are the
@@ -176,10 +177,8 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
                     os.fsync(f.fileno())
                 atomic_replace(tmp, path)
             except BaseException:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp)
-                except OSError:
-                    pass
                 raise
     except Exception:
         pass  # best-effort — don't block gateway startup

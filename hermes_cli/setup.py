@@ -161,6 +161,7 @@ from hermes_cli.cli_output import (  # noqa: E402
     print_success,
     print_warning,
 )
+import contextlib
 
 
 def is_interactive_stdin() -> bool:
@@ -195,10 +196,7 @@ def print_noninteractive_setup_guidance(reason: str | None = None) -> None:
 
 def prompt(question: str, default: str = None, password: bool = False) -> str:
     """Prompt for input with optional default."""
-    if default:
-        display = f"{question} [{default}]: "
-    else:
-        display = f"{question}: "
+    display = f"{question} [{default}]: " if default else f"{question}: "
 
     try:
         if password:
@@ -658,26 +656,20 @@ def _prompt_container_resources(config: dict):
     # CPU
     current_cpu = terminal.get("container_cpu", 1)
     cpu_str = prompt("  CPU cores", str(current_cpu))
-    try:
+    with contextlib.suppress(ValueError):
         terminal["container_cpu"] = float(cpu_str)
-    except ValueError:
-        pass
 
     # Memory
     current_mem = terminal.get("container_memory", 5120)
     mem_str = prompt("  Memory in MB (5120 = 5GB)", str(current_mem))
-    try:
+    with contextlib.suppress(ValueError):
         terminal["container_memory"] = int(mem_str)
-    except ValueError:
-        pass
 
     # Disk
     current_disk = terminal.get("container_disk", 51200)
     disk_str = prompt("  Disk in MB (51200 = 50GB)", str(current_disk))
-    try:
+    with contextlib.suppress(ValueError):
         terminal["container_disk"] = int(disk_str)
-    except ValueError:
-        pass
 
 
 def _prompt_vercel_sandbox_settings(config: dict):
@@ -708,17 +700,13 @@ def _prompt_vercel_sandbox_settings(config: dict):
 
     current_cpu = terminal.get("container_cpu", 1)
     cpu_str = prompt("  CPU cores", str(current_cpu))
-    try:
+    with contextlib.suppress(ValueError):
         terminal["container_cpu"] = float(cpu_str)
-    except ValueError:
-        pass
 
     current_mem = terminal.get("container_memory", 5120)
     mem_str = prompt("  Memory in MB (5120 = 5GB)", str(current_mem))
-    try:
+    with contextlib.suppress(ValueError):
         terminal["container_memory"] = int(mem_str)
-    except ValueError:
-        pass
 
     if terminal.get("container_disk", 51200) not in {0, 51200}:
         print_warning("Vercel Sandbox does not support custom disk sizing; resetting container_disk to 51200.")

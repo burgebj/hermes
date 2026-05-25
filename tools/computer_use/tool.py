@@ -46,6 +46,7 @@ from tools.computer_use.backend import (
     ComputerUseBackend,
     UIElement,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -147,10 +148,8 @@ def reset_backend_for_tests() -> None:  # pragma: no cover
     global _backend, _session_auto_approve, _always_allow
     with _backend_lock:
         if _backend is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _backend.stop()
-            except Exception:
-                pass
         _backend = None
     _session_auto_approve = False
     _always_allow = set()
@@ -640,10 +639,8 @@ def _route_capture_through_aux_vision(
         return None
     finally:
         if temp_image_path is not None:
-            try:
+            with contextlib.suppress(Exception):
                 _os.unlink(str(temp_image_path))
-            except Exception:
-                pass
 
     analysis_text = ""
     if isinstance(result_json, str):

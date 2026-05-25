@@ -121,10 +121,9 @@ def validate_plan(plan: dict) -> list[str]:
                         f"team[{i}].skills must be a list of strings"
                     )
 
-    if "slug" in plan:
-        if not SLUG_RE.match(plan["slug"]):
-            errors.append("slug must be lowercase, hyphenated, "
-                          "starting with [a-z0-9]")
+    if "slug" in plan and not SLUG_RE.match(plan["slug"]):
+        errors.append("slug must be lowercase, hyphenated, "
+                      "starting with [a-z0-9]")
 
     return errors
 

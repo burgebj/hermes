@@ -11,7 +11,7 @@ On a fresh install, all three are no-ops — fall through to first-time setup.
 """
 
 from argparse import Namespace
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from unittest.mock import patch
 
 import pytest
@@ -20,7 +20,7 @@ import pytest
 def _make_setup_args(**overrides):
     return Namespace(
         non_interactive=overrides.get("non_interactive", False),
-        section=overrides.get("section", None),
+        section=overrides.get("section"),
         reset=overrides.get("reset", False),
         reconfigure=overrides.get("reconfigure", False),
         quick=overrides.get("quick", False),
@@ -244,10 +244,8 @@ class TestArgparse:
             lambda args: captured.setdefault("args", args),
         )
         monkeypatch.setattr(sys, "argv", ["hermes", "setup", "--reconfigure"])
-        try:
+        with suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
         assert captured["args"].reconfigure is True
         assert captured["args"].quick is False
 
@@ -261,10 +259,8 @@ class TestArgparse:
             lambda args: captured.setdefault("args", args),
         )
         monkeypatch.setattr(sys, "argv", ["hermes", "setup", "--quick"])
-        try:
+        with suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
         assert captured["args"].quick is True
         assert captured["args"].reconfigure is False
 
@@ -278,9 +274,7 @@ class TestArgparse:
             lambda args: captured.setdefault("args", args),
         )
         monkeypatch.setattr(sys, "argv", ["hermes", "setup"])
-        try:
+        with suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
         assert captured["args"].reconfigure is False
         assert captured["args"].quick is False

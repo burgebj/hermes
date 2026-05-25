@@ -22,6 +22,7 @@ import pytest
 
 from gateway.config import PlatformConfig
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
+import contextlib
 
 _ntfy = load_plugin_adapter("ntfy")
 
@@ -279,10 +280,8 @@ class TestConnect:
         assert result is True
         assert adapter._stream_task is not None
         adapter._stream_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             _run(adapter._stream_task)
-        except (asyncio.CancelledError, Exception):
-            pass
 
     def test_disconnect_clears_state(self):
         adapter = NtfyAdapter(PlatformConfig(enabled=True, extra={"topic": "t"}))

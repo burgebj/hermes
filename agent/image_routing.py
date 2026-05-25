@@ -63,7 +63,7 @@ def _coerce_capability_bool(raw: Any) -> Optional[bool]:
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, int):
-        if raw in (0, 1):
+        if raw in {0, 1}:
             return bool(raw)
         return None
     if isinstance(raw, str):
@@ -154,9 +154,7 @@ def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     base_url = str(vision.get("base_url") or "").strip()
 
     # "auto" / "" / blank = not explicit
-    if provider in {"", "auto"} and not model and not base_url:
-        return False
-    return True
+    return not (provider in {"", "auto"} and not model and not base_url)
 
 
 def _lookup_supports_vision(

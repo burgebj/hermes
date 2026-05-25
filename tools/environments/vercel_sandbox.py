@@ -34,6 +34,7 @@ from tools.environments.file_sync import (
     iter_sync_files,
     quoted_rm_command,
 )
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -415,10 +416,8 @@ class VercelSandboxEnvironment(BaseEnvironment):
     def _close_sandbox_client(self, sandbox: Sandbox | None) -> None:
         if sandbox is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             sandbox.client.close()
-        except Exception:
-            pass
 
     def _stop_sandbox(self, sandbox: Sandbox | None) -> None:
         if sandbox is None:
@@ -430,10 +429,8 @@ class VercelSandboxEnvironment(BaseEnvironment):
                 poll_interval=_STOP_POLL_INTERVAL,
             )
         except TypeError:
-            try:
+            with contextlib.suppress(Exception):
                 sandbox.stop()
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -571,14 +568,12 @@ class VercelSandboxEnvironment(BaseEnvironment):
 
             sandbox.download_file(remote_tar, dest_tar_path)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 sandbox.run_command(
                     "bash",
                     ["-lc", f"rm -f {shlex.quote(remote_tar)}"],
                     cwd=self._workspace_root,
                 )
-            except Exception:
-                pass
 
     def _before_execute(self) -> None:
         with self._lock:

@@ -10,10 +10,7 @@ def _parse_setup_imports():
         tree = ast.parse(f.read())
     names = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                names.add(alias.name)
-        elif isinstance(node, ast.ImportFrom):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 names.add(alias.name)
     return names

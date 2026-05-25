@@ -1137,9 +1137,8 @@ def check_all_command_guards(command: str, env_type: str,
         if not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, tirith_desc, True))
 
-    if is_dangerous:
-        if not is_approved(session_key, pattern_key):
-            warnings.append((pattern_key, description, False))
+    if is_dangerous and not is_approved(session_key, pattern_key):
+        warnings.append((pattern_key, description, False))
 
     # Nothing to warn about
     if not warnings:

@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import contextlib
 
 # Resolve the worktree path robustly.
 _THIS = Path(__file__).resolve()
@@ -69,10 +70,8 @@ def scenario(name):
                 traceback.print_exc()
                 print(f"  ✗ ERROR: {msg}")
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     shutil.rmtree(home)
-                except Exception:
-                    pass
         run.__name__ = f"_scenario_{name}"
         # Register in a module-level list so discovery is trivial.
         _REGISTERED.append(run)
@@ -609,10 +608,8 @@ def _(home, kb):
         print("  symlinks to same HERMES_HOME share DB correctly")
     finally:
         for p in (link1, link2):
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(p)
-            except OSError:
-                pass
         shutil.rmtree(real, ignore_errors=True)
 
 
