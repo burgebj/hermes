@@ -4716,6 +4716,14 @@ def start_server(
                 "(headless Linux). Pass --no-open to suppress this detection."
             )
 
+            threading.Thread(target=_open, daemon=True).start()
+        else:
+            _log.debug(
+                "Skipping browser-open: no DISPLAY or WAYLAND_DISPLAY detected "
+                "(headless Linux). Pass --no-open to suppress this detection."
+            )
+
+    _restore_foreground_tty()
     print(f"  Hermes Web UI → http://{host}:{port}")
     # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
     # rather than X-Forwarded-For's rewritten value (which would defeat the

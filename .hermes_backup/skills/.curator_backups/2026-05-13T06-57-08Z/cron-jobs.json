@@ -1,0 +1,275 @@
+{
+  "jobs": [
+    {
+      "id": "7c1e45b92026",
+      "name": "\u61c2\u8f66\u5e1d\u4e50\u9053L90\u4e8c\u624b\u8f66\u6bcf\u65e5\u76d1\u63a7",
+      "prompt": "\u6bcf\u665a10\u70b9\u6267\u884c\u61c2\u8f66\u5e1d\u4e50\u9053L90\u4e8c\u624b\u8f66\u76d1\u63a7\u4efb\u52a1\u3002\n\n## \u5de5\u5177\u8c03\u7528\n\n**\u5fc5\u987b\u7528 xvfb-run \u5305\u88c5\u547d\u4ee4**\uff08WSL \u65e0 X server\uff0c\u5fc5\u987b\u7528\u865a\u62df\u663e\u793a\uff09\uff1a\n\n```bash\ncd /home/jianliu/work/hermes-agent && source venv/bin/activate && xvfb-run -a python tools/dongchedi_l90_watch.py \\\n  --list-url \"https://www.dongchedi.com/usedcar/20,!1-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-918-25234-310000-1-x-x-x-x-x\" \\\n  --db /tmp/dongchedi_l90_cron.db \\\n  --max-details 30 \\\n  --profile-dir /tmp/dongchedi_profile \\\n  2>&1\n```\n\n\u5de5\u5177\u8fd4\u56de JSON\uff0c\u63d0\u53d6\u5e76\u5c55\u793a\uff1a\n- `matched_count` \u2014 \u672c\u6b21\u626b\u63cf\u8f66\u6e90\u6570\n- `new_count` / `removed_count` / `changed_count` \u2014 \u53d8\u5316\u6570\u91cf\n- `items[]` \u2014 \u6bcf\u6761\u8f66\u6e90\uff1aprice_wan\u3001mileage_km\u3001city\u3001seller_type\u3001seller_address\u3001title\u3001first_license_date\n\n## \u683c\u5f0f\u8981\u6c42\n\n\u6309\u4ee5\u4e0b\u683c\u5f0f\u6574\u7406\u8f93\u51fa\uff1a\n\n| \u4ef7\u683c | \u91cc\u7a0b | \u4e0a\u724c | \u57ce\u5e02 | \u8f66\u578b | \u5730\u5740 |\n|------|------|------|------|------|------|\n\n\u6807\u6ce8\u65b0\u589e\u8f66\u6e90\uff08\ud83c\udd95\uff09\u548c\u4e0b\u67b6\u8f66\u6e90\uff08\ud83d\udcc9\uff09\uff0c\u82e5\u65e0\u53d8\u5316\u8bf4\u660e\"\u65e0\u53d8\u5316\"\u3002\n\n**\u4ef7\u683c\u533a\u95f4**\uff1a\u6700\u4f4e\u2013\u6700\u9ad8\u4e07\n\n## \u5f53\u524d\u5728\u552e\u53c2\u8003\uff082026-04-24\uff0c\u51719\u53f0\uff09\n\u5168\u90e8\u4e3a\u516d\u5ea7\u72482025\u6b3e\uff0c\u7535\u6c60\u4e70\u65ad\uff0c\u5546\u5bb6\uff1a\n- \u5408\u80a5 \u516d\u5ea7\u7248Max 20.80\u4e07\n- \u4e0a\u6d77 \u516d\u5ea7\u7248Pro 21.28\u4e07\uff082.0\u4e07km\uff09\n- \u5317\u4eac \u516d\u5ea7\u7248Pro 22.18\u4e07\n- \u4e0a\u6d77 \u516d\u5ea7\u7248Max 22.18\u4e07\uff081.4\u4e07km\uff09\n- \u4e0a\u6d77 \u516d\u5ea7\u7248Max 22.59\u4e07\n- \u592a\u539f \u516d\u5ea7\u7248Max 21.80\u4e07\uff08\u65b0\u589e\uff09\n- \u4e0a\u6d77 \u516d\u5ea7\u7248Max 23.28\u4e07\uff082.3\u4e07km\uff09\n- \u4f5b\u5c71 \u516d\u5ea7\u7248Ultra 24.38\u4e07\n- \u5b81\u6ce2 \u516d\u5ea7\u7248Max 24.50\u4e07\n\n## \u9a8c\u8bc1\u7801\u5904\u7406\n\u61c2\u8f66\u5e1d\u53ef\u80fd\u5f39\u9a8c\u8bc1\u7801\u3002\u6b63\u5e38\u65e0\u9700\u624b\u52a8\u9a8c\u8bc1\uff08cookies\u5df2\u7f13\u5b58\uff09\u3002\u82e5\u5931\u8d25\uff0c\u4e0b\u6b21\u91cd\u8bd5\u3002",
+      "skills": [
+        "dongchedi-l90-watch"
+      ],
+      "skill": "dongchedi-l90-watch",
+      "model": "deepseekv4-flash",
+      "provider": "custom",
+      "base_url": null,
+      "script": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 22 * * *",
+        "display": "0 22 * * *"
+      },
+      "schedule_display": "0 22 * * *",
+      "repeat": {
+        "times": 999,
+        "completed": 31
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-04-21T11:25:30.331382+08:00",
+      "next_run_at": "2026-05-13T22:00:00+08:00",
+      "last_run_at": "2026-05-12T22:11:29.421683+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": "delivery error: Weixin send failed: iLink sendmessage rate limited: ret=-2 errcode=None errmsg=rate limited",
+      "deliver": "origin",
+      "origin": {
+        "platform": "weixin",
+        "chat_id": "o9cq801iSM_4kP4nkL0j7OXvgC7o@im.wechat",
+        "chat_name": null,
+        "thread_id": null
+      }
+    },
+    {
+      "id": "a964294ed664",
+      "name": "\u6bcf\u65e5\u8d22\u7ecf\u65e9\u62a5",
+      "prompt": "\u6bcf\u5929\u65e9\u4e0a8\u70b9\uff0c\u83b7\u53d6\u534e\u5c14\u8857\u89c1\u95fb\u8d22\u7ecf\u65b0\u95fb\uff0c\u603b\u7ed3\u7f8e\u80a1\u6628\u665a\u8868\u73b0\u53ca\u4e3b\u8981\u8d22\u7ecf\u65b0\u95fb\uff0c\u4ee5\u5fae\u4fe1\u6d88\u606f\u683c\u5f0f\u53d1\u9001\u3002\n\n## \u6570\u636e\u83b7\u53d6\n\n\u4f7f\u7528 wallstreetcn-news \u6280\u80fd\uff0c\u540c\u65f6\u8c03\u7528\u4ee5\u4e0b API\uff1a\n\n1. **\u7f8e\u80a1\u884c\u60c5** \u2014 \u641c\u7d22 \"\u7f8e\u80a1\"\u3001\"\u7eb3\u6307\"\u3001\"\u6807\u666e500\" \u7b49\u5173\u952e\u8bcd\n2. **\u6700\u65b0\u65b0\u95fb** \u2014 https://api-one-wscn.awtmt.com/apiv1/content/information-flow?channel=global&accept=article&limit=15\n3. **\u70ed\u6587** \u2014 https://api-one-wscn.awtmt.com/apiv1/content/articles/hot?period=all\n\n## \u8f93\u51fa\u683c\u5f0f\n\n```\n\ud83d\udcca \u7f8e\u80a1\u6628\u665a\u6536\u76d8\n\n\u4e09\u5927\u6307\u6570\u6da8\u8dcc\uff1a\n- \u6807\u666e500\uff1a\u00b1X%\n- \u7eb3\u65af\u8fbe\u514b\uff1a\u00b1X%\n- \u9053\u743c\u65af\uff1a\u00b1X%\n\n\u70ed\u95e8\u4e2d\u6982\u80a1\uff1a\uff08\u5982\u6709\uff09\n\n\ud83d\udcf0 \u4eca\u65e5\u8d22\u7ecf\u8981\u95fb\n\n1.\u3010\u6807\u9898\u3011\u6458\u8981...\n2.\u3010\u6807\u9898\u3011\u6458\u8981...\n...\n\n\u6765\u6e90\uff1a\u534e\u5c14\u8857\u89c1\u95fb\n```\n\n\u683c\u5f0f\u8981\u6c42\uff1a\n- \u7b80\u6d01\uff0c\u5fae\u4fe1\u53cb\u597d\n- \u6da8\u8dcc\u7528\u7eff\u8272\u2191\u7ea2\u8272\u2193\n- \u91cd\u70b9\u65b0\u95fb\u653e\u524d\u9762\n- \u603b\u957f\u5ea6\u9002\u4e2d\uff0c\u4e0d\u8981\u592a\u5197\u957f",
+      "skills": [
+        "wallstreetcn-news"
+      ],
+      "skill": "wallstreetcn-news",
+      "model": "deepseekv4-flash",
+      "provider": "custom",
+      "base_url": null,
+      "script": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *",
+        "display": "0 8 * * *"
+      },
+      "schedule_display": "0 8 * * *",
+      "repeat": {
+        "times": 999,
+        "completed": 22
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-04-23T23:08:50.970385+08:00",
+      "next_run_at": "2026-05-14T08:00:00+08:00",
+      "last_run_at": "2026-05-13T08:01:21.174667+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": "delivery error: Weixin send failed: iLink sendmessage rate limited: ret=-2 errcode=None errmsg=rate limited",
+      "deliver": "origin",
+      "origin": {
+        "platform": "weixin",
+        "chat_id": "o9cq801iSM_4kP4nkL0j7OXvgC7o@im.wechat",
+        "chat_name": null,
+        "thread_id": null
+      }
+    },
+    {
+      "id": "89f4554bce6e",
+      "name": "\u6bcf\u65e5 Herms \u914d\u7f6e\u5907\u4efd + GitHub Push",
+      "prompt": "\u6267\u884c\u672c\u5730\u5907\u4efd\u5e76\u63a8\u9001\u5230 GitHub\u3002\n\n## \u6b65\u9aa4\n\n1. **\u672c\u5730\u5907\u4efd**\uff08memories + skills + cron + databases \u5230 /home/jianliu/work/hermes-agent/.hermes_backup/\uff09\n2. **git add + commit + push** \u5230 origin main\uff0ccommit message \u4e3a \"backup hermes YYYY-MM-DD\"\uff08\u5f53\u5929\u65e5\u671f\uff09\n3. **\u9a8c\u8bc1** push \u6210\u529f\uff1a`git status -sb` \u5e94\u663e\u793a `## main...origin/main`\uff0c\u65e0 ahead\n\n## \u6ce8\u610f\u4e8b\u9879\n\n- cron job \u65e0\u4ea4\u4e92\u73af\u5883\uff0c\u6240\u6709\u8def\u5f84\u4f7f\u7528\u7edd\u5bf9\u8def\u5f84\n- state.db \u4f7f\u7528 `sqlite3 ~/.hermes/state.db \".backup ...\"` \u505a\u539f\u5b50\u5feb\u7167\n- whatsapp \u6570\u636e\u5e93\u4e0d\u5b58\u5728\u65f6\u4e0d\u62a5\u9519\uff08\u7528 `2>/dev/null` \u6291\u5236\u9519\u8bef\uff09\n- push \u5931\u8d25\u65f6\u8bb0\u5f55\u9519\u8bef\u4f46\u4e0d\u963b\u585e\u6574\u4f53\u6d41\u7a0b\n- deliver \u8bbe\u4e3a origin\uff0c\u7ed3\u679c\u4f1a\u53d1\u9001\u56de\u5f53\u524d\u5bf9\u8bdd/\u4e3b\u9898",
+      "skills": [
+        "hermes-backup"
+      ],
+      "skill": "hermes-backup",
+      "model": "deepseekv4-flash",
+      "provider": "custom",
+      "base_url": null,
+      "script": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "display": "0 9 * * *"
+      },
+      "schedule_display": "0 9 * * *",
+      "repeat": {
+        "times": 999,
+        "completed": 18
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-04-26T17:30:29.608686+08:00",
+      "next_run_at": "2026-05-14T09:00:00+08:00",
+      "last_run_at": "2026-05-13T09:03:06.342317+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": "delivery error: Weixin send failed: iLink sendmessage rate limited: ret=-2 errcode=None errmsg=rate limited",
+      "deliver": "origin",
+      "origin": null
+    },
+    {
+      "id": "4f84b0c63dc2",
+      "name": "\u6bcf\u5468\u4e8c\u5165\u804c\u63d0\u9192",
+      "prompt": "\u6bcf\u5468\u4e8c\u4e0a\u534810\u70b9\uff0c\u68c0\u67e5\u5165\u804c\u65f6\u95f4\u8868\uff0c\u53d1\u9001\u5f85\u5165\u804c\u5019\u9009\u4eba\u63d0\u9192\u3002\n\n## \u6b65\u9aa4\n\n1. \u8bfb\u53d6\u5165\u804c\u65f6\u95f4\u8868\uff1a\n   `/mnt/c/Users/liuch/My Documents/warpdriveai/\u5236\u5ea6/\u62db\u8058/\u5165\u804c\u65f6\u95f4\u8868.md`\n\n2. \u8bfb\u53d6\u6240\u6709\u5019\u9009\u4eba\u6863\u6848\uff08`/mnt/c/Users/liuch/My Documents/warpdriveai/\u5236\u5ea6/\u62db\u8058/\u5019\u9009\u4eba\u6863\u6848/*.md`\uff09\uff0c\u8865\u5145\u5019\u9009\u4eba\u4fe1\u606f\n\n3. \u627e\u51fa\u6240\u6709\u72b6\u6001\u4e3a\"\u5df2\u5b89\u6392\"\u4e14\u5165\u804c\u65e5\u671f\u5728\u4eca\u5929\u4e4b\u540e\u7684\u5019\u9009\u4eba\n\n4. \u6574\u7406\u63d0\u9192\u5185\u5bb9\u5e76\u53d1\u9001\uff0c\u683c\u5f0f\u5982\u4e0b\uff1a\n\n   ```\n   \ud83d\udccb \u5165\u804c\u63d0\u9192 \u2014 \u5f85\u5165\u804c\u5019\u9009\u4eba\n\n   \u5019\u9009\u4eba\uff1a[\u59d3\u540d]\n   \u5165\u804c\u65e5\u671f\uff1a[YYYY-MM-DD]\n   \u8ddd\u5165\u804c\uff1a[X] \u5929\n\n   \u6ce8\u610f\u4e8b\u9879\uff1a\n   - [ ] Offer \u5df2\u53d1\u9001\uff1f\n   - [ ] \u80cc\u8c03\u5df2\u5b8c\u6210\uff1f\n   - [ ] \u5165\u804c\u6750\u6599\u51c6\u5907\u9f50\u5168\uff1f\n   - [ ] \u5de5\u4f4d/\u8bbe\u5907\u5df2\u51c6\u5907\uff1f\n   ```\n\n5. \u5982\u679c\u5f53\u5929\u6ca1\u6709\u5f85\u5165\u804c\u5019\u9009\u4eba\uff0c\u53d1\u9001\"\u672c\u5468\u65e0\u5f85\u5165\u804c\u5019\u9009\u4eba\"\u63d0\u793a\n\n6. \u901a\u8fc7 send_message \u53d1\u9001\u5230 origin\n\n## \u6ce8\u610f\u4e8b\u9879\n- \u53ea\u63d0\u9192\u672a\u67657\u5929\u5185\u5165\u804c\u7684\u5019\u9009\u4eba\uff08\u592a\u8fdc\u7684\u53ef\u4ee5\u5ffd\u7565\uff09\n- \u5982\u679c\u6240\u6709\u5f85\u5165\u804c\u5019\u9009\u4eba\u90fd\u5df2\u8d85\u8fc7\u5165\u804c\u65e5\uff0c\u63d0\u793a\u5df2\u8fc7\u671f\u5019\u9009\u4eba",
+      "skills": [
+        "interview"
+      ],
+      "skill": "interview",
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 10 * * 2",
+        "display": "0 10 * * 2"
+      },
+      "schedule_display": "0 10 * * 2",
+      "repeat": {
+        "times": null,
+        "completed": 3
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-04-27T19:19:45.178002+08:00",
+      "next_run_at": "2026-05-19T10:00:00+08:00",
+      "last_run_at": "2026-05-12T10:02:45.793612+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": "delivery error: Weixin send failed: iLink sendmessage rate limited: ret=-2 errcode=None errmsg=rate limited",
+      "deliver": "origin",
+      "origin": null
+    },
+    {
+      "id": "abbcf2686299",
+      "name": "\u6bcf\u65e5\u9762\u8bd5\u63d0\u9192",
+      "prompt": "\u6bcf\u5929\u665a\u4e0a9\u70b9\uff0c\u68c0\u67e5\u9762\u8bd5\u65f6\u95f4\u8868\uff0c\u53d1\u9001\u672a\u67657\u5929\u5185\u7684\u9762\u8bd5\u5b89\u6392\u63d0\u9192\u3002\n\n## \u6b65\u9aa4\n\n1. \u5148\u6267\u884c `date \"+%Y-%m-%d\"` \u786e\u8ba4\u4eca\u5929\u65e5\u671f\n\n2. \u8bfb\u53d6\u9762\u8bd5\u65f6\u95f4\u8868\uff1a\n   `/mnt/c/Users/liuch/My Documents/warpdriveai/\u5236\u5ea6/\u62db\u8058/\u9762\u8bd5\u65f6\u95f4\u8868.md`\n\n3. \u8bfb\u53d6\u6240\u6709\u5019\u9009\u4eba\u6863\u6848\uff08`/mnt/c/Users/liuch/My Documents/warpdriveai/\u5236\u5ea6/\u62db\u8058/\u5019\u9009\u4eba\u6863\u6848/*.md`\uff09\uff0c\u8865\u5145\u5019\u9009\u4eba\u5e94\u8058\u5c97\u4f4d\u7b49\u4fe1\u606f\n\n4. \u8bc6\u522b\u6240\u6709\"\u72b6\u6001\"\u975e\"\u5df2\u5b8c\u6210\"\u7684\u9762\u8bd5\u5b89\u6392\uff0c\u4e14\u65e5\u671f\u5728\u4eca\u5929\u4e4b\u540e7\u5929\u5185\n\n5. \u6309\u65e5\u671f\u5206\u7ec4\u6574\u7406\uff0c\u6309\u65e5\u671f\u5347\u5e8f\u6392\u5217\n\n6. \u53d1\u9001\u63d0\u9192\uff0c\u683c\u5f0f\uff1a\n\n   ```\n   \ud83d\udcc5 \u9762\u8bd5\u63d0\u9192 \u2014 \u672a\u67657\u5929\u5b89\u6392\n\n   ### YYYY-MM-DD (X\u5929\u540e)\n   - **[\u5019\u9009\u4eba\u59d3\u540d]** | [\u8f6e\u6b21] | [\u65f6\u95f4] | [\u5f62\u5f0f] | \u9762\u8bd5\u5b98\uff1a[\u9762\u8bd5\u5b98]\n     \u5907\u6ce8\uff1a[\u5907\u6ce8]\n   ```\n\n   \u5982\u679c\u4eca\u5929\u6709\u9762\u8bd5\uff1a\n   ```\n   ### \u4eca\u5929\n   - **[\u5019\u9009\u4eba\u59d3\u540d]** | [\u8f6e\u6b21] | [\u65f6\u95f4] | [\u5f62\u5f0f] | \u9762\u8bd5\u5b98\uff1a[\u9762\u8bd5\u5b98]\n     \u5907\u6ce8\uff1a[\u5907\u6ce8]\n   ```\n\n7. \u5982\u679c\u6ca1\u6709\u672a\u67657\u5929\u5185\u7684\u9762\u8bd5\u5b89\u6392\uff0c\u53d1\u9001\"\u672a\u67657\u5929\u5185\u65e0\u9762\u8bd5\u5b89\u6392\"\n\n## \u6ce8\u610f\u4e8b\u9879\n- \u5fc5\u987b\u4f7f\u7528 `date \"+%Y-%m-%d\"` \u83b7\u53d6\u4eca\u5929\u7684\u65e5\u671f\uff0c\u4e0d\u8981\u5047\u8bbe\u6216\u786c\u7f16\u7801\u65e5\u671f\n- \u5982\u679c\u9762\u8bd5\u5df2\u8fc7\u671f\uff08\u65e5\u671f\u5728\u4eca\u5929\u4e4b\u524d\u4e14\u72b6\u6001\u975e\u5df2\u5b8c\u6210\uff09\uff0c\u6807\u6ce8\"\u26a0\ufe0f \u5df2\u8fc7\u671f\"\n- \u6ce8\u610f\u8868\u683c\u4e2d\u7684\u65e5\u671f\u683c\u5f0f\uff0c\u53ea\u6709\u4e00\u884c\u6570\u636e\u65f6\u4e0d\u8981\u91cd\u590d\u8868\u5934",
+      "skills": [
+        "interview"
+      ],
+      "skill": "interview",
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 21 * * *",
+        "display": "0 21 * * *"
+      },
+      "schedule_display": "0 21 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 18
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-04-27T19:22:17.374140+08:00",
+      "next_run_at": "2026-05-13T21:00:00+08:00",
+      "last_run_at": "2026-05-12T21:04:40.645910+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": "delivery error: Weixin send failed: iLink sendmessage rate limited: ret=-2 errcode=None errmsg=rate limited",
+      "deliver": "origin",
+      "origin": null
+    },
+    {
+      "id": "13fbed6a9ac6",
+      "name": "Cron \u5065\u5eb7\u68c0\u67e5 & \u81ea\u52a8\u6062\u590d",
+      "prompt": "\u4f60\u662f Cron \u5065\u5eb7\u68c0\u67e5 & \u81ea\u52a8\u6062\u590d agent\u3002\u4e0a\u9762 script \u7684\u8f93\u51fa\u5df2\u6ce8\u5165\u4e3a context\uff0c\u5217\u51fa\u4e86\u9700\u8981\u5904\u7406\u7684\u95ee\u9898\u3002\u8bf7\u4e25\u683c\u6309\u4ee5\u4e0b\u89c4\u5219\u6267\u884c\uff1a\n\n## \u89c4\u5219\n\n### \u5bf9\u4e8e NEED-RERUN \u7684\u4efb\u52a1\n\u8c03\u7528 cronjob(action='run', job_id='<id>') \u91cd\u65b0\u6267\u884c\uff0c\u5b8c\u6210\u540e\u8bb0\u5f55\u3002\n\n### \u5bf9\u4e8e NEED-RESEND \u7684\u4efb\u52a1\n\u5982\u679c\u4e0a\u9762 context \u4e2d\u6709 WITH_CONTENT\uff0c\u610f\u5473\u7740 output \u5df2\u63d0\u4f9b\uff0c\u76f4\u63a5\u7528 send_message(target='weixin', message='<output>') \u53d1\u9001\u5230\u5fae\u4fe1\u3002\n\u5982\u679c\u4e0a\u9762 context \u4e2d output \u88ab\u622a\u65ad\u4e86\uff0c\u5148 terminal('cat ~/.hermes/cron/output/<jid>/<filename>.md') \u83b7\u53d6\u5b8c\u6574\u5185\u5bb9\u518d\u53d1\u9001\u3002\n\u5982\u679c NO_CONTENT\uff0c\u8df3\u8fc7\uff08\u6ca1\u6709\u5185\u5bb9\u53ef\u53d1\uff09\u3002\n\n### \u5bf9\u4e8e HEALTHY \u7684\u4efb\u52a1\n\u4e0d\u505a\u4efb\u4f55\u64cd\u4f5c\u3002\n\n## \u62a5\u544a\u683c\u5f0f\n\n\u8f93\u51fa\u7b80\u77ed\u62a5\u544a\u4f5c\u4e3a final response\uff1a\n\n```\n\ud83d\udd0d Cron \u5065\u5eb7\u68c0\u67e5\u62a5\u544a\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n\u2705 \u6b63\u5e38\uff1ax\u4e2a\n\ud83d\udd04 \u5df2\u81ea\u52a8\u6062\u590d\uff1ax\u4e2a\uff08\u5217\u660e\uff09\n\u274c \u4ecd\u5931\u8d25\uff1ax\u4e2a\uff08\u5217\u660e\uff09\n```\n\n\u26a0\ufe0f \u4e0d\u8981\u7528 [SILENT]\uff0c\u5fc5\u987b\u8f93\u51fa\u62a5\u544a\u3002\n",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "cron_health_collector.py",
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8,18 * * *",
+        "display": "0 8,18 * * *"
+      },
+      "schedule_display": "0 8,18 * * *",
+      "repeat": {
+        "times": 999,
+        "completed": 27
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-04-30T10:00:25.900478+08:00",
+      "next_run_at": "2026-05-13T18:00:00+08:00",
+      "last_run_at": "2026-05-13T08:04:16.953508+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": "delivery error: Weixin send failed: iLink sendmessage rate limited: ret=-2 errcode=None errmsg=rate limited",
+      "deliver": "origin",
+      "origin": {
+        "platform": "weixin",
+        "chat_id": "o9cq801iSM_4kP4nkL0j7OXvgC7o@im.wechat",
+        "chat_name": null,
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null
+    },
+    {
+      "id": "1b38a660ab9a",
+      "name": "\u6bcf\u65e5\u505a\u68a6\u7cbe\u70bc",
+      "prompt": "\u6267\u884c\u505a\u68a6\u7cbe\u70bc\u6d41\u6c34\u7ebf\uff1a\u8fd0\u884c ~/.hermes/scripts/dream_cycle.py\uff0c\u626b\u63cf\u65b0 session\uff0c\u63d0\u53d6\u91cd\u8981\u4fe1\u606f\uff0c\u5408\u5e76\u5230 MEMORY.md/USER.md\uff0c\u89e3\u51b3\u77db\u76fe\uff0c\u6e05\u7406\u8fc7\u65f6\u6761\u76ee\u3002\u9759\u9ed8\u6267\u884c\uff0c\u53ea\u8f93\u51fa\u7ed3\u679c\u6458\u8981\u3002\n\n\u811a\u672c\u7edd\u5bf9\u8def\u5f84\uff1a/home/jianliu/.hermes/scripts/dream_cycle.py\n\u8fd0\u884c\u65b9\u5f0f\uff1apython3 /home/jianliu/.hermes/scripts/dream_cycle.py\n\n\u4e0d\u52a0\u8f7d\u4efb\u4f55 skill\u3002",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 3 * * *",
+        "display": "0 3 * * *"
+      },
+      "schedule_display": "0 3 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 10
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-01T22:06:04.249578+08:00",
+      "next_run_at": "2026-05-14T03:00:00+08:00",
+      "last_run_at": "2026-05-13T03:05:41.126193+08:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "weixin",
+        "chat_id": "o9cq801iSM_4kP4nkL0j7OXvgC7o@im.wechat",
+        "chat_name": null,
+        "thread_id": null
+      },
+      "enabled_toolsets": [
+        "terminal",
+        "file"
+      ],
+      "workdir": null
+    }
+  ],
+  "updated_at": "2026-05-13T09:03:06.343645+08:00"
+}

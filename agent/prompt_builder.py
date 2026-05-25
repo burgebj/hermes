@@ -271,6 +271,16 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "without acting are not acceptable."
 )
 
+VERIFY_TASK_GUIDANCE = (
+    "# Independent verification\n"
+    "When the user asks to verify facts, code behavior, or tool results, use "
+    "`verify_task` instead of relying on your own prior reasoning. Pass concrete "
+    "claims, changed files, and tool-result handles. Treat `VERDICT: PASS` as "
+    "required before reporting verified success; for `VERDICT: FAIL` or "
+    "`VERDICT: PARTIAL`, explain the failed or incomplete checks and continue "
+    "fixing when the user asked you to complete the work."
+)
+
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")

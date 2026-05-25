@@ -71,6 +71,8 @@ _ALWAYS_BLOCKED_NETWORKS = (
 # This is intentionally narrow: QQ media downloads can legitimately resolve
 # to 198.18.0.0/15 behind local proxy/benchmark infrastructure.
 _TRUSTED_PRIVATE_IP_HOSTS = frozenset({
+    "cdn.discordapp.com",
+    "media.discordapp.net",
     "multimedia.nt.qq.com.cn",
 })
 

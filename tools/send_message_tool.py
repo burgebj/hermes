@@ -1557,6 +1557,7 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
             chat_id=chat_id,
             message=message,
             media_files=media_files,
+            force_fresh_session=True,
         )
     except Exception as e:
         return _error(f"Weixin send failed: {e}")

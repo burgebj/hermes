@@ -1106,17 +1106,21 @@ def check_all_command_guards(command: str, env_type: str,
 
     # --- Phase 1: Gather findings from both checks ---
 
+    # Dangerous command check is local and fast. Run it before tirith so
+    # gateway approval prompts appear immediately even when tirith needs a
+    # first-run install/download.
+    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+
     # Tirith check — wrapper guarantees no raise for expected failures.
     # Only catch ImportError (module not installed).
     tirith_result = {"action": "allow", "findings": [], "summary": ""}
-    try:
-        from tools.tirith_security import check_command_security
-        tirith_result = check_command_security(command)
-    except ImportError:
-        pass  # tirith module not installed — allow
-
-    # Dangerous command check (detection only, no approval)
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    skip_tirith_for_prompt_latency = bool((is_gateway or is_ask) and is_dangerous)
+    if not skip_tirith_for_prompt_latency:
+        try:
+            from tools.tirith_security import check_command_security
+            tirith_result = check_command_security(command)
+        except ImportError:
+            pass  # tirith module not installed — allow
 
     # --- Phase 2: Decide ---
 

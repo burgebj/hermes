@@ -72,6 +72,16 @@ mini-swe-agent/
 result
 website/static/api/skills-index.json
 models-dev-upstream/
+
+# Hermes backup - large database (compressed version stored as .gz)
+.hermes_backup/databases/state.db
+
+# Hermes backup - skills .hub/ cache (noise)
+.hermes_backup/skills/.hub/
+
+hermes_cli/tui_dist/*
+hermes_cli/scripts/
+docs/superpowers/*
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
 docs/superpowers/*

@@ -587,6 +587,18 @@ DEFAULT_CONFIG = {
         "image_input_mode": "auto",
         "disabled_toolsets": [],
     },
+
+    "verification": {
+        # Deterministic post-final-response gate. When enabled, Hermes runs
+        # verify_task automatically for turns with concrete verification risk
+        # signals (changed files, side-effectful tool results, or explicit
+        # user verification intent). The gate is skipped for streaming turns
+        # and verifier subagents to avoid rewriting already-delivered output
+        # and recursion.
+        "auto_enabled": True,
+        "text_quality_enabled": False,
+        "max_tool_results_chars": 6000,
+    },
     
     "terminal": {
         "backend": "local",

@@ -248,6 +248,17 @@ class FileStateRegistry:
         with self._state_lock:
             return list(self._reads.get(task_id, {}).keys())
 
+    def writes_by_task_since(self, task_id: str, since_ts: float) -> List[str]:
+        """Return paths written by ``task_id`` at or after ``since_ts``."""
+        if _disabled() or not task_id:
+            return []
+        with self._state_lock:
+            return [
+                p
+                for p, (writer_tid, ts) in self._last_writer.items()
+                if writer_tid == task_id and ts >= since_ts
+            ]
+
     # ── Testing hooks ───────────────────────────────────────────────
     def clear(self) -> None:
         """Reset all state.  Intended for tests only."""
@@ -320,6 +331,10 @@ def known_reads(task_id: str) -> List[str]:
     return _registry.known_reads(task_id)
 
 
+def writes_by_task_since(task_id: str, since_ts: float) -> List[str]:
+    return _registry.writes_by_task_since(task_id, since_ts)
+
+
 __all__ = [
     "FileStateRegistry",
     "get_registry",
@@ -329,4 +344,5 @@ __all__ = [
     "lock_path",
     "writes_since",
     "known_reads",
+    "writes_by_task_since",
 ]

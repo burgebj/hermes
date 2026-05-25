@@ -1,0 +1,20 @@
+{
+  "run_at": "2026-04-23T22:10:00+08:00",
+  "matched_count": 8,
+  "new_count": 0,
+  "removed_count": 5,
+  "changed_count": 0,
+  "summary": "懂车帝L90在售8台 | 无新增 | 5台下架 | 无价格变动",
+  "items": [
+    {"price_wan": 24.50, "mileage_km": null, "city": "宁波", "seller_type": "商家", "title": "六座版Max"},
+    {"price_wan": 21.28, "mileage_km": 20000, "city": "上海", "seller_type": "商家", "title": "六座版Pro"},
+    {"price_wan": 23.28, "mileage_km": 23000, "city": "上海", "seller_type": "商家", "title": "六座版Max"},
+    {"price_wan": 22.18, "mileage_km": null, "city": "北京", "seller_type": "商家", "title": "六座版Pro"},
+    {"price_wan": 22.59, "mileage_km": null, "city": "上海", "seller_type": "商家", "title": "六座版Max"},
+    {"price_wan": 22.18, "mileage_km": 14000, "city": "上海", "seller_type": "商家", "title": "六座版Max"},
+    {"price_wan": 20.80, "mileage_km": null, "city": "合肥", "seller_type": "商家", "title": "六座版Max"},
+    {"price_wan": 24.38, "mileage_km": null, "city": "佛山", "seller_type": "商家", "title": "六座版Ultra"}
+  ],
+  "removed_listing_ids": ["22104423", "23307091", "23402686", "23484511", "23505188"],
+  "note": "温州23.80万Max、青岛23.88万Ultra、上海21.99万Pro、南京23.66万Max 已下架；佛山24.38万Ultra新增"
+}

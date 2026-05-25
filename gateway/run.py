@@ -7602,6 +7602,7 @@ class GatewayRunner:
                 from agent.skill_commands import (
                     get_skill_commands,
                     build_skill_invocation_message,
+                    run_codex_session_skill,
                     resolve_skill_command_key,
                 )
                 skill_cmds = get_skill_commands()
@@ -7621,6 +7622,14 @@ class GatewayRunner:
                                 f"Enable it with: `hermes skills config`"
                             )
                     user_instruction = event.get_command_args().strip()
+                    if str(_skill_name).lower() == "codex-session":
+                        _workdir = os.environ.get("TERMINAL_CWD") or os.getcwd()
+                        return await asyncio.to_thread(
+                            run_codex_session_skill,
+                            user_instruction,
+                            workdir=_workdir,
+                            skill_dir=skill_cmds[cmd_key].get("skill_dir"),
+                        )
                     msg = build_skill_invocation_message(
                         cmd_key, user_instruction, task_id=_quick_key
                     )

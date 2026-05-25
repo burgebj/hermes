@@ -1,0 +1,9 @@
+{
+  "last_report_path": "/home/jianliu/.hermes/logs/curator/20260520-075242",
+  "last_run_at": "2026-05-20T07:52:42.075331+00:00",
+  "last_run_duration_seconds": 149.604091,
+  "last_run_summary": "auto: no changes; llm: Memory isn't available in this environment — that's fine.\n\n## Summary\n\n| Skill | Action | Reason |\n|---|---|---|\n| `code-review-and-diagnostics` | **Pruned** | Zero session usage, zero patches, zero activity. Generic \"review code\" content t…\narchived 1 skill(s):\n  • code-review-and-diagnostics — pruned (stale)\nfull report: hermes curator status",
+  "last_run_summary_shown_at": null,
+  "paused": false,
+  "run_count": 3
+}

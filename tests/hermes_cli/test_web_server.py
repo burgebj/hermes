@@ -2,7 +2,9 @@
 
 import os
 import json
+import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -223,6 +225,7 @@ class TestWebServerEndpoints:
         from hermes_cli.config import save_env_value
         from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
         save_env_value("TEST_REVEAL_KEY", "super-secret-value-12345")
+
         resp = self.client.post(
             "/api/env/reveal",
             json={"key": "TEST_REVEAL_KEY"},
@@ -1519,6 +1522,100 @@ class TestStatusRemoteGateway:
         assert data["gateway_state"] == "running"
 
 
+class TestWebServerForegroundTty:
+    def test_restore_foreground_tty_noop_without_tty(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        class _FakeStdin:
+            def isatty(self):
+                return False
+
+        monkeypatch.setattr(ws.sys, "stdin", _FakeStdin())
+
+        assert ws._restore_foreground_tty() is False
+
+    def test_restore_foreground_tty_enables_canonical_flags(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        class _FakeStdin:
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 0
+
+        calls = {}
+        fake_termios = types.SimpleNamespace(
+            BRKINT=0x0001,
+            ICRNL=0x0002,
+            IXON=0x0004,
+            IGNBRK=0x0008,
+            IGNCR=0x0010,
+            INLCR=0x0020,
+            ISTRIP=0x0040,
+            OPOST=0x0080,
+            ONLCR=0x0100,
+            ECHO=0x0200,
+            ECHOE=0x0400,
+            ECHOK=0x0800,
+            ICANON=0x1000,
+            IEXTEN=0x2000,
+            ISIG=0x4000,
+            VMIN=0,
+            VTIME=1,
+            TCSANOW=123,
+        )
+
+        def _tcgetattr(fd):
+            calls["fd"] = fd
+            return [
+                fake_termios.IGNBRK | fake_termios.IGNCR,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [9, 9, 9],
+            ]
+
+        def _tcsetattr(fd, when, attrs):
+            calls["set"] = (fd, when, attrs)
+
+        fake_termios.tcgetattr = _tcgetattr
+        fake_termios.tcsetattr = _tcsetattr
+
+        monkeypatch.setattr(ws.sys, "stdin", _FakeStdin())
+        monkeypatch.setitem(sys.modules, "termios", fake_termios)
+
+        assert ws._restore_foreground_tty() is True
+        assert calls["fd"] == 0
+        fd, when, attrs = calls["set"]
+        assert fd == 0
+        assert when == fake_termios.TCSANOW
+        assert attrs[0] & fake_termios.ICRNL
+        assert attrs[0] & fake_termios.IXON
+        assert not (attrs[0] & fake_termios.IGNCR)
+        assert attrs[1] & fake_termios.OPOST
+        assert attrs[3] & fake_termios.ICANON
+        assert attrs[3] & fake_termios.ISIG
+        assert attrs[6][fake_termios.VMIN] == 1
+        assert attrs[6][fake_termios.VTIME] == 0
+
+    def test_start_server_restores_tty_before_uvicorn(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        calls = []
+        fake_uvicorn = types.SimpleNamespace(
+            run=lambda *args, **kwargs: calls.append(("uvicorn", args, kwargs))
+        )
+
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+        monkeypatch.setattr(ws, "_restore_foreground_tty", lambda: calls.append(("restore",)))
+
+        ws.start_server(host="127.0.0.1", port=9119, open_browser=False)
+
+        assert calls[0] == ("restore",)
+        assert calls[1][0] == "uvicorn"
 # ---------------------------------------------------------------------------
 # Dashboard theme normaliser tests
 # ---------------------------------------------------------------------------

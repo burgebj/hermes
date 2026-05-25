@@ -1601,11 +1601,13 @@ def _resolve_child_python(mode: str) -> str:
         root = os.environ.get(var, "").strip()
         if not root:
             continue
+        found_candidate = False
         for subdir in subdirs:
             for exe in exe_names:
                 candidate = os.path.join(root, subdir, exe)
                 if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
                     continue
+                found_candidate = True
                 if _is_usable_python(candidate):
                     return candidate
                 # Found the interpreter but it failed the version check —
@@ -1615,6 +1617,8 @@ def _resolve_child_python(mode: str) -> str:
                     "Using sys.executable instead.", var, candidate,
                 )
                 return sys.executable
+        if var == "VIRTUAL_ENV" and not found_candidate:
+            return sys.executable
 
     return sys.executable
 

@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from hermes_constants import display_hermes_home
+from hermes_constants import display_hermes_home, get_hermes_home
 from agent.skill_preprocessing import (
     expand_inline_shell as _expand_inline_shell,
     load_skills_config as _load_skills_config,
@@ -25,6 +26,8 @@ _skill_commands_platform: Optional[str] = None
 # Patterns for sanitizing skill names into clean hyphen-separated slugs.
 _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 _SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
+_CODEX_SESSION_TIMEOUT_SECONDS = 30 * 60
+_CODEX_SESSION_FALLBACK_REPO = Path("/home/jianliu/work/hermes-agent")
 
 
 def _resolve_skill_commands_platform() -> Optional[str]:
@@ -49,6 +52,120 @@ def _resolve_skill_commands_platform() -> Optional[str]:
     except Exception:
         resolved_platform = os.getenv("HERMES_PLATFORM")
     return resolved_platform or None
+
+
+def _git_repo_root_for(path: Path) -> Optional[Path]:
+    """Return the git worktree root for *path*, or None when not in a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    root = result.stdout.strip()
+    return Path(root) if root else None
+
+
+def _resolve_codex_session_workdir(workdir: str | os.PathLike[str] | None = None) -> Optional[Path]:
+    """Choose a git repo workdir for the codex-session script."""
+    candidates: list[Path] = []
+    for raw in (
+        workdir,
+        os.getenv("TERMINAL_CWD"),
+        os.getcwd(),
+        _CODEX_SESSION_FALLBACK_REPO,
+    ):
+        if not raw or str(raw) in (".", "auto", "cwd"):
+            continue
+        try:
+            candidate = Path(raw).expanduser()
+        except TypeError:
+            continue
+        candidates.append(candidate)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        repo_root = _git_repo_root_for(resolved)
+        if repo_root:
+            return repo_root
+    return None
+
+
+def run_codex_session_skill(
+    prompt: str,
+    *,
+    workdir: str | os.PathLike[str] | None = None,
+    skill_dir: str | os.PathLike[str] | None = None,
+    timeout: int = _CODEX_SESSION_TIMEOUT_SECONDS,
+) -> str:
+    """Run the codex-session companion script directly and return its output."""
+    user_prompt = (prompt or "").strip()
+    if not user_prompt:
+        return "Codex session error: prompt is required."
+
+    if skill_dir:
+        script = Path(skill_dir).expanduser() / "scripts" / "codex_session.sh"
+    else:
+        script = get_hermes_home() / "skills" / "codex-session" / "scripts" / "codex_session.sh"
+    if not script.exists():
+        display_path = script
+        try:
+            display_path = Path(
+                str(script).replace(str(get_hermes_home()), display_hermes_home(), 1)
+            )
+        except Exception:
+            pass
+        return f"Codex session error: script not found at {display_path}."
+    if not script.is_file():
+        return f"Codex session error: script path is not a file: {script}."
+
+    repo_root = _resolve_codex_session_workdir(workdir)
+    if not repo_root:
+        return (
+            "Codex session error: no git repository workdir found. "
+            "Run Hermes from a git repo or set terminal.cwd to one."
+        )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script), "--workdir", str(repo_root), user_prompt],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = "\n".join(
+            part.strip()
+            for part in (exc.stdout or "", exc.stderr or "")
+            if isinstance(part, str) and part.strip()
+        )
+        suffix = f"\n\nPartial output:\n{partial}" if partial else ""
+        return f"Codex session timed out after {timeout}s.{suffix}"
+    except Exception as exc:
+        return f"Codex session error: {exc}"
+
+    output = "\n".join(
+        part.strip()
+        for part in (result.stdout, result.stderr)
+        if part and part.strip()
+    )
+    if result.returncode != 0:
+        detail = f"\n\n{output}" if output else ""
+        return f"Codex session failed with exit code {result.returncode}.{detail}"
+    return output or "Codex session completed with no output."
 
 def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
     """Load a skill by name/path and return (loaded_payload, skill_dir, display_name)."""

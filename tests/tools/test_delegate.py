@@ -20,16 +20,21 @@ from unittest.mock import MagicMock, patch
 from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
     DELEGATE_TASK_SCHEMA,
+    VERIFY_TASK_SCHEMA,
     DelegateEvent,
     _get_max_concurrent_children,
     _LEGACY_EVENT_MAP,
     MAX_DEPTH,
     check_delegate_requirements,
     delegate_task,
+    verify_task,
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
+    _get_child_approval_callback,
+    _parse_verifier_verdict,
     _strip_blocked_tools,
+    _restrict_toolsets_for_verifier,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
 )
@@ -2167,10 +2172,38 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
         from tools.delegate_tool import DELEGATE_TASK_SCHEMA
         props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
         self.assertIn("role", props)
+        # Role is dynamically rebuilt at get_definitions() time; only leaf/orchestrator
+        # are exposed in the static schema. Verifier role is handled via verify_task tool.
         self.assertEqual(props["role"]["enum"], ["leaf", "orchestrator"])
         task_props = props["tasks"]["items"]["properties"]
         self.assertIn("role", task_props)
         self.assertEqual(task_props["role"]["enum"], ["leaf", "orchestrator"])
+
+    def test_acp_command_description_has_do_not_set_guidance(self):
+        # acp_command/acp_args descriptions must NOT bias the model toward
+        # assuming an ACP CLI (Claude, Copilot, etc.) is installed. They must
+        # carry explicit "do not set unless told" guidance so the model doesn't
+        # hallucinate ACP availability (#22013).
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+
+        top_acp_desc = props["acp_command"]["description"]
+        self.assertIn("Do NOT set", top_acp_desc)
+        self.assertIn("explicitly told you", top_acp_desc)
+
+        task_props = props["tasks"]["items"]["properties"]
+        per_task_acp_desc = task_props["acp_command"]["description"]
+        self.assertIn("Do NOT set", per_task_acp_desc)
+
+    def test_acp_command_description_has_no_claude_as_example(self):
+        # Descriptions must not list 'claude' as a canonical example value —
+        # that directly primes the model to attempt Claude ACP even when it is
+        # not installed (#22013).
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        top_acp_desc = props["acp_command"]["description"].lower()
+        self.assertNotIn("e.g. 'claude'", top_acp_desc)
+        self.assertNotIn("e.g. \"claude\"", top_acp_desc)
 
     def test_acp_command_description_has_do_not_set_guidance(self):
         # acp_command/acp_args descriptions must NOT bias the model toward
@@ -2421,6 +2454,202 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
             delegate_task(goal="test", role="orchestrator",
                           parent_agent=parent)
             self.assertIn("delegation", MockAgent.call_args[1]["enabled_toolsets"])
+
+
+class TestVerifierRoleBehavior(unittest.TestCase):
+    """Tests that role='verifier' gets evidence-first prompt and safe tools."""
+
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_verifier_role_uses_read_only_file_toolset(self, mock_cfg, mock_creds):
+        mock_creds.return_value = {
+            "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None, "model": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "file", "skills", "web", "delegation"]
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_role_mock_child()
+            MockAgent.return_value = mock_child
+            delegate_task(goal="verify the change", role="verifier", parent_agent=parent)
+            kwargs = MockAgent.call_args[1]
+            self.assertEqual(mock_child._delegate_role, "verifier")
+            self.assertIn("terminal", kwargs["enabled_toolsets"])
+            self.assertIn("file_read", kwargs["enabled_toolsets"])
+            self.assertIn("skills_read", kwargs["enabled_toolsets"])
+            self.assertIn("web", kwargs["enabled_toolsets"])
+            self.assertNotIn("file", kwargs["enabled_toolsets"])
+            self.assertNotIn("skills", kwargs["enabled_toolsets"])
+            self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+
+    def test_verifier_prompt_requires_evidence_and_verdict(self):
+        prompt = _build_child_system_prompt(
+            "Verify the tool result",
+            context="Claim: file /tmp/x exists",
+            role="verifier",
+            max_spawn_depth=1,
+            child_depth=1,
+        )
+        self.assertIn("verification specialist", prompt)
+        self.assertIn("Command/source used", prompt)
+        self.assertIn("VERDICT: PASS", prompt)
+        self.assertIn("VERDICT: FAIL", prompt)
+        self.assertIn("VERDICT: PARTIAL", prompt)
+        self.assertIn("Tool results", prompt)
+        self.assertNotIn("Any files you created or modified", prompt)
+
+    def test_verifier_toolset_restriction_drops_write_surfaces(self):
+        toolsets = _restrict_toolsets_for_verifier(
+            [
+                "terminal",
+                "file",
+                "skills",
+                "delegation",
+                "memory",
+                "web",
+            ]
+        )
+        self.assertEqual(toolsets, ["terminal", "file_read", "skills_read", "web"])
+
+    def test_verifier_toolset_restriction_extracts_safe_parts_from_platform_bundle(self):
+        toolsets = _restrict_toolsets_for_verifier(["hermes-cli"])
+        self.assertIn("terminal", toolsets)
+        self.assertIn("file_read", toolsets)
+        self.assertIn("skills_read", toolsets)
+        self.assertIn("web", toolsets)
+        self.assertIn("browser", toolsets)
+        self.assertNotIn("file", toolsets)
+        self.assertNotIn("skills", toolsets)
+        self.assertNotIn("delegation", toolsets)
+
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_batch_mode_per_task_verifier_role(self, mock_cfg, mock_creds):
+        mock_creds.return_value = {
+            "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None, "model": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "file", "delegation"]
+        built = []
+
+        def _factory(*a, **kw):
+            m = _make_role_mock_child()
+            built.append((m, kw.get("enabled_toolsets")))
+            return m
+
+        with patch("run_agent.AIAgent", side_effect=_factory):
+            delegate_task(
+                tasks=[
+                    {"goal": "verify", "role": "verifier"},
+                    {"goal": "work", "role": "leaf"},
+                ],
+                parent_agent=parent,
+            )
+
+        self.assertEqual(built[0][0]._delegate_role, "verifier")
+        self.assertIn("file_read", built[0][1])
+        self.assertNotIn("file", built[0][1])
+        self.assertEqual(built[1][0]._delegate_role, "leaf")
+
+    def test_verifier_result_parser_extracts_final_verdict_and_checks(self):
+        parsed = _parse_verifier_verdict(
+            "### Check: tests\n"
+            "Command/source used: scripts/run_tests.sh tests/tools/test_delegate.py\n"
+            "Result: PASS\n"
+            "Evidence: passed\n\n"
+            "### Check: docs\n"
+            "Result: PARTIAL\n"
+            "Evidence: not checked\n\n"
+            "VERDICT: PARTIAL\n"
+        )
+        self.assertEqual(parsed["verdict"], "PARTIAL")
+        self.assertFalse(parsed["passed"])
+        self.assertEqual(len(parsed["checks"]), 2)
+        self.assertEqual(parsed["checks"][0]["name"], "tests")
+        self.assertEqual(parsed["failed_checks"], ["docs"])
+
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_delegate_task_verifier_result_is_structured(self, mock_cfg, mock_creds):
+        mock_creds.return_value = {
+            "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None, "model": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "file"]
+        summary = (
+            "### Check: focused test\n"
+            "Command/source used: scripts/run_tests.sh tests/tools/test_delegate.py\n"
+            "Result: PASS\n"
+            "Evidence: selected tests passed\n\n"
+            "VERDICT: PASS\n"
+        )
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_role_mock_child()
+            mock_child.run_conversation.return_value = {
+                "final_response": summary,
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+            payload = json.loads(
+                delegate_task(goal="verify the change", role="verifier", parent_agent=parent)
+            )
+
+        result = payload["results"][0]
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertTrue(result["verification"]["passed"])
+        self.assertEqual(result["verification"]["checks"][0]["name"], "focused test")
+
+    def test_verify_task_schema_is_first_class_tool(self):
+        self.assertEqual(VERIFY_TASK_SCHEMA["name"], "verify_task")
+        props = VERIFY_TASK_SCHEMA["parameters"]["properties"]
+        self.assertIn("original_request", props)
+        self.assertIn("claims_to_verify", props)
+        self.assertIn("tool_results_or_handles", props)
+        self.assertEqual(
+            props["verification_scope"]["enum"],
+            ["facts", "code", "tool_results", "mixed"],
+        )
+        from toolsets import TOOLSETS
+        self.assertIn("verify_task", TOOLSETS["delegation"]["tools"])
+
+    def test_verify_task_wrapper_forces_verifier_role_and_top_level_verdict(self):
+        parent = _make_mock_parent(depth=0)
+        raw_payload = {
+            "results": [
+                {
+                    "task_index": 0,
+                    "status": "completed",
+                    "summary": "### Check: claim\nResult: FAIL\nEvidence: no\n\nVERDICT: FAIL\n",
+                }
+            ],
+            "total_duration_seconds": 0.1,
+        }
+        with patch("tools.delegate_tool.delegate_task") as mock_delegate:
+            mock_delegate.return_value = json.dumps(raw_payload)
+            payload = json.loads(
+                verify_task(
+                    original_request="do X",
+                    claims_to_verify=["X succeeded"],
+                    verification_scope="tool_results",
+                    parent_agent=parent,
+                )
+            )
+
+        self.assertEqual(mock_delegate.call_args[1]["role"], "verifier")
+        self.assertIn("X succeeded", mock_delegate.call_args[1]["goal"])
+        self.assertEqual(payload["verdict"], "FAIL")
+        self.assertFalse(payload["verified"])
+        self.assertTrue(payload["action_required"])
+
+    def test_verifier_approval_callback_always_denies(self):
+        child = MagicMock()
+        child._delegate_role = "verifier"
+        cb = _get_child_approval_callback(child)
+        self.assertEqual(cb("bash -lc 'rm -rf x'", "dangerous"), "deny")
 
 
 class TestOrchestratorEndToEnd(unittest.TestCase):

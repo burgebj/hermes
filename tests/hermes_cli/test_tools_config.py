@@ -79,10 +79,21 @@ def test_get_platform_tools_uses_default_when_platform_not_configured():
 def test_configurable_toolsets_include_messaging():
     assert any(ts_key == "messaging" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
 
+
+def test_configurable_toolsets_include_car_scraper():
+    assert any(ts_key == "car-scraper" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
+
+
 def test_get_platform_tools_default_telegram_includes_messaging():
     enabled = _get_platform_tools({}, "telegram")
 
     assert "messaging" in enabled
+
+
+def test_get_platform_tools_default_cli_includes_car_scraper():
+    enabled = _get_platform_tools({}, "cli")
+
+    assert "car-scraper" in enabled
 
 
 def test_get_platform_tools_default_whatsapp_includes_web():

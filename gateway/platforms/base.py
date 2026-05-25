@@ -1095,7 +1095,13 @@ class MessageEvent:
             return None
         # Split on space and get first word, strip the /
         parts = self.text.split(maxsplit=1)
-        raw = parts[0][1:].lower() if parts else None
+        if not parts:
+            return None
+        token = parts[0]
+        if token.startswith("//") and not token.startswith("///"):
+            raw = token[2:].lower()
+        else:
+            raw = token[1:].lower()
         if raw and "@" in raw:
             raw = raw.split("@", 1)[0]
         # Reject file paths: valid command names never contain /

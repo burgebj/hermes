@@ -53,9 +53,11 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task",
+    "execute_code", "delegate_task", "verify_task",
     # Cronjob management
     "cronjob",
+    # Car scraper (懂车帝/瓜子 L90 monitoring)
+    "dongchedi_watch",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -166,6 +168,12 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
+
+    "skills_read": {
+        "description": "Read-only skill discovery and viewing tools",
+        "tools": ["skills_list", "skill_view"],
+        "includes": []
+    },
     
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
@@ -195,6 +203,12 @@ TOOLSETS = {
     "file": {
         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
         "tools": ["read_file", "write_file", "patch", "search_files"],
+        "includes": []
+    },
+
+    "file_read": {
+        "description": "Read-only file tools: read files and search paths/content",
+        "tools": ["read_file", "search_files"],
         "includes": []
     },
     
@@ -236,7 +250,7 @@ TOOLSETS = {
     
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
-        "tools": ["delegate_task"],
+        "tools": ["delegate_task", "verify_task"],
         "includes": []
     },
 
@@ -534,6 +548,12 @@ TOOLSETS = {
     "hermes-webhook": {
         "description": "Webhook toolset - receive and process external webhook events",
         "tools": _HERMES_WEBHOOK_SAFE_TOOLS,
+        "includes": []
+    },
+
+    "car-scraper": {
+        "description": "Car listing scraper - monitor 懂车帝/瓜子 EV listings with change detection",
+        "tools": ["dongchedi_watch"],
         "includes": []
     },
 

@@ -730,6 +730,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     job["id"], platform_name, chat_id, e,
                 )
 
+        # Weixin: always fall through to standalone path. The live adapter
+        # uses aiohttp's asyncio.timeout which can fail with
+        # "Timeout context manager should be used inside a task" when the
+        # gateway's event loop has unusual internal state (e.g. during a
+        # concurrent inbound long-poll cycle).  The standalone path uses
+        # asyncio.run() to create a fresh loop + task, which is always safe.
+        if platform_name.lower() == "weixin":
+            delivered = False
+
         if not delivered:
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)

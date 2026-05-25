@@ -2733,15 +2733,25 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
         return f"max turns: {max_turns}"
 
     elif section_key == "gateway":
-        from hermes_cli.gateway import _all_platforms, _platform_status
-        # Count any non-empty status other than the "not configured" sentinel —
-        # platforms like WhatsApp ("enabled, not paired"), Matrix ("configured
-        # + E2EE"), and Signal ("partially configured") all indicate the user
-        # has already started setup and we shouldn't force the section to rerun.
+        from hermes_cli.gateway import _all_platforms
+        # For setup skip detection, only count explicit primary env sentinels.
+        # Runtime registry checks may report "configured" from dependency or
+        # config defaults, but OpenClaw migration should rerun the gateway
+        # section unless a real token/enabled sentinel was imported.
         configured = [
             _gateway_platform_short_label(plat["label"])
             for plat in _all_platforms()
-            if _platform_status(plat) and _platform_status(plat) != "not configured"
+            if plat.get("token_var")
+            and (
+                (
+                    plat.get("token_var") == "WHATSAPP_ENABLED"
+                    and str(get_env_value(plat["token_var"]) or "").lower() == "true"
+                )
+                or (
+                    plat.get("token_var") != "WHATSAPP_ENABLED"
+                    and bool(get_env_value(plat["token_var"]))
+                )
+            )
         ]
         if configured:
             return ", ".join(configured)

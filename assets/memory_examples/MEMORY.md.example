@@ -1,0 +1,9 @@
+User wants detailed comparison doc between 乐道L90 (Onvo L90) and 零跑D19 (Leapmotor D19).
+- 零跑D19 data partially gathered from autohome.com.cn: 大型SUV, 纯电/增程, 21.98-26.98万, 7款配置 (增程400六座/增程500六座七座/纯电620六座/纯电720六座七座/纯电680三电机性能版六座), 关注榜第6名
+- 乐道L90 specs not yet gathered - need to find on autohome (brand: 乐道/Onvo, likely under L letter)
+- Browser navigation to autohome search pages redirects to homepage - need different approach to find 乐道L90 page ID
+- Task: generate comparison doc once both cars' specs are collected
+§
+用户纠正了我的错误：之前写的乐道L90价格(21.99-26.99万)是错误的。正确价格是26.58-29.98万（2025款，6款配置）。用户要求多数据源交叉验证，不要写不确定的数据。
+§
+autohome车型ID：乐道L90=8045，零跑D19=8273。autohome数据可能有误，零跑D19转弯半径3.6m用户存疑（可能是三电机版本特有，非全系统一）。

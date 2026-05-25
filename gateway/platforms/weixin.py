@@ -1176,7 +1176,7 @@ async def qr_login(
 class WeixinAdapter(BasePlatformAdapter):
     """Native Hermes adapter for Weixin personal accounts."""
 
-    MAX_MESSAGE_LENGTH = 2000
+    MAX_MESSAGE_LENGTH = 14000
 
     # WeChat does not support editing sent messages — streaming must use the
     # fallback "send-final-only" path so the cursor (▉) is never left visible.
@@ -1607,16 +1607,21 @@ class WeixinAdapter(BasePlatformAdapter):
                             or errcode == SESSION_EXPIRED_ERRCODE
                             or _is_stale_session_ret(ret, errcode, resp.get("errmsg"))
                         )
-                        # Session expired — strip token and retry once
-                        if is_session_expired and not retried_without_token and context_token:
+                        # ret=-2 ("unknown error") can also indicate a stale context token
+                        # that hasn't expired yet but is no longer accepted by the server.
+                        is_unknown_ret_error = ret == -2
+                        # Session expired or unknown token error — strip token and retry once
+                        if (is_session_expired or is_unknown_ret_error) and not retried_without_token and context_token:
                             retried_without_token = True
                             context_token = None
                             self._token_store._cache.pop(
                                 self._token_store._key(self._account_id, chat_id), None
                             )
                             logger.warning(
-                                "[%s] session expired for %s; retrying without context_token",
-                                self.name, _safe_id(chat_id),
+                                "[%s] %s for %s; retrying without context_token",
+                                self.name,
+                                "session expired" if is_session_expired else "ret=-2 unknown error",
+                                _safe_id(chat_id),
                             )
                             continue
                         # Rate limit (-2) — backoff and retry
@@ -2077,11 +2082,16 @@ async def send_weixin_direct(
     chat_id: str,
     message: str,
     media_files: Optional[List[Tuple[str, bool]]] = None,
+    force_fresh_session: bool = False,
 ) -> Dict[str, Any]:
     """
     One-shot send helper for ``send_message`` and cron delivery.
 
     This bypasses the long-poll adapter lifecycle and uses the raw API directly.
+    Set ``force_fresh_session=True`` when called from a standalone event loop
+    (e.g. cron delivery via asyncio.run()) to avoid the aiohttp 3.13+
+    "Timeout context manager should be used inside a task" bug with live
+    adapter sessions that belong to the gateway's event loop.
     """
     account_id = str(extra.get("account_id") or os.getenv("WEIXIN_ACCOUNT_ID", "")).strip()
     base_url = str(extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/")
@@ -2096,6 +2106,12 @@ async def send_weixin_direct(
     token_store.restore(account_id)
     context_token = token_store.get(account_id, chat_id)
 
+    # Skip the live adapter path entirely when called from cron delivery
+    # (standalone loop via asyncio.run() or ThreadPoolExecutor).  The live
+    # adapter's aiohttp.ClientSession belongs to the gateway event loop;
+    # calling it from a different loop triggers aiohttp 3.13+'s
+    # "Timeout context manager should be used inside a task" bug.
+    # Instead, always build a fresh session for standalone calls.
     live_adapter = _LIVE_ADAPTERS.get(resolved_token)
     send_session = getattr(live_adapter, '_send_session', None)
     if (live_adapter is not None and send_session is not None
@@ -2108,22 +2124,22 @@ async def send_weixin_direct(
             if not last_result.success:
                 return {"error": f"Weixin send failed: {last_result.error}"}
 
-        for media_path, _is_voice in media_files or []:
-            ext = Path(media_path).suffix.lower()
-            if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
-                last_result = await live_adapter.send_image_file(chat_id, media_path)
-            else:
-                last_result = await live_adapter.send_document(chat_id, media_path)
-            if not last_result.success:
-                return {"error": f"Weixin media send failed: {last_result.error}"}
+            for media_path, _is_voice in media_files or []:
+                ext = Path(media_path).suffix.lower()
+                if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
+                    last_result = await live_adapter.send_image_file(chat_id, media_path)
+                else:
+                    last_result = await live_adapter.send_document(chat_id, media_path)
+                if not last_result.success:
+                    return {"error": f"Weixin media send failed: {last_result.error}"}
 
-        return {
-            "success": True,
-            "platform": "weixin",
-            "chat_id": chat_id,
-            "message_id": last_result.message_id if last_result else None,
-            "context_token_used": bool(context_token),
-        }
+            return {
+                "success": True,
+                "platform": "weixin",
+                "chat_id": chat_id,
+                "message_id": last_result.message_id if last_result else None,
+                "context_token_used": bool(context_token),
+            }
 
     async with aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector()) as session:
         adapter = WeixinAdapter(

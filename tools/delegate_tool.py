@@ -19,6 +19,7 @@ never the child's intermediate tool calls or reasoning.
 import enum
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 import os
@@ -30,7 +31,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
-from toolsets import TOOLSETS
+from toolsets import TOOLSETS, resolve_toolset
 
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
@@ -109,6 +110,23 @@ def _get_subagent_approval_callback():
     if is_truthy_value(val):
         return _subagent_auto_approve
     return _subagent_auto_deny
+
+
+def _verifier_auto_deny(command: str, description: str, **kwargs) -> str:
+    """Always deny dangerous terminal commands for verifier subagents."""
+    logger.warning(
+        "Verifier subagent auto-denied dangerous command: %s (%s).",
+        command,
+        description,
+    )
+    return "deny"
+
+
+def _get_child_approval_callback(child):
+    """Return the terminal approval callback for a child worker thread."""
+    if getattr(child, "_delegate_role", None) == "verifier":
+        return _verifier_auto_deny
+    return _get_subagent_approval_callback()
 
 # Build a description fragment listing toolsets available for subagents.
 # Excludes toolsets where ALL tools are blocked, composite/platform toolsets
@@ -310,17 +328,17 @@ def _looks_like_error_output(content: str) -> bool:
 
 
 def _normalize_role(r: Optional[str]) -> str:
-    """Normalise a caller-provided role to 'leaf' or 'orchestrator'.
+    """Normalise a caller-provided role to 'leaf', 'orchestrator', or 'verifier'.
 
     None/empty -> 'leaf'.  Unknown strings coerce to 'leaf' with a
     warning log (matches the silent-degrade pattern of
     _get_orchestrator_enabled).  _build_child_agent adds a second
-    degrade layer for depth/kill-switch bounds.
+    degrade layer for orchestrator depth/kill-switch bounds.
     """
     if r is None or not r:
         return "leaf"
     r_norm = str(r).strip().lower()
-    if r_norm in {"leaf", "orchestrator"}:
+    if r_norm in ("leaf", "orchestrator", "verifier"):
         return r_norm
     logger.warning("Unknown delegate_task role=%r, coercing to 'leaf'", r)
     return "leaf"
@@ -566,6 +584,54 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+_VERIFIER_PROMPT = """
+## Verification Role
+You are a verification specialist. Your job is not to confirm that the work
+sounds plausible -- it is to verify it with evidence and try to break it.
+
+You are verification-only. Do not create, modify, delete, or patch files in
+the project. Do not install dependencies, commit, push, publish, send messages,
+or perform external writes. You may write ephemeral scripts under /tmp or
+$TMPDIR only when an inline command is not sufficient, and you must clean them
+up when practical.
+
+Verify by running checks, fetching sources, reading files, replaying commands,
+or querying returned handles. Reading code is useful context, but it is not a
+PASS by itself.
+
+Adapt the checks to the claim:
+- Facts: verify against primary or authoritative sources; include source URLs,
+  dates, IDs, or exact handles. Mark unverifiable claims as PARTIAL rather than
+  guessing.
+- Code: run the project's documented build/test/lint/typecheck commands, then
+  exercise the touched behavior directly. For Hermes itself, use
+  scripts/run_tests.sh rather than pytest directly.
+- Tool results: treat prior tool/subagent summaries as self-reports. Re-read
+  files, stat paths, fetch URLs, query APIs/databases, inspect logs, or check
+  process state before accepting a claimed result.
+
+Every check in your final report MUST include:
+### Check: <what you verified>
+**Command/source used:**
+  <exact command, URL, path, or query>
+**Output/evidence observed:**
+  <actual relevant output, status, excerpt, or handle>
+**Result: PASS** or **Result: FAIL**
+
+Before PASS, include at least one adversarial or edge probe when applicable:
+boundary input, malformed input, idempotency, orphan/missing ID, concurrency, or
+direct re-read of a claimed side effect. If the environment blocks a necessary
+check, use PARTIAL and state exactly what remains unverified.
+
+End with exactly one final line:
+VERDICT: PASS
+or
+VERDICT: FAIL
+or
+VERDICT: PARTIAL
+""".strip()
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -596,18 +662,26 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
-    parts.append(
-        "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
-        "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
-        "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
-        "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Be thorough but concise -- your response is returned to the "
-        "parent agent as a summary."
-    )
+    if role == "verifier":
+        parts.append("\n" + _VERIFIER_PROMPT)
+        parts.append(
+            "\nImportant workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
+            "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
+            "Be rigorous but concise -- your evidence-backed verdict is returned to the parent agent."
+        )
+    else:
+        parts.append(
+            "\nComplete this task using the tools available to you. "
+            "When finished, provide a clear, concise summary of:\n"
+            "- What you did\n"
+            "- What you found or accomplished\n"
+            "- Any files you created or modified\n"
+            "- Any issues encountered\n\n"
+            "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
+            "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
+            "Be thorough but concise -- your response is returned to the "
+            "parent agent as a summary."
+        )
     if role == "orchestrator":
         child_note = (
             "Your own children MUST be leaves (cannot delegate further) "
@@ -678,6 +752,72 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
         "code_execution",
     }
     return [t for t in toolsets if t not in blocked_toolset_names]
+
+
+def _restrict_toolsets_for_verifier(toolsets: List[str]) -> List[str]:
+    """Convert a child toolset list into a verification-safe shape.
+
+    The verifier must be able to read, run checks, and fetch evidence, but it
+    must not get project write tools or recursive delegation.  Toolsets are the
+    selection unit in Hermes, so replace broad read/write groups with read-only
+    variants and drop composite/platform groups that would reintroduce writes.
+    """
+    result: List[str] = []
+    blocked = {
+        "delegation",
+        "clarify",
+        "memory",
+        "code_execution",
+        "messaging",
+        "cronjob",
+        "todo",
+        "image_gen",
+        "tts",
+        "rl",
+        "moa",
+    }
+    replacements = {
+        "file": "file_read",
+        "skills": "skills_read",
+    }
+
+    def _append(name: str) -> None:
+        if name not in result:
+            result.append(name)
+
+    def _append_safe_groups_from_tools(tool_names: set[str]) -> None:
+        if {"terminal", "process"} & tool_names:
+            _append("terminal")
+        if {"read_file", "search_files"} & tool_names:
+            _append("file_read")
+        if {"skills_list", "skill_view"} & tool_names:
+            _append("skills_read")
+        if {"web_search", "web_extract"} & tool_names:
+            _append("web")
+        if "vision_analyze" in tool_names:
+            _append("vision")
+        if any(name.startswith("browser_") for name in tool_names):
+            _append("browser")
+        if "session_search" in tool_names:
+            _append("session_search")
+
+    for toolset_name in toolsets:
+        name = str(toolset_name)
+        if name in blocked:
+            continue
+        if name.startswith("hermes-"):
+            # Platform bundles include write/send/control surfaces. Verifiers
+            # should use explicit evidence tools instead. Extract the safe
+            # evidence-gathering subsets so platform parents do not leave the
+            # verifier with no tools at all.
+            try:
+                _append_safe_groups_from_tools(set(resolve_toolset(name)))
+            except Exception:
+                pass
+            continue
+        mapped = replacements.get(name, name)
+        _append(mapped)
+    return result
 
 
 def _build_child_progress_callback(
@@ -884,9 +1024,9 @@ def _build_child_agent(
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
-    # Per-call role controlling whether the child can further delegate.
-    # 'leaf' (default) cannot; 'orchestrator' retains the delegation
-    # toolset subject to depth/kill-switch bounds applied below.
+    # Per-call role controlling child behavior. 'leaf' is a focused worker;
+    # 'orchestrator' retains delegation subject to depth/kill-switch bounds;
+    # 'verifier' gets verification-specific prompt/tool restrictions.
     role: str = "leaf",
 ):
     """
@@ -902,15 +1042,18 @@ def _build_child_agent(
     import uuid as _uuid
 
     # ── Role resolution ─────────────────────────────────────────────────
-    # Honor the caller's role only when BOTH the kill switch and the
-    # child's depth allow it.  This is the single point where role
-    # degrades to 'leaf' — keeps the rule predictable.  Callers pass
-    # the normalised role (_normalize_role ran in delegate_task) so
-    # we only deal with 'leaf' or 'orchestrator' here.
+    # Honor orchestrator only when BOTH the kill switch and child depth allow
+    # it.  Verifier is not a spawning role, so it never needs depth-based
+    # degradation.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
     max_spawn = _get_max_spawn_depth()
     orchestrator_ok = _get_orchestrator_enabled() and child_depth < max_spawn
-    effective_role = role if (role == "orchestrator" and orchestrator_ok) else "leaf"
+    if role == "orchestrator":
+        effective_role = "orchestrator" if orchestrator_ok else "leaf"
+    elif role == "verifier":
+        effective_role = "verifier"
+    else:
+        effective_role = "leaf"
 
     # ── Subagent identity (stable across events, 0-indexed for TUI) ─────
     # subagent_id is generated here so the progress callback, the
@@ -966,6 +1109,8 @@ def _build_child_agent(
     # test_intersection_preserves_delegation_bound test for the design rationale.
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
+    elif effective_role == "verifier":
+        child_toolsets = _restrict_toolsets_for_verifier(child_toolsets)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -1076,6 +1221,9 @@ def _build_child_agent(
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
+    # Verifier doesn't need extended thinking — just read, check, report.
+    if role == "verifier":
+        child_reasoning = {"enabled": False}
     # Inherit the parent's fallback provider chain so subagents can recover
     # from rate-limits and credential exhaustion exactly like the top-level
     # agent does.  _fallback_chain is a list accepted by AIAgent's
@@ -1494,9 +1642,10 @@ def _run_single_child(
             # Install a non-interactive approval callback in the worker thread
             # so dangerous-command prompts from the subagent don't fall back to
             # input() and deadlock the parent's prompt_toolkit TUI.
-            # Callback (deny vs approve) is governed by delegation.subagent_auto_approve.
+            # Callback (deny vs approve) is governed by delegation.subagent_auto_approve,
+            # except verifier children, which always deny dangerous commands.
             initializer=_set_subagent_approval_cb,
-            initargs=(_get_subagent_approval_callback(),),
+            initargs=(_get_child_approval_callback(child),),
         )
         # Capture the worker thread so the timeout diagnostic can dump its
         # Python stack (see #14726 — 0-API-call hangs are opaque without it).
@@ -1892,6 +2041,119 @@ def _run_single_child(
             logger.debug("Failed to close child agent after delegation")
 
 
+_VERDICT_RE = re.compile(r"(?im)^\s*VERDICT:\s*(PASS|FAIL|PARTIAL)\s*\.?\s*$")
+_CHECK_HEADING_RE = re.compile(r"(?im)^\s*#{2,4}\s*Check\s*:\s*(.+?)\s*$")
+_CHECK_RESULT_RE = re.compile(r"(?im)^\s*Result\s*:\s*(PASS|FAIL|PARTIAL)\s*\.?\s*$")
+
+
+def _parse_verifier_verdict(summary: Optional[str]) -> Dict[str, Any]:
+    """Parse a verifier summary into a stable machine-readable shape."""
+    text = summary if isinstance(summary, str) else ""
+    verdict_matches = list(_VERDICT_RE.finditer(text))
+    verdict = verdict_matches[-1].group(1).upper() if verdict_matches else "PARTIAL"
+
+    checks: List[Dict[str, Any]] = []
+    headings = list(_CHECK_HEADING_RE.finditer(text))
+    verdict_start = verdict_matches[-1].start() if verdict_matches else len(text)
+    for idx, match in enumerate(headings):
+        start = match.end()
+        end = headings[idx + 1].start() if idx + 1 < len(headings) else verdict_start
+        block = text[start:end].strip()
+        result_match = _CHECK_RESULT_RE.search(block)
+        result = result_match.group(1).upper() if result_match else "PARTIAL"
+        checks.append(
+            {
+                "name": match.group(1).strip(),
+                "result": result,
+                "evidence": block[:2000],
+            }
+        )
+
+    return {
+        "verdict": verdict,
+        "passed": verdict == "PASS",
+        "checks": checks,
+        "failed_checks": [
+            check["name"]
+            for check in checks
+            if check.get("result") in {"FAIL", "PARTIAL"}
+        ],
+        "has_explicit_verdict": bool(verdict_matches),
+    }
+
+
+def _annotate_verifier_entry(entry: Dict[str, Any]) -> None:
+    """Attach parsed verification metadata to a verifier result entry."""
+    verification = _parse_verifier_verdict(entry.get("summary"))
+    if entry.get("status") != "completed" and verification["verdict"] == "PASS":
+        verification["verdict"] = "PARTIAL"
+        verification["passed"] = False
+    entry["verification"] = verification
+    entry["verdict"] = verification["verdict"]
+
+
+def _build_verification_goal(
+    *,
+    original_request: Optional[str] = None,
+    claims_to_verify: Optional[Any] = None,
+    changed_files: Optional[List[str]] = None,
+    tool_results_or_handles: Optional[Any] = None,
+    verification_scope: Optional[str] = None,
+    context: Optional[str] = None,
+) -> str:
+    parts = [
+        "Verify the described work. Do not modify project files. "
+        "Use source reads, shell checks, browser/web evidence, or supplied "
+        "tool handles as appropriate. Return evidence-backed checks and end "
+        "with exactly one final VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.",
+    ]
+    if verification_scope:
+        parts.append(f"Scope: {verification_scope}")
+    if original_request:
+        parts.append(f"Original request:\n{original_request}")
+    if claims_to_verify:
+        if isinstance(claims_to_verify, list):
+            claims_text = "\n".join(f"- {item}" for item in claims_to_verify)
+        else:
+            claims_text = str(claims_to_verify)
+        parts.append(f"Claims to verify:\n{claims_text}")
+    if changed_files:
+        parts.append("Changed files:\n" + "\n".join(f"- {path}" for path in changed_files))
+    if tool_results_or_handles:
+        if isinstance(tool_results_or_handles, (dict, list)):
+            handles_text = json.dumps(tool_results_or_handles, ensure_ascii=False, indent=2)
+        else:
+            handles_text = str(tool_results_or_handles)
+        parts.append(f"Tool results or handles to verify:\n{handles_text}")
+    if context:
+        parts.append(f"Additional context:\n{context}")
+    return "\n\n".join(parts)
+
+
+def _augment_verification_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return payload
+    verdicts = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        if "verification" not in entry:
+            _annotate_verifier_entry(entry)
+        verdicts.append(entry.get("verdict"))
+    if not verdicts:
+        payload["verdict"] = "PARTIAL"
+    elif all(v == "PASS" for v in verdicts):
+        payload["verdict"] = "PASS"
+    elif any(v == "FAIL" for v in verdicts):
+        payload["verdict"] = "FAIL"
+    else:
+        payload["verdict"] = "PARTIAL"
+    payload["verified"] = payload["verdict"] == "PASS"
+    payload["action_required"] = payload["verdict"] != "PASS"
+    return payload
+
+
 def _recover_tasks_from_json_string(
     tasks: Any,
 ) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
@@ -1933,10 +2195,12 @@ def delegate_task(
       - Single: provide goal (+ optional context, toolsets, role)
       - Batch:  provide tasks array [{goal, context, toolsets, role}, ...]
 
-    The 'role' parameter controls whether a child can further delegate:
-    'leaf' (default) cannot; 'orchestrator' retains the delegation
-    toolset and can spawn its own workers, bounded by
-    delegation.max_spawn_depth.  Per-task role beats the top-level one.
+    The 'role' parameter controls child behavior:
+    'leaf' (default) is a focused worker; 'orchestrator' retains the
+    delegation toolset and can spawn its own workers, bounded by
+    delegation.max_spawn_depth; 'verifier' runs evidence-backed validation
+    with read-only file/skill toolsets and a strict PASS/FAIL/PARTIAL report.
+    Per-task role beats the top-level one.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2212,6 +2476,10 @@ def delegate_task(
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
 
+    for entry in results:
+        if entry.get("_child_role") == "verifier":
+            _annotate_verifier_entry(entry)
+
     # Notify parent's memory provider of delegation outcomes
     if (
         parent_agent
@@ -2307,6 +2575,53 @@ def delegate_task(
         },
         ensure_ascii=False,
     )
+
+
+def verify_task(
+    original_request: Optional[str] = None,
+    claims_to_verify: Optional[Any] = None,
+    changed_files: Optional[List[str]] = None,
+    tool_results_or_handles: Optional[Any] = None,
+    verification_scope: Optional[str] = None,
+    context: Optional[str] = None,
+    toolsets: Optional[List[str]] = None,
+    acp_command: Optional[str] = None,
+    acp_args: Optional[List[str]] = None,
+    parent_agent=None,
+) -> str:
+    """Run a dedicated verifier subagent and return a structured verdict."""
+    if parent_agent is None:
+        return tool_error("verify_task requires a parent agent context.")
+
+    goal = _build_verification_goal(
+        original_request=original_request,
+        claims_to_verify=claims_to_verify,
+        changed_files=changed_files,
+        tool_results_or_handles=tool_results_or_handles,
+        verification_scope=verification_scope,
+        context=context,
+    )
+    raw = delegate_task(
+        goal=goal,
+        context=(
+            "You are a verifier. Treat PASS as a high bar: pass only after "
+            "source-backed or command-backed checks support the claims. "
+            "Use FAIL for contradicted claims and PARTIAL for incomplete evidence."
+        ),
+        toolsets=toolsets,
+        acp_command=acp_command,
+        acp_args=acp_args,
+        role="verifier",
+        parent_agent=parent_agent,
+    )
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return raw
+    if isinstance(payload, dict):
+        payload = _augment_verification_payload(payload)
+        return json.dumps(payload, ensure_ascii=False)
+    return raw
 
 
 def _resolve_child_credential_pool(effective_provider: Optional[str], parent_agent):
@@ -2541,8 +2856,9 @@ def _build_top_level_description() -> str:
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). "
         f"All run in parallel and results are returned together. {nesting_clause}\n\n"
-        "WHEN TO USE delegate_task:\n"
+        "WHEN TO USE:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
+        "- Independent verification of facts, code behavior, or claimed tool results via role='verifier'\n"
         "- Tasks that would flood your context with intermediate data\n"
         "- Parallel independent workstreams (research A and B simultaneously)\n\n"
         "WHEN NOT TO USE (use these instead):\n"
@@ -2579,6 +2895,11 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
+        "- Verifier subagents (role='verifier') are for validating facts, "
+        "code, and tool results. They must produce command/source-backed "
+        "evidence and end with VERDICT: PASS, VERDICT: FAIL, or "
+        "VERDICT: PARTIAL. They cannot delegate and their file/skill "
+        "toolsets are restricted to read-only variants.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -2777,6 +3098,70 @@ DELEGATE_TASK_SCHEMA = {
 }
 
 
+VERIFY_TASK_SCHEMA = {
+    "name": "verify_task",
+    "description": (
+        "Run a dedicated verifier subagent to validate facts, code behavior, "
+        "or claimed tool results. The verifier uses read-only file/skill "
+        "toolsets, cannot delegate, auto-denies dangerous terminal commands, "
+        "and must return evidence-backed checks ending in VERDICT: PASS, "
+        "VERDICT: FAIL, or VERDICT: PARTIAL. Use this before reporting that "
+        "a risky, external, code, or tool-result claim is true."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "original_request": {
+                "type": "string",
+                "description": "The user's original request or success criteria.",
+            },
+            "claims_to_verify": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Specific factual, code, or outcome claims to verify. "
+                    "Prefer concrete claims over vague summaries."
+                ),
+            },
+            "changed_files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Files whose content or behavior should be checked.",
+            },
+            "tool_results_or_handles": {
+                "type": "string",
+                "description": (
+                    "Tool outputs, URLs, IDs, paths, command results, or other "
+                    "handles that the verifier should independently check. "
+                    "Pass structured data as JSON text when needed."
+                ),
+            },
+            "verification_scope": {
+                "type": "string",
+                "enum": ["facts", "code", "tool_results", "mixed"],
+                "description": "Primary kind of verification to perform.",
+            },
+            "context": {
+                "type": "string",
+                "description": "Additional constraints, expected behavior, or evidence locations.",
+            },
+            "toolsets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional verifier toolsets. Defaults to inherited tools, "
+                    "then safely restricts them. Common values: ['terminal', "
+                    "'file', 'web'], ['terminal', 'file'], or ['web']."
+                ),
+            },
+            "acp_command": DELEGATE_TASK_SCHEMA["parameters"]["properties"]["acp_command"],
+            "acp_args": DELEGATE_TASK_SCHEMA["parameters"]["properties"]["acp_args"],
+        },
+        "required": [],
+    },
+}
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
 
@@ -2798,4 +3183,24 @@ registry.register(
     check_fn=check_delegate_requirements,
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,
+)
+
+registry.register(
+    name="verify_task",
+    toolset="delegation",
+    schema=VERIFY_TASK_SCHEMA,
+    handler=lambda args, **kw: verify_task(
+        original_request=args.get("original_request"),
+        claims_to_verify=args.get("claims_to_verify"),
+        changed_files=args.get("changed_files"),
+        tool_results_or_handles=args.get("tool_results_or_handles"),
+        verification_scope=args.get("verification_scope"),
+        context=args.get("context"),
+        toolsets=args.get("toolsets"),
+        acp_command=args.get("acp_command"),
+        acp_args=args.get("acp_args"),
+        parent_agent=kw.get("parent_agent"),
+    ),
+    check_fn=check_delegate_requirements,
+    emoji="🧪",
 )
