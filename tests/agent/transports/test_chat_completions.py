@@ -553,6 +553,96 @@ class TestChatCompletionsKimi:
         )
         assert kw["extra_body"]["thinking"] == {"type": "disabled"}
 
+    def test_kimi_fallback_pads_codex_tool_call_history_reasoning_content(self, transport):
+        """Kimi fallback can receive Codex-built api_messages.
+
+        The Codex path strips Responses-only fields before retrying on a
+        chat-completions fallback, but Kimi thinking mode still requires
+        ``reasoning_content`` on assistant tool-call messages.
+        """
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "codex_reasoning_items": [{"id": "rs_1"}],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "call_id": "call_1",
+                        "response_item_id": "fc_1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        kw = transport.build_kwargs(
+            model="kimi-k2",
+            messages=messages,
+            is_kimi=True,
+            reasoning_config={"enabled": True, "effort": "high"},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+
+        assistant_msg = kw["messages"][1]
+        assert assistant_msg["reasoning_content"] == " "
+        assert "codex_reasoning_items" not in assistant_msg
+        assert "call_id" not in assistant_msg["tool_calls"][0]
+        assert "response_item_id" not in assistant_msg["tool_calls"][0]
+        # The transport must not mutate persisted history.
+        assert "reasoning_content" not in messages[1]
+        assert "codex_reasoning_items" in messages[1]
+
+    def test_kimi_disabled_thinking_does_not_pad_reasoning_content(self, transport):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        kw = transport.build_kwargs(
+            model="kimi-k2",
+            messages=messages,
+            is_kimi=True,
+            reasoning_config={"enabled": False},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert "reasoning_content" not in kw["messages"][1]
+
+    def test_kimi_existing_reasoning_content_is_preserved(self, transport):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "provider-supplied summary",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        kw = transport.build_kwargs(
+            model="kimi-k2",
+            messages=messages,
+            is_kimi=True,
+            reasoning_config={"enabled": True},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert kw["messages"][1]["reasoning_content"] == "provider-supplied summary"
+
     def test_moonshot_tool_schemas_are_sanitized_by_model_name(self, transport):
         """Aggregator routes (Nous, OpenRouter) hit Moonshot by model name, not base URL."""
         tools = [

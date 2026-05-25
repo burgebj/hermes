@@ -99,6 +99,62 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     return normalized.endswith("/openai")
 
 
+def _kimi_thinking_enabled(reasoning_config: dict | None) -> bool:
+    """Return whether Kimi/Moonshot thinking-mode request fields are active."""
+    return not (
+        reasoning_config
+        and isinstance(reasoning_config, dict)
+        and reasoning_config.get("enabled") is False
+    )
+
+
+def _pad_kimi_tool_call_reasoning_content(
+    messages: List[Dict[str, Any]],
+    reasoning_config: dict | None,
+) -> List[Dict[str, Any]]:
+    """Pad assistant tool-call turns for Kimi thinking-mode replay.
+
+    Hermes can build ``api_messages`` while the active provider is still a
+    Codex Responses backend, then switch to Kimi inside the retry/fallback
+    loop. In that shape, Codex assistant tool-call history has already had
+    Codex-only fields stripped, but it was never passed through the Kimi
+    replay guard that adds ``reasoning_content``. Kimi rejects such requests
+    with HTTP 400: "thinking is enabled but reasoning_content is missing in
+    assistant tool call message".
+
+    Add a single-space placeholder only for Kimi thinking-mode assistant
+    tool-call messages that lack a string ``reasoning_content``. The space is
+    non-empty for strict validators, but does not fabricate or leak another
+    provider's chain-of-thought.
+    """
+    if not _kimi_thinking_enabled(reasoning_config):
+        return messages
+
+    needs_copy = False
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        if not msg.get("tool_calls"):
+            continue
+        existing = msg.get("reasoning_content")
+        if not isinstance(existing, str) or existing == "":
+            needs_copy = True
+            break
+    if not needs_copy:
+        return messages
+
+    padded = copy.deepcopy(messages)
+    for msg in padded:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        if not msg.get("tool_calls"):
+            continue
+        existing = msg.get("reasoning_content")
+        if not isinstance(existing, str) or existing == "":
+            msg["reasoning_content"] = " "
+    return padded
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'.
 
@@ -242,6 +298,13 @@ class ChatCompletionsTransport(ProviderTransport):
         """
         # Codex sanitization: drop reasoning_items / call_id / response_item_id
         sanitized = self.convert_messages(messages)
+        is_kimi = params.get("is_kimi", False)
+        reasoning_config = params.get("reasoning_config")
+        if is_kimi:
+            sanitized = _pad_kimi_tool_call_reasoning_content(
+                sanitized,
+                reasoning_config,
+            )
 
         # ── Provider profile: single-path when present ──────────────────
         _profile = params.get("provider_profile")
@@ -302,12 +365,7 @@ class ChatCompletionsTransport(ProviderTransport):
 
         # Kimi: top-level reasoning_effort (unless thinking disabled)
         if is_kimi:
-            _kimi_thinking_off = bool(
-                reasoning_config
-                and isinstance(reasoning_config, dict)
-                and reasoning_config.get("enabled") is False
-            )
-            if not _kimi_thinking_off:
+            if _kimi_thinking_enabled(reasoning_config):
                 _kimi_effort = "medium"
                 if reasoning_config and isinstance(reasoning_config, dict):
                     _e = (reasoning_config.get("effort") or "").strip().lower()
@@ -372,12 +430,8 @@ class ChatCompletionsTransport(ProviderTransport):
 
         # Kimi extra_body.thinking
         if is_kimi:
-            _kimi_thinking_enabled = True
-            if reasoning_config and isinstance(reasoning_config, dict):
-                if reasoning_config.get("enabled") is False:
-                    _kimi_thinking_enabled = False
             extra_body["thinking"] = {
-                "type": "enabled" if _kimi_thinking_enabled else "disabled",
+                "type": "enabled" if _kimi_thinking_enabled(reasoning_config) else "disabled",
             }
 
         # Reasoning. LM Studio is handled above via top-level reasoning_effort,
