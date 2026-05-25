@@ -1170,7 +1170,7 @@ class WeComAdapter(BasePlatformAdapter):
                 "filename": filename,
                 "total_size": total_size,
                 "total_chunks": total_chunks,
-                "md5": hashlib.md5(data).hexdigest(),
+                "md5": hashlib.md5(data).hexdigest(),  # nosec B324  -- WeCom media upload protocol requires the md5 field
             },
         )
         self._raise_for_wecom_error(init_response, "media upload init")

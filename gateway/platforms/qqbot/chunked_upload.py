@@ -366,7 +366,7 @@ class ChunkedUploader:
         data = await asyncio.get_running_loop().run_in_executor(
             None, _read_file_chunk, file_path, offset, length
         )
-        md5_hex = hashlib.md5(data).hexdigest()
+        md5_hex = hashlib.md5(data).hexdigest()  # nosec B324  -- QQ Bot rich-media upload protocol requires MD5 digest of chunk payload
 
         logger.debug(
             "[%s] Part %d/%d: uploading %s (offset=%d md5=%s)",
@@ -558,9 +558,9 @@ def _read_file_chunk(file_path: str, offset: int, length: int) -> bytes:
 
 def _compute_file_hashes(file_path: str, file_size: int) -> Dict[str, str]:
     """Compute md5, sha1, and md5_10m in a single pass."""
-    md5 = hashlib.md5()
-    sha1 = hashlib.sha1()
-    md5_10m = hashlib.md5()
+    md5 = hashlib.md5()  # nosec B324  -- QQ Bot chunked upload protocol field
+    sha1 = hashlib.sha1()  # nosec B324  -- QQ Bot chunked upload protocol field
+    md5_10m = hashlib.md5()  # nosec B324  -- QQ Bot chunked upload first-10MB MD5 protocol field
 
     need_10m = file_size > _MD5_10M_SIZE
     bytes_read = 0
