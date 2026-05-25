@@ -820,6 +820,36 @@
   color: rgba(255, 215, 0, 0.8);
 }
 
+.copyBtn {
+  margin-left: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(212, 132, 90, 0.25);
+  background: rgba(212, 132, 90, 0.08);
+  color: #d4845a;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+/* hover = subtle glow */
+.copyBtn:hover {
+  background: rgba(212, 132, 90, 0.15);
+  border-color: rgba(212, 132, 90, 0.4);
+}
+
+/* copied state = green success */
+.copied {
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.4);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+/* optional: slight glow when copied */
+.copied:hover {
+  background: rgba(74, 222, 128, 0.18);
+}
+
 
 @media (max-width: 900px) {
   .layout {
@@ -908,3 +938,5 @@
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   }
 }
+
+

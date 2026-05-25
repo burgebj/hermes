@@ -131,6 +131,7 @@ function SkillCard({
 }) {
   const src = SOURCE_CONFIG[skill.source] || SOURCE_CONFIG["optional"];
   const icon = CATEGORY_ICONS[skill.category] || "\u{1F4E6}";
+  const [copied, setCopied] = useState(false);
 
   return (
     <div
@@ -251,6 +252,16 @@ function SkillCard({
             )}
             <div className={styles.installHint}>
               <code>hermes skills install {skill.name}</code>
+              <button
+              className={`${styles.copyBtn} ${copied ? styles.copied : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard.writeText(`hermes skills install ${skill.name}`);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                }}>
+                {copied ? "Copied" : "Copy"}
+                </button>
             </div>
             {skill.docsPath && (
               <a
