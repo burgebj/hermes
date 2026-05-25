@@ -3726,18 +3726,53 @@ def mount_spa(application: FastAPI):
 
     _index_path = WEB_DIST / "index.html"
 
-    def _serve_index(prefix: str = ""):
+    def _serve_index(prefix: str = "", full_path: str = ""):
         """Return index.html with the session token + base-path injected.
 
         ``prefix`` is the normalised ``X-Forwarded-Prefix`` (e.g. ``/hermes``)
         or empty string when served at root.
+        ``full_path`` is the SPA route the browser requested (used to restore
+        the correct route after async plugin registration).
         """
         html = _index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
+        import json as _json
+        plugins = _get_dashboard_plugins()
+        plugin_paths_json = _json.dumps([
+            p["tab"]["path"] for p in plugins if not p.get("tab", {}).get("hidden")
+        ])
+        initial_route = _json.dumps("/" + full_path.lstrip("/")) if full_path else _json.dumps("/")
         token_script = (
             f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
             f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
-            f'window.__HERMES_BASE_PATH__="{prefix}";</script>'
+            f'window.__HERMES_BASE_PATH__="{prefix}";'
+            f"window.__HERMES_INITIAL_ROUTE__={initial_route};"
+            f"window.__HERMES_PLUGIN_PATHS__={plugin_paths_json};"
+            f"(function(){{"
+            f"var _target=window.__HERMES_INITIAL_ROUTE__;"
+            f"var _paths=new Set(window.__HERMES_PLUGIN_PATHS__||[]);"
+            f"if(!_paths.has(_target))return;"
+            f"var _done=false;"
+            f"function _installHook(){{"
+            f"var P=window.__HERMES_PLUGINS__;"
+            f"if(!P||typeof P.register!=='function')return false;"
+            f"var _orig=P.register;"
+            f"P.register=function(name,comp){{"
+            f"_orig.call(this,name,comp);"
+            f"if(_done)return;"
+            f"setTimeout(function(){{"
+            f"if(!_done&&window.location.pathname!==_target){{"
+            f"_done=true;"
+            f"window.history.pushState({{}},'',_target);"
+            f"window.dispatchEvent(new PopStateEvent('popstate'));"
+            f"}}}}  ,30);"
+            f"}};"
+            f"return true;"
+            f"}}"
+            f"var _interval=setInterval(function(){{if(_installHook())clearInterval(_interval);}},10);"
+            f"setTimeout(function(){{clearInterval(_interval);}},3000);"
+            f"}})();"
+            f'</script>'
         )
         if prefix:
             # Rewrite absolute asset URLs baked into the Vite build so the
@@ -3791,7 +3826,7 @@ def mount_spa(application: FastAPI):
             and file_path.is_file()
         ):
             return FileResponse(file_path)
-        return _serve_index(prefix)
+        return _serve_index(prefix, full_path=full_path)
 
 
 # ---------------------------------------------------------------------------
