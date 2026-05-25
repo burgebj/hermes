@@ -186,6 +186,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "x-ai/grok-4.3",
         "nvidia/nemotron-3-super-120b-a12b",
         "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-flash",
     ],
     # Native OpenAI Chat Completions (api.openai.com). Used by /model counts and
     # provider_model_ids fallback when /v1/models is unavailable.
