@@ -75,7 +75,22 @@ Config file: `~/.hermes/hindsight/config.json`
 | `recall_prompt_preamble` | — | Custom preamble for recalled memories in context |
 | `recall_tags` | — | Tags to filter when searching memories |
 | `recall_tags_match` | `any` | Tag matching mode: `any` / `all` / `any_strict` / `all_strict` |
+| `recall_types` | — | Optional list of Hindsight memory types to recall. When unset, Hindsight recalls all available types |
 | `auto_recall` | `true` | Automatically recall memories before each turn |
+
+#### Repeated recall or memory bloat
+
+Hindsight can return several memory types during recall. The default `recall_types` value is unset, which lets Hindsight recall all available types, including synthesized `world` / `experience` memories and direct `observation` memories.
+
+If long-running sessions start injecting near-duplicate memories into the prompt, try narrowing automatic recall to observations:
+
+```json title="~/.hermes/hindsight/config.json"
+{
+  "recall_types": ["observation"]
+}
+```
+
+This is a trade-off: it reduces repeated synthesized context from the `experience` / `world` layers, but it also means automatic recall will no longer include those layers. Keep the default if you want the broadest Hindsight recall surface.
 
 ### Retain
 
