@@ -33,6 +33,7 @@ from gateway.platforms.api_server import (
     _derive_chat_session_id,
     check_api_server_requirements,
     cors_middleware,
+    host_header_middleware,
     security_headers_middleware,
 )
 
@@ -392,9 +393,13 @@ class TestAuth:
 # ---------------------------------------------------------------------------
 
 
-def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
+def _make_adapter(
+    api_key: str = "",
+    cors_origins=None,
+    host: str = "127.0.0.1",
+) -> APIServerAdapter:
     """Create an adapter with optional API key."""
-    extra = {}
+    extra = {"host": host}
     if api_key:
         extra["key"] = api_key
     if cors_origins is not None:
@@ -405,7 +410,11 @@ def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
 
 def _create_app(adapter: APIServerAdapter) -> web.Application:
     """Create the aiohttp app from the adapter (without starting the full server)."""
-    mws = [mw for mw in (cors_middleware, security_headers_middleware) if mw is not None]
+    mws = [
+        mw
+        for mw in (host_header_middleware, cors_middleware, security_headers_middleware)
+        if mw is not None
+    ]
     app = web.Application(middlewares=mws)
     app["api_server_adapter"] = adapter
     app.router.add_get("/health", adapter._handle_health)
@@ -2899,6 +2908,50 @@ class TestCORS:
             )
             assert resp.status == 200
             assert resp.headers.get("Access-Control-Max-Age") == "600"
+
+
+# ---------------------------------------------------------------------------
+# Host header / DNS rebinding guard
+# ---------------------------------------------------------------------------
+
+
+class TestHostHeaderGuard:
+    def test_host_header_allows_loopback_names_without_key(self, adapter):
+        assert adapter._host_header_allowed("127.0.0.1:8642") is True
+        assert adapter._host_header_allowed("localhost:8642") is True
+        assert adapter._host_header_allowed("[::1]:8642") is True
+
+    def test_host_header_rejects_untrusted_host_without_key(self, adapter):
+        assert adapter._host_header_allowed("evil.example:8642") is False
+
+    def test_host_header_preserves_authenticated_network_clients(self):
+        adapter = _make_adapter(api_key="sk-secret", host="0.0.0.0")
+        assert adapter._host_header_allowed("open-webui.internal:8642") is True
+
+    @pytest.mark.asyncio
+    async def test_no_origin_untrusted_host_is_rejected_by_default(self, adapter):
+        """DNS-rebinding requests can omit Origin but still carry attacker Host."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get(
+                "/v1/models",
+                headers={"Host": "evil.example:8642"},
+            )
+            assert resp.status == 403
+            data = await resp.json()
+            assert data["error"]["code"] == "invalid_host_header"
+
+    @pytest.mark.asyncio
+    async def test_loopback_host_still_allows_local_clients(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get(
+                "/v1/models",
+                headers={"Host": "127.0.0.1:8642"},
+            )
+            assert resp.status == 200
+
+
 # ---------------------------------------------------------------------------
 # Conversation parameter
 # ---------------------------------------------------------------------------

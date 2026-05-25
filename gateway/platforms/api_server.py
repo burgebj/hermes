@@ -475,7 +475,7 @@ class ResponseStore:
 
 
 # ---------------------------------------------------------------------------
-# CORS middleware
+# Host / CORS middleware
 # ---------------------------------------------------------------------------
 
 _CORS_HEADERS = {
@@ -483,8 +483,48 @@ _CORS_HEADERS = {
     "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
 }
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _normalize_host_header(value: str) -> str:
+    """Return the hostname portion of a Host header for exact comparison."""
+    host = (value or "").strip().lower().rstrip(".")
+    if not host:
+        return ""
+    # A comma is never valid in a single Host field value; fail closed by
+    # returning the whole invalid value, which will not match the allowlist.
+    if "," in host:
+        return host
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            return host
+        return host[1:end].rstrip(".")
+    if host.count(":") == 1:
+        host, port = host.rsplit(":", 1)
+        if port.isdigit():
+            return host.rstrip(".")
+    return host
+
 
 if AIOHTTP_AVAILABLE:
+    @web.middleware
+    async def host_header_middleware(request, handler):
+        """Reject DNS-rebinding Host headers on unauthenticated local servers."""
+        adapter = request.app.get("api_server_adapter")
+        host_allowed = adapter is None or adapter._host_header_allowed(
+            request.headers.get("Host", "")
+        )
+        if not host_allowed:
+            return web.json_response(
+                _openai_error(
+                    "Invalid Host header for unauthenticated local API server.",
+                    code="invalid_host_header",
+                ),
+                status=403,
+            )
+        return await handler(request)
+
     @web.middleware
     async def cors_middleware(request, handler):
         """Add CORS headers for explicitly allowed origins; handle OPTIONS preflight."""
@@ -506,6 +546,7 @@ if AIOHTTP_AVAILABLE:
             response.headers.update(cors_headers)
         return response
 else:
+    host_header_middleware = None  # type: ignore[assignment]
     cors_middleware = None  # type: ignore[assignment]
 
 
@@ -762,6 +803,30 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         return "*" in self._cors_origins or origin in self._cors_origins
+
+    def _host_header_allowed(self, host_header: str) -> bool:
+        """Allow local/bound Host headers when the local API server has no key.
+
+        The no-key mode is intended for loopback-only clients. CORS blocks
+        ordinary cross-origin browser requests, but DNS rebinding can make an
+        attacker-controlled hostname resolve to 127.0.0.1 and issue same-origin
+        requests with no Origin header. In no-key mode, accept only the normal
+        loopback hostnames plus the explicitly configured bind hostname.
+        Authenticated/network deployments keep their existing Host behavior.
+        """
+        if self._api_key:
+            return True
+
+        host = _normalize_host_header(host_header)
+        if not host:
+            return True
+
+        allowed = set(_LOOPBACK_HOSTS)
+        configured = _normalize_host_header(str(self._host or ""))
+        if configured and configured not in {"0.0.0.0", "::"}:
+            allowed.add(configured)
+
+        return host in allowed
 
     # ------------------------------------------------------------------
     # Auth helper
@@ -3422,7 +3487,16 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         try:
-            mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
+            mws = [
+                mw
+                for mw in (
+                    host_header_middleware,
+                    cors_middleware,
+                    body_limit_middleware,
+                    security_headers_middleware,
+                )
+                if mw is not None
+            ]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
