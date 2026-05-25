@@ -269,8 +269,11 @@ def _build_payload(
 
     clamped = _clamp_duration(family, duration)
     if clamped is not None and family.get("durations"):
-        # FAL exposes duration as a string in the queue API ("8" not 8).
-        payload["duration"] = str(clamped)
+        # Some FAL endpoints (notably Veo 3.1) validate duration as
+        # literal strings with an "s" suffix ("4s", "6s", "8s") rather
+        # than bare numeric strings. FAL tolerates these suffixed values for
+        # current video endpoints, so prefer the documented API shape.
+        payload["duration"] = f"{clamped}s"
 
     if family.get("audio") and audio is not None:
         payload["generate_audio"] = bool(audio)
@@ -511,7 +514,7 @@ class FALVideoGenProvider(VideoGenProvider):
             prompt=prompt,
             modality=modality_used,
             aspect_ratio=aspect_ratio if "aspect_ratio" in payload else "",
-            duration=int(payload["duration"]) if "duration" in payload else 0,
+            duration=int(str(payload.get("duration", "0")).rstrip("s") or 0) if "duration" in payload else 0,
             provider="fal",
             extra=extra,
         )
