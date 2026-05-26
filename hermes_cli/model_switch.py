@@ -1370,6 +1370,29 @@ def list_authenticated_providers(
             # Merge with models.dev for preferred providers (same rationale as above).
             if hermes_slug in _MODELS_DEV_PREFERRED:
                 model_ids = _merge_with_models_dev(hermes_slug, model_ids)
+            # For Nous Portal: augment curated list with free-tier models from
+            # the Portal's /api/nous/recommended-models endpoint so free users
+            # see models like deepseek-v4-flash and stepfun/step-3.5-flash in
+            # the /model picker (mirrors hermes_cli/main.py Nous model picker).
+            if hermes_slug == "nous":
+                try:
+                    from hermes_cli.models import (
+                        check_nous_free_tier,
+                        union_with_portal_free_recommendations,
+                        union_with_portal_paid_recommendations,
+                        get_pricing_for_provider,
+                    )
+                    _pricing = get_pricing_for_provider("nous")
+                    if check_nous_free_tier():
+                        model_ids, _pricing = union_with_portal_free_recommendations(
+                            model_ids, _pricing,
+                        )
+                    else:
+                        model_ids, _pricing = union_with_portal_paid_recommendations(
+                            model_ids, _pricing,
+                        )
+                except Exception:
+                    pass
         total = len(model_ids)
         top = model_ids[:max_models]
 
