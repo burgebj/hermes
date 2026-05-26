@@ -35,7 +35,8 @@ included here — only the slash-command access split.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, FrozenSet, Iterable, Optional, Tuple
+from typing import Any, FrozenSet, Optional, Tuple
+from collections.abc import Iterable
 
 
 # Slash commands that MUST stay reachable for any allowed user, even when

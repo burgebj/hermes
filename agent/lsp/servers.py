@@ -23,7 +23,8 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from collections.abc import Callable, Sequence
 
 from agent.lsp.workspace import nearest_root, normalize_path
 

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from concurrent.futures import TimeoutError as FutureTimeout
 from itertools import count
-from typing import Callable
+from collections.abc import Callable
 
 from acp.schema import (
     AllowedOutcome,

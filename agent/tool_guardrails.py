@@ -11,7 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from utils import safe_json_loads
 from agent.tool_result_classification import file_mutation_result_landed

@@ -475,7 +475,8 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union
+from typing import Dict, List, Optional, Any, Tuple, Union
+from collections.abc import Callable, Awaitable
 from enum import Enum
 
 from pathlib import Path as _Path

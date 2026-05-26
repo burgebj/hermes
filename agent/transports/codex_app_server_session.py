@@ -29,7 +29,8 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
+from collections.abc import Callable
 
 from agent.redact import redact_sensitive_text
 from agent.transports.codex_app_server import (

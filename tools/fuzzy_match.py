@@ -30,7 +30,8 @@ Usage:
 """
 
 import re
-from typing import Tuple, Optional, List, Callable
+from typing import Tuple, Optional, List
+from collections.abc import Callable
 from difflib import SequenceMatcher
 
 UNICODE_MAP = {

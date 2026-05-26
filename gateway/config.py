@@ -13,7 +13,8 @@ import os
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any
+from collections.abc import Callable
 from enum import Enum
 
 from hermes_cli.config import get_hermes_home

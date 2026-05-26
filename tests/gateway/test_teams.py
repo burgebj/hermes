@@ -134,7 +134,7 @@ def _ensure_teams_mock():
     # HttpResponse TypedDict mock
     HttpResponse = dict
     HttpMethod = str
-    from typing import Callable
+    from collections.abc import Callable
     HttpRouteHandler = Callable
 
     microsoft_teams_apps_http_adapter.HttpRequest = HttpRequest

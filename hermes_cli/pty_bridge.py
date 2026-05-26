@@ -37,7 +37,8 @@ import struct
 import sys
 import termios
 import time
-from typing import Optional, Sequence
+from typing import Optional
+from collections.abc import Sequence
 
 try:
     import ptyprocess  # type: ignore

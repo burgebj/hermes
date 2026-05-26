@@ -9,7 +9,8 @@ import json
 import logging
 from collections import deque
 from hashlib import sha1
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Dict, Optional
+from collections.abc import Awaitable, Callable
 
 try:
     from aiohttp import web

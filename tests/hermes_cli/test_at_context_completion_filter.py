@@ -12,7 +12,7 @@ filtering.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
 
 from hermes_cli.commands import SlashCommandCompleter
 

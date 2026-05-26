@@ -7,7 +7,8 @@ import logging
 import os
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 

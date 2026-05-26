@@ -22,7 +22,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
+from collections.abc import Sequence
 
 from hermes_constants import get_hermes_home, display_hermes_home
 

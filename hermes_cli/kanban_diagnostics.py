@@ -30,7 +30,8 @@ Design goals:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Optional
+from collections.abc import Callable, Iterable
 import json
 import time
 

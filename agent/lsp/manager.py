@@ -40,7 +40,8 @@ import os
 import threading
 import time
 from concurrent.futures import Future as ConcurrentFuture
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from collections.abc import Callable
 
 from agent.lsp import eventlog
 from agent.lsp.client import (

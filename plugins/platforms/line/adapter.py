@@ -76,7 +76,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+from collections.abc import Awaitable, Callable
 from urllib.parse import quote as _urlquote
 
 logger = logging.getLogger(__name__)

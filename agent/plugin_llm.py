@@ -64,7 +64,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
+from collections.abc import Awaitable, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 

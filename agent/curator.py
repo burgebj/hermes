@@ -29,7 +29,8 @@ import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Set
+from collections.abc import Callable
 
 from hermes_constants import get_hermes_home
 from tools import skill_usage

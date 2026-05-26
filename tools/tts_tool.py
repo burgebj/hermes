@@ -49,7 +49,8 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Dict, Any, Optional
+from collections.abc import Callable
 from urllib.parse import urljoin
 
 from hermes_constants import display_hermes_home

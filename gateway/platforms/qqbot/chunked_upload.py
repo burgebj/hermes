@@ -39,7 +39,8 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
+from collections.abc import Awaitable, Callable
 
 from gateway.platforms.qqbot.constants import FILE_UPLOAD_TIMEOUT
 

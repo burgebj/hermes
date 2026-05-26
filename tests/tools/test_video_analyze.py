@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Awaitable
+from collections.abc import Awaitable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

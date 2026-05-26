@@ -33,7 +33,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from collections.abc import Callable
 
 import sys
 

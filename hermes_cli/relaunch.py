@@ -11,7 +11,8 @@ Also works when ``hermes`` is not on PATH (e.g. ``nix run`` or ``python -m``).
 import os
 import shutil
 import sys
-from typing import Optional, Sequence
+from typing import Optional
+from collections.abc import Sequence
 
 from hermes_cli._parser import (
     PRE_ARGPARSE_INHERITED_FLAGS,

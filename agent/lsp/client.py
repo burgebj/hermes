@@ -45,7 +45,8 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
+from collections.abc import Awaitable, Callable
 from urllib.parse import quote, unquote
 
 from agent.lsp.protocol import (

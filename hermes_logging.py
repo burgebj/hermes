@@ -28,7 +28,8 @@ import os
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
+from collections.abc import Sequence
 
 from hermes_constants import get_config_path, get_hermes_home
 

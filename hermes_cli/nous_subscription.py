@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Set
+from typing import Dict, Optional, Set
+from collections.abc import Iterable
 
 from hermes_cli.auth import get_nous_auth_status
 from hermes_cli.config import get_env_value, load_config

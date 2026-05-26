@@ -27,7 +27,8 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Dict, Optional
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 

@@ -11,7 +11,8 @@ import asyncio
 import json
 import logging
 from collections import deque
-from typing import Any, Callable, Deque, Dict
+from typing import Any, Deque, Dict
+from collections.abc import Callable
 
 import acp
 from acp.schema import AgentPlanUpdate, PlanEntry

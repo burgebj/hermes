@@ -45,7 +45,8 @@ import threading
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
+from collections.abc import Callable
 
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled

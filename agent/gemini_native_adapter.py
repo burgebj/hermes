@@ -23,7 +23,8 @@ import logging
 import time
 import uuid
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
+from collections.abc import Iterator
 
 import httpx
 

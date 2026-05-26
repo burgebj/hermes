@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Tuple
+from collections.abc import Iterable, Mapping, Sequence
 
 # How many recent user/assistant turns we consider "recent activity".
 _RECENT_TURN_WINDOW = 20

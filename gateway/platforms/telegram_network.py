@@ -13,7 +13,8 @@ import asyncio
 import ipaddress
 import logging
 import socket
-from typing import Iterable, Optional
+from typing import Optional
+from collections.abc import Iterable
 
 import httpx
 

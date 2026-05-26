@@ -20,7 +20,8 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 

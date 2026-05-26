@@ -12,7 +12,8 @@ a thin dispatcher that delegates to a platform-provided callback.
 """
 
 import json
-from typing import List, Optional, Callable
+from typing import List, Optional
+from collections.abc import Callable
 
 
 # Maximum number of predefined choices the agent can offer.

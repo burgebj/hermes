@@ -20,7 +20,8 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
+from collections.abc import Iterable
 
 logger = logging.getLogger("agent.lsp.workspace")
 
