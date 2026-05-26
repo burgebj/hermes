@@ -1295,10 +1295,14 @@ def _setup_tts_provider(config: dict):
                 try:
                     import subprocess
                     subprocess.run(
-                        [sys.executable, "-m", "pip", "install", "pocket-tts", "scipy"],
-                        check=True,
+                        [sys.executable, "-m", "pip", "install", "-U", "pocket-tts", "scipy", "--quiet"],
+                        check=True, timeout=300,
                     )
                     print_success("Pocket TTS installed successfully")
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    print_error(f"Failed to install Pocket TTS: {e}")
+                    print_info("Try manually: python -m pip install -U pocket-tts scipy")
+                    selected = "edge"
                 except Exception as e:
                     print_error(f"Failed to install Pocket TTS: {e}")
                     selected = "edge"

@@ -208,7 +208,6 @@ all = [
   "hermes-agent[sms]",
   "hermes-agent[acp]",
   "hermes-agent[google]",
-  "hermes-agent[pocket-tts]",
   "hermes-agent[web]",
   "hermes-agent[youtube]",
 ]

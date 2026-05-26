@@ -83,16 +83,36 @@ class TestPocketTtsRegistration:
 # ---------------------------------------------------------------------------
 
 class TestCheckPocketTtsAvailable:
-    def test_reports_available_when_package_present(self, monkeypatch):
+    def test_reports_available_when_both_packages_present(self, monkeypatch):
+        import importlib.util
+        fake_spec = MagicMock()
+        monkeypatch.setattr(
+            importlib.util, "find_spec",
+            lambda name: fake_spec if name in {"pocket_tts", "scipy"} else None,
+        )
+        assert _check_pocket_tts_available() is True
+
+    def test_reports_unavailable_when_pocket_tts_missing(self, monkeypatch):
+        import importlib.util
+        fake_spec = MagicMock()
+        monkeypatch.setattr(
+            importlib.util, "find_spec",
+            lambda name: fake_spec if name == "scipy" else None,
+        )
+        assert _check_pocket_tts_available() is False
+
+    def test_reports_unavailable_when_scipy_missing(self, monkeypatch):
+        # Generation needs scipy.io.wavfile — reporting "available" without
+        # scipy produced a misleading runtime failure (Copilot review).
         import importlib.util
         fake_spec = MagicMock()
         monkeypatch.setattr(
             importlib.util, "find_spec",
             lambda name: fake_spec if name == "pocket_tts" else None,
         )
-        assert _check_pocket_tts_available() is True
+        assert _check_pocket_tts_available() is False
 
-    def test_reports_unavailable_when_package_missing(self, monkeypatch):
+    def test_reports_unavailable_when_both_missing(self, monkeypatch):
         import importlib.util
         monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
         assert _check_pocket_tts_available() is False
@@ -195,6 +215,16 @@ class TestGeneratePocketTts:
 
         assert fake_tts_model_cls.load_model.call_count == 2
 
+    def test_different_temps_get_separate_cache_entries(self, tmp_path, mock_pocket_tts, mock_scipy):
+        # Regression: cache used to be keyed by language only, so changing
+        # temp returned the stale first-call model (Copilot review).
+        fake_model, fake_tts_model_cls = mock_pocket_tts
+
+        _generate_pocket_tts("Hello", str(tmp_path / "a.wav"), {"pocket_tts": {"temp": 0.5}})
+        _generate_pocket_tts("Hello", str(tmp_path / "b.wav"), {"pocket_tts": {"temp": 0.9}})
+
+        assert fake_tts_model_cls.load_model.call_count == 2
+
     def test_mp3_output_with_ffmpeg(self, tmp_path, mock_pocket_tts, mock_scipy, monkeypatch):
         fake_model, _ = mock_pocket_tts
         out_mp3 = str(tmp_path / "out.mp3")
@@ -249,6 +279,14 @@ class TestGeneratePocketTts:
 
 class TestPocketTtsDispatcher:
     def test_not_installed_returns_helpful_error(self, monkeypatch, tmp_path):
+        # Block the auto-install path so the dispatcher falls through to the
+        # ImportError probe and surfaces the install-instructions error.
+        from tools import lazy_deps as _lazy_deps
+
+        def _refuse_install(feature, *, prompt=True):
+            raise _lazy_deps.FeatureUnavailable(f"lazy installs disabled for {feature}")
+
+        monkeypatch.setattr(_lazy_deps, "ensure", _refuse_install)
         monkeypatch.setitem(sys.modules, "pocket_tts", None)
 
         import yaml

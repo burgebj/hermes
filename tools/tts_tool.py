@@ -49,7 +49,7 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, Tuple
 from urllib.parse import urljoin
 
 from hermes_constants import display_hermes_home
@@ -1828,14 +1828,24 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 
 # --- Pocket TTS (Kyutai Labs, multilingual) ---
 
-_pocket_tts_model_cache: Dict[str, Any] = {}
+_pocket_tts_model_cache: Dict[Tuple[str, float], Any] = {}
 
 
 def _check_pocket_tts_available() -> bool:
-    """Check whether the pocket-tts package is importable."""
+    """Check whether Pocket TTS can actually generate audio.
+
+    Pocket TTS generation requires both ``pocket_tts`` (the model) and
+    ``scipy`` (for ``scipy.io.wavfile.write``). Reporting "available" when
+    only one is installed produces a misleading "TTS generation failed"
+    error at runtime instead of an actionable install hint.
+    """
     try:
         import importlib.util
-        return importlib.util.find_spec("pocket_tts") is not None
+        if importlib.util.find_spec("pocket_tts") is None:
+            return False
+        if importlib.util.find_spec("scipy") is None:
+            return False
+        return True
     except Exception:
         return False
 
@@ -1861,9 +1871,12 @@ def _generate_pocket_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     if use_24l and language != "english" and not language.endswith("_24l"):
         language = f"{language}_24l"
 
-    cache_key = language
+    # Cache key must include temp because ``TTSModel.load_model`` bakes the
+    # sampling temperature into the model state. Keying by language alone
+    # silently returned the first-call temp on every subsequent generation.
+    cache_key = (language, temp)
     if cache_key not in _pocket_tts_model_cache:
-        logger.info("Loading Pocket TTS model for language=%s ...", language)
+        logger.info("Loading Pocket TTS model for language=%s temp=%s ...", language, temp)
         _pocket_tts_model_cache[cache_key] = TTSModel.load_model(language=language, temp=temp)
     model = _pocket_tts_model_cache[cache_key]
 
@@ -2113,12 +2126,28 @@ def text_to_speech_tool(
             _generate_piper_tts(text, file_str, tts_config)
 
         elif provider == "pocket_tts":
+            # Validate the full runtime surface (pocket_tts + scipy) before
+            # dispatching, so a partial install surfaces a targeted hint
+            # instead of falling through to the generic "TTS generation failed".
             try:
-                _import_pocket_tts()
+                from tools.lazy_deps import ensure as _lazy_ensure
+                _lazy_ensure("tts.pocket_tts", prompt=False)
             except ImportError:
+                pass  # lazy_deps unavailable — fall through to direct probe
+            except Exception as exc:
                 return json.dumps({
                     "success": False,
-                    "error": "Pocket TTS provider selected but 'pocket-tts' package not installed. "
+                    "error": f"Pocket TTS dependencies could not be installed: {exc}. "
+                             "Install manually: pip install pocket-tts scipy"
+                }, ensure_ascii=False)
+            try:
+                _import_pocket_tts()
+                import scipy.io.wavfile  # noqa: F401 — generation requires it
+            except ImportError as exc:
+                missing = "scipy" if "scipy" in str(exc) else "pocket-tts"
+                return json.dumps({
+                    "success": False,
+                    "error": f"Pocket TTS provider selected but '{missing}' is not installed. "
                              "Run: pip install pocket-tts scipy"
                 }, ensure_ascii=False)
             logger.info("Generating speech with Pocket TTS (local, multilingual)...")
@@ -2195,7 +2224,11 @@ def text_to_speech_tool(
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
-            voice_compatible = True
+            # Only tag as voice-deliverable if ffmpeg actually produced .ogg.
+            # When conversion fails (no ffmpeg, codec error), the file stays
+            # MP3/WAV and tagging it [[audio_as_voice]] breaks Telegram
+            # voice-bubble delivery.
+            voice_compatible = file_str.endswith(".ogg")
         elif provider in {"elevenlabs", "openai", "mistral", "gemini"}:
             voice_compatible = want_opus and file_str.endswith(".ogg")
 
