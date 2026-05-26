@@ -3021,3 +3021,80 @@ class TestFTS5ToolCallMigration:
         finally:
             session_db.close()
 
+
+# =========================================================================
+# Batch import & repair (session DB sync gap fix)
+# =========================================================================
+
+class TestBatchImport:
+    """Tests for batch_import_session — the repair command's core import method."""
+
+    def test_batch_import_creates_session_and_messages(self, db):
+        """Batch import creates session row and inserts all messages."""
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+            {"role": "tool", "content": "tool result", "tool_call_id": "tc1"},
+        ]
+        count = db.batch_import_session(
+            session_id="import-1",
+            source="cli",
+            model="test/model",
+            system_prompt="be helpful",
+            started_at=1_700_000_000.0,
+            messages=messages,
+        )
+        assert count == 3
+        assert db.message_count("import-1") == 3
+        session = db.get_session("import-1")
+        assert session is not None
+        assert session["source"] == "cli"
+
+    def test_batch_import_idempotent(self, db):
+        """Re-importing the same session returns 0 and doesn't duplicate."""
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        first = db.batch_import_session(
+            session_id="idem-1", source="cli", messages=messages, model=None,
+            model_config=None, system_prompt=None, parent_session_id=None, started_at=None,
+        )
+        assert first == 2
+        second = db.batch_import_session(
+            session_id="idem-1", source="cli", messages=messages, model=None,
+            model_config=None, system_prompt=None, parent_session_id=None, started_at=None,
+        )
+        assert second == 0
+        assert db.message_count("idem-1") == 2
+
+    def test_batch_import_handles_empty_messages(self, db):
+        """Import with no messages returns 0 without error."""
+        count = db.batch_import_session(
+            session_id="empty-1", source="cli", messages=[], model=None,
+            model_config=None, system_prompt=None, parent_session_id=None, started_at=None,
+        )
+        assert count == 0
+
+
+class TestListSessionIds:
+    """Tests for list_session_ids — public API for the repair command."""
+
+    def test_returns_empty_list(self, db):
+        assert db.list_session_ids() == []
+
+    def test_returns_session_ids(self, db):
+        db.create_session(session_id="aaa", source="cli")
+        db.create_session(session_id="bbb", source="telegram")
+        ids = db.list_session_ids()
+        assert set(ids) == {"aaa", "bbb"}
+
+    def test_after_batch_import(self, db):
+        db.batch_import_session(
+            session_id="import-xx", source="cli", messages=[
+                {"role": "user", "content": "test"}
+            ], model=None, model_config=None, system_prompt=None,
+            parent_session_id=None, started_at=None,
+        )
+        assert "import-xx" in db.list_session_ids()
+

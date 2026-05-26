@@ -41,9 +41,11 @@ import json
 import logging
 logger = logging.getLogger(__name__)
 import os
+import pathlib
 import random
 import re
 import ssl
+import sqlite3
 import sys
 import tempfile
 import time
@@ -98,6 +100,58 @@ if _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
 else:
     logger.info("No .env file found. Using system environment variables.")
+
+
+# ---------------------------------------------------------------------------
+# Opportunistic orphaned-session startup hint (P2)
+# ---------------------------------------------------------------------------
+
+_orphan_hint_checked = False
+
+
+def _check_orphaned_sessions_hint() -> None:
+    """Light-weight startup check: if >50 sessions exist on disk but are
+    missing from the SQLite DB, log a one-line hint suggesting
+    ``hermes sessions repair``. Runs at most once per process.
+    """
+    global _orphan_hint_checked
+    if _orphan_hint_checked:
+        return
+    _orphan_hint_checked = True
+    try:
+        from hermes_state import SessionDB
+
+        sessions_dir = get_hermes_home() / "sessions"
+        if not sessions_dir.is_dir():
+            return
+
+        # Count on-disk session files
+        disk_ids: set[str] = set()
+        for fp in sessions_dir.iterdir():
+            name = fp.name
+            if name.startswith("session_") and not fp.is_symlink():
+                if name.endswith(".json.gz"):
+                    disk_ids.add(name.replace("session_", "").replace(".json.gz", ""))
+                elif name.endswith(".json"):
+                    disk_ids.add(name.replace("session_", "").replace(".json", ""))
+
+        if not disk_ids:
+            return
+
+        db = SessionDB()
+        db_ids = set(db.list_session_ids())
+        db.close()
+
+        orphan_count = len(disk_ids - db_ids)
+        if orphan_count > 50:
+            logger.info(
+                "%d session file(s) on disk are not in the SQLite database. "
+                "Run 'hermes sessions repair' to import them.",
+                orphan_count,
+            )
+    except Exception:
+        # Never block startup on a DB or I/O issue.
+        pass
 
 
 # Import our tool system
@@ -483,6 +537,9 @@ class AIAgent:
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
         )
+
+        # Opportunistic orphaned-session hint (runs once per process)
+        _check_orphaned_sessions_hint()
 
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
@@ -1235,12 +1292,42 @@ class AIAgent:
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
+        Post-flush: verifies the session row exists in DB and that the message
+        count matches our in-memory transcript. If there's a gap, the JSON log
+        on disk can be recovered via ``hermes sessions repair`` later.
         """
         self._drop_trailing_empty_response_scaffolding(messages)
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
+        self._verify_session_db_health(messages)
+
+    def _verify_session_db_health(self, messages: List[Dict]) -> None:
+        """Light-weight post-flush integrity check. Warns if the DB session
+        row doesn't exist or message counts diverge from the in-memory
+        transcript.  Does NOT block session exit — the JSON log is the
+        durable fallback."""
+        if not self._session_db:
+            return
+        try:
+            imported_count = self._session_db.message_count(self.session_id)
+            expected_count = len(messages)
+            if imported_count == 0 and expected_count > 0:
+                logger.warning(
+                    "Session DB POST-FLUSH: 0 messages for %s (expected %d). "
+                    "Session file on disk is the fallback; import with: "
+                    "hermes sessions repair",
+                    self.session_id, expected_count,
+                )
+            elif imported_count > 0 and imported_count < expected_count // 2:
+                logger.warning(
+                    "Session DB POST-FLUSH: only %d messages for %s (expected ~%d). "
+                    "Partial flush — may be recoverable on next turn.",
+                    imported_count, self.session_id, expected_count,
+                )
+        except Exception as e:
+            logger.warning("Session DB health check failed: %s", e)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1306,58 +1393,77 @@ class AIAgent:
         Uses _last_flushed_db_idx to track which messages have already been
         written, so repeated calls (from multiple exit paths) only write
         truly new messages — preventing the duplicate-write bug (#860).
+
+        Retries the entire flush up to 3 times with exponential backoff on
+        WAL write-lock contention, protecting against transient SQLite lock
+        errors when multiple CLI sessions + gateway share one state.db.
         """
         if not self._session_db:
             return
         self._apply_persist_user_message_override(messages)
-        try:
-            # Retry row creation if the earlier attempt failed transiently.
-            if not self._session_db_created:
-                self._ensure_db_session()
-            start_idx = len(conversation_history) if conversation_history else 0
-            flush_from = max(start_idx, self._last_flushed_db_idx)
-            for msg in messages[flush_from:]:
-                role = msg.get("role", "unknown")
-                content = msg.get("content")
-                # Persist multimodal tool results as their text summary only —
-                # base64 images would bloat the session DB and aren't useful
-                # for cross-session replay.
-                if _is_multimodal_tool_result(content):
-                    content = _multimodal_text_summary(content)
-                elif isinstance(content, list):
-                    # List of OpenAI-style content parts: strip images, keep text.
-                    _txt = []
-                    for p in content:
-                        if isinstance(p, dict) and p.get("type") == "text":
-                            _txt.append(str(p.get("text", "")))
-                        elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
-                            _txt.append("[screenshot]")
-                    content = "\n".join(_txt) if _txt else None
-                tool_calls_data = None
-                if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-                    tool_calls_data = [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
-                        for tc in msg.tool_calls
-                    ]
-                elif isinstance(msg.get("tool_calls"), list):
-                    tool_calls_data = msg["tool_calls"]
-                self._session_db.append_message(
-                    session_id=self.session_id,
-                    role=role,
-                    content=content,
-                    tool_name=msg.get("tool_name"),
-                    tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
-                )
-            self._last_flushed_db_idx = len(messages)
-        except Exception as e:
-            logger.warning("Session DB append_message failed: %s", e)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Retry row creation if the earlier attempt failed transiently.
+                if not self._session_db_created:
+                    self._ensure_db_session()
+                start_idx = len(conversation_history) if conversation_history else 0
+                flush_from = max(start_idx, self._last_flushed_db_idx)
+                for msg in messages[flush_from:]:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content")
+                    if _is_multimodal_tool_result(content):
+                        content = _multimodal_text_summary(content)
+                    elif isinstance(content, list):
+                        _txt = []
+                        for p in content:
+                            if isinstance(p, dict) and p.get("type") == "text":
+                                _txt.append(str(p.get("text", "")))
+                            elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
+                                _txt.append("[screenshot]")
+                        content = "\n".join(_txt) if _txt else None
+                    tool_calls_data = None
+                    if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
+                        tool_calls_data = [
+                            {"name": tc.function.name, "arguments": tc.function.arguments}
+                            for tc in msg.tool_calls
+                        ]
+                    elif isinstance(msg.get("tool_calls"), list):
+                        tool_calls_data = msg["tool_calls"]
+                    self._session_db.append_message(
+                        session_id=self.session_id,
+                        role=role,
+                        content=content,
+                        tool_name=msg.get("tool_name"),
+                        tool_calls=tool_calls_data,
+                        tool_call_id=msg.get("tool_call_id"),
+                        finish_reason=msg.get("finish_reason"),
+                        reasoning=msg.get("reasoning") if role == "assistant" else None,
+                        reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
+                        reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
+                        codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                        codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    )
+                self._last_flushed_db_idx = len(messages)
+                break  # Success
+            except sqlite3.OperationalError as exc:
+                err_msg = str(exc).lower()
+                if ("locked" in err_msg or "busy" in err_msg) and attempt < max_retries - 1:
+                    import random as _rand  # local import for agent startup size
+                    delay = 0.05 * (2 ** attempt) + _rand.uniform(0, 0.02)
+                    logger.warning(
+                        "Session DB flush locked (attempt %d/%d), retrying in %.2fs: %s",
+                        attempt + 1, max_retries, delay, exc,
+                    )
+                    time.sleep(delay)
+                    continue
+                # Non-lock error or retries exhausted — log and move on
+                logger.warning("Session DB append_message failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
+                break
+            except Exception as e:
+                logger.warning("Session DB append_message failed: %s", e)
+                break
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """

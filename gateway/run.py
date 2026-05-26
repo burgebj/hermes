@@ -747,6 +747,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
+_gateway_orphan_hint_checked = False
 
 # Load environment variables from ~/.hermes/.env first.
 # User-managed env files should override stale shell exports on restart.
@@ -4293,6 +4294,38 @@ class GatewayRunner:
         
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
+
+        # Opportunistic orphaned-session hint at gateway startup
+        global _gateway_orphan_hint_checked
+        if not _gateway_orphan_hint_checked:
+            _gateway_orphan_hint_checked = True
+            try:
+                from hermes_state import SessionDB
+
+                sessions_dir = _hermes_home / "sessions"
+                if sessions_dir.is_dir():
+                    disk_ids = set()
+                    for fp in sessions_dir.iterdir():
+                        name = fp.name
+                        if name.startswith("session_") and not fp.is_symlink():
+                            if name.endswith(".json.gz"):
+                                disk_ids.add(name.replace("session_", "").replace(".json.gz", ""))
+                            elif name.endswith(".json"):
+                                disk_ids.add(name.replace("session_", "").replace(".json", ""))
+                    if disk_ids:
+                        db = SessionDB()
+                        db_ids = set(db.list_session_ids())
+                        db.close()
+                        orphan_count = len(disk_ids - db_ids)
+                        if orphan_count > 100:
+                            logger.info(
+                                "%d session file(s) on disk are not in the SQLite database. "
+                                "Run 'hermes sessions repair' to import them.",
+                                orphan_count,
+                            )
+            except Exception:
+                pass
+
         
         # Build initial channel directory for send_message name resolution
         try:
