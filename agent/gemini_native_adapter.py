@@ -191,8 +191,9 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
             text = item.get("text")
             if isinstance(text, str) and text:
                 parts.append({"text": text})
-        elif ptype == "image_url":
-            url = ((item.get("image_url") or {}).get("url") or "")
+        elif ptype in {"image_url", "video_url"}:
+            media_obj = item.get("image_url") if ptype == "image_url" else item.get("video_url")
+            url = ((media_obj or {}).get("url") or "")
             if not isinstance(url, str) or not url.startswith("data:"):
                 continue
             try:
@@ -247,9 +248,32 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     return part
 
 
+def _extract_image_inline_data(raw_content: Any) -> List[Dict[str, Any]]:
+    """Extract image_url parts from OpenAI-style content into Gemini inlineData dicts."""
+    if not isinstance(raw_content, list):
+        return []
+    parts: List[Dict[str, Any]] = []
+    for item in raw_content:
+        if not isinstance(item, dict) or item.get("type") != "image_url":
+            continue
+        url = ((item.get("image_url") or {}).get("url") or "")
+        if not isinstance(url, str) or not url.startswith("data:"):
+            continue
+        try:
+            header, encoded = url.split(",", 1)
+            mime = header.split(":", 1)[1].split(";", 1)[0]
+            raw = base64.b64decode(encoded)
+            parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}})
+        except Exception:
+            continue
+    return parts
+
+
 def _translate_tool_result_to_gemini(
     message: Dict[str, Any],
     tool_name_by_call_id: Optional[Dict[str, str]] = None,
+    *,
+    is_gemini3: bool = False,
 ) -> Dict[str, Any]:
     tool_name_by_call_id = tool_name_by_call_id or {}
     tool_call_id = str(message.get("tool_call_id") or "")
@@ -259,21 +283,29 @@ def _translate_tool_result_to_gemini(
         or tool_call_id
         or "tool"
     )
-    content = _coerce_content_to_text(message.get("content"))
+    raw_content = message.get("content")
+    content = _coerce_content_to_text(raw_content)
     try:
         parsed = json.loads(content) if content.strip().startswith(("{", "[")) else None
     except json.JSONDecodeError:
         parsed = None
     response = parsed if isinstance(parsed, dict) else {"output": content}
-    return {
-        "functionResponse": {
-            "name": name,
-            "response": response,
-        }
-    }
+    fr: Dict[str, Any] = {"name": name, "response": response}
+    # Gemini 3.5+ requires id matching the corresponding FunctionCall id.
+    if tool_call_id:
+        fr["id"] = tool_call_id
+    # Gemini 3.x supports embedding images directly inside functionResponse.parts.
+    # On 2.x this field is rejected, so only attach when the model supports it.
+    if is_gemini3:
+        image_parts = _extract_image_inline_data(raw_content)
+        if image_parts:
+            fr["parts"] = image_parts
+    return {"functionResponse": fr}
 
 
-def _build_gemini_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def _build_gemini_contents(messages: List[Dict[str, Any]], model: str = "") -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    _model_lower = (model or "").strip().lower()
+    _is_gemini3 = _model_lower.startswith("gemini-3.") or _model_lower.startswith("google/gemini-3.")
     system_text_parts: List[str] = []
     contents: List[Dict[str, Any]] = []
     tool_name_by_call_id: Dict[str, str] = {}
@@ -295,6 +327,7 @@ def _build_gemini_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[st
                         _translate_tool_result_to_gemini(
                             msg,
                             tool_name_by_call_id=tool_name_by_call_id,
+                            is_gemini3=_is_gemini3,
                         )
                     ],
                 }
@@ -323,7 +356,7 @@ def _build_gemini_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[st
     system_instruction = None
     joined_system = "\n".join(part for part in system_text_parts if part).strip()
     if joined_system:
-        system_instruction = {"parts": [{"text": joined_system}]}
+        system_instruction = {"role": "system", "parts": [{"text": joined_system}]}
     return contents, system_instruction
 
 
@@ -382,12 +415,18 @@ def _normalize_thinking_config(config: Any) -> Optional[Dict[str, Any]]:
         normalized["includeThoughts"] = include
     if isinstance(level, str) and level.strip():
         normalized["thinkingLevel"] = level.strip().lower()
+    # Gemini 3.x rejects requests that include both thinkingLevel and
+    # thinkingBudget with HTTP 400.  thinkingLevel is the newer field;
+    # always prefer it and drop the legacy budget when both appear.
+    if "thinkingLevel" in normalized:
+        normalized.pop("thinkingBudget", None)
     return normalized or None
 
 
 def build_gemini_request(
     *,
     messages: List[Dict[str, Any]],
+    model: Optional[str] = None,
     tools: Any = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
@@ -396,7 +435,7 @@ def build_gemini_request(
     stop: Any = None,
     thinking_config: Any = None,
 ) -> Dict[str, Any]:
-    contents, system_instruction = _build_gemini_contents(messages)
+    contents, system_instruction = _build_gemini_contents(messages, model or "")
     request: Dict[str, Any] = {"contents": contents}
     if system_instruction:
         request["systemInstruction"] = system_instruction
@@ -409,12 +448,17 @@ def build_gemini_request(
     if tool_config:
         request["toolConfig"] = tool_config
 
+    # Gemini 3.x deprecated temperature, top_p, and top_k — the reasoning
+    # engine is tuned for its own defaults. Sending them can degrade quality.
+    _model_lower = (model or "").strip().lower()
+    _is_gemini3 = _model_lower.startswith("gemini-3.") or _model_lower.startswith("google/gemini-3.")
+
     generation_config: Dict[str, Any] = {}
-    if temperature is not None:
+    if temperature is not None and not _is_gemini3:
         generation_config["temperature"] = temperature
     if max_tokens is not None:
         generation_config["maxOutputTokens"] = max_tokens
-    if top_p is not None:
+    if top_p is not None and not _is_gemini3:
         generation_config["topP"] = top_p
     if stop:
         generation_config["stopSequences"] = stop if isinstance(stop, list) else [str(stop)]
@@ -499,8 +543,12 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
                 args_str = json.dumps(fc.get("args") or {}, ensure_ascii=False)
             except (TypeError, ValueError):
                 args_str = "{}"
+            # Gemini 3.5+ includes an id on FunctionCall; use it so the
+            # matching FunctionResponse can echo the same id back.
+            gemini_call_id = fc.get("id")
+            call_id = str(gemini_call_id) if gemini_call_id else f"call_{uuid.uuid4().hex[:12]}"
             tool_call = SimpleNamespace(
-                id=f"call_{uuid.uuid4().hex[:12]}",
+                id=call_id,
                 type="function",
                 index=index,
                 function=SimpleNamespace(name=str(fc["name"]), arguments=args_str),
@@ -649,9 +697,13 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
             )
             slot = tool_call_indices.get(call_key)
             if slot is None:
+                # Gemini 3.5+ includes an id on FunctionCall; use it so the
+                # matching FunctionResponse can echo the same id back.
+                gemini_call_id = fc.get("id")
+                call_id = str(gemini_call_id) if gemini_call_id else f"call_{uuid.uuid4().hex[:12]}"
                 slot = {
                     "index": len(tool_call_indices),
-                    "id": f"call_{uuid.uuid4().hex[:12]}",
+                    "id": call_id,
                     "last_arguments": "",
                 }
                 tool_call_indices[call_key] = slot
@@ -886,6 +938,7 @@ class GeminiNativeClient:
 
         request = build_gemini_request(
             messages=messages or [],
+            model=model,
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
