@@ -2361,42 +2361,43 @@ def run_conversation(
                 _base = getattr(agent, "base_url", "unknown")
                 _model = getattr(agent, "model", "unknown")
                 _status_code_str = f" [HTTP {status_code}]" if status_code else ""
-                agent._vprint(f"{agent.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}", force=True)
-                agent._vprint(f"{agent.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                agent._vprint(f"{agent.log_prefix}   🌐 Endpoint: {_base}", force=True)
-                agent._vprint(f"{agent.log_prefix}   📝 Error: {_error_summary}", force=True)
-                if status_code and status_code < 500:
-                    _err_body = getattr(api_error, "body", None)
-                    _err_body_str = str(_err_body)[:300] if _err_body else None
-                    if _err_body_str:
-                        agent._vprint(f"{agent.log_prefix}   📋 Details: {_err_body_str}", force=True)
-                agent._vprint(f"{agent.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
+                if not getattr(agent, "_suppress_retry_warnings", False):
+                    agent._vprint(f"{agent.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}", force=True)
+                    agent._vprint(f"{agent.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
+                    agent._vprint(f"{agent.log_prefix}   🌐 Endpoint: {_base}", force=True)
+                    agent._vprint(f"{agent.log_prefix}   📝 Error: {_error_summary}", force=True)
+                    if status_code and status_code < 500:
+                        _err_body = getattr(api_error, "body", None)
+                        _err_body_str = str(_err_body)[:300] if _err_body else None
+                        if _err_body_str:
+                            agent._vprint(f"{agent.log_prefix}   📋 Details: {_err_body_str}", force=True)
+                    agent._vprint(f"{agent.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
 
-                # Actionable hint for OpenRouter "no tool endpoints" error.
-                # This fires regardless of whether fallback succeeds — the
-                # user needs to know WHY their model failed so they can fix
-                # their provider routing, not just silently fall back.
-                if (
-                    agent._is_openrouter_url()
-                    and "support tool use" in error_msg
-                ):
-                    agent._vprint(
-                        f"{agent.log_prefix}   💡 No OpenRouter providers for {_model} support tool calling with your current settings.",
-                        force=True,
-                    )
-                    if agent.providers_allowed:
+                    # Actionable hint for OpenRouter "no tool endpoints" error.
+                    # This fires regardless of whether fallback succeeds — the
+                    # user needs to know WHY their model failed so they can fix
+                    # their provider routing, not just silently fall back.
+                    if (
+                        agent._is_openrouter_url()
+                        and "support tool use" in error_msg
+                    ):
                         agent._vprint(
-                            f"{agent.log_prefix}      Your provider_routing.only restriction is filtering out tool-capable providers.",
+                            f"{agent.log_prefix}   💡 No OpenRouter providers for {_model} support tool calling with your current settings.",
                             force=True,
                         )
+                        if agent.providers_allowed:
+                            agent._vprint(
+                                f"{agent.log_prefix}      Your provider_routing.only restriction is filtering out tool-capable providers.",
+                                force=True,
+                            )
+                            agent._vprint(
+                                f"{agent.log_prefix}      Try removing the restriction or adding providers that support tools for this model.",
+                                force=True,
+                            )
                         agent._vprint(
-                            f"{agent.log_prefix}      Try removing the restriction or adding providers that support tools for this model.",
+                            f"{agent.log_prefix}      Check which providers support tools: https://openrouter.ai/models/{_model}",
                             force=True,
                         )
-                    agent._vprint(
-                        f"{agent.log_prefix}      Check which providers support tools: https://openrouter.ai/models/{_model}",
-                        force=True,
-                    )
 
                 # Check for interrupt before deciding to retry
                 if agent._interrupt_requested:
@@ -3036,9 +3037,9 @@ def run_conversation(
                                 pass
                 wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                 if is_rate_limited:
-                    agent._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
+                    agent._emit_retry_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
                 else:
-                    agent._emit_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
+                    agent._emit_retry_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
                 logger.warning(
                     "Retrying API call in %ss (attempt %s/%s) %s error=%s",
                     wait_time,

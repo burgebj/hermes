@@ -700,6 +700,12 @@ class AIAgent:
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
 
+    def _emit_retry_status(self, message: str) -> None:
+        """Emit retry status unless the user opted out of retry noise."""
+        if getattr(self, "_suppress_retry_warnings", False):
+            return
+        self._emit_status(message)
+
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
 

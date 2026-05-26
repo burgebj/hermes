@@ -1199,6 +1199,13 @@ def init_agent(
     except (TypeError, ValueError):
         _api_retries = 3
     agent._api_max_retries = _api_retries
+    _raw_suppress_retry_warnings = _agent_section.get(
+        "suppress_retry_warnings", False
+    )
+    agent._suppress_retry_warnings = (
+        str(_raw_suppress_retry_warnings).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
     # Initialize context compressor for automatic context management
     # Compresses conversation when approaching model's context limit
