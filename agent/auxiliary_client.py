@@ -4028,6 +4028,52 @@ def _is_retryable_error(e: Exception) -> bool:
     return False
 
 
+# Rough per-model context-window limits (in tokens) for fallback guards.
+# Only models likely to appear in auxiliary fallback configs are listed.
+_KNOWN_AUX_CONTEXT_LIMITS: Dict[str, int] = {
+    "gemini-3-flash-preview": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-5.3-codex": 2_000_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "kimi-k2.6": 128_000,
+    "deepseek-v4": 1_000_000,
+    "deepseek-v4-flash": 1_000_000,
+    "minimax-m2.7": 1_000_000,
+    "minimax-m2": 1_000_000,
+}
+
+
+def _get_model_context_limit(model: str) -> int:
+    """Return max context tokens for *model*, or a large default when unknown."""
+    model_lower = model.lower().strip()
+    # Direct lookup
+    if model_lower in _KNOWN_AUX_CONTEXT_LIMITS:
+        return _KNOWN_AUX_CONTEXT_LIMITS[model_lower]
+    # Prefix match for versioned variants (e.g. gemini-3-flash-*)
+    for known, limit in _KNOWN_AUX_CONTEXT_LIMITS.items():
+        if model_lower.startswith(known):
+            return limit
+    # Unknown model — assume it can handle the payload (don't skip)
+    return 2_000_000
+
+
+def _estimate_payload_tokens(kwargs: dict) -> int:
+    """Rough token estimate from a kwargs dict containing 'messages'.
+
+    Uses ~4 chars per token as a heuristic.  Config and image tokens are
+    ignored in this estimate.
+    """
+    messages = kwargs.get("messages", [])
+    total_chars = sum(
+        len(str(m.get("content", "")))
+        for m in messages if isinstance(m, dict)
+    )
+    return total_chars // 4
+
+
 class _FailoverAuxiliaryClient:
     """Wraps an OpenAI client, failing through a provider chain on errors.
 
@@ -4087,6 +4133,15 @@ class _FailoverChatCompletions:
         for entry in self._parent._fallbacks:
             provider = entry["provider"]
             model = entry.get("model", "")
+            # Rough context-window guard: skip fallback if the payload likely
+            # exceeds the model's known capacity.
+            if model and _estimate_payload_tokens(kwargs) > _get_model_context_limit(model):
+                logger.warning(
+                    "Skipping fallback %s/%s — context window likely too small "
+                    "for current payload (~%d tokens)",
+                    provider, model, _estimate_payload_tokens(kwargs),
+                )
+                continue
             try:
                 new_client, resolved = self._parent._resolve_fallback(provider, model)
             except Exception as e:
