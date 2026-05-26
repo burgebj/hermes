@@ -35,6 +35,7 @@ from tools.code_execution_tool import (
     _WINDOWS_ESSENTIAL_ENV_VARS,
     _scrub_child_env,
 )
+from agent.credential_exposure_policy import HERMES_CREDENTIAL_ENV_BLOCKLIST
 
 
 def _no_passthrough(_name):
@@ -208,6 +209,35 @@ class TestScrubChildEnvPassthroughInteraction:
         assert scrubbed.get("SYSTEMROOT") == r"C:\Windows"
         assert "OPENAI_API_KEY" not in scrubbed
 
+    def test_passthrough_cannot_override_hermes_credential_blocklist(self):
+        env = {
+            "AWS_PROFILE": "prod-admin",
+            "OPENAI_API_KEY": "sk-secret",
+            "TENOR_API_KEY": "tenor",
+            "PATH": "/bin",
+        }
+        scrubbed = _scrub_child_env(
+            env,
+            is_passthrough=lambda _k: True,
+            is_windows=False,
+        )
+
+        assert "AWS_PROFILE" not in scrubbed
+        assert "OPENAI_API_KEY" not in scrubbed
+        assert scrubbed["TENOR_API_KEY"] == "tenor"
+        assert scrubbed["PATH"] == "/bin"
+
+    def test_aws_profile_blocked_without_secret_substring(self):
+        env = {"AWS_PROFILE": "prod-admin", "PATH": "/bin"}
+        scrubbed = _scrub_child_env(
+            env,
+            is_passthrough=_no_passthrough,
+            is_windows=False,
+        )
+
+        assert "AWS_PROFILE" not in scrubbed
+        assert scrubbed["PATH"] == "/bin"
+
 
 @pytest.mark.skipif(
     sys.platform != "win32",
@@ -256,13 +286,12 @@ class TestWindowsSocketSmokeTest:
 # ---------------------------------------------------------------------------
 
 def _legacy_posix_scrubber(source_env, is_passthrough):
-    """Verbatim copy of the pre-Windows-fix inline scrubbing logic.
+    """POSIX oracle for the current execute_code scrubbing rules.
 
-    This is the oracle used by TestPosixEquivalence to prove the refactor
-    did not change POSIX behavior.  DO NOT edit this to "match" a future
-    production change — if _scrub_child_env's POSIX behavior legitimately
-    needs to evolve, delete this function and adjust the equivalence test
-    on purpose, so the churn is visible in review.
+    This keeps the prefix/substring behavior explicit while also applying
+    the shared Hermes credential blocklist. If execute_code's POSIX behavior
+    legitimately evolves, update this oracle in the same PR so the churn is
+    visible in review.
     """
     _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
                           "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
@@ -272,6 +301,8 @@ def _legacy_posix_scrubber(source_env, is_passthrough):
                           "PASSWD", "AUTH")
     out = {}
     for k, v in source_env.items():
+        if k in HERMES_CREDENTIAL_ENV_BLOCKLIST:
+            continue
         if is_passthrough(k):
             out[k] = v
             continue
@@ -317,6 +348,7 @@ class TestPosixEquivalence:
         "OPENAI_API_KEY": "sk-xxx",
         "GITHUB_TOKEN": "ghp_xxx",
         "AWS_SECRET_ACCESS_KEY": "yyy",
+        "AWS_PROFILE": "prod-admin",
         "MY_PASSWORD": "hunter2",
         # Uncategorized — must be dropped
         "RANDOM_UNKNOWN": "drop-me",

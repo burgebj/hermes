@@ -229,3 +229,8 @@ class TestTerminalIntegration:
         # Arbitrary skill-specific var
         register_env_passthrough(["MY_SKILL_CUSTOM_CONFIG"])
         assert is_env_passthrough("MY_SKILL_CUSTOM_CONFIG")
+
+    def test_aws_sdk_profile_passthrough_rejected(self):
+        """AWS_PROFILE is a credential source for Bedrock SDK auth."""
+        register_env_passthrough(["AWS_PROFILE"])
+        assert not is_env_passthrough("AWS_PROFILE")
