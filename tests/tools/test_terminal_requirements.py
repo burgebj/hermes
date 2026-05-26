@@ -28,6 +28,9 @@ def _clear_terminal_env(monkeypatch):
         "VERCEL_TOKEN",
         "VERCEL_PROJECT_ID",
         "VERCEL_TEAM_ID",
+        "BL_API_KEY",
+        "BL_WORKSPACE",
+        "BL_REGION",
         "HOME",
         "USERPROFILE",
     ]
@@ -241,6 +244,147 @@ def test_vercel_backend_accepts_token_tuple_auth(monkeypatch):
     monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
 
     assert terminal_tool_module.check_terminal_requirements() is True
+
+
+def test_blaxel_backend_without_api_key_logs_specific_error(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+    monkeypatch.setenv("BL_WORKSPACE", "workspace")
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any(
+        "BL_API_KEY is not set" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_blaxel_backend_without_workspace_logs_specific_error(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+    monkeypatch.setenv("BL_API_KEY", "key")
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any(
+        "BL_WORKSPACE is not set" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_blaxel_backend_accepts_auth_and_sdk(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+    monkeypatch.setenv("BL_API_KEY", "key")
+    monkeypatch.setenv("BL_WORKSPACE", "workspace")
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+
+    assert terminal_tool_module.check_terminal_requirements() is True
+
+
+def test_blaxel_backend_invalidates_import_caches_after_lazy_install(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+    monkeypatch.setenv("BL_API_KEY", "key")
+    monkeypatch.setenv("BL_WORKSPACE", "workspace")
+
+    find_results = iter([None, object()])
+
+    def fake_find_spec(name):
+        assert name == "blaxel"
+        return next(find_results)
+
+    invalidated = []
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(
+        terminal_tool_module.importlib,
+        "invalidate_caches",
+        lambda: invalidated.append(True),
+    )
+    monkeypatch.setattr("tools.lazy_deps.ensure", lambda *args, **kwargs: None)
+
+    assert terminal_tool_module.check_terminal_requirements() is True
+    assert invalidated == [True]
+
+
+def test_blaxel_backend_defaults_to_4gb_memory(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+
+    assert terminal_tool_module._get_env_config()["container_memory"] == 4096
+
+
+def test_blaxel_backend_defaults_to_10gb_volume(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+
+    assert terminal_tool_module._get_env_config()["container_disk"] == 10240
+
+
+def test_blaxel_backend_respects_memory_override(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+    monkeypatch.setenv("TERMINAL_CONTAINER_MEMORY", "2048")
+
+    assert terminal_tool_module._get_env_config()["container_memory"] == 2048
+
+
+def test_blaxel_create_environment_preserves_fractional_cpu(monkeypatch):
+    captured = {}
+
+    class FakeBlaxelEnvironment:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import tools.environments.blaxel as blaxel_mod
+
+    monkeypatch.setattr(blaxel_mod, "BlaxelEnvironment", FakeBlaxelEnvironment)
+
+    terminal_tool_module._create_environment(
+        "blaxel",
+        "blaxel/base-image:latest",
+        "/blaxel",
+        60,
+        container_config={
+            "container_cpu": 0.5,
+            "container_memory": 4096,
+            "container_disk": 10240,
+            "container_persistent": True,
+        },
+        task_id="fractional-cpu",
+    )
+
+    assert captured["cpu"] == 0.5
+
+
+def test_blaxel_backend_without_sdk_reports_lazy_install_failure(
+    monkeypatch, caplog,
+):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "blaxel")
+    monkeypatch.setenv("BL_API_KEY", "key")
+    monkeypatch.setenv("BL_WORKSPACE", "workspace")
+    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: None)
+
+    def fail_lazy_install(_feature, prompt=False):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr("tools.lazy_deps.ensure", fail_lazy_install)
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any(
+        "blaxel is required for the Blaxel terminal backend" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.parametrize("runtime", ["node24", "node22", "python3.13"])
