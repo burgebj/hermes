@@ -4029,20 +4029,36 @@ def _is_retryable_error(e: Exception) -> bool:
 
 
 # Rough per-model context-window limits (in tokens) for fallback guards.
-# Only models likely to appear in auxiliary fallback configs are listed.
+# Sources: agent/model_metadata.py DEFAULT_CONTEXT_LENGTHS and provider profiles.
 _KNOWN_AUX_CONTEXT_LIMITS: Dict[str, int] = {
+    # Google Gemini
+    "gemini-3.1-flash-lite-preview": 1_048_576,
     "gemini-3-flash-preview": 1_048_576,
-    "gemini-2.5-flash": 1_048_576,
-    "gpt-4o": 128_000,
-    "gpt-4o-mini": 128_000,
-    "gpt-5.3-codex": 2_000_000,
-    "claude-sonnet-4-5": 200_000,
+    "gemini-3-flash": 1_048_576,
+    # OpenAI
+    "gpt-5.5": 1_050_000,
+    "gpt-5.4": 1_050_000,
+    "gpt-5.4-mini": 400_000,
+    "gpt-5": 400_000,
+    "gpt-4.1": 1_047_576,
+    "gpt-4": 128_000,
+    # Anthropic Claude
+    "claude-opus-4.7": 1_000_000,
+    "claude-sonnet-4.6": 1_000_000,
     "claude-haiku-4-5": 200_000,
-    "kimi-k2.6": 128_000,
-    "deepseek-v4": 1_000_000,
+    # DeepSeek
+    "deepseek-v4-pro": 1_000_000,
     "deepseek-v4-flash": 1_000_000,
-    "minimax-m2.7": 1_000_000,
-    "minimax-m2": 1_000_000,
+    "deepseek-chat": 1_000_000,
+    # MiniMax
+    "minimax-m2.7": 204_800,
+    "minimax-m2": 204_800,
+    # GLM / Zhipu
+    "glm-5": 202_752,
+    "glm-4.5-flash": 202_752,
+    # Kimi
+    "kimi-k2-turbo-preview": 262_144,
+    "kimi-k2": 262_144,
 }
 
 
