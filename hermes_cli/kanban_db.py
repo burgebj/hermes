@@ -92,6 +92,22 @@ from toolsets import get_toolset_names
 _log = logging.getLogger(__name__)
 
 
+# ── Database encryption (opt-in) ───────────────────────────────────────────
+# kanban.db follows the same SQLCipher rebind as state.db: when database
+# encryption is on, the module-level ``sqlite3`` name is swapped for the
+# keyed ``sqlcipher3.dbapi2`` drop-in. See hermes_state for the rationale.
+_DB_ENCRYPTED = False
+try:
+    from hermes_crypto import database_encryption_active as _hc_db_active
+
+    if _hc_db_active():
+        import sqlcipher3.dbapi2 as sqlite3  # noqa: F811 — keyed-DB drop-in
+
+        _DB_ENCRYPTED = True
+except Exception:  # noqa: BLE001 — never let this break import of the DB layer
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -981,6 +997,10 @@ def _validate_sqlite_header(path: Path) -> None:
     being collapsed into a generic PRAGMA error and lets the gateway's corrupt
     board handling identify the board by fingerprint.
     """
+    if _DB_ENCRYPTED:
+        # An encrypted SQLCipher database intentionally has no plaintext
+        # SQLite header — the header check does not apply.
+        return
     try:
         stat = path.stat()
     except FileNotFoundError:
@@ -1170,6 +1190,10 @@ def connect(
     resolved = str(path.resolve())
     conn = sqlite3.connect(str(path), isolation_level=None, timeout=30)
     try:
+        # Unlock the SQLCipher key first (no-op when encryption is disabled).
+        from hermes_state import _apply_db_key
+
+        _apply_db_key(conn)
         conn.row_factory = sqlite3.Row
         with _INIT_LOCK:
             # WAL activation can take an exclusive lock while SQLite creates the

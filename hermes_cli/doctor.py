@@ -952,6 +952,44 @@ def run_doctor(args):
     except Exception:
         pass
 
+    _section("Encryption at Rest")
+    try:
+        from hermes_crypto import audit as _enc_audit
+        from hermes_crypto import is_encryption_enabled, running_under_openshell
+
+        if is_encryption_enabled():
+            from hermes_crypto import keystore as _enc_ks
+
+            slot = _enc_ks.primary_slot_type() or "?"
+            check_ok("Encryption at rest", f"(enabled, key source: {slot})")
+            if slot == "passphrase" and not _enc_ks.has_recovery_slot():
+                check_warn(
+                    "No recovery code set",
+                    "run `hermes encrypt add-recovery` — a lost passphrase = lost data",
+                )
+        else:
+            check_info(
+                "Encryption at rest is off — enable with `hermes encrypt enable`"
+            )
+        if running_under_openshell():
+            check_ok("Running inside an OpenShell sandbox", "(runtime isolation active)")
+        else:
+            check_info(
+                "Not sandboxed — pair encryption with a runtime sandbox "
+                "(e.g. NVIDIA OpenShell) to confine the running agent"
+            )
+        recent_fails = [
+            e for e in _enc_audit.read_recent(50)
+            if e.get("activity") == "keystore_unlock_failed"
+        ]
+        if recent_fails:
+            check_warn(
+                f"{len(recent_fails)} failed keystore unlock(s) in the audit log",
+                "review ~/.hermes/logs/security-audit.jsonl",
+            )
+    except Exception:
+        pass
+
     _section("Directory Structure")
     hermes_home = HERMES_HOME
     if hermes_home.exists():

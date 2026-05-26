@@ -45,9 +45,7 @@ def get_secret_source(env_var: str) -> str | None:
     Returns ``"bitwarden"`` for keys pulled from Bitwarden Secrets Manager
     during the current process's ``load_hermes_dotenv()`` call.  Returns
     ``None`` for keys that came from ``.env``, the shell environment, or
-    aren't tracked.  The returned label is metadata only: credential-pool
-    persistence may store it to explain the origin of a borrowed secret, but
-    must never treat it as authorization to persist the raw value.
+    aren't tracked.
     """
     return _SECRET_SOURCES.get(env_var)
 
@@ -143,11 +141,42 @@ def _sanitize_loaded_credentials() -> None:
         )
 
 
-def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
+def _maybe_decrypt_env_file(path: Path) -> str | None:
+    """Return the decrypted ``.env`` text when *path* is encrypted, else None.
+
+    A genuine decryption failure is allowed to propagate: an encrypted
+    ``.env`` that cannot be opened must fail loudly here rather than let the
+    agent start with no API keys (which would surface as a confusing
+    unrelated auth error later).
+    """
     try:
-        load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
-    except UnicodeDecodeError:
-        load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        from hermes_crypto import is_encrypted
+    except Exception:
+        return None
+    if not is_encrypted(raw):
+        return None
+    from hermes_crypto import decrypt_if_encrypted
+
+    return decrypt_if_encrypted(raw).decode("utf-8", errors="replace")
+
+
+def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
+    decrypted = _maybe_decrypt_env_file(path)
+    if decrypted is not None:
+        # Encrypted .env — feed python-dotenv the decrypted text directly so
+        # no plaintext copy is ever written to disk.
+        import io
+
+        load_dotenv(stream=io.StringIO(decrypted), override=override)
+    else:
+        try:
+            load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
+        except UnicodeDecodeError:
+            load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
     # Strip non-ASCII characters from credential env vars that were just
     # loaded.  API keys must be pure ASCII since they're sent as HTTP
     # header values (httpx encodes headers as ASCII).  Non-ASCII chars
@@ -164,16 +193,23 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     This produces mangled values — e.g. a bot token duplicated 8×
     (see #8908).
 
-    Also strips embedded null bytes which crash ``os.environ[k] = v``
-    with ``ValueError: embedded null byte`` — typically introduced by
-    copy-pasting API keys from terminals or rich-text editors.
-
     We delegate to ``hermes_cli.config._sanitize_env_lines`` which
     already knows all valid Hermes env-var names and can split
     concatenated lines correctly.
     """
     if not path.exists():
         return
+    # An encrypted .env is an opaque marker + base64 blob — the line
+    # sanitizer would corrupt the envelope, so skip it entirely.
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(64)
+        from hermes_crypto import is_encrypted
+
+        if is_encrypted(head):
+            return
+    except Exception:
+        pass
     try:
         from hermes_cli.config import _sanitize_env_lines
     except ImportError:
@@ -183,11 +219,7 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     try:
         with open(path, **read_kw) as f:
             original = f.readlines()
-        # Strip null bytes before _sanitize_env_lines so they never
-        # reach python-dotenv (which passes them to os.environ and
-        # crashes with ValueError).
-        stripped = [line.replace("\x00", "") for line in original]
-        sanitized = _sanitize_env_lines(stripped)
+        sanitized = _sanitize_env_lines(original)
         if sanitized != original:
             import tempfile
             fd, tmp = tempfile.mkstemp(
@@ -290,8 +322,6 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         override_existing=bool(bw_cfg.get("override_existing", False)),
         cache_ttl_seconds=float(bw_cfg.get("cache_ttl_seconds", 300)),
         auto_install=bool(bw_cfg.get("auto_install", True)),
-        server_url=str(bw_cfg.get("server_url", "") or "").strip(),
-        home_path=home_path,
     )
 
     if result.applied:
