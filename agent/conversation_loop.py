@@ -63,6 +63,7 @@ from agent.nous_rate_guard import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_cache_strategy import (
     AnthropicInlineCacheStrategy,
+    GeminiResourceCacheStrategy,
     NoCacheStrategy,
     PromptCacheIntent,
 )
@@ -262,6 +263,117 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
             "length limit. Continue exactly where you left off. Do not "
             "restart or repeat prior text. Finish the answer directly.]"
         )
+
+
+def _ensure_gemini_cache(agent: Any, api_messages: list) -> Optional[str]:
+    """Create or reuse a Gemini ``cachedContents`` resource for this session.
+
+    Returns the resource name (``"cachedContents/<id>"``) or ``None`` when
+    caching is unavailable or the system prompt is too short.  Failures are
+    logged at DEBUG and never raise — uncached requests are the safe fallback.
+    """
+    import json
+    import time
+
+    session_id = getattr(agent, "session_id", None)
+    if not session_id:
+        return None
+
+    session_key = f"gemini_cache_{session_id}"
+
+    # Reuse existing cache if it has more than 5 minutes of TTL remaining.
+    try:
+        db = getattr(agent, "_session_db", None)
+        if db:
+            cache_json = db.get_meta(session_key)
+            if cache_json:
+                state = json.loads(cache_json)
+                if state.get("name") and state.get("expires_at", 0) > time.time() + 300:
+                    return state["name"]
+    except Exception:
+        pass
+
+    # Build systemInstruction parts from api_messages.
+    system_parts: list = []
+    for msg in api_messages:
+        if not isinstance(msg, dict) or msg.get("role") != "system":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip():
+            system_parts.append({"text": content})
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                    system_parts.append({"text": part["text"]})
+
+    if not system_parts:
+        return None
+
+    model_id = getattr(agent, "model", "") or ""
+    if not model_id.startswith("models/"):
+        model_id = f"models/{model_id}"
+    base_url = (getattr(agent, "base_url", None) or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    api_key = getattr(agent, "api_key", None) or ""
+
+    cache_payload: dict = {
+        "model": model_id,
+        "systemInstruction": {"parts": system_parts},
+        "ttl": "3600s",
+    }
+    try:
+        from agent.gemini_native_adapter import _translate_tools_to_gemini
+        tools_list = getattr(agent, "tools", None)
+        if tools_list:
+            gemini_tools = _translate_tools_to_gemini(tools_list)
+            if gemini_tools:
+                cache_payload["tools"] = gemini_tools
+    except Exception:
+        pass
+
+    try:
+        import httpx
+        url = f"{base_url}/cachedContents"
+        with httpx.Client(timeout=30.0) as _hc:
+            resp = _hc.post(
+                url,
+                params={"key": api_key} if api_key else {},
+                json=cache_payload,
+                headers={"Content-Type": "application/json"},
+            )
+        if resp.status_code != 200:
+            logger.debug(
+                "Gemini cache creation failed HTTP %d: %s",
+                resp.status_code, resp.text[:300],
+            )
+            return None
+        result = resp.json()
+        cache_name = result.get("name")
+        if not cache_name:
+            return None
+
+        expires_at = time.time() + 3600
+        expire_time = result.get("expireTime", "")
+        if expire_time:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(expire_time.replace("Z", "+00:00"))
+                expires_at = dt.timestamp()
+            except Exception:
+                pass
+
+        try:
+            db = getattr(agent, "_session_db", None)
+            if db:
+                db.set_meta(session_key, json.dumps({"name": cache_name, "expires_at": expires_at}))
+        except Exception:
+            pass
+
+        logger.debug("Gemini context cache created: %s", cache_name)
+        return cache_name
+
+    except Exception as exc:
+        logger.debug("Gemini cache creation error: %s", exc)
+        return None
 
 
 def run_conversation(
@@ -906,7 +1018,15 @@ def run_conversation(
         ):
             _strategy = AnthropicInlineCacheStrategy(layout="native")
         _intent = PromptCacheIntent(ttl=getattr(agent, "_cache_ttl", "5m"))
-        api_messages = _strategy.apply(api_messages, _intent)
+
+        if isinstance(_strategy, GeminiResourceCacheStrategy):
+            # Gemini server-side caching: create or reuse a cachedContents
+            # resource for this session's system instruction + tools.
+            # The cache name flows to GeminiNativeClient via extra_body.
+            agent._gemini_cached_content_name = _ensure_gemini_cache(agent, api_messages)
+        else:
+            agent._gemini_cached_content_name = None
+            api_messages = _strategy.apply(api_messages, _intent)
 
         # Safety net: strip orphaned tool results / add stubs for missing
         # results before sending to the API.  Runs unconditionally — not

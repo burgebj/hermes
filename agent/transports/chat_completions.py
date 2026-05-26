@@ -511,6 +511,7 @@ class ChatCompletionsTransport(ProviderTransport):
             base_url=params.get("base_url"),
             reasoning_config=reasoning_config,
             openrouter_min_coding_score=params.get("openrouter_min_coding_score"),
+            gemini_cached_content_name=params.get("gemini_cached_content_name"),
         )
         if profile_body:
             extra_body.update(profile_body)

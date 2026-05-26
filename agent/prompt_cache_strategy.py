@@ -174,6 +174,36 @@ class AnthropicInlineCacheStrategy:
         )
 
 
+# ── Gemini server-side resource strategy ────────────────────────────────
+
+
+@dataclass
+class GeminiResourceCacheStrategy:
+    """Marker strategy: use Gemini server-side context caching.
+
+    Signal to conversation_loop.py that a ``cachedContents`` resource
+    should be created (or reused) for the session's system instruction +
+    tools. The actual HTTP call to ``POST /v1beta/cachedContents`` is made
+    in the loop (which has access to the agent's credentials and state DB),
+    not here.
+
+    The resource name is threaded to ``GeminiNativeClient`` via
+    ``extra_body["gemini_cached_content_name"]`` so ``build_gemini_request``
+    can add ``cachedContent`` to the payload and omit ``systemInstruction``
+    and ``tools`` (both are already encoded in the server-side resource).
+    """
+
+    name: str = "gemini-resource"
+
+    def apply(
+        self,
+        messages: List[Dict[str, Any]],
+        intent: PromptCacheIntent,
+        session_ctx: Optional[SessionCacheState] = None,
+    ) -> List[Dict[str, Any]]:
+        return messages
+
+
 # ── Public re-exports ───────────────────────────────────────────────────
 
 
@@ -183,4 +213,5 @@ __all__ = [
     "PromptCacheStrategy",
     "NoCacheStrategy",
     "AnthropicInlineCacheStrategy",
+    "GeminiResourceCacheStrategy",
 ]
