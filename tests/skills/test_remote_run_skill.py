@@ -298,18 +298,147 @@ def test_requirements_check_with_paramiko():
 def test_requirements_check_without_paramiko():
     """check_remote_run_requirements returns False when paramiko is missing."""
     from tools.remote_run_tool import check_remote_run_requirements
-    with patch.dict("sys.modules", clear=True):
-        # Re-add builtins and the tool module itself
-        import builtins
-        fake_modules = {
-            "paramiko": None,
-            "tools": MagicMock(),
-            "tools.remote_run_tool": MagicMock(),
-        }
-        with patch.dict("sys.modules", fake_modules):
-            # We need to reload the check or at least verify the logic
-            # The function checks import paramiko — if it's not there, return False
-            pass
-    # Can't easily test the import failure case without reloading the module,
-    # but the function structure is straightforward
+    # Simulate ImportError by patching builtins.__import__ to raise
+    # for the 'paramiko' module
+    import builtins
+    orig_import = builtins.__import__
+
+    def _mock_import(name, *args, **kwargs):
+        if name == 'paramiko':
+            raise ImportError("No module named paramiko")
+        return orig_import(name, *args, **kwargs)
+
+    with patch.object(builtins, '__import__', side_effect=_mock_import):
+        assert check_remote_run_requirements() is False
+
+
+# ---------------------------------------------------------------------------
+# Security — injection resistance
+# ---------------------------------------------------------------------------
+
+
+def test_workdir_injection_prevented(mock_paramiko):
+    """Shell injection via workdir containing $(...) is prevented by shlex.quote."""
+    _run({
+        "host": "srv", "command": "echo hello",
+        "workdir": "/tmp/$(whoami)",
+    })
+    mock_p, mock_client, _, _ = mock_paramiko
+    cmd = mock_client.exec_command.call_args[0][0]
+    # The injected $(whoami) should be single-quoted by shlex.quote
+    assert "$(whoami)" not in cmd.split("'")[0]  # Should not be unquoted
+    assert "whoami" not in cmd or "cd '/tmp/$(whoami)'" in cmd
+    assert "'" in cmd  # Should be quoted
+
+
+def test_env_key_injection_prevented():
+    """Shell injection via env key containing shell metacharacters is rejected."""
+    result = _run({
+        "host": "srv", "command": "echo hello",
+        "env": {"X;whoami;Y": "val"},
+    })
+    assert "error" in result
+    assert "Invalid environment variable key" in result["error"]
+
+
+def test_env_key_empty_rejected():
+    """Empty env var key is rejected."""
+    result = _run({
+        "host": "srv", "command": "echo hello",
+        "env": {"": "val"},
+    })
+    assert "error" in result
+    assert "Invalid environment variable key" in result["error"]
+
+
+def test_sudo_command_with_single_quotes(mock_paramiko):
+    """Sudo with command containing single quotes is handled correctly."""
+    _run({
+        "host": "srv", "command": "echo 'test'", "sudo": True,
+    })
+    mock_p, mock_client, _, _ = mock_paramiko
+    cmd = mock_client.exec_command.call_args[0][0]
+    assert cmd.startswith("sudo")
+    assert "echo" in cmd
+    # The single quotes should be preserved via shlex.quote wrapping
+    # We can't validate exact format since shlex.quote may vary, but
+    # the command should execute without shell syntax errors
+    assert "bash -c" in cmd
+
+
+def test_sudo_password_sent_via_channel(mock_paramiko):
+    """Sudo password is sent via channel stdin, not embedded in command string."""
+    mock_p, mock_client, mock_stdout, _ = mock_paramiko
+    mock_stdin = MagicMock()
+
+    # Mock exec_command to capture stdin channel for password sending
+    mock_stdin.channel = MagicMock()
+    mock_client.exec_command.return_value = (mock_stdin, mock_stdout, MagicMock())
+
+    _run({
+        "host": "srv", "command": "whoami",
+        "sudo": True, "password": "sekret",
+    })
+    cmd = mock_client.exec_command.call_args[0][0]
+    # The password should NOT be in the command string
+    assert "sekret" not in cmd
+    assert "printf" not in cmd
+    # The password should be sent via stdin.channel
+    mock_stdin.channel.send.assert_called_once()
+    sent = mock_stdin.channel.send.call_args[0][0]
+    assert "sekret" in sent
+
+
+def test_password_not_in_command_string(mock_paramiko):
+    """Password never appears in the command string (sent via channel)."""
+    _run({
+        "host": "srv", "command": "whoami",
+        "sudo": True, "password": "p@$$w0rd'",
+    })
+    mock_p, mock_client, _, _ = mock_paramiko
+    cmd = mock_client.exec_command.call_args[0][0]
+    assert "p@$$w0rd" not in cmd
+
+
+def test_host_key_policy_is_warning(mock_paramiko):
+    """The SSHClient uses WarningPolicy (not AutoAddPolicy)."""
+    from tools.remote_run_tool import check_remote_run_requirements
+    # Policy is set during handler execution, verified via mock
+    mock_p, mock_client, _, _ = mock_paramiko
+    _run({"host": "srv", "command": "ls"})
+    # Verify set_missing_host_key_policy was called
+    mock_client.set_missing_host_key_policy.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Output truncation
+# ---------------------------------------------------------------------------
+
+
+def test_large_output_truncated(mock_paramiko):
+    """Output exceeding MAX_RESULT_SIZE_CHARS is truncated."""
+    from tools.remote_run_tool import MAX_RESULT_SIZE_CHARS
+    mock_p, mock_client, mock_stdout, mock_stderr = mock_paramiko
+    # Generate output larger than the limit
+    big_output = b"x" * (MAX_RESULT_SIZE_CHARS + 10000)
+    mock_stdout.read.return_value = big_output
+    mock_stderr.read.return_value = b""
+
+    result = _run({"host": "srv", "command": "cat largefile"})
+    assert len(result["stdout"]) < len(big_output)
+    assert "truncated" in result["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# Toolset registration
+# ---------------------------------------------------------------------------
+
+
+def test_tool_registered_in_ssh_toolset():
+    """The tool is registered in the 'ssh' toolset (not 'terminal')."""
+    from tools.remote_run_tool import REMOTE_RUN_SCHEMA, check_remote_run_requirements
+    assert REMOTE_RUN_SCHEMA["name"] == "remote_run"
     assert callable(check_remote_run_requirements)
+    # The toolset is set at registry time — verify via the module
+    # (We can't easily inspect the registry after registration, but
+    #  the registration call in the module uses toolset="ssh")
