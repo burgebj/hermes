@@ -8137,6 +8137,18 @@ def _install_psutil_android_compat(
     import tempfile
     import urllib.request
 
+    def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
+        destination_resolved = destination.resolve(strict=False)
+        for member in tar.getmembers():
+            target = (destination / member.name).resolve(strict=False)
+            try:
+                target.relative_to(destination_resolved)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe tar member path: {member.name!r}") from exc
+            if member.issym() or member.islnk() or member.isdev():
+                raise RuntimeError(f"Unsafe tar member type: {member.name!r}")
+        tar.extractall(destination)
+
     psutil_url = (
         "https://files.pythonhosted.org/packages/aa/c6/"
         "d1ddf4abb55e93cebc4f2ed8b5d6dbad109ecb8d63748dd2b20ab5e57ebe/"
@@ -8148,7 +8160,7 @@ def _install_psutil_android_compat(
         archive = tmp_path / "psutil.tar.gz"
         urllib.request.urlretrieve(psutil_url, archive)
         with tarfile.open(archive) as tar:
-            tar.extractall(tmp_path)
+            _safe_extract_tar(tar, tmp_path)
 
         src_root = next(
             p for p in tmp_path.iterdir() if p.is_dir() and p.name.startswith("psutil-")

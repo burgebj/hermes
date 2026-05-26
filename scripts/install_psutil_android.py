@@ -44,6 +44,21 @@ MARKER = 'LINUX = sys.platform.startswith("linux")'
 REPLACEMENT = 'LINUX = sys.platform.startswith(("linux", "android"))'
 
 
+def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
+    """Extract a tar archive without allowing members to escape destination."""
+    destination = Path(destination)
+    destination_resolved = destination.resolve(strict=False)
+    for member in tar.getmembers():
+        target = (destination / member.name).resolve(strict=False)
+        try:
+            target.relative_to(destination_resolved)
+        except ValueError as exc:
+            raise ValueError(f"Unsafe tar member path: {member.name!r}") from exc
+        if member.issym() or member.islnk() or member.isdev():
+            raise ValueError(f"Unsafe tar member type: {member.name!r}")
+    tar.extractall(destination)
+
+
 def _resolve_install_cmd(pip_arg: str | None, prefer_uv: bool) -> list[str]:
     if pip_arg:
         return pip_arg.split()
@@ -83,7 +98,7 @@ def main() -> int:
         archive = tmp_path / "psutil.tar.gz"
         urllib.request.urlretrieve(PSUTIL_URL, archive)
         with tarfile.open(archive) as tar:
-            tar.extractall(tmp_path)
+            _safe_extract_tar(tar, tmp_path)
 
         try:
             src_root = next(
