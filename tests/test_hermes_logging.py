@@ -774,3 +774,35 @@ class TestReadLoggingConfig:
 
         level, max_size, backup = hermes_logging._read_logging_config()
         assert level is None
+
+
+class TestReadLoggingConfigExceptionSpecificity:
+    """Regression tests: _read_logging_config except Exception narrowed to specific types."""
+
+    def test_returns_nones_on_os_error(self, hermes_home):
+        """OSError opening config.yaml returns (None, None, None)."""
+        from unittest.mock import patch
+        (hermes_home / "config.yaml").write_text("logging:\n  level: DEBUG\n")
+        with patch("builtins.open", side_effect=OSError("disk error")):
+            result = hermes_logging._read_logging_config()
+        assert result == (None, None, None)
+
+    def test_returns_nones_on_malformed_yaml(self, hermes_home):
+        """yaml.YAMLError from malformed config.yaml returns (None, None, None)."""
+        (hermes_home / "config.yaml").write_text("{ bad yaml [[[")
+        result = hermes_logging._read_logging_config()
+        assert result == (None, None, None)
+
+    def test_propagates_runtime_error(self, hermes_home):
+        """RuntimeError from yaml.safe_load must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except Exception`` (RuntimeError
+        swallowed, returns (None, None, None)), passes after narrowing to
+        ``except (OSError, yaml.YAMLError)``.
+        """
+        import yaml
+        from unittest.mock import patch
+        (hermes_home / "config.yaml").write_text("logging:\n  level: DEBUG\n")
+        with patch.object(yaml, "safe_load", side_effect=RuntimeError("unexpected")):
+            with pytest.raises(RuntimeError):
+                hermes_logging._read_logging_config()

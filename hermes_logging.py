@@ -373,6 +373,9 @@ def _read_logging_config():
     """
     try:
         import yaml
+    except ImportError:
+        return (None, None, None)
+    try:
         config_path = get_config_path()
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
@@ -384,6 +387,6 @@ def _read_logging_config():
                     log_cfg.get("max_size_mb"),
                     log_cfg.get("backup_count"),
                 )
-    except Exception:
+    except (OSError, yaml.YAMLError):
         pass
     return (None, None, None)

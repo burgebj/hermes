@@ -48,6 +48,9 @@ def _resolve_timezone_name() -> str:
     # 2. config.yaml ``timezone`` key
     try:
         import yaml
+    except ImportError:
+        return ""
+    try:
         config_path = get_config_path()
         if config_path.exists():
             with open(config_path, encoding="utf-8") as f:
@@ -55,7 +58,7 @@ def _resolve_timezone_name() -> str:
             tz_cfg = cfg.get("timezone", "")
             if isinstance(tz_cfg, str) and tz_cfg.strip():
                 return tz_cfg.strip()
-    except Exception:
+    except (OSError, yaml.YAMLError):
         pass
 
     return ""
@@ -67,7 +70,7 @@ def _get_zoneinfo(name: str) -> Optional[ZoneInfo]:
         return None
     try:
         return ZoneInfo(name)
-    except (KeyError, Exception) as exc:
+    except KeyError as exc:
         logger.warning(
             "Invalid timezone '%s': %s. Falling back to server local time.",
             name, exc,

@@ -383,3 +383,58 @@ class TestCronTimezone:
 
         next_run = datetime.fromisoformat(job["next_run_at"])
         assert next_run.tzinfo is not None
+
+
+class TestExceptionSpecificity:
+    """Regression tests: hermes_time.py except Exception narrowed to specific types."""
+
+    def test_resolve_timezone_name_returns_empty_on_os_error(self, monkeypatch, tmp_path):
+        """OSError reading config.yaml returns empty string, not an exception."""
+        from unittest.mock import patch
+        import hermes_time
+        monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("timezone: UTC")
+        monkeypatch.setattr("hermes_time.get_config_path", lambda: cfg)
+        with patch("builtins.open", side_effect=OSError("disk error")):
+            result = hermes_time._resolve_timezone_name()
+        assert result == ""
+
+    def test_resolve_timezone_name_returns_empty_on_yaml_error(self, monkeypatch, tmp_path):
+        """yaml.YAMLError from safe_load returns empty string, not an exception."""
+        import hermes_time
+        monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("{ bad yaml [[[")
+        monkeypatch.setattr("hermes_time.get_config_path", lambda: cfg)
+        result = hermes_time._resolve_timezone_name()
+        assert result == ""
+
+    def test_resolve_timezone_name_propagates_runtime_error(self, monkeypatch, tmp_path):
+        """RuntimeError from yaml.safe_load must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except Exception`` (RuntimeError
+        swallowed, returns ""), passes after narrowing to ``except (OSError, yaml.YAMLError)``.
+        """
+        import yaml
+        import hermes_time
+        from unittest.mock import patch
+        monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("timezone: UTC")
+        monkeypatch.setattr("hermes_time.get_config_path", lambda: cfg)
+        with patch.object(yaml, "safe_load", side_effect=RuntimeError("unexpected")):
+            with pytest.raises(RuntimeError):
+                hermes_time._resolve_timezone_name()
+
+    def test_get_zoneinfo_propagates_non_key_error(self):
+        """Non-KeyError from ZoneInfo must propagate, not be swallowed.
+
+        Stash-verify anchor: fails under old ``except (KeyError, Exception)``
+        (all exceptions swallowed), passes after narrowing to ``except KeyError``.
+        """
+        from unittest.mock import patch
+        import hermes_time
+        with patch("hermes_time.ZoneInfo", side_effect=RuntimeError("unexpected")):
+            with pytest.raises(RuntimeError):
+                hermes_time._get_zoneinfo("America/Sao_Paulo")
