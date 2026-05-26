@@ -68,6 +68,7 @@ CONFIGURABLE_TOOLSETS = [
     ("todo",            "📋 Task Planning",             "todo"),
     ("memory",          "💾 Memory",                    "persistent memory across sessions"),
     ("session_search",  "🔎 Session Search",            "search past conversations"),
+    ("cognee",          "🧠 Cognee Lab Retrieval",       "read-only cognee_query against isolated cognee-lab corpus"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
@@ -142,6 +143,38 @@ def _toolset_allowed_for_platform(ts_key: str, platform: str) -> bool:
     """
     allowed = _TOOLSET_PLATFORM_RESTRICTIONS.get(ts_key)
     return allowed is None or platform in allowed
+
+
+def _default_off_toolsets_for_platform(platform: str) -> set[str]:
+    """Return default-off toolsets after platform/runtime exceptions."""
+    default_off = set(_DEFAULT_OFF_TOOLSETS)
+    if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
+        default_off.remove(platform)
+    if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
+        default_off.remove("homeassistant")
+    return default_off
+
+
+def _infer_configurable_toolsets_from_tools(
+    tool_names: set[str],
+    platform: str,
+    configurable_keys: set[str] | None = None,
+) -> set[str]:
+    """Infer configurable toolsets whose tools are all present in a tool set."""
+    from toolsets import resolve_toolset
+
+    if configurable_keys is None:
+        configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+    enabled: set[str] = set()
+    for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
+        if ts_key not in configurable_keys:
+            continue
+        if not _toolset_allowed_for_platform(ts_key, platform):
+            continue
+        ts_tools = set(resolve_toolset(ts_key))
+        if ts_tools and ts_tools.issubset(tool_names):
+            enabled.add(ts_key)
+    return enabled
 
 
 def _get_effective_configurable_toolsets():
@@ -1146,6 +1179,7 @@ def _get_platform_tools(
     # "hermes-cli" (which include all _HERMES_CORE_TOOLS) cause disabled
     # toolsets to re-appear as enabled.
     has_explicit_config = any(ts in configurable_keys for ts in toolset_names)
+    has_platform_default = any(ts in platform_default_keys for ts in toolset_names)
 
     if has_explicit_config:
         enabled_toolsets = {
@@ -1153,12 +1187,12 @@ def _get_platform_tools(
             if ts in configurable_keys and _toolset_allowed_for_platform(ts, platform)
         }
         # Mixed config: composite toolset alongside configurables (e.g.
-        # ``[hermes-cli, spotify]`` after enabling Spotify via ``hermes
-        # tools``). Without expansion the composite name is silently dropped,
-        # leaving sessions with only the configurable opt-ins and no native
-        # tools. Mirror the else-branch's subset inference, but apply
-        # _DEFAULT_OFF_TOOLSETS only to the implicit expansion — anything the
-        # user explicitly listed (e.g. ``spotify``) must survive.
+        # ``[hermes-cli, spotify]`` or ["hermes-cli", "cognee"]). Without
+        # expansion the composite name is silently dropped, leaving sessions
+        # with only the configurable opt-ins and no native tools. Mirror the
+        # else-branch's subset inference, but apply _DEFAULT_OFF_TOOLSETS only
+        # to the implicit expansion — anything the user explicitly listed
+        # (e.g. ``spotify``) must survive.
         composite_tools = set()
         for ts_name in toolset_names:
             if ts_name in configurable_keys or ts_name in plugin_ts_keys:
@@ -1168,21 +1202,12 @@ def _get_platform_tools(
             composite_tools.update(resolve_toolset(ts_name))
 
         if composite_tools:
-            expanded = set()
-            for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
-                if not _toolset_allowed_for_platform(ts_key, platform):
-                    continue
-                ts_tools = set(resolve_toolset(ts_key))
-                if ts_tools and ts_tools.issubset(composite_tools):
-                    expanded.add(ts_key)
-
-            default_off = set(_DEFAULT_OFF_TOOLSETS)
-            if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
-                default_off.remove(platform)
-            if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
-                default_off.remove("homeassistant")
-            expanded -= default_off
-
+            expanded = _infer_configurable_toolsets_from_tools(
+                composite_tools,
+                platform,
+                configurable_keys,
+            )
+            expanded -= _default_off_toolsets_for_platform(platform)
             enabled_toolsets |= expanded
     else:
         # No explicit config — fall back to resolving composite toolset names
@@ -1191,13 +1216,12 @@ def _get_platform_tools(
         for ts_name in toolset_names:
             all_tool_names.update(resolve_toolset(ts_name))
 
-        enabled_toolsets = set()
-        for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
-            if not _toolset_allowed_for_platform(ts_key, platform):
-                continue
-            ts_tools = set(resolve_toolset(ts_key))
-            if ts_tools and ts_tools.issubset(all_tool_names):
-                enabled_toolsets.add(ts_key)
+        enabled_toolsets = _infer_configurable_toolsets_from_tools(
+            all_tool_names,
+            platform,
+            configurable_keys,
+        )
+
 
         # Auto-enable ``x_search`` when xAI credentials are configured.
         # Unlike ``homeassistant`` (whose ``ha_*`` tools live inside the
@@ -1239,6 +1263,7 @@ def _get_platform_tools(
         if x_search_auto_enabled and "x_search" in default_off:
             default_off.remove("x_search")
         enabled_toolsets -= default_off
+
 
     # Recover non-configurable platform toolsets (e.g. discord, feishu_doc,
     # feishu_drive).  These are part of the platform's default composite but
