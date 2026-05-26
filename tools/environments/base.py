@@ -155,12 +155,21 @@ def _popen_bash(
 
 
 def _load_json_store(path: Path) -> dict:
-    """Load a JSON file as a dict, returning ``{}`` on any error."""
+    """Load a JSON file as a dict, returning ``{}`` on any error.
+
+    Logs a warning when the file exists but cannot be read or parsed so
+    that callers (snapshot stores for Modal/Singularity/Vercel backends)
+    surface corruption instead of silently rebuilding an empty store and
+    losing previously recorded snapshot state.
+    """
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "Failed to load JSON store %s (%s: %s); returning empty dict.",
+                path, type(exc).__name__, exc,
+            )
     return {}
 
 

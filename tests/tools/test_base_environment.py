@@ -5,9 +5,12 @@ init_session() failure handling, and the CWD marker contract.
 """
 
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock
 
-from tools.environments.base import BaseEnvironment, _cwd_marker
+import pytest
+
+from tools.environments.base import BaseEnvironment, _cwd_marker, _load_json_store
 
 
 class _TestableEnv(BaseEnvironment):
@@ -195,3 +198,32 @@ class TestCwdMarker:
         env1 = _TestableEnv()
         env2 = _TestableEnv()
         assert env1._cwd_marker != env2._cwd_marker
+
+
+class TestLoadJsonStore:
+    def test_returns_empty_dict_for_missing_file(self, tmp_path):
+        assert _load_json_store(tmp_path / "nonexistent.json") == {}
+
+    def test_returns_parsed_dict_for_valid_file(self, tmp_path):
+        p = tmp_path / "store.json"
+        p.write_text('{"key": "value"}', encoding="utf-8")
+        assert _load_json_store(p) == {"key": "value"}
+
+    def test_logs_warning_and_returns_empty_on_malformed_json(
+        self, tmp_path, caplog,
+    ):
+        """A corrupted snapshot store must surface a warning instead of being
+        silently discarded — operators need to know their store is broken so
+        they can recover manually rather than losing all snapshot state (ag08)."""
+        p = tmp_path / "store.json"
+        p.write_text('{"key": broken', encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="tools.environments.base"):
+            result = _load_json_store(p)
+
+        assert result == {}
+        assert any(
+            "Failed to load JSON store" in rec.message
+            and "JSONDecodeError" in rec.message
+            for rec in caplog.records
+        ), [r.message for r in caplog.records]
