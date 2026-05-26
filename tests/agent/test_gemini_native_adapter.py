@@ -304,6 +304,119 @@ def test_stream_event_translation_emits_tool_call_delta_with_stable_index():
     assert first[-1].choices[0].finish_reason == "tool_calls"
 
 
+def _make_image_data_url(mime: str = "image/jpeg") -> str:
+    import base64
+    return f"data:{mime};base64," + base64.b64encode(b"\xff\xd8\xff").decode("ascii")
+
+
+def test_tool_result_gemini3_embeds_image_in_function_response_parts():
+    """Gemini 3.x tool results with image_url content must put images in functionResponse.parts."""
+    from agent.gemini_native_adapter import build_gemini_request
+
+    image_url = _make_image_data_url("image/jpeg")
+    request = build_gemini_request(
+        model="gemini-3.5-flash",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_img",
+                        "type": "function",
+                        "function": {"name": "vision_analyze", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_img",
+                "name": "vision_analyze",
+                "content": [
+                    {"type": "text", "text": "A cat on a mat."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ],
+    )
+
+    fr = request["contents"][1]["parts"][0]["functionResponse"]
+    assert fr["name"] == "vision_analyze"
+    assert fr["id"] == "call_img"
+    assert fr["response"] == {"output": "A cat on a mat."}
+    assert "parts" in fr
+    assert len(fr["parts"]) == 1
+    assert fr["parts"][0]["inlineData"]["mimeType"] == "image/jpeg"
+
+
+def test_tool_result_gemini2_drops_image_content():
+    """Gemini 2.x does not support functionResponse.parts — images must be silently dropped."""
+    from agent.gemini_native_adapter import build_gemini_request
+
+    image_url = _make_image_data_url("image/png")
+    request = build_gemini_request(
+        model="gemini-2.5-flash",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_img",
+                        "type": "function",
+                        "function": {"name": "vision_analyze", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_img",
+                "name": "vision_analyze",
+                "content": [
+                    {"type": "text", "text": "A dog."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ],
+    )
+
+    fr = request["contents"][1]["parts"][0]["functionResponse"]
+    assert fr["response"] == {"output": "A dog."}
+    assert "parts" not in fr
+
+
+def test_tool_result_gemini3_text_only_has_no_parts():
+    """Text-only tool results on Gemini 3.x must not add an empty parts list."""
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        model="gemini-3.5-flash",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_txt",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_txt",
+                "name": "get_weather",
+                "content": "Sunny, 22°C",
+            },
+        ],
+    )
+
+    fr = request["contents"][1]["parts"][0]["functionResponse"]
+    assert fr["response"] == {"output": "Sunny, 22°C"}
+    assert "parts" not in fr
+
+
 def test_stream_event_translation_keeps_identical_calls_in_distinct_parts():
     from agent.gemini_native_adapter import translate_stream_event
 
