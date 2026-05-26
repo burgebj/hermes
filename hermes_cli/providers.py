@@ -201,6 +201,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="https://api.gmi-serving.com/v1",
         base_url_env_var="GMI_BASE_URL",
     ),
+    "nebius-token-factory": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("NEBIUS_API_KEY", "NEBIUS_TOKEN_FACTORY_API_KEY"),
+        base_url_override="https://api.tokenfactory.nebius.com/v1",
+        base_url_env_var="NEBIUS_BASE_URL",
+    ),
     "ollama-cloud": HermesOverlay(
         transport="openai_chat",
         base_url_override="https://ollama.com/v1",
@@ -358,6 +364,13 @@ ALIASES: Dict[str, str] = {
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
 
+    # Nebius Token Factory
+    "nebius": "nebius-token-factory",
+    "nebius-tokenfactory": "nebius-token-factory",
+    "nebius-tf": "nebius-token-factory",
+    "token-factory": "nebius-token-factory",
+    "tokenfactory": "nebius-token-factory",
+
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
@@ -382,6 +395,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "xiaomi": "Xiaomi MiMo",
     "gmi": "GMI Cloud",
     "tencent-tokenhub": "Tencent TokenHub",
+    "nebius-token-factory": "Nebius Token Factory",
     "lmstudio": "LM Studio",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",

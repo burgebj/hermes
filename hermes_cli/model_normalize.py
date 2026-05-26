@@ -103,6 +103,7 @@ _MATCHING_PREFIX_STRIP_PROVIDERS: frozenset[str] = frozenset({
     "xiaomi",
     "arcee",
     "ollama-cloud",
+    "nebius-token-factory",
     "custom",
 })
 
@@ -470,4 +471,3 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
 # ---------------------------------------------------------------------------
 # Batch / convenience helpers
 # ---------------------------------------------------------------------------
-
