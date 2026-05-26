@@ -652,12 +652,17 @@ class Task:
     # ``kanban.failure_limit`` config, and then to ``DEFAULT_FAILURE_LIMIT``.
     # Name matches the ``--max-retries`` CLI flag on ``kanban create``.
     max_retries: Optional[int] = None
-    # Originating chat/agent session id, when the task was created from
+# Originating chat/agent session id, when the task was created from
     # within an agent loop that propagated ``HERMES_SESSION_ID``. NULL for
     # tasks created from the CLI, the dashboard, or any path that doesn't
     # set the env var. Lets clients render a per-session board without
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
+    # Handoff flag: True if the task was deliberately blocked for handoff
+    # (e.g., awaiting review) rather than a genuine failure. The dispatcher
+    # does NOT increment consecutive_failures or retry tasks blocked with
+    # handoff=1.
+    handoff: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -724,9 +729,10 @@ class Task:
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
             ),
-            session_id=(
+session_id=(
                 row["session_id"] if "session_id" in keys else None
             ),
+            handoff=row["handoff"] if "handoff" in keys else 0,
         )
 
 
@@ -859,12 +865,18 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
     max_retries          INTEGER,
-    -- Originating chat/agent session id when the task was created from
+-- Originating chat/agent session id when the task was created from
     -- inside an agent loop that propagated ``HERMES_SESSION_ID``. NULL
     -- for tasks created from the CLI, dashboard, or any path that doesn't
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
-    session_id           TEXT
+    session_id           TEXT,
+    -- Handoff flag: True if the task was deliberately blocked for handoff
+    -- (e.g., awaiting review) rather than a genuine failure. Set when
+    -- workers call kanban_block with handoff=True or with reason patterns
+    -- like "review-required:", "handoff:", etc. The dispatcher does NOT
+    -- increment consecutive_failures or retry tasks blocked with handoff=1.
+    handoff              INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1354,6 +1366,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    if "handoff" not in cols:
+        # Handoff flag: True if the task was deliberately blocked for handoff
+        # (e.g., awaiting review) rather than a genuine failure. The dispatcher
+        # does NOT increment consecutive_failures or retry tasks blocked with
+        # handoff=1. Existing rows get 0 (no handoff), which is the correct
+        # default (they keep the global behaviour they were getting before
+        # the column existed).
+        _add_column_if_missing(
+            conn, "tasks", "handoff", "handoff INTEGER NOT NULL DEFAULT 0"
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -1368,7 +1391,6 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
     )
-
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
     ev_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_events)")}
@@ -3349,6 +3371,7 @@ def block_task(
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    handoff: bool = False,
 ) -> bool:
     """Transition ``running -> blocked``."""
     with write_txn(conn):
@@ -3359,11 +3382,12 @@ def block_task(
                    SET status       = 'blocked',
                        claim_lock   = NULL,
                        claim_expires= NULL,
-                       worker_pid   = NULL
+                       worker_pid   = NULL,
+                       handoff      = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """,
-                (task_id,),
+                (1 if handoff else 0, task_id,),
             )
         else:
             cur = conn.execute(
@@ -3372,12 +3396,13 @@ def block_task(
                    SET status       = 'blocked',
                        claim_lock   = NULL,
                        claim_expires= NULL,
-                       worker_pid   = NULL
+                       worker_pid   = NULL,
+                       handoff      = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                    AND current_run_id = ?
                 """,
-                (task_id, int(expected_run_id)),
+                (1 if handoff else 0, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
@@ -4794,11 +4819,16 @@ def _record_task_failure(
     blocked = False
     with write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries "
+            "SELECT consecutive_failures, status, max_retries, handoff "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
             return False
+        
+        # Skip failure counting for handoff blocks - they're deliberate, not failures
+        if row["handoff"]:
+            return False
+        
         failures = int(row["consecutive_failures"]) + 1
         cur_status = row["status"]
 
