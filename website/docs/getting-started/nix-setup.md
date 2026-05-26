@@ -647,7 +647,7 @@ The package's `site-packages` is added to PYTHONPATH in the hermes wrapper. `imp
 
 ### Optional Dependency Groups (`extraDependencyGroups`)
 
-For optional extras already declared in hermes-agent's `pyproject.toml` (e.g., memory providers like `hindsight` or `honcho`), use `extraDependencyGroups` to include them in the sealed venv at build time:
+For optional extras already declared in hermes-agent's `pyproject.toml` (e.g., memory providers like `hindsight` or `honcho`), use `extraDependencyGroups` to include them in the sealed venv at build time. The Nix package includes `all` and, by default, `messaging`, so Telegram/Discord/Slack gateway dependencies are available for `nix run`, `nix profile install`, and the NixOS module without runtime pip installs.
 
 ```nix
 services.hermes-agent = {
@@ -658,11 +658,26 @@ services.hermes-agent = {
 
 This is resolved by uv alongside core dependencies in a single pass — no PYTHONPATH patching, no collision risk. Available groups match the `[project.optional-dependencies]` keys in `pyproject.toml` (e.g., `"hindsight"`, `"honcho"`, `"voice"`, `"matrix"`, `"mistral"`, `"bedrock"`).
 
+For a minimal NixOS install that does not use messaging platforms:
+
+```nix
+services.hermes-agent.includeMessagingDependencies = false;
+```
+
+For package overrides outside the NixOS module:
+
+```nix
+pkgs.hermes-agent.override {
+  includeMessagingDependencies = false;
+}
+```
+
 **When to use which:**
 
 | Need | Option |
 |------|--------|
 | Enable a pyproject.toml optional extra | `extraDependencyGroups` |
+| Disable default Telegram/Discord/Slack deps | `includeMessagingDependencies = false` |
 | Add an external Python plugin not in pyproject.toml | `extraPythonPackages` |
 | Add a system binary (pandoc, jq, etc.) | `extraPackages` |
 | Add a directory-based plugin source tree | `extraPlugins` |
@@ -837,6 +852,7 @@ nix build .#checks.x86_64-linux.config-roundtrip    # merge script preserves use
 | `extraPlugins` | `listOf package` | `[]` | Directory plugin packages to symlink into `$HERMES_HOME/plugins/`. Each must contain `plugin.yaml` |
 | `extraPythonPackages` | `listOf package` | `[]` | Python packages added to PYTHONPATH for entry-point plugin discovery. Build with `python312Packages` |
 | `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras to include in the sealed venv (e.g. `["hindsight"]`). Resolved by uv — no collisions |
+| `includeMessagingDependencies` | `bool` | `true` | Include Telegram/Discord/Slack Python dependencies in the sealed venv |
 | `restart` | `str` | `"always"` | systemd `Restart=` policy |
 | `restartSec` | `int` | `5` | systemd `RestartSec=` value |
 

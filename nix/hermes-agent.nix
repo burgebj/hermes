@@ -4,6 +4,7 @@
 # Users override via:
 #   pkgs.hermes-agent.override { extraPythonPackages = [...]; }
 #   pkgs.hermes-agent.override { extraDependencyGroups = [ "hindsight" ]; }
+#   pkgs.hermes-agent.override { includeMessagingDependencies = false; }
 {
   lib,
   stdenv,
@@ -33,12 +34,16 @@
   # Overridable parameters
   extraPythonPackages ? [ ],
   extraDependencyGroups ? [ ],
+  includeMessagingDependencies ? true,
 }:
 let
   nodejs = nodejs_22;
+  defaultDependencyGroups = [ "all" ] ++ lib.optional includeMessagingDependencies "messaging";
   hermesVenv = callPackage ./python.nix {
     inherit uv2nix pyproject-nix pyproject-build-systems;
-    dependency-groups = [ "all" ] ++ extraDependencyGroups;
+    dependency-groups =
+      defaultDependencyGroups
+      ++ lib.filter (group: !(lib.elem group defaultDependencyGroups)) extraDependencyGroups;
   };
 
   hermesNpmLib = callPackage ./lib.nix {

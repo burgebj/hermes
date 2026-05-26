@@ -29,9 +29,9 @@
   let
     cfg = config.services.hermes-agent;
     effectivePackage =
-      if cfg.extraPythonPackages == [ ] && cfg.extraDependencyGroups == [ ]
+      if cfg.extraPythonPackages == [ ] && cfg.extraDependencyGroups == [ ] && cfg.includeMessagingDependencies
       then cfg.package
-      else cfg.package.override { inherit (cfg) extraPythonPackages extraDependencyGroups; };
+      else cfg.package.override { inherit (cfg) extraPythonPackages extraDependencyGroups includeMessagingDependencies; };
     hermes-agent = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
     # Deep-merge config type (from 0xrsydn/nix-hermes-agent)
@@ -531,6 +531,17 @@
           Use extraPythonPackages for external packages not in pyproject.toml.
         '';
         example = [ "hindsight" ];
+      };
+
+      includeMessagingDependencies = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Include the messaging optional-dependency group in the sealed Python
+          venv by default. This provides Telegram, Discord, and Slack gateway
+          dependencies for Nix installs without runtime pip installs. Set to
+          false for minimal installs that do not use messaging platforms.
+        '';
       };
 
       restart = mkOption {
