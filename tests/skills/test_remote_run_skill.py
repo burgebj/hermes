@@ -102,16 +102,27 @@ def test_ssh_port(mock_paramiko):
 # ---------------------------------------------------------------------------
 
 def test_sudo_with_password(mock_paramiko):
-    """Sudo with password constructs the correct command."""
+    """Sudo with password sends via channel, not in command string."""
+    mock_p, mock_client, mock_stdout, _ = mock_paramiko
+    mock_stdin = MagicMock()
+    mock_stdin.channel = MagicMock()
+    mock_client.exec_command.return_value = (mock_stdin, mock_stdout, MagicMock())
+
     _run({
         "host": "srv", "command": "whoami",
         "sudo": True, "password": "sekret",
     })
-    mock_p, mock_client, _, _ = mock_paramiko
     cmd = mock_client.exec_command.call_args[0][0]
-    # The password should be piped to sudo -S
-    assert "printf" in cmd or "sudo -S" in cmd
+    # Password is NOT in the command — sent via channel stdin
+    assert "sekret" not in cmd
+    assert "printf" not in cmd
+    assert "sudo -S" not in cmd
     assert "whoami" in cmd
+    assert cmd.startswith("sudo")
+    # Verify password is sent via channel (with 0.5s delay before send)
+    assert mock_stdin.channel.send.call_count == 1
+    sent = mock_stdin.channel.send.call_args[0][0]
+    assert "sekret" in sent
 
 
 def test_sudo_without_password(mock_paramiko):
@@ -331,7 +342,7 @@ def test_workdir_injection_prevented(mock_paramiko):
     assert "'" in cmd  # Should be quoted
 
 
-def test_env_key_injection_prevented():
+def test_env_key_injection_prevented(mock_paramiko):
     """Shell injection via env key containing shell metacharacters is rejected."""
     result = _run({
         "host": "srv", "command": "echo hello",
@@ -341,7 +352,7 @@ def test_env_key_injection_prevented():
     assert "Invalid environment variable key" in result["error"]
 
 
-def test_env_key_empty_rejected():
+def test_env_key_empty_rejected(mock_paramiko):
     """Empty env var key is rejected."""
     result = _run({
         "host": "srv", "command": "echo hello",
