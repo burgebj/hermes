@@ -122,6 +122,31 @@ describe('fragmented SGR mouse recovery', () => {
     expect(events[4]).toMatchObject({ kind: 'key', sequence: 'typed' })
   })
 
+  it('re-synthesizes degraded focus fragments when they ride in the same burst', () => {
+    const [events] = parseMultipleKeypresses(INITIAL_STATE, '5;142;11M[I[Otyped')
+
+    expect(events).toHaveLength(4)
+    expect(events[0]).toMatchObject({ kind: 'mouse', button: 5, col: 142, row: 11 })
+    expect(events[1]).toMatchObject({ kind: 'key', sequence: '\x1b[I' })
+    expect(events[2]).toMatchObject({ kind: 'key', sequence: '\x1b[O' })
+    expect(events[3]).toMatchObject({ kind: 'key', sequence: 'typed' })
+  })
+
+  it('re-synthesizes focus-only fragment bursts without leaking prompt text', () => {
+    const [events] = parseMultipleKeypresses(INITIAL_STATE, '[I[Otyped')
+
+    expect(events).toHaveLength(3)
+    expect(events[0]).toMatchObject({ kind: 'key', sequence: '\x1b[I' })
+    expect(events[1]).toMatchObject({ kind: 'key', sequence: '\x1b[O' })
+    expect(events[2]).toMatchObject({ kind: 'key', sequence: 'typed' })
+  })
+
+  it('keeps isolated focus-like text that is not part of a burst', () => {
+    const [[key]] = parseMultipleKeypresses(INITIAL_STATE, '[I typed literally')
+
+    expect(key).toMatchObject({ kind: 'key', sequence: '[I typed literally' })
+  })
+
   it('keeps isolated semicolon text that only resembles a prefixless mouse report', () => {
     const [[key]] = parseMultipleKeypresses(INITIAL_STATE, 'see 1;2;3M for details')
 

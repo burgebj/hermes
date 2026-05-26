@@ -64,6 +64,7 @@ const XTVERSION_RE = /^\x1bP>\|(.*?)(?:\x07|\x1b\\)$/s
 // eslint-disable-next-line no-control-regex
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/
 const SGR_MOUSE_FRAGMENT_RE = /(?<!\d)(?:\[<|<)?(?:[0-9]|[1-9][0-9]|1\d{2}|2[0-4]\d|25[0-5]);\d+;\d+[Mm]/g
+const FOCUS_FRAGMENT_RE = /\[(?:I|O)/g
 
 function createPasteKey(content: string): ParsedKey {
   return {
@@ -269,10 +270,10 @@ export function parseMultipleKeypresses(
       if (inPaste) {
         pasteBuffer += token.value
       } else {
-        const mouseFragments = parseTextWithSgrMouseFragments(token.value)
+        const terminalFragments = parseTextWithTerminalFragments(token.value)
 
-        if (mouseFragments) {
-          keys.push(...mouseFragments)
+        if (terminalFragments) {
+          keys.push(...terminalFragments)
         } else if (/^\[M[\x60-\x7f][\x20-\uffff]{2}$/.test(token.value)) {
           // Orphaned X10 wheel tail (fullscreen only — mouse tracking is off
           // otherwise). A heavy render blocked the event loop past App's 50ms
@@ -642,10 +643,40 @@ function parseSgrMouseFragment(fragment: string): ParsedInput {
   return parseMouseEvent(sequence) ?? parseKeypress(sequence)
 }
 
-function parseTextWithSgrMouseFragments(text: string): ParsedInput[] | null {
-  SGR_MOUSE_FRAGMENT_RE.lastIndex = 0
+function parseFocusFragment(fragment: string): ParsedInput {
+  return parseKeypress(`\x1b${fragment}`)
+}
 
-  const matches = [...text.matchAll(SGR_MOUSE_FRAGMENT_RE)]
+type RecoverableFragment = {
+  index: number
+  text: string
+  kind: 'focus' | 'mouse'
+}
+
+function collectRecoverableFragments(text: string): RecoverableFragment[] {
+  SGR_MOUSE_FRAGMENT_RE.lastIndex = 0
+  FOCUS_FRAGMENT_RE.lastIndex = 0
+
+  const fragments: RecoverableFragment[] = []
+
+  for (const match of text.matchAll(SGR_MOUSE_FRAGMENT_RE)) {
+    fragments.push({ index: match.index!, text: match[0], kind: 'mouse' })
+  }
+
+  for (const match of text.matchAll(FOCUS_FRAGMENT_RE)) {
+    fragments.push({ index: match.index!, text: match[0], kind: 'focus' })
+  }
+
+  return fragments.sort((a, b) => a.index - b.index)
+}
+
+function parseRecoverableFragment(fragment: RecoverableFragment): ParsedInput {
+  return fragment.kind === 'mouse' ? parseSgrMouseFragment(fragment.text) : parseFocusFragment(fragment.text)
+}
+
+function parseTextWithTerminalFragments(text: string): ParsedInput[] | null {
+  const matches = collectRecoverableFragments(text)
+
   if (matches.length === 0) {
     return null
   }
@@ -656,29 +687,31 @@ function parseTextWithSgrMouseFragments(text: string): ParsedInput[] | null {
 
   for (let i = 0; i < matches.length;) {
     const first = matches[i]!
-    const run: RegExpMatchArray[] = [first]
-    let runEnd = first.index! + first[0].length
+    const run: RecoverableFragment[] = [first]
+    let runEnd = first.index + first.text.length
     i++
 
     while (i < matches.length && matches[i]!.index === runEnd) {
       run.push(matches[i]!)
-      runEnd = matches[i]!.index! + matches[i]![0].length
+      runEnd = matches[i]!.index + matches[i]!.text.length
       i++
     }
 
-    const hasExplicitMousePrefix = run.some(match => match[0].startsWith('[<') || match[0].startsWith('<'))
+    const hasExplicitMousePrefix = run.some(
+      match => match.kind === 'mouse' && (match.text.startsWith('[<') || match.text.startsWith('<'))
+    )
     const isFragmentBurst = run.length > 1
 
     if (!hasExplicitMousePrefix && !isFragmentBurst) {
       continue
     }
 
-    if (first.index! > cursor) {
-      parsed.push(parseKeypress(text.slice(cursor, first.index!)))
+    if (first.index > cursor) {
+      parsed.push(parseKeypress(text.slice(cursor, first.index)))
     }
 
-    for (const match of run) {
-      parsed.push(parseSgrMouseFragment(match[0]))
+    for (const fragment of run) {
+      parsed.push(parseRecoverableFragment(fragment))
     }
 
     cursor = runEnd
