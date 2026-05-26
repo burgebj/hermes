@@ -161,7 +161,7 @@ class EntraIdentityConfig:
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]],
-                  *, default_scope: Optional[str] = None) -> "EntraIdentityConfig":
+                  *, default_scope: Optional[str] = None) -> EntraIdentityConfig:
         data = data or {}
         scope = str(data.get("scope") or "").strip() or default_scope or SCOPE_AI_AZURE_DEFAULT
         exclude_browser = bool(data.get("exclude_interactive_browser", True))
@@ -504,7 +504,7 @@ def build_bearer_http_client(token_provider: Callable[[], str], **httpx_kwargs: 
             "dependency of the openai/anthropic SDKs."
         ) from exc
 
-    def _inject_bearer(request: "httpx.Request") -> None:
+    def _inject_bearer(request: httpx.Request) -> None:
         try:
             token = materialize_bearer_for_http(token_provider)
         except ValueError as exc:

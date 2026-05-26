@@ -70,7 +70,7 @@ class PtyBridge:
     ``os.write`` on the master fd, which is safe.
     """
 
-    def __init__(self, proc: "ptyprocess.PtyProcess"):  # type: ignore[name-defined]
+    def __init__(self, proc: ptyprocess.PtyProcess):  # type: ignore[name-defined]
         self._proc = proc
         self._fd: int = proc.fd
         self._closed = False
@@ -91,7 +91,7 @@ class PtyBridge:
         env: Optional[dict] = None,
         cols: int = 80,
         rows: int = 24,
-    ) -> "PtyBridge":
+    ) -> PtyBridge:
         """Spawn ``argv`` behind a new PTY and return a bridge.
 
         Raises :class:`PtyUnavailableError` if the platform can't host a
@@ -230,7 +230,7 @@ class PtyBridge:
             pass
 
     # Context-manager sugar — handy in tests and ad-hoc scripts.
-    def __enter__(self) -> "PtyBridge":
+    def __enter__(self) -> PtyBridge:
         return self
 
     def __exit__(self, *_exc) -> None:

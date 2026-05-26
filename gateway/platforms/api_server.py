@@ -565,7 +565,7 @@ class _IdempotencyCache:
     def __init__(self, max_items: int = 1000, ttl_seconds: int = 300):
         from collections import OrderedDict
         self._store = OrderedDict()
-        self._inflight: Dict[tuple[str, str], "asyncio.Task[Any]"] = {}
+        self._inflight: Dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._ttl = ttl_seconds
         self._max = max_items
 
@@ -679,17 +679,17 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
-        self._app: Optional["web.Application"] = None
-        self._runner: Optional["web.AppRunner"] = None
-        self._site: Optional["web.TCPSite"] = None
+        self._app: Optional[web.Application] = None
+        self._runner: Optional[web.AppRunner] = None
+        self._site: Optional[web.TCPSite] = None
         self._response_store = ResponseStore()
         # Active run streams: run_id -> asyncio.Queue of SSE event dicts
-        self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
+        self._run_streams: Dict[str, asyncio.Queue[Optional[Dict]]] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
-        self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+        self._active_run_tasks: Dict[str, asyncio.Task] = {}
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
         # Active approval session key for each run_id.  The approval core
@@ -3032,7 +3032,7 @@ class APIServerAdapter(BasePlatformAdapter):
         approval_session_key = gateway_session_key or session_id or run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
-        q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
+        q: asyncio.Queue[Optional[Dict]] = asyncio.Queue()
         created_at = time.time()
         self._run_streams[run_id] = q
         self._run_streams_created[run_id] = created_at

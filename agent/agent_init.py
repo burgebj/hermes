@@ -194,7 +194,7 @@ def init_agent(
     skip_memory: bool = False,
     session_db=None,
     parent_session_id: str = None,
-    iteration_budget: "IterationBudget" = None,
+    iteration_budget: IterationBudget = None,
     fallback_model: Dict[str, Any] = None,
     credential_pool=None,
     checkpoints_enabled: bool = False,
@@ -506,7 +506,7 @@ def init_agent(
 
     # Rate limit tracking — updated from x-ratelimit-* response headers
     # after each API call.  Accessed by /usage slash command.
-    agent._rate_limit_state: Optional["RateLimitState"] = None
+    agent._rate_limit_state: Optional[RateLimitState] = None
 
     # OpenRouter response cache hit counter — incremented when
     # X-OpenRouter-Cache-Status: HIT is seen in streaming response headers.

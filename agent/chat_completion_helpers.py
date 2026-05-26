@@ -880,7 +880,7 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
 
 
-def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
+def try_activate_fallback(agent, reason: FailoverReason | None = None) -> bool:
     """Switch to the next fallback model/provider in the chain.
 
     Called when the current model is failing after retries.  Swaps the

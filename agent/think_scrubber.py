@@ -253,7 +253,7 @@ class StreamingThinkScrubber:
         earlier wins.
         """
         buf_lower = buf.lower()
-        best: "tuple[int, int] | None" = None
+        best: tuple[int, int] | None = None
         for open_tag, close_tag in zip(self._OPEN_TAGS, self._CLOSE_TAGS):
             open_lower = open_tag.lower()
             close_lower = close_tag.lower()

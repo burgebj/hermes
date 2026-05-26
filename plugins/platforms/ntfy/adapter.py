@@ -175,7 +175,7 @@ class NtfyAdapter(BasePlatformAdapter):
         self._token: str = extra.get("token") or os.getenv("NTFY_TOKEN", "")
 
         self._stream_task: Optional[asyncio.Task] = None
-        self._http_client: Optional["httpx.AsyncClient"] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
 
         # Message deduplication: msg_id -> timestamp
         self._seen_messages: Dict[str, float] = {}

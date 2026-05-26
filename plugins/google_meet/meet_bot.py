@@ -272,7 +272,7 @@ def _start_realtime_speaker(
     voice: str,
     instructions: str,
     stop_flag: dict,
-    state: "_BotState",
+    state: _BotState,
 ) -> None:
     """Wire up the OpenAI Realtime session + speaker thread + PCM pump.
 

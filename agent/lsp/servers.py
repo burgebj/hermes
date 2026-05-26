@@ -140,7 +140,7 @@ class ServerDef:
     server_id: str
     extensions: Tuple[str, ...]
     resolve_root: Callable[[str, str], Optional[str]]
-    build_spawn: Callable[[str, "ServerContext"], Optional[SpawnSpec]]
+    build_spawn: Callable[[str, ServerContext], Optional[SpawnSpec]]
     seed_first_push: bool = False
     description: str = ""
 

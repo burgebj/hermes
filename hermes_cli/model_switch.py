@@ -1574,7 +1574,7 @@ def list_authenticated_providers(
         # Key by (base_url, api_key) instead of slug: names frequently
         # differ per model ("Ollama — X") while the endpoint stays the
         # same. Slug-based grouping left them as separate rows.
-        groups: "OrderedDict[tuple, dict]" = OrderedDict()
+        groups: OrderedDict[tuple, dict] = OrderedDict()
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue

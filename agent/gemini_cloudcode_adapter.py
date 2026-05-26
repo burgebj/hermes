@@ -576,7 +576,7 @@ MARKER_BASE_URL = "cloudcode-pa://google"
 
 
 class _GeminiChatCompletions:
-    def __init__(self, client: "GeminiCloudCodeClient"):
+    def __init__(self, client: GeminiCloudCodeClient):
         self._client = client
 
     def create(self, **kwargs: Any) -> Any:
@@ -584,7 +584,7 @@ class _GeminiChatCompletions:
 
 
 class _GeminiChatNamespace:
-    def __init__(self, client: "GeminiCloudCodeClient"):
+    def __init__(self, client: GeminiCloudCodeClient):
         self.completions = _GeminiChatCompletions(client)
 
 

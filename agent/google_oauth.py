@@ -396,7 +396,7 @@ class RefreshParts:
     managed_project_id: str = ""
 
     @classmethod
-    def parse(cls, packed: str) -> "RefreshParts":
+    def parse(cls, packed: str) -> RefreshParts:
         if not packed:
             return cls(refresh_token="")
         parts = packed.split("|", 2)
@@ -440,7 +440,7 @@ class GoogleCredentials:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GoogleCredentials":
+    def from_dict(cls, data: Dict[str, Any]) -> GoogleCredentials:
         refresh_packed = str(data.get("refresh", "") or "")
         parts = RefreshParts.parse(refresh_packed)
         return cls(

@@ -189,7 +189,7 @@ class LSPService:
         self._delta_baseline: Dict[str, List[Dict[str, Any]]] = {}
 
     @classmethod
-    def create_from_config(cls) -> Optional["LSPService"]:
+    def create_from_config(cls) -> Optional[LSPService]:
         """Build a service from ``hermes_cli.config`` settings.
 
         Returns ``None`` if the config can't be loaded.  The service

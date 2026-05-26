@@ -184,7 +184,7 @@ class CodexAppServerClient:
             except Exception:
                 pass
 
-    def __enter__(self) -> "CodexAppServerClient":
+    def __enter__(self) -> CodexAppServerClient:
         return self
 
     def __exit__(self, *exc: Any) -> None:

@@ -71,7 +71,7 @@ _BWS_RUN_TIMEOUT = 30
 # In-process cache so repeated load_hermes_dotenv() calls (CLI startup,
 # gateway hot-reload, test suites) don't re-fetch from BSM.
 _CacheKey = Tuple[str, str, str]  # (access_token_fingerprint, project_id, server_url)
-_CACHE: Dict[_CacheKey, "_CachedFetch"] = {}
+_CACHE: Dict[_CacheKey, _CachedFetch] = {}
 
 # Disk-persisted cache so back-to-back CLI invocations (e.g. `hermes chat -q ...`
 # called from scripts, cron, the gateway forking new agents) don't each pay the

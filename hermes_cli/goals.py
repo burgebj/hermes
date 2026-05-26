@@ -164,7 +164,7 @@ class GoalState:
         return json.dumps(asdict(self), ensure_ascii=False)
 
     @classmethod
-    def from_json(cls, raw: str) -> "GoalState":
+    def from_json(cls, raw: str) -> GoalState:
         data = json.loads(raw)
         raw_subgoals = data.get("subgoals") or []
         subgoals: List[str] = []

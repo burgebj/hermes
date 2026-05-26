@@ -198,7 +198,7 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         self._stream_client: Any = None
         self._stream_task: Optional[asyncio.Task] = None
-        self._http_client: Optional["httpx.AsyncClient"] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
         self._card_sdk: Optional[Any] = None
         self._robot_sdk: Optional[Any] = None
         self._robot_code: str = extra.get("robot_code") or self._client_id

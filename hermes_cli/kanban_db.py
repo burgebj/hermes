@@ -660,7 +660,7 @@ class Task:
     session_id: Optional[str] = None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Task":
+    def from_row(cls, row: sqlite3.Row) -> Task:
         keys = set(row.keys())
         # Parse skills JSON blob if present
         skills_value: Optional[list] = None
@@ -759,7 +759,7 @@ class Run:
     error: Optional[str]
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Run":
+    def from_row(cls, row: sqlite3.Row) -> Run:
         try:
             meta = json.loads(row["metadata"]) if row["metadata"] else None
         except Exception:
@@ -4108,7 +4108,7 @@ class DispatchResult:
 # belt-and-braces against unbounded growth on exotic platforms).
 _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
-_recent_worker_exits: "dict[int, tuple[int, float]]" = {}
+_recent_worker_exits: dict[int, tuple[int, float]] = {}
 
 
 def _record_worker_exit(pid: int, raw_status: int) -> None:
@@ -4134,7 +4134,7 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
             _recent_worker_exits.pop(_pid, None)
 
 
-def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
+def _classify_worker_exit(pid: int) -> tuple[str, Optional[int]]:
     """Classify a recently-reaped worker by pid.
 
     Returns ``(kind, code)`` where ``kind`` is one of:

@@ -287,7 +287,7 @@ class LoadedPlugin:
 class PluginContext:
     """Facade given to plugins so they can register tools and hooks."""
 
-    def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
+    def __init__(self, manifest: PluginManifest, manager: PluginManager):
         self.manifest = manifest
         self._manager = manager
         # Lazy-built host-owned LLM facade — see ctx.llm property below.

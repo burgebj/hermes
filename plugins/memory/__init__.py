@@ -157,7 +157,7 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
     return results
 
 
-def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
+def load_memory_provider(name: str) -> Optional[MemoryProvider]:
     """Load and return a MemoryProvider instance by name.
 
     Checks both bundled (``plugins/memory/<name>/``) and user-installed
@@ -182,7 +182,7 @@ def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
         return None
 
 
-def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
+def _load_provider_from_dir(provider_dir: Path) -> Optional[MemoryProvider]:
     """Import a provider module and extract the MemoryProvider instance.
 
     The module must have either:

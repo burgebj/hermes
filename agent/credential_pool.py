@@ -130,7 +130,7 @@ class PooledCredential:
         raise AttributeError(f"'{type(self).__name__}' object has no attribute {name!r}")
 
     @classmethod
-    def from_dict(cls, provider: str, payload: Dict[str, Any]) -> "PooledCredential":
+    def from_dict(cls, provider: str, payload: Dict[str, Any]) -> PooledCredential:
         field_names = {f.name for f in fields(cls) if f.name != "provider"}
         data = {k: payload.get(k) for k in field_names if k in payload}
         # Rehydrated last_status_at may be an ISO string from to_dict() — normalize to float epoch

@@ -72,7 +72,7 @@ _MEMORY_WRITE_TARGET_SUBDIR_MAP = {
 # even if shutdown_memory_provider is never called (e.g. gateway crash,
 # SIGKILL, or exception in the session expiry watcher preventing shutdown).
 # ---------------------------------------------------------------------------
-_last_active_provider: Optional["OpenVikingMemoryProvider"] = None
+_last_active_provider: Optional[OpenVikingMemoryProvider] = None
 
 
 def _atexit_commit_sessions():

@@ -53,13 +53,13 @@ DEFAULT_PORT = 8645
 DEFAULT_HOST = "127.0.0.1"
 
 
-def _json_error(status: int, message: str, code: str = "proxy_error") -> "web.Response":
+def _json_error(status: int, message: str, code: str = "proxy_error") -> web.Response:
     """Return an OpenAI-style error JSON response."""
     body = {"error": {"message": message, "type": code, "code": code}}
     return web.json_response(body, status=status)
 
 
-def _filter_request_headers(headers: "aiohttp.typedefs.LooseHeaders") -> dict:
+def _filter_request_headers(headers: aiohttp.typedefs.LooseHeaders) -> dict:
     """Strip hop-by-hop + auth headers from the inbound request."""
     out = {}
     for key, value in headers.items():
@@ -82,7 +82,7 @@ def _filter_response_headers(headers) -> dict:
     return out
 
 
-def create_app(adapter: UpstreamAdapter) -> "web.Application":
+def create_app(adapter: UpstreamAdapter) -> web.Application:
     """Build the aiohttp application bound to a specific upstream adapter."""
     if not AIOHTTP_AVAILABLE:
         raise RuntimeError(
@@ -96,7 +96,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
     _adapter_key = web.AppKey("adapter", UpstreamAdapter)
     app[_adapter_key] = adapter
 
-    async def handle_health(request: "web.Request") -> "web.Response":
+    async def handle_health(request: web.Request) -> web.Response:
         return web.json_response(
             {
                 "status": "ok",
@@ -105,7 +105,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
             }
         )
 
-    async def handle_models_fallback(request: "web.Request") -> "web.Response":
+    async def handle_models_fallback(request: web.Request) -> web.Response:
         # Most clients hit /v1/models on startup. If the upstream doesn't
         # serve /models, synthesize a minimal response so clients don't
         # crash. The actual forwarding path handles /models when allowed.
@@ -116,7 +116,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
             }
         )
 
-    async def handle_proxy(request: "web.Request") -> "web.StreamResponse":
+    async def handle_proxy(request: web.Request) -> web.StreamResponse:
         # Extract the path *after* /v1
         rel_path = request.match_info.get("tail", "")
         rel_path = "/" + rel_path.lstrip("/")

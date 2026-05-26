@@ -59,7 +59,7 @@ class ConfigContext:
         current_provider: Optional[str] = None,
         current_model: Optional[str] = None,
         current_base_url: Optional[str] = None,
-    ) -> "ConfigContext":
+    ) -> ConfigContext:
         """Return a copy with truthy overrides applied.
 
         Truthy-only because the TUI reads agent attributes that may be

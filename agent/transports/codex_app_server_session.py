@@ -304,7 +304,7 @@ class CodexAppServerSession:
             self._client = None
         self._thread_id = None
 
-    def __enter__(self) -> "CodexAppServerSession":
+    def __enter__(self) -> CodexAppServerSession:
         return self
 
     def __exit__(self, *exc: Any) -> None:

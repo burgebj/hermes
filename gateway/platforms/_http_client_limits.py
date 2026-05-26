@@ -40,7 +40,7 @@ _DEFAULT_KEEPALIVE_EXPIRY_S = 2.0
 _DEFAULT_MAX_KEEPALIVE = 10
 
 
-def platform_httpx_limits() -> "httpx.Limits | None":
+def platform_httpx_limits() -> httpx.Limits | None:
     """Return ``httpx.Limits`` tuned for persistent platform-adapter clients.
 
     Returns ``None`` when httpx isn't importable, so callers can fall

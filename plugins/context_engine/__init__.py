@@ -76,7 +76,7 @@ def discover_context_engines() -> List[Tuple[str, str, bool]]:
     return results
 
 
-def load_context_engine(name: str) -> Optional["ContextEngine"]:
+def load_context_engine(name: str) -> Optional[ContextEngine]:
     """Load and return a ContextEngine instance by name.
 
     Returns None if the engine is not found or fails to load.
@@ -97,7 +97,7 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:
         return None
 
 
-def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
+def _load_engine_from_dir(engine_dir: Path) -> Optional[ContextEngine]:
     """Import an engine module and extract the ContextEngine instance.
 
     The module must have either:

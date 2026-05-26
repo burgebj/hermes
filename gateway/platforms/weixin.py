@@ -97,7 +97,7 @@ MESSAGE_DEDUP_TTL_SECONDS = 300
 
 
 def _is_stale_session_ret(
-    ret: "Optional[int]", errcode: "Optional[int]", errmsg: "Optional[str]",
+    ret: Optional[int], errcode: Optional[int], errmsg: Optional[str],
 ) -> bool:
     """True when iLink returns ret=-2 / errcode=-2 with 'unknown error',
     which is a stale-session signal (same as errcode=-14) rather than
@@ -115,7 +115,7 @@ MEDIA_VOICE = 4
 _LIVE_ADAPTERS: Dict[str, Any] = {}
 
 
-def _make_ssl_connector() -> Optional["aiohttp.TCPConnector"]:
+def _make_ssl_connector() -> Optional[aiohttp.TCPConnector]:
     """Return a TCPConnector with a certifi CA bundle, or None if certifi is unavailable.
 
     Tencent's iLink server (``ilinkai.weixin.qq.com``) is not verifiable against
@@ -368,7 +368,7 @@ def _guess_chat_type(message: Dict[str, Any], account_id: str) -> Tuple[str, str
 
 
 async def _api_post(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     endpoint: str,
@@ -387,7 +387,7 @@ async def _api_post(
 
 
 async def _api_get(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     endpoint: str,
@@ -407,7 +407,7 @@ async def _api_get(
 
 
 async def _get_updates(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     token: str,
@@ -428,7 +428,7 @@ async def _get_updates(
 
 
 async def _send_message(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     token: str,
@@ -465,7 +465,7 @@ async def _send_message(
 
 
 async def _send_typing(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     token: str,
@@ -488,7 +488,7 @@ async def _send_typing(
 
 
 async def _get_config(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     token: str,
@@ -509,7 +509,7 @@ async def _get_config(
 
 
 async def _get_upload_url(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     base_url: str,
     token: str,
@@ -541,7 +541,7 @@ async def _get_upload_url(
 
 
 async def _upload_ciphertext(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     ciphertext: bytes,
     upload_url: str,
@@ -569,7 +569,7 @@ async def _upload_ciphertext(
 
 
 async def _download_bytes(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     url: str,
     timeout_seconds: float = 60.0,
@@ -621,7 +621,7 @@ def _media_reference(item: Dict[str, Any], key: str) -> Dict[str, Any]:
 
 
 async def _download_and_decrypt_media(
-    session: "aiohttp.ClientSession",
+    session: aiohttp.ClientSession,
     *,
     cdn_base_url: str,
     encrypted_query_param: Optional[str],

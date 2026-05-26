@@ -2266,7 +2266,7 @@ class MatrixAdapter(BasePlatformAdapter):
     async def _redact_bot_approval_reactions(
         self,
         room_id: str,
-        prompt: "_MatrixApprovalPrompt",
+        prompt: _MatrixApprovalPrompt,
     ) -> None:
         """Redact the bot's seed ✅/❎ reactions, leaving only the user's reaction."""
         for emoji, evt_id in prompt.bot_reaction_events.items():

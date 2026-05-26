@@ -2292,7 +2292,7 @@ class DiscordAdapter(BasePlatformAdapter):
     # parity with on_message.
 
     def _evaluate_slash_authorization(
-        self, interaction: "discord.Interaction",
+        self, interaction: discord.Interaction,
     ) -> Tuple[bool, Optional[str]]:
         """Evaluate slash authorization without producing any response.
 
@@ -2388,7 +2388,7 @@ class DiscordAdapter(BasePlatformAdapter):
         return (True, None)
 
     async def _check_slash_authorization(
-        self, interaction: "discord.Interaction", command_text: str,
+        self, interaction: discord.Interaction, command_text: str,
     ) -> bool:
         """Mirror on_message's user/role/channel gates onto a slash invocation.
 
@@ -2405,7 +2405,7 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
     async def _reject_slash(
-        self, interaction: "discord.Interaction", command_text: str, *, reason: str,
+        self, interaction: discord.Interaction, command_text: str, *, reason: str,
     ) -> bool:
         """Send ephemeral reject + log warning + schedule admin alert. Returns False.
 
@@ -3279,7 +3279,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 return
 
             async def _autocomplete_name(
-                interaction: "discord.Interaction", current: str,
+                interaction: discord.Interaction, current: str,
             ) -> list:
                 """Filter skills by the user's typed prefix.
 
@@ -3331,7 +3331,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             @discord.app_commands.autocomplete(name=_autocomplete_name)
             async def _skill_handler(
-                interaction: "discord.Interaction", name: str, args: str = "",
+                interaction: discord.Interaction, name: str, args: str = "",
             ):
                 # Authorize BEFORE any skill lookup so that known and
                 # unknown skill names produce identical rejections for
@@ -3714,7 +3714,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _fetch_channel_context(
         self,
         channel: Any,
-        before: "DiscordMessage",
+        before: DiscordMessage,
     ) -> str:
         """Fetch recent channel messages for conversational context.
 
@@ -3907,7 +3907,7 @@ class DiscordAdapter(BasePlatformAdapter):
     # Auto-thread helpers
     # ------------------------------------------------------------------
 
-    async def _auto_create_thread(self, message: 'DiscordMessage') -> Optional[Any]:
+    async def _auto_create_thread(self, message: DiscordMessage) -> Optional[Any]:
         """Create a thread from a user message for auto-threading.
 
         Returns the created thread object, or ``None`` on failure.
@@ -5566,19 +5566,19 @@ def _define_discord_view_classes() -> None:
             other_btn.callback = self._on_other
             self.add_item(other_btn)
 
-        def _check_auth(self, interaction: "discord.Interaction") -> bool:
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
             )
 
         def _make_choice_callback(self, index: int, choice: str):
-            async def _callback(interaction: "discord.Interaction"):
+            async def _callback(interaction: discord.Interaction):
                 await self._resolve_choice(interaction, index, choice)
             return _callback
 
         async def _resolve_choice(
             self,
-            interaction: "discord.Interaction",
+            interaction: discord.Interaction,
             index: int,
             choice: str,
         ) -> None:
@@ -5649,7 +5649,7 @@ def _define_discord_view_classes() -> None:
                     self.clarify_id, exc,
                 )
 
-        async def _on_other(self, interaction: "discord.Interaction") -> None:
+        async def _on_other(self, interaction: discord.Interaction) -> None:
             """Flip the clarify entry into text-capture mode."""
             if self.resolved:
                 await interaction.response.send_message(

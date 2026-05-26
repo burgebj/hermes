@@ -1732,7 +1732,7 @@ class GatewayRunner:
         # background-process events) when the persisted origin is missing
         # and _parse_session_key can't recover thread_id. Capped so it
         # cannot grow unbounded over a long-running gateway lifetime.
-        self._session_sources: "OrderedDict[str, SessionSource]" = OrderedDict()
+        self._session_sources: OrderedDict[str, SessionSource] = OrderedDict()
         self._session_sources_max = 512
 
         # Cache AIAgent instances per session to preserve prompt caching.
@@ -1746,7 +1746,7 @@ class GatewayRunner:
         # eviction).  Hard cap via _AGENT_CACHE_MAX_SIZE, idle TTL enforced
         # from _session_expiry_watcher().
         import threading as _threading
-        self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
+        self._agent_cache: OrderedDict[str, tuple] = OrderedDict()
         self._agent_cache_lock = _threading.Lock()
 
         # Per-session model overrides from /model command.
@@ -5498,7 +5498,7 @@ class GatewayRunner:
                 boards = _kb.list_boards(include_archived=False)
             except Exception:
                 boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            out: list[tuple[str, "Optional[object]"]] = []
+            out: list[tuple[str, Optional[object]]] = []
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 out.append((slug, _tick_once_for_board(slug)))

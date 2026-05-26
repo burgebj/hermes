@@ -2470,7 +2470,7 @@ def test_resolve_hermes_argv_module_actually_runs():
 # ---------------------------------------------------------------------------
 
 
-def _make_task(**overrides) -> "kb.Task":
+def _make_task(**overrides) -> kb.Task:
     """Minimal Task with all required fields filled in. Override anything."""
     defaults = dict(
         id="t_age",

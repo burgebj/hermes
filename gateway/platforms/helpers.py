@@ -110,7 +110,7 @@ class TextBatchAggregator:
         self._batch_delay = batch_delay
         self._split_delay = split_delay
         self._split_threshold = split_threshold
-        self._pending: Dict[str, "MessageEvent"] = {}
+        self._pending: Dict[str, MessageEvent] = {}
         self._pending_tasks: Dict[str, asyncio.Task] = {}
 
     def is_enabled(self) -> bool:

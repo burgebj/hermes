@@ -176,7 +176,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "webhook"}
 
-    async def _handle_health(self, request: "web.Request") -> "web.Response":
+    async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response(
             {
                 "status": "ok",
@@ -187,7 +187,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             }
         )
 
-    async def _handle_validation(self, request: "web.Request") -> "web.Response":
+    async def _handle_validation(self, request: web.Request) -> web.Response:
         """Handle Microsoft Graph subscription validation handshake.
 
         Graph validates a subscription endpoint by sending a GET with
@@ -203,7 +203,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             return web.Response(status=400)
         return web.Response(text=validation_token, content_type="text/plain")
 
-    async def _handle_notification(self, request: "web.Request") -> "web.Response":
+    async def _handle_notification(self, request: web.Request) -> web.Response:
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
 
@@ -268,7 +268,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             return web.Response(status=403)
         return web.Response(status=400)
 
-    def _source_ip_allowed(self, request: "web.Request") -> bool:
+    def _source_ip_allowed(self, request: web.Request) -> bool:
         """Return True if the request's source IP is in the configured allowlist.
 
         When ``allowed_source_cidrs`` is empty (the default), everything is
@@ -370,7 +370,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
     def _render_template(self, template: str, payload: Dict[str, Any]) -> str:
         import re
 
-        def _resolve(match: "re.Match[str]") -> str:
+        def _resolve(match: re.Match[str]) -> str:
             key = match.group(1)
             value: Any = payload
             for part in key.split("."):

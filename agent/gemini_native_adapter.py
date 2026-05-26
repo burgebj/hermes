@@ -777,7 +777,7 @@ def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
 
 
 class _GeminiChatCompletions:
-    def __init__(self, client: "GeminiNativeClient"):
+    def __init__(self, client: GeminiNativeClient):
         self._client = client
 
     def create(self, **kwargs: Any) -> Any:
@@ -785,7 +785,7 @@ class _GeminiChatCompletions:
 
 
 class _AsyncGeminiChatCompletions:
-    def __init__(self, client: "AsyncGeminiNativeClient"):
+    def __init__(self, client: AsyncGeminiNativeClient):
         self._client = client
 
     async def create(self, **kwargs: Any) -> Any:
@@ -793,12 +793,12 @@ class _AsyncGeminiChatCompletions:
 
 
 class _GeminiChatNamespace:
-    def __init__(self, client: "GeminiNativeClient"):
+    def __init__(self, client: GeminiNativeClient):
         self.completions = _GeminiChatCompletions(client)
 
 
 class _AsyncGeminiChatNamespace:
-    def __init__(self, client: "AsyncGeminiNativeClient"):
+    def __init__(self, client: AsyncGeminiNativeClient):
         self.completions = _AsyncGeminiChatCompletions(client)
 
 

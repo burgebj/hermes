@@ -995,7 +995,7 @@ class InboundPipeline:
 
     # -- Registration API --------------------------------------------------
 
-    def use(self, name_or_mw, handler=None, when=None) -> "InboundPipeline":
+    def use(self, name_or_mw, handler=None, when=None) -> InboundPipeline:
         """Append a middleware to the end of the pipeline.
 
         Accepts either:
@@ -1006,7 +1006,7 @@ class InboundPipeline:
         self._middlewares.append((name, h, when))
         return self
 
-    def use_before(self, target: str, name_or_mw, handler=None, when=None) -> "InboundPipeline":
+    def use_before(self, target: str, name_or_mw, handler=None, when=None) -> InboundPipeline:
         """Insert a middleware before *target* (by name).  Appends if not found."""
         name, h = self._normalize(name_or_mw, handler)
         idx = next((i for i, (n, _, _) in enumerate(self._middlewares) if n == target), None)
@@ -1017,7 +1017,7 @@ class InboundPipeline:
             self._middlewares.insert(idx, entry)
         return self
 
-    def use_after(self, target: str, name_or_mw, handler=None, when=None) -> "InboundPipeline":
+    def use_after(self, target: str, name_or_mw, handler=None, when=None) -> InboundPipeline:
         """Insert a middleware after *target* (by name).  Appends if not found."""
         name, h = self._normalize(name_or_mw, handler)
         idx = next((i for i, (n, _, _) in enumerate(self._middlewares) if n == target), None)
@@ -1028,7 +1028,7 @@ class InboundPipeline:
             self._middlewares.insert(idx + 1, entry)
         return self
 
-    def remove(self, name: str) -> "InboundPipeline":
+    def remove(self, name: str) -> InboundPipeline:
         """Remove a middleware by name."""
         self._middlewares = [(n, h, w) for n, h, w in self._middlewares if n != name]
         return self
@@ -2671,7 +2671,7 @@ class DispatchMiddleware(InboundMiddleware):
         await next_fn()
 
     @staticmethod
-    async def _consume_group_queue(adapter: "YuanbaoAdapter", session_key: str) -> None:
+    async def _consume_group_queue(adapter: YuanbaoAdapter, session_key: str) -> None:
         """Drain the group queue one dispatch at a time, waiting for each to finish."""
         _IDLE_TIMEOUT = 2.0
         queue = adapter._group_queues.get(session_key)
@@ -2745,7 +2745,7 @@ class ConnectionManager:
       - Reconnect with exponential backoff
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: YuanbaoAdapter) -> None:
         self._adapter = adapter
         self._ws = None  # websockets connection
         self._connect_id: Optional[str] = None
@@ -3405,7 +3405,7 @@ class MediaSendHandler(ABC):
 
     @abstractmethod
     async def acquire_file(
-        self, adapter: "YuanbaoAdapter", **kwargs: Any,
+        self, adapter: YuanbaoAdapter, **kwargs: Any,
     ) -> Tuple[bytes, str, str]:
         """Return (file_bytes, filename, content_type).
 
@@ -3423,12 +3423,12 @@ class MediaSendHandler(ABC):
 
     async def handle(
         self,
-        adapter: "YuanbaoAdapter",
+        adapter: YuanbaoAdapter,
         chat_id: str,
         reply_to: Optional[str] = None,
         caption: Optional[str] = None,
         **kwargs: Any,
-    ) -> "SendResult":
+    ) -> SendResult:
         """Template method: shared media send flow."""
         conn = adapter._connection
         sender = adapter._outbound.sender
@@ -3664,7 +3664,7 @@ class GroupQueryService:
       - Member cache population on the adapter
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: YuanbaoAdapter) -> None:
         self._adapter = adapter
 
     # ------------------------------------------------------------------
@@ -3815,7 +3815,7 @@ class HeartbeatManager:
       - Explicit stop with optional FINISH signal
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: YuanbaoAdapter) -> None:
         self._adapter = adapter
         self._reply_heartbeat_tasks: Dict[str, asyncio.Task] = {}
         self._reply_hb_last_active: Dict[str, float] = {}
@@ -3936,7 +3936,7 @@ class SlowResponseNotifier:
     SLOW_RESPONSE_TIMEOUT_S seconds, sends a courtesy message.
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter", sender: "MessageSender") -> None:
+    def __init__(self, adapter: YuanbaoAdapter, sender: MessageSender) -> None:
         self._adapter = adapter
         self._sender = sender
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -3992,7 +3992,7 @@ class MessageSender:
     IMAGE_EXTS: ClassVar[frozenset] = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
     CHAT_DICT_MAX_SIZE: ClassVar[int] = 1000  # Max distinct chat IDs in _chat_locks
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: YuanbaoAdapter) -> None:
         self._adapter = adapter
         self._chat_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()
 
@@ -4042,7 +4042,7 @@ class MessageSender:
         content: str,
         reply_to: Optional[str] = None,
         group_code: str = "",
-    ) -> "SendResult":
+    ) -> SendResult:
         """Send text message with auto-chunking and per-chat-id ordering guarantee."""
         adapter = self._adapter
         conn = adapter._connection
@@ -4082,7 +4082,7 @@ class MessageSender:
         reply_to: Optional[str] = None,
         caption: Optional[str] = None,
         **kwargs: Any,
-    ) -> "SendResult":
+    ) -> SendResult:
         """Dispatch media send to the named handler strategy."""
         handler = self._media_handlers.get(handler_name)
         if handler is None:
@@ -4111,7 +4111,7 @@ class MessageSender:
         extension.
         """
         adapter = self._adapter
-        last_result: Optional["SendResult"] = None
+        last_result: Optional[SendResult] = None
 
         # 1. Send text
         if message.strip():
@@ -4146,7 +4146,7 @@ class MessageSender:
         msg_body: list,
         reply_to: Optional[str] = None,
         group_code: str = "",
-    ) -> "SendResult":
+    ) -> SendResult:
         """Lock + dispatch an arbitrary MsgBody to C2C or group."""
         lock = self.get_chat_lock(chat_id)
         async with lock:
@@ -4168,7 +4168,7 @@ class MessageSender:
         reply_to: Optional[str] = None,
         retry: int = 3,
         group_code: str = "",
-    ) -> "SendResult":
+    ) -> SendResult:
         """Send a single text chunk with retry (exponential backoff: 1s, 2s, 4s)."""
         adapter = self._adapter
         last_error: str = "Unknown error"
@@ -4312,7 +4312,7 @@ class MessageSender:
 
     @staticmethod
     async def _dispatch_encoded(
-        adapter: "YuanbaoAdapter", encoded: bytes, req_id: str,
+        adapter: YuanbaoAdapter, encoded: bytes, req_id: str,
     ) -> dict:
         """Send pre-encoded bytes via WS and return a normalised result dict."""
         try:
@@ -4418,7 +4418,7 @@ class OutboundManager:
     # Expose class-level constants from MessageSender for backward compatibility
     CHAT_DICT_MAX_SIZE: ClassVar[int] = MessageSender.CHAT_DICT_MAX_SIZE
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: YuanbaoAdapter) -> None:
         self._adapter = adapter
         self.sender: MessageSender = MessageSender(adapter)
         self.heartbeat: HeartbeatManager = HeartbeatManager(adapter)
@@ -4443,13 +4443,13 @@ class OutboundManager:
     async def send_text(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
         group_code: str = "",
-    ) -> "SendResult":
+    ) -> SendResult:
         """Send text message with auto-chunking."""
         return await self.sender.send_text(chat_id, content, reply_to, group_code=group_code)
 
     async def send_media(
         self, chat_id: str, handler_name: str, **kwargs: Any,
-    ) -> "SendResult":
+    ) -> SendResult:
         """Dispatch media send to the named handler strategy."""
         return await self.sender.send_media(chat_id, handler_name, **kwargs)
 
@@ -4509,15 +4509,15 @@ class YuanbaoAdapter(BasePlatformAdapter):
 
     # -- Active instance registry (class-level singleton) -------------------
 
-    _active_instance: ClassVar[Optional["YuanbaoAdapter"]] = None
+    _active_instance: ClassVar[Optional[YuanbaoAdapter]] = None
 
     @classmethod
-    def get_active(cls) -> Optional["YuanbaoAdapter"]:
+    def get_active(cls) -> Optional[YuanbaoAdapter]:
         """Return the currently connected YuanbaoAdapter, or None."""
         return cls._active_instance
 
     @classmethod
-    def set_active(cls, adapter: Optional["YuanbaoAdapter"]) -> None:
+    def set_active(cls, adapter: Optional[YuanbaoAdapter]) -> None:
         """Register (or clear) the active adapter instance."""
         cls._active_instance = adapter
 
@@ -4859,13 +4859,13 @@ class YuanbaoAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 
-def get_active_adapter() -> Optional["YuanbaoAdapter"]:
+def get_active_adapter() -> Optional[YuanbaoAdapter]:
     """Delegate to ``YuanbaoAdapter.get_active()``."""
     return YuanbaoAdapter.get_active()
 
 
 async def send_yuanbao_direct(
-    adapter: "YuanbaoAdapter",
+    adapter: YuanbaoAdapter,
     chat_id: str,
     message: str,
     media_files: Optional[List[Tuple[str, bool]]] = None,

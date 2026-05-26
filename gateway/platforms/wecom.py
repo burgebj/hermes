@@ -167,9 +167,9 @@ class WeComAdapter(BasePlatformAdapter):
         self._group_allow_from = _coerce_list(extra.get("group_allow_from") or extra.get("groupAllowFrom"))
         self._groups = extra.get("groups") if isinstance(extra.get("groups"), dict) else {}
 
-        self._session: Optional["aiohttp.ClientSession"] = None
-        self._ws: Optional["aiohttp.ClientWebSocketResponse"] = None
-        self._http_client: Optional["httpx.AsyncClient"] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
         self._listen_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._pending_responses: Dict[str, asyncio.Future] = {}

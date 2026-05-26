@@ -65,7 +65,7 @@ class MicrosoftGraphClient:
         self.user_agent = user_agent
 
     @classmethod
-    def from_env(cls, **kwargs: Any) -> "MicrosoftGraphClient":
+    def from_env(cls, **kwargs: Any) -> MicrosoftGraphClient:
         credentials = GraphCredentials.from_env()
         provider = MicrosoftGraphTokenProvider(credentials)
         return cls(provider, **kwargs)

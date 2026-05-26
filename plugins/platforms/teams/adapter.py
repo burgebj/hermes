@@ -358,16 +358,16 @@ class _AiohttpBridgeAdapter:
     route registrations and wires them into our own aiohttp ``Application``.
     """
 
-    def __init__(self, aiohttp_app: "web.Application"):
+    def __init__(self, aiohttp_app: web.Application):
         self._aiohttp_app = aiohttp_app
 
-    def register_route(self, method: "HttpMethod", path: str, handler: "HttpRouteHandler") -> None:
+    def register_route(self, method: HttpMethod, path: str, handler: HttpRouteHandler) -> None:
         """Register an SDK route handler as an aiohttp route."""
 
-        async def _aiohttp_handler(request: "web.Request") -> "web.Response":
+        async def _aiohttp_handler(request: web.Request) -> web.Response:
             body = await request.json()
             headers = dict(request.headers)
-            result: "HttpResponse" = await handler(HttpRequest(body=body, headers=headers))
+            result: HttpResponse = await handler(HttpRequest(body=body, headers=headers))
             status = result.get("status", 200)
             resp_body = result.get("body")
             if resp_body is not None:
@@ -633,8 +633,8 @@ class TeamsAdapter(BasePlatformAdapter):
         self._port = _coerce_port(
             extra.get("port") or os.getenv("TEAMS_PORT", str(_DEFAULT_PORT))
         )
-        self._app: Optional["App"] = None
-        self._runner: Optional["web.AppRunner"] = None
+        self._app: Optional[App] = None
+        self._runner: Optional[web.AppRunner] = None
         self._dedup = MessageDeduplicator(max_size=1000)
         # Maps chat_id → ConversationReference captured from incoming messages.
         # Used to send cards with the correct conversation type (personal/group/channel).
@@ -806,7 +806,7 @@ class TeamsAdapter(BasePlatformAdapter):
         )
         await self.handle_message(event)
 
-    async def _send_card(self, chat_id: str, card: "AdaptiveCard") -> "Any":
+    async def _send_card(self, chat_id: str, card: AdaptiveCard) -> Any:
         """Send an AdaptiveCard, using a stored ConversationReference when available."""
         from microsoft_teams.api import MessageActivityInput
 
@@ -819,8 +819,8 @@ class TeamsAdapter(BasePlatformAdapter):
         return None
 
     async def _on_card_action(
-        self, ctx: "ActivityContext[AdaptiveCardInvokeActivity]"
-    ) -> "InvokeResponse[AdaptiveCardActionMessageResponse]":
+        self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
+    ) -> InvokeResponse[AdaptiveCardActionMessageResponse]:
         """Handle an Adaptive Card Action.Execute button click."""
         from tools.approval import resolve_gateway_approval, has_blocking_approval
 

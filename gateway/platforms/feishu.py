@@ -1140,7 +1140,7 @@ def _normalize_feishu_text(
     text: str,
     mentions_map: Optional[Dict[str, FeishuMentionRef]] = None,
 ) -> str:
-    def _sub(match: "re.Match[str]") -> str:
+    def _sub(match: re.Match[str]) -> str:
         key = match.group(0)
         ref = (mentions_map or {}).get(key)
         if ref is None:
@@ -1466,7 +1466,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._update_prompt_counter = itertools.count(1)
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
-        self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
+        self._pending_processing_reactions: OrderedDict[str, str] = OrderedDict()
         self._load_seen_message_ids()
 
     @staticmethod

@@ -66,9 +66,9 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.HOMEASSISTANT)
 
         # Connection state
-        self._session: Optional["aiohttp.ClientSession"] = None
-        self._ws: Optional["aiohttp.ClientWebSocketResponse"] = None
-        self._rest_session: Optional["aiohttp.ClientSession"] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._rest_session: Optional[aiohttp.ClientSession] = None
         self._listen_task: Optional[asyncio.Task] = None
         self._msg_id: int = 0
 

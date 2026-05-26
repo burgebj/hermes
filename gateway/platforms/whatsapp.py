@@ -269,7 +269,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         self._bridge_log_fh = None
         self._bridge_log: Optional[Path] = None
         self._poll_task: Optional[asyncio.Task] = None
-        self._http_session: Optional["aiohttp.ClientSession"] = None
+        self._http_session: Optional[aiohttp.ClientSession] = None
         # Set to True by disconnect() before we SIGTERM our child bridge so
         # _check_managed_bridge_exit() can distinguish an intentional
         # shutdown-time exit (returncode -15 / -2 / 0) from a real crash.

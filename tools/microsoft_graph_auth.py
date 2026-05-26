@@ -50,7 +50,7 @@ class GraphCredentials:
         environ: dict[str, str] | None = None,
         *,
         required: bool = True,
-    ) -> "GraphCredentials | None":
+    ) -> GraphCredentials | None:
         env = environ if environ is not None else os.environ
         tenant_id = (env.get("MSGRAPH_TENANT_ID") or "").strip()
         client_id = (env.get("MSGRAPH_CLIENT_ID") or "").strip()
@@ -124,7 +124,7 @@ class MicrosoftGraphTokenProvider:
         cls,
         environ: dict[str, str] | None = None,
         **kwargs: Any,
-    ) -> "MicrosoftGraphTokenProvider":
+    ) -> MicrosoftGraphTokenProvider:
         credentials = GraphCredentials.from_env(environ)
         return cls(credentials, **kwargs)
 

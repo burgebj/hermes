@@ -81,7 +81,7 @@ class ToolCallGuardrailConfig:
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any] | None) -> "ToolCallGuardrailConfig":
+    def from_mapping(cls, data: Mapping[str, Any] | None) -> ToolCallGuardrailConfig:
         """Build config from the `tool_loop_guardrails` config.yaml section."""
         if not isinstance(data, Mapping):
             return cls()
@@ -132,7 +132,7 @@ class ToolCallSignature:
     args_hash: str
 
     @classmethod
-    def from_call(cls, tool_name: str, args: Mapping[str, Any] | None) -> "ToolCallSignature":
+    def from_call(cls, tool_name: str, args: Mapping[str, Any] | None) -> ToolCallSignature:
         canonical = canonical_tool_args(args or {})
         return cls(tool_name=tool_name, args_hash=_sha256(canonical))
 

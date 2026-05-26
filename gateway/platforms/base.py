@@ -1520,7 +1520,7 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_code: Optional[str] = None
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_retryable = True
-        self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
+        self._fatal_error_handler: Optional[Callable[[BasePlatformAdapter], Awaitable[None] | None]] = None
         
         # Track active message handlers per session for interrupt support.
         # _active_sessions stores the per-session interrupt Event; _session_tasks

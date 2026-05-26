@@ -400,7 +400,7 @@ class GatewayStreamConsumer:
         # overflow detection matches what the platform actually enforces.
         # Gate on isinstance(BasePlatformAdapter) so test MagicMocks (whose
         # auto-attributes return mock objects, not callables) fall back to len.
-        _len_fn: "Callable[[str], int]" = (
+        _len_fn: Callable[[str], int] = (
             self.adapter.message_len_fn
             if isinstance(self.adapter, _BasePlatformAdapter)
             else len
@@ -717,7 +717,7 @@ class GatewayStreamConsumer:
     @staticmethod
     def _split_text_chunks(
         text: str, limit: int,
-        len_fn: "Callable[[str], int]" = len,
+        len_fn: Callable[[str], int] = len,
     ) -> list[str]:
         """Split text into reasonably sized chunks for fallback sends."""
         if len_fn(text) <= limit:
@@ -781,7 +781,7 @@ class GatewayStreamConsumer:
                 return
 
         raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
-        _len_fn: "Callable[[str], int]" = (
+        _len_fn: Callable[[str], int] = (
             self.adapter.message_len_fn
             if isinstance(self.adapter, _BasePlatformAdapter)
             else len
