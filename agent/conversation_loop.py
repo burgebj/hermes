@@ -127,6 +127,48 @@ def _ra():
     return run_agent
 
 
+def _stored_system_prompt_stale_for_soul(agent: Any, stored_prompt: str) -> bool:
+    """Return True when a persisted prompt no longer matches current identity.
+
+    Gateway profiles often create a fresh AIAgent for each incoming message and
+    restore the frozen prompt from the session DB for cache stability. That is
+    correct for normal turns, but profile identity edits such as SOUL.md changes
+    must take effect without forcing users to abandon the current chat session.
+    """
+    if not stored_prompt:
+        return False
+
+    should_load_soul = (
+        getattr(agent, "load_soul_identity", False)
+        or not getattr(agent, "skip_context_files", False)
+    )
+    if not should_load_soul:
+        return False
+
+    try:
+        run_agent = _ra()
+        current_soul = run_agent.load_soul_md()
+        default_identity = getattr(run_agent, "DEFAULT_AGENT_IDENTITY", "")
+        guidance = getattr(run_agent, "HERMES_AGENT_HELP_GUIDANCE", "")
+    except Exception as exc:
+        logger.debug(
+            "Could not load SOUL.md while validating stored system prompt: %s",
+            exc,
+        )
+        return False
+
+    expected_identity = current_soul or default_identity
+    if not expected_identity:
+        return False
+
+    marker = f"\n\n{guidance}" if guidance else ""
+    identity_block, sep, _ = stored_prompt.partition(marker)
+    if not sep:
+        return True
+
+    return identity_block.strip() != expected_identity.strip()
+
+
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
     """Restore the cached system prompt from the session DB or build it fresh.
 
@@ -156,6 +198,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     """
     stored_prompt = None
     stored_state = "missing"
+    stored_prompt_stale = False
     if conversation_history and agent._session_db:
         try:
             session_row = agent._session_db.get_session(agent.session_id)
@@ -177,10 +220,18 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
 
     if stored_prompt:
-        # Continuing session — reuse the exact system prompt from the
-        # previous turn so the Anthropic cache prefix matches.
-        agent._cached_system_prompt = stored_prompt
-        return
+        if _stored_system_prompt_stale_for_soul(agent, stored_prompt):
+            stored_prompt_stale = True
+            logger.info(
+                "Stored system prompt for session %s is stale relative to "
+                "SOUL.md/default identity; rebuilding.",
+                agent.session_id,
+            )
+        else:
+            # Continuing session — reuse the exact system prompt from the
+            # previous turn so the Anthropic cache prefix matches.
+            agent._cached_system_prompt = stored_prompt
+            return
 
     if conversation_history and stored_state in ("null", "empty"):
         # Continuing session whose stored prompt is unusable.  The
@@ -199,19 +250,20 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # prompt) — build from scratch.
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
 
-    # Plugin hook: on_session_start — fired once when a brand-new
-    # session is created (not on continuation).  Plugins can use this
-    # to initialise session-scoped state (e.g. warm a memory cache).
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "on_session_start",
-            session_id=agent.session_id,
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-        )
-    except Exception as exc:
-        logger.warning("on_session_start hook failed: %s", exc)
+    if not stored_prompt_stale:
+        # Plugin hook: on_session_start — fired once when a brand-new
+        # session is created (not on continuation).  Plugins can use this
+        # to initialise session-scoped state (e.g. warm a memory cache).
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_start",
+                session_id=agent.session_id,
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_start hook failed: %s", exc)
 
     # Persist the system prompt snapshot in SQLite.  Failure here used
     # to log at DEBUG, which silently broke prefix-cache reuse on the
