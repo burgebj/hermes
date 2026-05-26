@@ -7115,11 +7115,16 @@ def _update_via_zip(args):
             print(
                 f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
             )
+        if result.get("skipped_auto"):
+            print(
+                f"  ⏭ {result['skipped_auto']} new bundled skill(s) skipped "
+                f"(skills.auto_sync_bundled=false)"
+            )
         if result.get("user_modified"):
             print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
         if result.get("cleaned"):
             print(f"  − {len(result['cleaned'])} removed from manifest")
-        if not result["copied"] and not result.get("updated"):
+        if not result["copied"] and not result.get("updated") and not result.get("skipped_auto"):
             print("  ✓ Skills are up to date")
     except Exception:
         pass
@@ -9107,11 +9112,16 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 print(
                     f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
                 )
+            if result.get("skipped_auto"):
+                print(
+                    f"  ⏭ {result['skipped_auto']} new bundled skill(s) skipped "
+                    f"(skills.auto_sync_bundled=false)"
+                )
             if result.get("user_modified"):
                 print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
             if result.get("cleaned"):
                 print(f"  − {len(result['cleaned'])} removed from manifest")
-            if not result["copied"] and not result.get("updated"):
+            if not result["copied"] and not result.get("updated") and not result.get("skipped_auto"):
                 print("  ✓ Skills are up to date")
         except Exception as e:
             logger.debug("Skills sync during update failed: %s", e)

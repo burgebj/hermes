@@ -172,18 +172,124 @@ def _dir_hash(directory: Path) -> str:
     return hasher.hexdigest()
 
 
+def _load_auto_sync_bundled() -> bool:
+    """Check if auto_sync_bundled is enabled in config.yaml.
+
+    Returns True (default) if config doesn't exist or key is missing.
+    """
+    try:
+        import yaml
+        # Derive config path from SKILLS_DIR so tests/profile overrides that patch
+        # SKILLS_DIR automatically isolate config lookup too.
+        config_path = SKILLS_DIR.parent / "config.yaml"
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            skills_cfg = config.get("skills", {})
+            if not isinstance(skills_cfg, dict):
+                return True
+            value = skills_cfg.get("auto_sync_bundled", True)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"0", "false", "no", "off"}:
+                    return False
+                if normalized in {"1", "true", "yes", "on"}:
+                    return True
+            return bool(value)
+    except Exception:
+        pass
+    return True
+
+
+def _sync_one_bundled_skill(name: str, skill_src: Path, quiet: bool = True) -> dict:
+    """Force-sync exactly one bundled skill, bypassing auto_sync_bundled for explicit reset/restore."""
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    manifest = _read_manifest()
+    bundled_dir = _get_bundled_dir()
+    dest = _compute_relative_dest(skill_src, bundled_dir)
+    bundled_hash = _dir_hash(skill_src)
+
+    copied = []
+    updated = []
+    user_modified = []
+    skipped = 0
+
+    if name not in manifest:
+        try:
+            if dest.exists():
+                skipped += 1
+                manifest[name] = bundled_hash
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(skill_src, dest)
+                copied.append(name)
+                manifest[name] = bundled_hash
+                if not quiet:
+                    print(f"  + {name}")
+        except (OSError, IOError) as e:
+            if not quiet:
+                print(f"  ! Failed to copy {name}: {e}")
+    elif dest.exists():
+        origin_hash = manifest.get(name, "")
+        user_hash = _dir_hash(dest)
+
+        if not origin_hash:
+            manifest[name] = user_hash
+            skipped += 1
+        elif user_hash != origin_hash:
+            user_modified.append(name)
+            if not quiet:
+                print(f"  ~ {name} (user-modified, skipping)")
+        elif bundled_hash != origin_hash:
+            try:
+                backup = dest.with_suffix(".bak")
+                shutil.move(str(dest), str(backup))
+                try:
+                    shutil.copytree(skill_src, dest)
+                    manifest[name] = bundled_hash
+                    updated.append(name)
+                    if not quiet:
+                        print(f"  ↑ {name} (updated)")
+                    shutil.rmtree(backup, ignore_errors=True)
+                except (OSError, IOError):
+                    if backup.exists() and not dest.exists():
+                        shutil.move(str(backup), str(dest))
+                    raise
+            except (OSError, IOError) as e:
+                if not quiet:
+                    print(f"  ! Failed to update {name}: {e}")
+        else:
+            skipped += 1
+    else:
+        skipped += 1
+
+    _write_manifest(manifest)
+    return {
+        "copied": copied,
+        "updated": updated,
+        "skipped": skipped,
+        "skipped_auto": 0,
+        "user_modified": user_modified,
+        "cleaned": [],
+        "total_bundled": 1,
+    }
+
+
 def sync_skills(quiet: bool = False) -> dict:
     """
     Sync bundled skills into ~/.hermes/skills/ using the manifest.
 
     Returns:
         dict with keys: copied (list), updated (list), skipped (int),
-                        user_modified (list), cleaned (list), total_bundled (int)
+                        skipped_auto (int), user_modified (list), cleaned (list),
+                        total_bundled (int)
     """
     bundled_dir = _get_bundled_dir()
     if not bundled_dir.exists():
         return {
-            "copied": [], "updated": [], "skipped": 0,
+            "copied": [], "updated": [], "skipped": 0, "skipped_auto": 0,
             "user_modified": [], "cleaned": [], "total_bundled": 0,
         }
 
@@ -197,12 +303,21 @@ def sync_skills(quiet: bool = False) -> dict:
     user_modified = []
     skipped = 0
 
+    auto_sync = _load_auto_sync_bundled()
+    skipped_auto = 0
+
     for skill_name, skill_src in bundled_skills:
         dest = _compute_relative_dest(skill_src, bundled_dir)
         bundled_hash = _dir_hash(skill_src)
 
         if skill_name not in manifest:
             # ── New skill — never offered before ──
+            if not auto_sync:
+                # Auto-sync disabled: skip new skills without adding to manifest,
+                # so they can be picked up later if auto_sync_bundled is re-enabled.
+                skipped += 1
+                skipped_auto += 1
+                continue
             try:
                 if dest.exists():
                     # User already has a skill with the same name — don't overwrite.
@@ -310,6 +425,7 @@ def sync_skills(quiet: bool = False) -> dict:
         "copied": copied,
         "updated": updated,
         "skipped": skipped,
+        "skipped_auto": skipped_auto,
         "user_modified": user_modified,
         "cleaned": cleaned,
         "total_bundled": len(bundled_skills),
@@ -394,16 +510,37 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
                     "synced": None,
                 }
 
-    # Step 3: run sync to re-baseline (or re-copy if we deleted)
-    synced = sync_skills(quiet=True)
+    # Step 3: force-sync just this skill to re-baseline (or re-copy if we deleted).
+    # Explicit reset/restore should bypass auto_sync_bundled suppression.
+    synced = None
+    if is_bundled:
+        synced = _sync_one_bundled_skill(name, bundled_by_name[name], quiet=True)
 
     if restore and deleted_user_copy:
-        action = "restored"
-        message = f"Restored '{name}' from bundled source."
+        dest = _compute_relative_dest(bundled_by_name[name], bundled_dir)
+        if dest.exists():
+            action = "restored"
+            message = f"Restored '{name}' from bundled source."
+        else:
+            return {
+                "ok": False,
+                "action": "bundled_missing",
+                "message": f"Failed to restore '{name}' from bundled source.",
+                "synced": synced,
+            }
     elif restore:
-        # Nothing on disk to delete, but we re-synced — acts like a fresh install
-        action = "restored"
-        message = f"Restored '{name}' (no prior user copy, re-copied from bundled)."
+        # Nothing on disk to delete, but explicit restore should still ensure the bundled copy exists.
+        dest = _compute_relative_dest(bundled_by_name[name], bundled_dir)
+        if dest.exists():
+            action = "restored"
+            message = f"Restored '{name}' (no prior user copy, re-copied from bundled)."
+        else:
+            return {
+                "ok": False,
+                "action": "bundled_missing",
+                "message": f"Failed to restore '{name}' from bundled source.",
+                "synced": synced,
+            }
     else:
         action = "manifest_cleared"
         message = (
@@ -422,6 +559,8 @@ if __name__ == "__main__":
         f"{len(result['updated'])} updated",
         f"{result['skipped']} unchanged",
     ]
+    if result.get("skipped_auto"):
+        parts.append(f"{result['skipped_auto']} auto-skilled (auto_sync_bundled=false)")
     if result["user_modified"]:
         names = result["user_modified"]
         MAX_SHOW = 5

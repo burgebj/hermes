@@ -1360,7 +1360,7 @@ DEFAULT_CONFIG = {
     # Skills — external skill directories for sharing skills across tools/agents.
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
     # always goes to ~/.hermes/skills/.
-    "skills": {
+        "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
         # content with the absolute skill directory and the active session id
@@ -1387,6 +1387,10 @@ DEFAULT_CONFIG = {
         # External hub installs (trusted/community sources) are always
         # scanned regardless of this setting.
         "guard_agent_created": False,
+        # When false, new bundled skills added upstream are NOT auto-installed
+        # into ~/.hermes/skills/ during sync/update. Existing tracked skills
+        # still update normally. Default: true.
+        "auto_sync_bundled": True,
     },
 
     # Curator — background skill maintenance.
