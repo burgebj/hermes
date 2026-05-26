@@ -4005,6 +4005,127 @@ def resolve_provider_client(
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
+
+# Retryable HTTP status codes for auxiliary fallback.
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503})
+
+
+def _is_retryable_error(e: Exception) -> bool:
+    """Return True if *e* is an API error that should trigger a fallback retry.
+
+    Covers rate limits (429), server errors (5xx), auth failures (401),
+    and network-level failures.
+    """
+    import openai
+    if isinstance(e, openai.RateLimitError):
+        return True
+    if isinstance(e, openai.APIStatusError):
+        return e.status_code in _RETRYABLE_HTTP_STATUSES
+    if isinstance(e, openai.AuthenticationError):
+        return True
+    if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+        return True
+    return False
+
+
+class _FailoverAuxiliaryClient:
+    """Wraps an OpenAI client, failing through a provider chain on errors.
+
+    Use this when a task has ``fallback_providers`` configured.  On a
+    retryable error (429, 5xx, 401, connection failure) the wrapper
+    transparently re-resolves through the fallback list.
+    """
+
+    def __init__(self, primary_client, fallback_entries, task="",
+                 main_runtime=None, is_vision=False, async_mode=False):
+        self._client = primary_client
+        self._fallbacks = fallback_entries
+        self._task = task
+        self._main_runtime = main_runtime
+        self._is_vision = is_vision
+        self._async_mode = async_mode
+        self._resolved_model = getattr(primary_client, "_model", None)
+        self._chat = _FailoverChatCompletions(self)
+
+    @property
+    def chat(self):
+        return self._chat
+
+    def _resolve_fallback(self, provider, model):
+        """Call resolve_provider_client for a single fallback entry."""
+        return resolve_provider_client(
+            provider,
+            model=model or None,
+            async_mode=self._async_mode,
+            main_runtime=self._main_runtime,
+            is_vision=self._is_vision,
+        )
+
+
+class _FailoverChatCompletions:
+    """Wraps ``.chat.completions`` with fallback-on-error logic."""
+
+    def __init__(self, parent):
+        self._parent = parent
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, *args, **kwargs):
+        last_error = None
+
+        # Try the primary client first.
+        try:
+            return self._parent._client.chat.completions.create(*args, **kwargs)
+        except Exception as e:
+            if not _is_retryable_error(e):
+                raise
+            last_error = e
+
+        # Walk fallback entries.
+        for entry in self._parent._fallbacks:
+            provider = entry["provider"]
+            model = entry.get("model", "")
+            try:
+                new_client, resolved = self._parent._resolve_fallback(provider, model)
+            except Exception as e:
+                logger.warning(
+                    "auxiliary fallback %s/%s client creation failed: %s",
+                    provider, model, e,
+                )
+                last_error = e
+                continue
+            if new_client is None:
+                continue
+            try:
+                return new_client.chat.completions.create(*args, **kwargs)
+            except Exception as e:
+                if not _is_retryable_error(e):
+                    raise
+                last_error = e
+                continue
+
+        # All fallbacks exhausted.
+        raise last_error or RuntimeError(
+            f"All auxiliary fallback providers exhausted for task {self._parent._task!r}"
+        )
+
+
+def _wrap_with_failover(client, model, task, *, main_runtime=None,
+                         is_vision=False):
+    """Wrap *client* in ``_FailoverAuxiliaryClient`` if fallbacks are configured."""
+    fallback_entries = _get_task_fallback_providers(task)
+    if client is not None and fallback_entries:
+        wrapped = _FailoverAuxiliaryClient(
+            client, fallback_entries,
+            task=task, main_runtime=main_runtime,
+            is_vision=is_vision,
+        )
+        wrapped._resolved_model = model
+        return wrapped, model
+    return client, model
+
 def get_text_auxiliary_client(
     task: str = "",
     *,
@@ -4020,12 +4141,16 @@ def get_text_auxiliary_client(
     (e.g. auxiliary.compression.model, auxiliary.web_extract.model).
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    client, resolved = resolve_provider_client(
         provider,
         model=model,
         explicit_base_url=base_url,
         explicit_api_key=api_key,
         api_mode=api_mode,
+        main_runtime=main_runtime,
+    )
+    return _wrap_with_failover(
+        client, resolved, task,
         main_runtime=main_runtime,
     )
 
@@ -4038,13 +4163,17 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
     Returns (None, None) when no provider is available.
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    client, resolved = resolve_provider_client(
         provider,
         model=model,
         async_mode=True,
         explicit_base_url=base_url,
         explicit_api_key=api_key,
         api_mode=api_mode,
+        main_runtime=main_runtime,
+    )
+    return _wrap_with_failover(
+        client, resolved, task,
         main_runtime=main_runtime,
     )
 
@@ -4829,6 +4958,31 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
     return {}
+
+
+def _get_task_fallback_providers(task: str) -> List[Dict[str, str]]:
+    """Read auxiliary.<task>.fallback_providers from config, or [].
+
+    Returns a list of ``{provider, model?}`` dicts mirroring the top-level
+    ``model.fallback_providers`` format.  Malformed entries (missing provider,
+    non-dict values) are filtered with a warning.
+    """
+    if not task:
+        return []
+    task_config = _get_auxiliary_task_config(task)
+    raw = task_config.get("fallback_providers", [])
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for entry in raw:
+        if isinstance(entry, dict) and entry.get("provider"):
+            result.append(entry)
+        else:
+            logger.warning(
+                "_get_task_fallback_providers(%s): skipping malformed entry %r",
+                task, entry,
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
