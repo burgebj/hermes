@@ -4015,14 +4015,17 @@ def _is_retryable_error(e: Exception) -> bool:
 
     Covers rate limits (429), server errors (5xx), auth failures (401),
     and network-level failures.
+
+    Order matters: AuthenticationError is a subclass of APIStatusError,
+    so it must be checked first.
     """
     import openai
     if isinstance(e, openai.RateLimitError):
         return True
-    if isinstance(e, openai.APIStatusError):
-        return e.status_code in _RETRYABLE_HTTP_STATUSES
     if isinstance(e, openai.AuthenticationError):
         return True
+    if isinstance(e, openai.APIStatusError):
+        return e.status_code in _RETRYABLE_HTTP_STATUSES
     if isinstance(e, (ConnectionError, TimeoutError, OSError)):
         return True
     return False
