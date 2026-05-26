@@ -66,7 +66,7 @@ def test_detect_service_manager_returns_known_value() -> None:
     advertised literals — anything else means a new platform branch
     was added without updating ServiceManagerKind."""
     result = detect_service_manager()
-    assert result in ("systemd", "launchd", "windows", "s6", "none")
+    assert result in {"systemd", "launchd", "windows", "s6", "none"}
 
 
 # ---------------------------------------------------------------------------

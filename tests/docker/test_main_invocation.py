@@ -23,7 +23,7 @@ def test_no_args_starts_hermes(built_image: str) -> None:
         ["docker", "run", "--rm", built_image, "--version"],
         capture_output=True, text=True, timeout=60,
     )
-    assert r.returncode in (0, 1), (
+    assert r.returncode in {0, 1}, (
         f"Unexpected exit {r.returncode}: stderr={r.stderr!r}"
     )
     assert "Traceback" not in r.stderr

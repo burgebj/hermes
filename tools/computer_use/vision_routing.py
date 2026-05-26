@@ -71,7 +71,7 @@ def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     model = str(vision.get("model") or "").strip()
     base_url = str(vision.get("base_url") or "").strip()
 
-    if provider in ("", "auto") and not model and not base_url:
+    if provider in {"", "auto"} and not model and not base_url:
         return False
     return True
 

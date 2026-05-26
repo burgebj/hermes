@@ -4144,7 +4144,7 @@ def _model_flow_azure_foundry(config, current_model=""):
             except (KeyboardInterrupt, EOFError):
                 print("\nCancelled.")
                 return
-            if ans and ans not in ("y", "yes"):
+            if ans and ans not in {"y", "yes"}:
                 print("Cancelled.")
                 return
 
@@ -6208,7 +6208,7 @@ def cmd_doctor(args):
 def cmd_security(args):
     """Dispatch `hermes security <subcmd>`."""
     sub = getattr(args, "security_command", None)
-    if sub in ("audit", None):
+    if sub in {"audit", None}:
         from hermes_cli.security_audit import cmd_security_audit
 
         # Default subcommand is `audit` when no subcmd is given.
@@ -11179,7 +11179,7 @@ def main():
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
-        if sub in ("bitwarden", "bw") and bw_sub is not None:
+        if sub in {"bitwarden", "bw"} and bw_sub is not None:
             return args.func(args)
         secrets_parser.print_help()
         return 0

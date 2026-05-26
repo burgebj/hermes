@@ -182,7 +182,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         agent._cached_system_prompt = stored_prompt
         return
 
-    if conversation_history and stored_state in ("null", "empty"):
+    if conversation_history and stored_state in {"null", "empty"}:
         # Continuing session whose stored prompt is unusable.  The
         # previous turn's write either never happened or wrote an empty
         # string — either way every turn now rebuilds and the prefix

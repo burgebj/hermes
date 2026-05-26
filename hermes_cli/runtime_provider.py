@@ -126,11 +126,11 @@ def _host_derived_api_key(base_url: str) -> str:
     if any(ch.isdigit() for ch in hostname.split(".")[-1]):
         # Last label starts with a digit → likely IP. (TLDs are never numeric.)
         return ""
-    if hostname in ("localhost",) or ":" in hostname:
+    if hostname in {"localhost",} or ":" in hostname:
         return ""
     labels = [lbl for lbl in hostname.split(".") if lbl]
     # Strip common API/CDN prefixes.
-    while labels and labels[0] in ("api", "www"):
+    while labels and labels[0] in {"api", "www"}:
         labels.pop(0)
     if len(labels) < 2:
         return ""
@@ -151,7 +151,7 @@ def _host_derived_api_key(base_url: str) -> str:
     if not sanitized or not sanitized[0].isalpha():
         return ""
     # Don't re-derive env vars already handled by explicit host-gated paths.
-    if sanitized in ("OPENAI", "OPENROUTER", "OLLAMA"):
+    if sanitized in {"OPENAI", "OPENROUTER", "OLLAMA"}:
         return ""
     env_name = f"{sanitized}_API_KEY"
     return (os.getenv(env_name, "") or "").strip()

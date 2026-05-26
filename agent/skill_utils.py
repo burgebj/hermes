@@ -164,7 +164,7 @@ def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
         if running_in_termux and mapped == "linux":
             return True
         # Explicit termux/android tags match a Termux session too.
-        if running_in_termux and mapped in ("termux", "android"):
+        if running_in_termux and mapped in {"termux", "android"}:
             return True
     return False
 

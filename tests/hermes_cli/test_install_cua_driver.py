@@ -190,7 +190,7 @@ class TestCheckCuaDriverAssetForArch:
         with patch("platform.system", return_value="Darwin"), \
              patch.object(tools_config.shutil, "which",
                           side_effect=lambda n: "/usr/local/bin/" + n
-                                                 if n in ("cua-driver", "curl") else None), \
+                                                 if n in {"cua-driver", "curl"} else None), \
              patch("platform.machine", return_value="x86_64"), \
              patch("urllib.request.urlopen", return_value=mock_resp), \
              patch.object(tools_config, "_print_warning"), \

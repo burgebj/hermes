@@ -1204,7 +1204,7 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
         except Exception:
             pass
 
-    if ext in (".ogg", ".opus", ".oga"):
+    if ext in {".ogg", ".opus", ".oga"}:
         try:
             def _ogg_duration() -> float:
                 from mutagen.oggopus import OggOpus
@@ -15994,7 +15994,7 @@ class GatewayRunner:
         ) if _progress_thread_id else None
         _progress_reply_to = (
             event_message_id
-            if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
+            if source.platform in {Platform.FEISHU, Platform.MATTERMOST} and source.thread_id and event_message_id
             else None
         )
 

@@ -646,7 +646,7 @@ class CredentialPool:
                 "inference_base_url": state.get("inference_base_url"),
             }
             should_sync = any(
-                value not in (None, "") and getattr(entry, key, None) != value
+                value not in {None, ""} and getattr(entry, key, None) != value
                 for key, value in comparable_updates.items()
             )
             if should_sync:

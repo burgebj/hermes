@@ -2159,7 +2159,7 @@ class SessionDB:
         # validation.
         if isinstance(sort, str):
             sort_norm = sort.strip().lower()
-            if sort_norm not in ("newest", "oldest"):
+            if sort_norm not in {"newest", "oldest"}:
                 sort_norm = None
         else:
             sort_norm = None

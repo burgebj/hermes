@@ -5105,7 +5105,7 @@ def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
 
     if detect_service_manager() != "s6":
         return False
-    if action not in ("stop", "restart"):
+    if action not in {"stop", "restart"}:
         return False
     mgr = get_service_manager()
     profiles = mgr.list_profile_gateways()

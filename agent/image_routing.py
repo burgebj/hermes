@@ -63,7 +63,7 @@ def _coerce_capability_bool(raw: Any) -> Optional[bool]:
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, int):
-        if raw in (0, 1):
+        if raw in {0, 1}:
             return bool(raw)
         return None
     if isinstance(raw, str):

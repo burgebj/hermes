@@ -104,7 +104,7 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[s
         entry["anchor"] = True
     # Strip None values to keep payload tight, but always keep content
     # (absent content is meaningful — tool-call-only assistant turns).
-    return {k: v for k, v in entry.items() if v is not None or k in ("content",)}
+    return {k: v for k, v in entry.items() if v is not None or k in {"content",}}
 
 
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
@@ -437,7 +437,7 @@ def session_search(
     sort_norm: Optional[str] = None
     if isinstance(sort, str):
         candidate = sort.strip().lower()
-        if candidate in ("newest", "oldest"):
+        if candidate in {"newest", "oldest"}:
             sort_norm = candidate
 
     return _discover(

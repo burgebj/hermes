@@ -126,7 +126,7 @@ def ensure_dependency(
             reply = input(f"{desc} is not installed. Install now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
-        if reply not in ("", "y", "yes"):
+        if reply not in {"", "y", "yes"}:
             return False
 
     if shell == "powershell":
