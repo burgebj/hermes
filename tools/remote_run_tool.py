@@ -11,18 +11,28 @@ Design:
 - Every connection uses a fresh SSHClient (no persistent connection pooling)
   to avoid stale-channel bugs across tool calls
 - Key-based auth preferred; password auth supported as fallback
-- sudo mode pipes the password automatically if provided
+- sudo mode pipes the password via channel stdin (never in process cmdline)
 """
 
 import json
 import logging
 import os
 import re
-import stat
-import tempfile
-from typing import Any, Dict, List, Optional
+import shlex
+import time
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Connection timeout (seconds) — separate from command execution timeout
+SSH_CONNECT_TIMEOUT = 15
+
+# Maximum combined stdout/stderr output before truncation (matching terminal tool)
+MAX_RESULT_SIZE_CHARS = 100_000
 
 # ---------------------------------------------------------------------------
 # Requirements check
@@ -115,13 +125,15 @@ REMOTE_RUN_SCHEMA = {
                 "type": "object",
                 "description": (
                     "Environment variables to set on the remote host, "
-                    "passed as KEY: VALUE pairs."
+                    "passed as KEY: VALUE pairs. Keys must be valid shell "
+                    "identifiers matching [A-Za-z_][A-Za-z0-9_]*."
                 ),
                 "additionalProperties": {"type": "string"},
             },
             "timeout": {
                 "type": "integer",
-                "description": "Command timeout in seconds (default: 60).",
+                "description": "Command execution timeout in seconds (default: 60). "
+                               "The TCP connection timeout is fixed at 15s.",
                 "default": 60,
             },
         },
@@ -136,11 +148,21 @@ REMOTE_RUN_SCHEMA = {
 
 
 def _build_env_export(env: Optional[Dict[str, str]]) -> str:
-    """Build shell 'export' preamble from env dict."""
+    """Build shell 'export' preamble from env dict.
+
+    Validates that all keys are valid shell identifiers to prevent
+    shell injection via env key names.
+    """
     if not env:
         return ""
     parts = []
     for k, v in env.items():
+        # Validate env var key — reject anything that's not a valid shell identifier
+        if not k or not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', k):
+            raise ValueError(
+                f"Invalid environment variable key: {k!r}. "
+                "Keys must be valid shell identifiers matching [A-Za-z_][A-Za-z0-9_]*"
+            )
         escaped = v.replace("'", "'\\''")
         parts.append(f"export {k}='{escaped}'")
     return "; ".join(parts) + "; " if parts else ""
@@ -148,12 +170,18 @@ def _build_env_export(env: Optional[Dict[str, str]]) -> str:
 
 def _build_command(command: str, workdir: Optional[str],
                    env: Optional[Dict[str, str]],
-                   sudo: bool, password: Optional[str]) -> str:
-    """Build the final command string to execute over SSH."""
+                   sudo: bool) -> str:
+    """Build the final command string to execute over SSH.
+
+    All shell-interpolated values use shlex.quote() to prevent injection.
+    The sudo wrapper uses shlex.quote() on the inner command so that
+    commands containing single quotes or other shell metacharacters work
+    correctly.
+    """
     prefix = ""
 
     if workdir:
-        prefix += f"cd {workdir} && "
+        prefix += f"cd {shlex.quote(workdir)} && "
 
     env_export = _build_env_export(env)
     if env_export:
@@ -162,24 +190,25 @@ def _build_command(command: str, workdir: Optional[str],
     full_cmd = f"{prefix}{command}"
 
     if sudo:
-        # Wrap in sudo. If password is provided, pipe it via stdin.
-        if password:
-            # Use printf to avoid echo variations, pipe to sudo -S
-            escaped_pw = password.replace("'", "'\\''")
-            full_cmd = f"printf '%s\\n' '{escaped_pw}' | sudo -S bash -c '{full_cmd}'"
-        else:
-            full_cmd = f"sudo bash -c '{full_cmd}'"
+        # Wrap in sudo. The inner command is shlex-quoted so that single quotes
+        # and other shell metacharacters in the command are preserved correctly.
+        full_cmd = f"sudo bash -c {shlex.quote(full_cmd)}"
 
     return full_cmd
 
 
-def _build_sftp_command(client, command: str, workdir: Optional[str]) -> str:
-    """Build a command that uses cd when SFTP is also in use."""
-    # Simple wrapper - for now just the same as _build_command without sudo
-    prefix = ""
-    if workdir:
-        prefix += f"cd {workdir} && "
-    return f"{prefix}{command}"
+def _send_sudo_password(stdin_chan, password: str) -> None:
+    """Send the sudo password to the remote process via channel stdin.
+
+    This avoids embedding the password in the command string, which would
+    make it visible in process listings on the remote host.
+    """
+    if not password:
+        return
+    # Brief delay to allow the sudo password prompt to appear
+    time.sleep(0.5)
+    stdin_chan.send(password + "\n")
+    stdin_chan.shutdown_write()
 
 
 def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
@@ -191,6 +220,8 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
     Returns:
         JSON string: {"stdout": "...", "stderr": "...", "exit_code": N}
     """
+    import paramiko
+
     host = args["host"]
     command = args["command"]
     user = args.get("user")
@@ -202,17 +233,27 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
     env = args.get("env")
     timeout = args.get("timeout", 60)
 
-    import paramiko
-
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    # Use WarningPolicy — logs a warning for unknown/changed host keys
+    # but does not abort. This matches the existing SSH environment's
+    # StrictHostKeyChecking=accept-new pattern.
+    # For stricter verification, users can switch to RejectPolicy and
+    # pre-configure known_hosts.
+    client.set_missing_host_key_policy(paramiko.WarningPolicy())
+
+    # Try to load system known_hosts — non-fatal if missing
+    try:
+        client.load_system_host_keys()
+    except Exception:
+        pass
 
     try:
         # Build connect kwargs
         connect_kwargs: Dict[str, Any] = {
             "hostname": host,
             "port": port,
-            "timeout": timeout,
+            "timeout": SSH_CONNECT_TIMEOUT,  # connection timeout only
         }
         if user:
             connect_kwargs["username"] = user
@@ -226,26 +267,45 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
         connect_kwargs["look_for_keys"] = True
 
         logger.info(
-            "remote_run: connecting to %s@%s:%s",
+            "remote_run: connecting to %s@%s:%s (connect_timeout=%s)",
             connect_kwargs.get("username", "default"), host, port,
+            SSH_CONNECT_TIMEOUT,
         )
         client.connect(**connect_kwargs)
         logger.info("remote_run: connected, executing command")
 
         # Build the command string
-        full_cmd = _build_command(command, workdir, env, sudo, password)
+        get_pty = sudo
+        full_cmd = _build_command(command, workdir, env, sudo)
 
         # The max size for the combined command
         stdin, stdout, stderr = client.exec_command(
             full_cmd,
             timeout=timeout,
-            get_pty=sudo,  # PTY needed for sudo password prompt
+            get_pty=get_pty,  # PTY needed for sudo password prompt
         )
 
-        # Read output
+        # If sudo mode with password, send it via channel stdin
+        # instead of embedding it in the command string
+        if sudo and password:
+            _send_sudo_password(stdin.channel, password)
+
+        # Read output with truncation protection
         out_text = stdout.read().decode("utf-8", errors="replace")
         err_text = stderr.read().decode("utf-8", errors="replace")
         exit_code = stdout.channel.recv_exit_status()
+
+        # Truncate if combined output exceeds limit
+        combined_size = len(out_text) + len(err_text)
+        if combined_size > MAX_RESULT_SIZE_CHARS:
+            # Truncate proportionally
+            out_max = max(0, MAX_RESULT_SIZE_CHARS - len(err_text) - 100)
+            if len(out_text) > out_max:
+                out_text = out_text[:out_max] + "\n... [stdout truncated]"
+            if combined_size > MAX_RESULT_SIZE_CHARS:
+                err_max = MAX_RESULT_SIZE_CHARS - len(out_text) - 100
+                if len(err_text) > err_max:
+                    err_text = err_text[:err_max] + "\n... [stderr truncated]"
 
         result = {
             "stdout": out_text,
@@ -255,8 +315,9 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
         }
 
         logger.info(
-            "remote_run: exit_code=%s, stdout=%s bytes, stderr=%s bytes",
-            exit_code, len(out_text), len(err_text),
+            "remote_run: exit_code=%s, output=%s bytes (trunc=%s)",
+            exit_code, len(out_text) + len(err_text),
+            combined_size > MAX_RESULT_SIZE_CHARS,
         )
 
         return json.dumps(result)
@@ -270,6 +331,13 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
     except paramiko.SSHException as e:
         return json.dumps({
             "error": f"SSH connection failed: {e}",
+            "host": host,
+            "exit_code": 1,
+        })
+    except ValueError as e:
+        # Raised by _build_env_export for invalid env keys
+        return json.dumps({
+            "error": str(e),
             "host": host,
             "exit_code": 1,
         })
@@ -301,9 +369,9 @@ from tools.registry import registry  # noqa: E402
 
 registry.register(
     name="remote_run",
-    toolset="terminal",
+    toolset="ssh",
     schema=REMOTE_RUN_SCHEMA,
-    handler=lambda args, **kw: remote_run_handler(args, **kw),
+    handler=remote_run_handler,
     check_fn=check_remote_run_requirements,
     emoji="🔗",
 )

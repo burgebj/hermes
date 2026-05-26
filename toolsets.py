@@ -32,7 +32,7 @@ _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
     # Terminal + process management
-    "terminal", "process", "remote_run",
+    "terminal", "process",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
@@ -142,6 +142,12 @@ TOOLSETS = {
     "terminal": {
         "description": "Terminal/command execution and process management tools",
         "tools": ["terminal", "process"],
+        "includes": []
+    },
+
+    "ssh": {
+        "description": "SSH remote execution — run commands on remote hosts via SSH with structured output",
+        "tools": ["remote_run"],
         "includes": []
     },
     
