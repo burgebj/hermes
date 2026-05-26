@@ -1,53 +1,42 @@
-"""Integration test for the policy + marker-placement join.
+"""Integration test for the strategy + marker-placement join.
 
-`agent/conversation_loop.py:898` calls `apply_anthropic_cache_control()` only
-when `_anthropic_prompt_cache_policy()` returned `(True, native_layout)`.
-The 24 + 14 existing unit tests in `tests/run_agent/test_anthropic_prompt_cache_policy.py`
-and `tests/agent/test_prompt_caching.py` cover each side in isolation — but
-not the join. That join is exactly what the PR-1 refactor replaces with
-`profile.cache_strategy_for(model).apply(messages, intent)`.
+`agent/conversation_loop.py` calls `profile.cache_strategy_for(model).apply(messages, intent)`
+for each request. The 26 unit tests in `tests/run_agent/test_anthropic_prompt_cache_policy.py`
+and 14 in `tests/agent/test_prompt_caching.py` cover each side in isolation — but
+not the join.
 
-This test pins the join: for each (provider × model) combo from the policy
-matrix, given a known input message list, what does the FULL pipeline
-produce? Same input/output contract must hold after the refactor.
-
-When PR-1 lands, this file's `_apply_for_agent_combo()` helper changes one
-function call — the asserts on the produced messages stay identical.
+This test pins the join: for each (provider × model) combo from the strategy
+matrix, given a known input message list, what does the FULL pipeline produce?
 """
 
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock
 
-from agent.prompt_caching import apply_anthropic_cache_control
-from agent.agent_runtime_helpers import anthropic_prompt_cache_policy
-
-
-def _stub_agent(*, provider, base_url, api_mode, model):
-    """Build a minimal AIAgent-shaped object for policy fn calls."""
-    agent = MagicMock()
-    agent.provider = provider
-    agent.base_url = base_url
-    agent.api_mode = api_mode
-    agent.model = model
-    return agent
+from agent.prompt_cache_strategy import (
+    AnthropicInlineCacheStrategy,
+    NoCacheStrategy,
+    PromptCacheIntent,
+)
+from providers import get_provider_profile
 
 
 def _apply_for_agent_combo(messages, *, provider, base_url, api_mode, model, ttl="5m"):
-    """Run the policy + marker-placement combination once, mirroring
-    `conversation_loop.py:898`. Returns the messages as they would be sent
-    to the API (with cache_control markers if the policy said to cache).
+    """Run the strategy + marker-placement combination once, mirroring
+    `conversation_loop.py`. Returns the messages as they would be sent
+    to the API (with cache_control markers if the strategy applies any).
     """
-    agent = _stub_agent(provider=provider, base_url=base_url, api_mode=api_mode, model=model)
-    should_cache, native_layout = anthropic_prompt_cache_policy(agent)
-    if should_cache:
-        return apply_anthropic_cache_control(
-            messages,
-            cache_ttl=ttl,
-            native_anthropic=native_layout,
-        )
-    return messages
+    profile = get_provider_profile(provider)
+    strategy = profile.cache_strategy_for(model) if profile else NoCacheStrategy()
+    # Fallback for unknown providers speaking Anthropic wire format with Claude
+    if (
+        isinstance(strategy, NoCacheStrategy)
+        and api_mode == "anthropic_messages"
+        and "claude" in (model or "").lower()
+    ):
+        strategy = AnthropicInlineCacheStrategy(layout="native")
+    intent = PromptCacheIntent(ttl=ttl)
+    return strategy.apply(messages, intent)
 
 
 def _has_native_marker(msg) -> bool:

@@ -806,18 +806,26 @@ class TestChatCompletionsNormalize:
         assert nr.provider_data == {"reasoning_content": "model-extra scratchpad"}
 
 
-class TestChatCompletionsCacheStats:
+class TestChatCompletionsExtractUsage:
 
     def test_no_usage(self, transport):
-        r = SimpleNamespace(usage=None)
-        assert transport.extract_cache_stats(r) is None
+        result = transport.extract_usage(None)
+        assert result.prompt_tokens == 0
+        assert result.cache_read_tokens == 0
 
     def test_no_details(self, transport):
-        r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens_details=None))
-        assert transport.extract_cache_stats(r) is None
+        usage = SimpleNamespace(prompt_tokens=1000, completion_tokens=200, prompt_tokens_details=None)
+        result = transport.extract_usage(usage)
+        assert result.cache_read_tokens == 0
+        assert result.prompt_tokens == 1000
 
     def test_with_cache(self, transport):
         details = SimpleNamespace(cached_tokens=500, cache_write_tokens=100)
-        r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens_details=details))
-        result = transport.extract_cache_stats(r)
-        assert result == {"cached_tokens": 500, "creation_tokens": 100}
+        usage = SimpleNamespace(prompt_tokens=2000, completion_tokens=300, prompt_tokens_details=details)
+        result = transport.extract_usage(usage)
+        assert result.cache_read_tokens == 500
+        assert result.cached_tokens == 500  # back-compat alias
+        assert result.cache_write_tokens == 100
+        # OpenAI prompt_tokens is gross — subtract cache to get net input.
+        assert result.prompt_tokens == 2000 - 500 - 100
+        assert result.completion_tokens == 300

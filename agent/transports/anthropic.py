@@ -157,16 +157,29 @@ class AnthropicTransport(ProviderTransport):
             return getattr(response, "stop_reason", None) == "end_turn"
         return True
 
-    def extract_cache_stats(self, response: Any) -> Optional[Dict[str, int]]:
-        """Extract Anthropic cache_read and cache_creation token counts."""
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return None
-        cached = getattr(usage, "cache_read_input_tokens", 0) or 0
-        written = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        if cached or written:
-            return {"cached_tokens": cached, "creation_tokens": written}
-        return None
+    def extract_usage(self, response_usage: Any) -> "Usage":
+        """Extract canonical usage from an Anthropic response.usage object.
+
+        Anthropic's ``input_tokens`` is NET (does not include cache reads),
+        so no subtraction is needed. Cache fields live at the top level:
+        ``cache_read_input_tokens`` / ``cache_creation_input_tokens``.
+        """
+        from agent.transports.types import Usage
+
+        if response_usage is None:
+            return Usage()
+        input_tokens = int(getattr(response_usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(response_usage, "output_tokens", 0) or 0)
+        cache_read = int(getattr(response_usage, "cache_read_input_tokens", 0) or 0)
+        cache_write = int(getattr(response_usage, "cache_creation_input_tokens", 0) or 0)
+        return Usage(
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens + cache_read + cache_write,
+            cached_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+        )
 
     # Promote the adapter's canonical mapping to module level so it's shared
     _STOP_REASON_MAP = {

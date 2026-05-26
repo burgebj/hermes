@@ -10,6 +10,19 @@ from providers.base import ProviderProfile
 class NousProfile(ProviderProfile):
     """Nous Portal — product tags, reasoning with Nous-specific omission."""
 
+    def cache_strategy_for(self, model: str):
+        from agent.prompt_cache_strategy import (
+            AnthropicInlineCacheStrategy,
+            NoCacheStrategy,
+        )
+        # Nous Portal proxies to OpenRouter behind the scenes — same
+        # OpenAI-wire envelope cache_control semantics. Both Claude AND
+        # Qwen models route through caching backends that honor the markers.
+        m = (model or "").lower()
+        if "claude" in m or "qwen" in m:
+            return AnthropicInlineCacheStrategy(layout="envelope")
+        return NoCacheStrategy()
+
     def build_extra_body(
         self, *, session_id: str | None = None, **context
     ) -> dict[str, Any]:
