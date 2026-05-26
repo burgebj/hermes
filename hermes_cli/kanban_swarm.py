@@ -209,7 +209,6 @@ def create_swarm(
         priority=priority,
         workspace_kind=workspace_kind,
         workspace_path=workspace_path,
-        skills=["avoid-ai-writing"],
     )
 
     created = SwarmCreated(root, worker_ids, verifier, synthesizer)
