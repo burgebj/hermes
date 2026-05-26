@@ -117,6 +117,11 @@ def _is_gateway_approval_context() -> bool:
         return False
     if env_var_enabled("HERMES_GATEWAY_SESSION"):
         return True
+    session_key = get_current_session_key("")
+    if session_key:
+        with _lock:
+            if session_key in _gateway_notify_cbs:
+                return True
     return bool(_get_session_platform())
 
 # Sensitive write targets that should trigger approval even when referenced

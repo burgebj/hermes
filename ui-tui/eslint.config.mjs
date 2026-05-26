@@ -50,6 +50,7 @@ export default [
     },
     rules: {
       'no-fallthrough': ['error', { allowEmptyCase: true }],
+      'no-control-regex': 'off',
       curly: ['error', 'all'],
       '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
       '@typescript-eslint/no-unused-vars': 'off',

@@ -252,6 +252,34 @@ class TestGoalManager:
         assert mgr2.state.goal == "do the thing"
         assert mgr2.is_active()
 
+    def test_persistence_follows_current_hermes_home_after_state_import(
+        self, tmp_path, monkeypatch
+    ):
+        """Goal storage must follow HERMES_HOME even if hermes_state was imported earlier."""
+        import hermes_state  # noqa: F401
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        session_id = "same-session-id"
+        home_one = tmp_path / "home-one"
+        home_two = tmp_path / "home-two"
+
+        try:
+            monkeypatch.setenv("HERMES_HOME", str(home_one))
+            goals._DB_CACHE.clear()
+            GoalManager(session_id).set("home one goal")
+
+            monkeypatch.setenv("HERMES_HOME", str(home_two))
+            goals._DB_CACHE.clear()
+            assert GoalManager(session_id).state is None
+            GoalManager(session_id).set("home two goal")
+
+            monkeypatch.setenv("HERMES_HOME", str(home_one))
+            goals._DB_CACHE.clear()
+            assert GoalManager(session_id).state.goal == "home one goal"
+        finally:
+            goals._DB_CACHE.clear()
+
     def test_evaluate_after_turn_done(self, hermes_home):
         """Judge says done → status=done, no continuation."""
         from hermes_cli import goals

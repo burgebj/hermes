@@ -180,6 +180,10 @@ class TestGeminiContextLength:
 # ── Agent Init (no SyntaxError) ──
 
 class TestGeminiAgentInit:
+    @pytest.fixture(autouse=True)
+    def _skip_toolset_requirement_checks(self, monkeypatch):
+        monkeypatch.setattr("run_agent.check_toolset_requirements", lambda: {})
+
     def test_agent_imports_without_error(self):
         """Verify run_agent.py has no SyntaxError (the critical bug)."""
         import importlib

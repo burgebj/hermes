@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -174,6 +175,28 @@ _SENSITIVE_PATH_PREFIXES = (
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 
+def _is_under_path(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except (OSError, ValueError):
+        return False
+
+
+def _is_temp_path(path: str) -> bool:
+    """Return True for paths under the platform temp directory.
+
+    On macOS, ``tempfile`` commonly resolves under ``/private/var/folders``.
+    That tree is otherwise system-owned, but user-scoped temp children are a
+    normal scratch location and should not be rejected by the file tools.
+    """
+    try:
+        temp_root = os.path.realpath(tempfile.gettempdir())
+        real_path = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    return _is_under_path(real_path, temp_root)
+
+
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
     try:
@@ -181,6 +204,8 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except (OSError, ValueError):
         resolved = filepath
     normalized = os.path.normpath(os.path.expanduser(filepath))
+    if _is_temp_path(resolved) or _is_temp_path(normalized):
+        return None
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."

@@ -747,6 +747,10 @@ def _live_system_guard(request, monkeypatch):
             def __init__(self, cmd, *args, **kwargs):
                 _check_subprocess_cmd("Popen", cmd)
                 super().__init__(cmd, *args, **kwargs)
+                try:
+                    _initial_children.add(int(self.pid))
+                except Exception:
+                    pass
 
         _GuardedPopen.__name__ = "Popen"
         _GuardedPopen.__qualname__ = "Popen"
@@ -809,6 +813,31 @@ def _live_system_guard(request, monkeypatch):
     except Exception:
         pass
 
+    # ptyprocess.PtyProcess.spawn forks directly instead of going through
+    # subprocess.Popen, so record its child PID for later os.kill(pid, 0)
+    # existence probes in PTY tests.
+    try:
+        import ptyprocess as _ptyprocess  # type: ignore
+
+        real_ptyprocess_spawn = _ptyprocess.PtyProcess.spawn
+
+        def _guarded_ptyprocess_spawn(argv, *args, **kwargs):
+            _check_subprocess_cmd("ptyprocess.PtyProcess.spawn", argv)
+            proc = real_ptyprocess_spawn(argv, *args, **kwargs)
+            try:
+                _initial_children.add(int(proc.pid))
+            except Exception:
+                pass
+            return proc
+
+        monkeypatch.setattr(
+            _ptyprocess.PtyProcess,
+            "spawn",
+            staticmethod(_guarded_ptyprocess_spawn),
+        )
+    except Exception:
+        pass
+
     # asyncio.create_subprocess_* — bypasses subprocess module entirely.
     try:
         import asyncio as _asyncio
@@ -819,11 +848,21 @@ def _live_system_guard(request, monkeypatch):
             _check_subprocess_cmd(
                 "asyncio.create_subprocess_exec", [program, *args]
             )
-            return await real_async_exec(program, *args, **kwargs)
+            proc = await real_async_exec(program, *args, **kwargs)
+            try:
+                _initial_children.add(int(proc.pid))
+            except Exception:
+                pass
+            return proc
 
         async def _guarded_async_shell(cmd, *args, **kwargs):
             _check_subprocess_cmd("asyncio.create_subprocess_shell", cmd)
-            return await real_async_shell(cmd, *args, **kwargs)
+            proc = await real_async_shell(cmd, *args, **kwargs)
+            try:
+                _initial_children.add(int(proc.pid))
+            except Exception:
+                pass
+            return proc
 
         monkeypatch.setattr(_asyncio, "create_subprocess_exec", _guarded_async_exec)
         monkeypatch.setattr(

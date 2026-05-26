@@ -159,6 +159,7 @@ def test_make_tui_argv_skips_build_only_on_termux_when_fresh(
     monkeypatch.setenv("TERMUX_VERSION", "1")
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: False)
     monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
+    monkeypatch.setattr(main_mod, "_find_bundled_tui", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
 
     def fail_run(*_args, **_kwargs):
@@ -180,6 +181,7 @@ def test_make_tui_argv_keeps_desktop_always_build_behaviour(
     monkeypatch.setenv("PREFIX", "/usr")
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: False)
     monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
+    monkeypatch.setattr(main_mod, "_find_bundled_tui", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
     calls = []
 

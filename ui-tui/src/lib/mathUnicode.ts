@@ -515,6 +515,7 @@ const readBraced = (s: string, start: number): { content: string; end: number } 
     // should not change the brace counter.
     if (c === '\\' && i + 1 < s.length) {
       i += 2
+
       continue
     }
 
@@ -560,6 +561,7 @@ const replaceBracedCommand = (input: string, command: string, render: (content: 
     if (after && /[A-Za-z]/.test(after)) {
       out += input.slice(i, idx + cmdLen)
       i = idx + cmdLen
+
       continue
     }
 
@@ -567,13 +569,14 @@ const replaceBracedCommand = (input: string, command: string, render: (content: 
 
     let p = idx + cmdLen
 
-    while (input[p] === ' ' || input[p] === '\t') p++
+    while (input[p] === ' ' || input[p] === '\t') {p++}
 
     const arg = readBraced(input, p)
 
     if (!arg) {
       out += input.slice(idx, p + 1)
       i = p + 1
+
       continue
     }
 
@@ -607,6 +610,7 @@ const replaceFracs = (input: string): string => {
     if (after && /[A-Za-z]/.test(after)) {
       out += input.slice(i, idx + 5)
       i = idx + 5
+
       continue
     }
 
@@ -614,25 +618,27 @@ const replaceFracs = (input: string): string => {
 
     let p = idx + 5
 
-    while (input[p] === ' ' || input[p] === '\t') p++
+    while (input[p] === ' ' || input[p] === '\t') {p++}
 
     const num = readBraced(input, p)
 
     if (!num) {
       out += input.slice(idx, p + 1)
       i = p + 1
+
       continue
     }
 
     p = num.end
 
-    while (input[p] === ' ' || input[p] === '\t') p++
+    while (input[p] === ' ' || input[p] === '\t') {p++}
 
     const den = readBraced(input, p)
 
     if (!den) {
       out += input.slice(idx, p + 1)
       i = p + 1
+
       continue
     }
 

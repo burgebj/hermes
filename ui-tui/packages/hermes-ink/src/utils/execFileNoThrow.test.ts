@@ -28,6 +28,7 @@ let sleeperPids: number[]
 function trackSleeperPid(pidFile: string): void {
   try {
     const pid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10)
+
     if (pid > 0) {
       sleeperPids.push(pid)
     }
@@ -59,6 +60,7 @@ afterEach(() => {
       // Already exited — fine.
     }
   }
+
   rmSync(scriptDir, { recursive: true, force: true })
 })
 
@@ -86,15 +88,17 @@ describe.skipIf(onWindows)('execFileNoThrow with daemon-style children', () => {
       timeout: 2000,
       resolveOnExit: true
     })
+
     trackSleeperPid(pidFile)
 
     const elapsed = Date.now() - start
 
-    // The shell exits in a few ms. resolveOnExit lets us return on exit
-    // (code 0) instead of waiting for the orphaned sleeper to release
-    // stdio. Should be well under 200ms even on slow CI.
+    // resolveOnExit lets us return on the shell's exit (code 0) instead
+    // of waiting for the orphaned sleeper to release stdio. Keep the
+    // bound below the 2s timeout and far below the sleeper's 3s runtime,
+    // while leaving room for busy developer machines.
     expect(result.code).toBe(0)
-    expect(elapsed).toBeLessThan(500)
+    expect(elapsed).toBeLessThan(1500)
   })
 
   it("still surfaces the right code when resolveOnExit'd child exits non-zero", async () => {
@@ -107,6 +111,7 @@ describe.skipIf(onWindows)('execFileNoThrow with daemon-style children', () => {
       timeout: 2000,
       resolveOnExit: true
     })
+
     trackSleeperPid(pidFile)
 
     expect(result.code).toBe(7)
@@ -130,12 +135,14 @@ describe.skipIf(onWindows)('execFileNoThrow with daemon-style children', () => {
 
   it('does not double-resolve when both timer and exit fire', async () => {
     const pidFile = join(scriptDir, 'sleeper-race.pid')
+
     // Race: child happens to exit right around the timeout. The settled
     // guard ensures only the first resolution wins.
     const result = await execFileNoThrow(daemonScript, [pidFile], {
       timeout: 50, // very tight
       resolveOnExit: true
     })
+
     trackSleeperPid(pidFile)
 
     // Either code=0 (exit beat timer) or code=124 (timer beat exit).

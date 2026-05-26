@@ -3504,6 +3504,7 @@ def _chromium_search_roots() -> List[str]:
     3. ``~/Library/Caches/ms-playwright`` — Playwright's default on macOS.
     4. ``%USERPROFILE%\\AppData\\Local\\ms-playwright`` — Playwright's default
        on Windows.
+    5. ``~/.agent-browser/browsers`` — agent-browser's own install target.
     """
     roots: List[str] = []
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
@@ -3518,7 +3519,19 @@ def _chromium_search_roots() -> List[str]:
             home, "AppData", "Local"
         )
         roots.append(os.path.join(local, "ms-playwright"))
+    roots.append(os.path.join(home, ".agent-browser", "browsers"))
     return roots
+
+
+def _looks_like_browser_install(entry: str) -> bool:
+    """Return True for browser directories created by Playwright or agent-browser."""
+    return entry.startswith(
+        (
+            "chromium-",
+            "chromium_headless_shell-",
+            "chrome-",
+        )
+    )
 
 
 def _chromium_installed() -> bool:
@@ -3562,7 +3575,7 @@ def _chromium_installed() -> bool:
         _cached_chromium_installed = True
         return True
 
-    # 3. Playwright browser cache (legacy — chromium-* / chromium_headless_shell-* dirs)
+    # 3. Playwright and agent-browser browser caches.
     for root in _chromium_search_roots():
         if not root or not os.path.isdir(root):
             continue
@@ -3571,11 +3584,11 @@ def _chromium_installed() -> bool:
         except OSError:
             continue
         # Playwright names them ``chromium-<build>`` and
-        # ``chromium_headless_shell-<build>``; agent-browser accepts either.
+        # ``chromium_headless_shell-<build>``; agent-browser's own installer
+        # creates ``chrome-<version>``. Any of these means a browser binary is
+        # available for the local backend.
         for entry in entries:
-            if entry.startswith("chromium-") or entry.startswith(
-                "chromium_headless_shell-"
-            ):
+            if _looks_like_browser_install(entry):
                 _cached_chromium_installed = True
                 return True
 

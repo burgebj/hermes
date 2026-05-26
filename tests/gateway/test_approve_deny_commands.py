@@ -367,6 +367,10 @@ class TestBlockingApprovalE2E:
         os.environ.pop("HERMES_GATEWAY_SESSION", None)
         os.environ.pop("HERMES_EXEC_ASK", None)
         os.environ.pop("HERMES_SESSION_KEY", None)
+        os.environ["TIRITH_ENABLED"] = "0"
+
+    def teardown_method(self):
+        os.environ.pop("TIRITH_ENABLED", None)
 
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""
@@ -639,11 +643,13 @@ class TestFallbackNoCallback:
 
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = "no-callback-test"
+        os.environ["TIRITH_ENABLED"] = "0"
         try:
             result = check_all_command_guards("rm -rf /important", "local")
         finally:
             os.environ.pop("HERMES_EXEC_ASK", None)
             os.environ.pop("HERMES_SESSION_KEY", None)
+            os.environ.pop("TIRITH_ENABLED", None)
 
         assert result["approved"] is False
         assert result.get("status") == "pending_approval"

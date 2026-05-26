@@ -1,4 +1,4 @@
-import { spawn } from 'child_process'
+import { type ChildProcess, spawn, type SpawnOptions } from 'child_process'
 type ExecFileOptions = {
   input?: string
   timeout?: number
@@ -32,15 +32,14 @@ export function execFileNoThrow(
     // doesn't inherit those pipe FDs — prevents handle leaks that can
     // keep the parent process alive. No output data is collected in
     // this mode; both stdout and stderr will be empty strings.
-    const stdioConfig = options.resolveOnExit
-      ? ['pipe', 'ignore', 'ignore'] as const
-      : 'pipe' as const
-
-    const child = spawn(file, args, {
+    const spawnOptions: SpawnOptions = {
       cwd: options.useCwd ? process.cwd() : undefined,
-      env: options.env,
-      stdio: stdioConfig
-    })
+      env: options.env
+    }
+
+    const child: ChildProcess = options.resolveOnExit
+      ? spawn(file, args, { ...spawnOptions, stdio: ['pipe', 'ignore', 'ignore'] })
+      : spawn(file, args, { ...spawnOptions, stdio: 'pipe' })
 
     let stdout = ''
     let stderr = ''
@@ -80,13 +79,13 @@ export function execFileNoThrow(
         }, options.timeout)
       : null
 
-    child.stdout?.on('data', chunk => {
+    child.stdout?.on('data', (chunk: Buffer | string) => {
       stdout += String(chunk)
     })
-    child.stderr?.on('data', chunk => {
+    child.stderr?.on('data', (chunk: Buffer | string) => {
       stderr += String(chunk)
     })
-    child.on('error', error => {
+    child.on('error', (error: Error) => {
       settle(1, String(error))
     })
 
@@ -95,12 +94,12 @@ export function execFileNoThrow(
       // daemon it forked still holds the inherited stdio pipes open.
       // When a signal kills the child, code is null — map that to 1
       // so callers don't mistake a signal-terminated run for success.
-      child.on('exit', (code, signal) => {
+      child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
         const exitCode = timedOut ? 124 : (code ?? (signal ? 1 : 0))
         settle(exitCode)
       })
     } else {
-      child.on('close', (code, signal) => {
+      child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
         const exitCode = timedOut ? 124 : (code ?? (signal ? 1 : 0))
         settle(exitCode)
       })

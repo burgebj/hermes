@@ -45,10 +45,32 @@ class _FakeOpenAI:
         pass
 
 
+class _FakeContextCompressor:
+    def __init__(self, **kw):
+        self.model = kw.get("model", "")
+        self.base_url = kw.get("base_url", "")
+        self.api_key = kw.get("api_key", "")
+        self.provider = kw.get("provider", "")
+        self.api_mode = kw.get("api_mode", "")
+        self.context_length = kw.get("config_context_length") or 1_048_576
+        self.threshold_tokens = int(self.context_length * 0.5)
+
+    def get_tool_schemas(self):
+        return []
+
+    def on_session_start(self, *args, **kwargs):
+        return None
+
+    def update_model(self, **kw):
+        for key, value in kw.items():
+            setattr(self, key, value)
+
+
 def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="https://openrouter.ai/api/v1", model=None):
     monkeypatch.setattr("run_agent.get_tool_definitions", lambda **kw: _tool_defs("web_search", "terminal"))
     monkeypatch.setattr("run_agent.check_toolset_requirements", lambda: {})
     monkeypatch.setattr("run_agent.OpenAI", _FakeOpenAI)
+    monkeypatch.setattr("run_agent.ContextCompressor", _FakeContextCompressor)
     kwargs = dict(
         api_key="test-key",
         base_url=base_url,
@@ -949,6 +971,11 @@ class TestBuildAssistantMessage:
 
 class TestAuxiliaryClientProviderPriority:
     """Verify auxiliary client resolution doesn't break for any provider."""
+
+    def setup_method(self):
+        from agent.auxiliary_client import _reset_aux_unhealthy_cache
+
+        _reset_aux_unhealthy_cache()
 
     def test_openrouter_always_wins(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")

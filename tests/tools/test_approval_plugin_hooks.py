@@ -32,6 +32,9 @@ def isolated_session(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_SESSION_KEY", session_key)
     # Make sure we don't skip guards via yolo / approvals.mode=off
     monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+    # These tests exercise approval hook dispatch, not Tirith installation.
+    # Keep them hermetic so they never try to download the scanner binary.
+    monkeypatch.setenv("TIRITH_ENABLED", "0")
     # Isolate from the real user's permanent allowlist + session state
     _saved_permanent = _am._permanent_approved.copy()
     _saved_session = {k: v.copy() for k, v in _am._session_approved.items()}
@@ -151,5 +154,4 @@ class TestGatewayPathFiresHooks:
     gateway notify callback is registered. The agent thread blocks on the
     approval event until resolve_gateway_approval() is called from another
     thread."""
-
 

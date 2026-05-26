@@ -19,7 +19,8 @@ from tools.approval import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_approval_state():
+def _clear_approval_state(monkeypatch):
+    monkeypatch.setenv("TIRITH_ENABLED", "0")
     approval_module._permanent_approved.clear()
     approval_module.clear_session("default")
     approval_module.clear_session("test-session")

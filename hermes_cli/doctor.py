@@ -1345,8 +1345,9 @@ def run_doctor(args):
         else:
             check_warn("agent-browser not installed", "(run: npm install)")
 
-        # Chromium presence — the browser tools silently fail to register when
-        # agent-browser is found but no Playwright-managed Chromium is on disk
+        # Chromium/Chrome presence — the browser tools silently fail to
+        # register when agent-browser is found but no local browser binary is
+        # on disk
         # (tools/browser_tool.py::check_browser_requirements filters them out
         # before the agent ever sees them).  Reuse the exact predicate it uses
         # so the two checks cannot diverge.  Skip on Termux (not a tested
@@ -1378,21 +1379,21 @@ def run_doctor(args):
                 )
                 if not skip_chromium_check:
                     if _chromium_installed():
-                        check_ok("Playwright Chromium", "(browser engine)")
+                        check_ok("Local Chromium/Chrome", "(browser engine)")
                     else:
                         check_warn(
-                            "Playwright Chromium not installed",
+                            "Local Chromium/Chrome not installed",
                             "(browser_* tools will be hidden from the agent)",
                         )
                         if sys.platform == "win32":
                             check_info(
                                 f"Install with: cd {PROJECT_ROOT} && "
-                                "npx playwright install chromium"
+                                "npx agent-browser install"
                             )
                         else:
                             check_info(
                                 f"Install with: cd {PROJECT_ROOT} && "
-                                "npx playwright install --with-deps chromium"
+                                "npx agent-browser install"
                             )
     elif _is_termux():
         check_info("Node.js not found (browser tools are optional in the tested Termux path)")

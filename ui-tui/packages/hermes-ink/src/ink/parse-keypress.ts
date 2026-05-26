@@ -9,17 +9,14 @@ import { Buffer } from 'buffer'
 import { PASTE_END, PASTE_START } from './termio/csi.js'
 import { createTokenizer, type Tokenizer } from './termio/tokenize.js'
 
-// eslint-disable-next-line no-control-regex
 const META_KEY_CODE_RE = /^(?:\x1b)([a-zA-Z0-9])$/
 
 const FN_KEY_RE =
-  // eslint-disable-next-line no-control-regex
   /^(?:\x1b+)(O|N|\[|\[\[)(?:(\d+)(?:;(\d+))?([~^$])|(?:1;)?(\d+)?([a-zA-Z]))/
 
 // CSI u (kitty keyboard protocol): ESC [ codepoint [; modifier] u
 // Example: ESC[13;2u = Shift+Enter, ESC[27u = Escape (no modifiers)
 // Modifier is optional - when absent, defaults to 1 (no modifiers)
-// eslint-disable-next-line no-control-regex
 const CSI_U_RE = /^\x1b\[(\d+)(?:;(\d+))?u/
 
 // xterm modifyOtherKeys: ESC [ 27 ; modifier ; keycode ~
@@ -27,41 +24,32 @@ const CSI_U_RE = /^\x1b\[(\d+)(?:;(\d+))?u/
 // modifyOtherKeys=2 is active or via user keybinds, typically over SSH where
 // TERM sniffing misses Ghostty and we never push Kitty keyboard mode.
 // Note param order is reversed vs CSI u (modifier first, keycode second).
-// eslint-disable-next-line no-control-regex
 const MODIFY_OTHER_KEYS_RE = /^\x1b\[27;(\d+);(\d+)~/
 
 // -- Terminal response patterns (inbound sequences from the terminal itself) --
 // DECRPM: CSI ? Ps ; Pm $ y  — response to DECRQM (request mode)
-// eslint-disable-next-line no-control-regex
 const DECRPM_RE = /^\x1b\[\?(\d+);(\d+)\$y$/
 // DA1: CSI ? Ps ; ... c  — primary device attributes response
-// eslint-disable-next-line no-control-regex
 const DA1_RE = /^\x1b\[\?([\d;]*)c$/
 // DA2: CSI > Ps ; ... c  — secondary device attributes response
-// eslint-disable-next-line no-control-regex
 const DA2_RE = /^\x1b\[>([\d;]*)c$/
 // Kitty keyboard flags: CSI ? flags u  — response to CSI ? u query
 // (private ? marker distinguishes from CSI u key events)
-// eslint-disable-next-line no-control-regex
 const KITTY_FLAGS_RE = /^\x1b\[\?(\d+)u$/
 // DECXCPR cursor position: CSI ? row ; col R
 // The ? marker disambiguates from modified F3 keys (Shift+F3 = CSI 1;2 R,
 // Ctrl+F3 = CSI 1;5 R, etc.) — plain CSI row;col R is genuinely ambiguous.
-// eslint-disable-next-line no-control-regex
 const CURSOR_POSITION_RE = /^\x1b\[\?(\d+);(\d+)R$/
 // OSC response: OSC code ; data (BEL|ST)
-// eslint-disable-next-line no-control-regex
 const OSC_RESPONSE_RE = /^\x1b\](\d+);(.*?)(?:\x07|\x1b\\)$/s
 // XTVERSION: DCS > | name ST  — terminal name/version string (answer to CSI > 0 q).
 // xterm.js replies "xterm.js(X.Y.Z)"; Ghostty, kitty, iTerm2, etc. reply with
 // their own name. Unlike TERM_PROGRAM, this survives SSH since the query/reply
 // goes through the pty, not the environment.
-// eslint-disable-next-line no-control-regex
 const XTVERSION_RE = /^\x1bP>\|(.*?)(?:\x07|\x1b\\)$/s
 // SGR mouse event: CSI < button ; col ; row M (press) or m (release)
 // Button codes: 64=wheel-up, 65=wheel-down (0x40 | wheel-bit).
 // Button 32=left-drag (0x20 | motion-bit). Plain 0/1/2 = left/mid/right click.
-// eslint-disable-next-line no-control-regex
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/
 const SGR_MOUSE_FRAGMENT_RE = /(?<!\d)(?:\[<|<)?(?:[0-9]|[1-9][0-9]|1\d{2}|2[0-4]\d|25[0-5]);\d+;\d+[Mm]/g
 
@@ -639,6 +627,7 @@ function normalizeSgrMouseFragment(fragment: string): string {
 
 function parseSgrMouseFragment(fragment: string): ParsedInput {
   const sequence = normalizeSgrMouseFragment(fragment)
+
   return parseMouseEvent(sequence) ?? parseKeypress(sequence)
 }
 
@@ -646,6 +635,7 @@ function parseTextWithSgrMouseFragments(text: string): ParsedInput[] | null {
   SGR_MOUSE_FRAGMENT_RE.lastIndex = 0
 
   const matches = [...text.matchAll(SGR_MOUSE_FRAGMENT_RE)]
+
   if (matches.length === 0) {
     return null
   }

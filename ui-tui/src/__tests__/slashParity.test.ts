@@ -52,7 +52,7 @@ const loadCommandRegistryNames = (): CommandRegistryLoad => {
           '-c',
           'import json; from hermes_cli.commands import COMMAND_REGISTRY; print(json.dumps([c.name for c in COMMAND_REGISTRY]))'
         ],
-        { cwd: resolve(here, '../../..'), encoding: 'utf8' }
+        { cwd: resolve(here, '../../..'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
       )
     ) as string[]
 

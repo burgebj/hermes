@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 
-from agent.context_compressor import ContextCompressor
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import StreamingContextScrubber
 from agent.model_metadata import (
@@ -1432,7 +1431,10 @@ def init_agent(
         if not agent.quiet_mode:
             _ra().logger.info("Using context engine: %s", _selected_engine.name)
     else:
-        agent.context_compressor = ContextCompressor(
+        # Resolve through run_agent so tests and embedders that patch
+        # run_agent.ContextCompressor keep intercepting the init path after
+        # this constructor was extracted into agent.agent_init.
+        agent.context_compressor = _ra().ContextCompressor(
             model=agent.model,
             threshold_percent=compression_threshold,
             protect_first_n=compression_protect_first,
