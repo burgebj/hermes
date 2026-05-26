@@ -84,7 +84,7 @@ modal = ["modal==1.3.4"]
 daytona = ["daytona==0.155.0"]
 vercel = ["vercel==0.5.7"]
 hindsight = ["hindsight-client==0.6.1"]
-dev = ["debugpy==1.8.20", "pytest==9.0.2", "pytest-asyncio==1.3.0", "pytest-timeout==2.4.0", "mcp==1.26.0", "ty==0.0.21", "ruff==0.15.10"]
+dev = ["debugpy==1.8.20", "pytest==9.0.2", "pytest-asyncio==1.3.0", "pytest-timeout==2.4.0", "mcp==1.26.0", "ty==0.0.21", "ruff==0.15.10", "hermes-agent[encryption]"]
 messaging = ["python-telegram-bot[webhooks]==22.6", "discord.py[voice]==2.7.1", "aiohttp==3.13.3", "brotlicffi==1.2.0.1", "slack-bolt==1.27.0", "slack-sdk==3.40.1", "qrcode==7.4.2"]
 cron = []  # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt==1.27.0", "slack-sdk==3.40.1", "aiohttp==3.13.3"]
@@ -177,6 +177,21 @@ youtube = [
 ]
 # `hermes dashboard` (localhost SPA + API).  Not in core to keep the default install lean.
 web = ["fastapi==0.133.1", "uvicorn[standard]==0.41.0"]
+# Opt-in encryption-at-rest (`hermes encrypt`).  Kept out of core and out of
+# `[all]` per the 2026-05-12 policy — it is opt-in and lazy-installs via
+# `tools/lazy_deps.py` on first `hermes encrypt enable`.  `cryptography` is
+# already in the resolved tree (PyJWT[crypto]); the pin here just makes it an
+# explicit, reviewed direct dependency.  `sqlcipher3-binary` is only needed
+# for database encryption (`encrypt_databases`).
+encryption = [
+  "cryptography==46.0.7",
+  "argon2-cffi==25.1.0",
+  "keyring==25.6.0",
+  # sqlcipher3-wheels ships prebuilt SQLCipher wheels (incl. Windows) with
+  # FTS5 enabled; it provides the `sqlcipher3` module. Only used when
+  # database encryption (`encrypt_databases`) is turned on.
+  "sqlcipher3-wheels==0.5.7",
+]
 all = [
   # Policy (2026-05-12): `[all]` includes only extras that genuinely
   # CAN'T be lazy-installed via `tools/lazy_deps.py` — i.e. things every
@@ -230,7 +245,7 @@ plugins = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
+include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*", "hermes_crypto"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

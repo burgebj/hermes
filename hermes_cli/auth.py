@@ -1000,8 +1000,20 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     if not auth_file.exists():
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
+    blob = auth_file.read_bytes()
+    # Decrypt an encrypted auth.json BEFORE the corrupt-file handling below.
+    # A decryption failure (locked keystore / wrong key) must propagate — it
+    # is not the same as a corrupt store, and silently returning an empty
+    # store would look like the user's credentials had vanished.
     try:
-        raw = json.loads(auth_file.read_text())
+        from hermes_crypto import decrypt_if_encrypted, is_encrypted
+    except ImportError:
+        is_encrypted = None  # type: ignore[assignment]
+    if is_encrypted is not None and is_encrypted(blob):
+        blob = decrypt_if_encrypted(blob)
+
+    try:
+        raw = json.loads(blob.decode("utf-8"))
     except Exception as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
@@ -1044,7 +1056,14 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
     secure_parent_dir(auth_file)
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
-    payload = json.dumps(auth_store, indent=2) + "\n"
+    payload = (json.dumps(auth_store, indent=2) + "\n").encode("utf-8")
+    # Encrypt at rest when credential encryption is enabled (no-op otherwise).
+    try:
+        from hermes_crypto import encrypt_if_enabled
+
+        payload = encrypt_if_enabled(payload)
+    except ImportError:
+        pass
     tmp_path = auth_file.with_name(f"{auth_file.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
         # Create with 0o600 atomically via os.open(O_EXCL) + fdopen to close
@@ -1056,7 +1075,7 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             stat.S_IRUSR | stat.S_IWUSR,
         )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
