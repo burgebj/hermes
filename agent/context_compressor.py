@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -74,6 +75,31 @@ _IMAGE_TOKEN_ESTIMATE = 1600
 # for tail-cut decisions.
 _IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+
+_GUARDRAIL_ANTI_ECHO_PHRASES = (
+    "create a structured checkpoint summary",
+    "context checkpoint",
+    "summarization agent",
+    "summarisation agent",
+    "treat the conversation turns below",
+    "preserve enough detail for continuity",
+)
+
+_GUARDRAIL_REQUIRED_HEADINGS = (
+    "## Active Task",
+    "## Goal",
+    "## Constraints & Preferences",
+    "## Completed Actions",
+    "## Active State",
+    "## In Progress",
+    "## Blocked",
+    "## Key Decisions",
+    "## Resolved Questions",
+    "## Pending User Asks",
+    "## Relevant Files",
+    "## Remaining Work",
+    "## Critical Context",
+)
 
 
 def _content_length_for_budget(raw_content: Any) -> int:
@@ -524,6 +550,7 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        compression_guardrails: Optional[Dict[str, Any]] = None,
     ):
         self.model = model
         self.base_url = base_url
@@ -579,6 +606,42 @@ class ContextCompressor(ContextEngine):
         self.last_completion_tokens = 0
 
         self.summary_model = summary_model_override or ""
+        _guardrails = compression_guardrails if isinstance(compression_guardrails, dict) else {}
+        self._compression_guardrails_enabled = str(
+            _guardrails.get("enabled", False)
+        ).strip().lower() in {"true", "1", "yes", "on"}
+        self._compression_guardrail_mode = str(_guardrails.get("mode", "validate-repair"))
+        self._summary_repair_count: int = 0
+        self._summary_validation_failure_count: int = 0
+        self._summary_guardrail_fallback_count: int = 0
+        self._summary_guardrail_fallback_pending: bool = False
+        self._summary_guardrail_last_issues: list[str] = []
+
+        _shadow_cfg = _guardrails.get("shadow", {}) if isinstance(_guardrails, dict) else {}
+        if not isinstance(_shadow_cfg, dict):
+            _shadow_cfg = {}
+        self._compression_shadow_enabled = (
+            self._compression_guardrails_enabled
+            and str(_shadow_cfg.get("enabled", False)).strip().lower() in {"true", "1", "yes", "on"}
+        )
+        self._compression_shadow_model = str(_shadow_cfg.get("model", "")).strip()
+        try:
+            self._compression_shadow_max_per_session = max(0, int(_shadow_cfg.get("max_per_session", 20)))
+        except (TypeError, ValueError):
+            self._compression_shadow_max_per_session = 20
+        try:
+            self._compression_shadow_timeout = max(1.0, float(_shadow_cfg.get("timeout", 60)))
+        except (TypeError, ValueError):
+            self._compression_shadow_timeout = 60.0
+        self._compression_shadow_count: int = 0
+        self._compression_shadow_success_count: int = 0
+        self._compression_shadow_validation_failure_count: int = 0
+        self._compression_shadow_error_count: int = 0
+        self._compression_shadow_last_model: str = ""
+        self._compression_shadow_last_summary_hash: str = ""
+        self._compression_shadow_last_issues: list[str] = []
+        self._compression_shadow_last_error: Optional[str] = None
+        self._compression_shadow_last_thread: Optional[threading.Thread] = None
 
         # Stores the previous compaction summary for iterative updates
         self._previous_summary: Optional[str] = None
@@ -884,6 +947,308 @@ class ContextCompressor(ContextEngine):
 
         return "\n\n".join(parts)
 
+    @classmethod
+    def _extract_latest_user_request(cls, messages: List[Dict[str, Any]]) -> str:
+        """Return the newest real user turn to anchor guarded summaries.
+
+        Persisted compaction handoff messages are stored as user-role messages;
+        those are background reference, not fresh asks, so skip them.
+        """
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = _content_text_for_contains(msg.get("content"))
+            if not content or cls._is_context_summary_content(content):
+                continue
+            text = redact_sensitive_text(content).strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _summary_section(summary: str, heading: str) -> str:
+        pattern = rf"(?ms)^{re.escape(heading)}\s*\n(.*?)(?=^##\s+|\Z)"
+        match = re.search(pattern, summary or "")
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _summary_contains_anti_echo(text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(phrase in lowered for phrase in _GUARDRAIL_ANTI_ECHO_PHRASES)
+
+    @staticmethod
+    def _anchor_tokens(text: str) -> set[str]:
+        """Return exact-match lexical tokens used by active-task guardrails."""
+        tokens: set[str] = set()
+        for raw in re.findall(r"[A-Za-z0-9_.-]{2,}", (text or "").lower()):
+            token = raw.strip("._-")
+            if token:
+                tokens.add(token)
+        return tokens
+
+    @classmethod
+    def _latest_user_anchor_terms(cls, latest_user_request: str) -> set[str]:
+        """Return non-generic lexical anchors from the latest user request.
+
+        Keep short operational tokens such as ``ls``, ``pr``, or ``5``. These
+        are easy to drop with a four-character threshold and are often the only
+        distinguishing anchors in compact user asks like "run ls" or
+        "review PR 5".
+        """
+        stop_terms = {
+            "lokilore",
+            "user",
+            "asked",
+            "please",
+            "that",
+            "this",
+            "with",
+            "make",
+            "sure",
+            "keep",
+            "continue",
+            "proceed",
+            "request",
+            "requested",
+            "task",
+            "latest",
+            "real",
+            "answer",
+            "answered",
+            "prior",
+            "current",
+            "the",
+            "and",
+            "for",
+            "to",
+            "of",
+            "in",
+            "on",
+            "it",
+            "me",
+            "you",
+            "we",
+            "our",
+        }
+        return {term for term in cls._anchor_tokens(latest_user_request) if term not in stop_terms}
+
+    @classmethod
+    def _has_completion_evidence_for_latest(cls, summary: str, latest_user_request: str) -> bool:
+        """Return whether `None.` Active Task is backed by completion evidence.
+
+        `None.` is valid when the latest user request has already been answered
+        before compaction. It is unsafe when the summarizer simply drops an
+        active latest request. Use a small lexical-overlap check against the
+        completed/resolved sections to distinguish those cases.
+        """
+        if not latest_user_request:
+            return True
+        evidence = "\n".join(
+            [
+                cls._summary_section(summary, "## Completed Actions"),
+                cls._summary_section(summary, "## Resolved Questions"),
+            ]
+        ).lower()
+        if not evidence:
+            return False
+        terms = cls._latest_user_anchor_terms(latest_user_request)
+        if not terms:
+            return False
+        evidence_terms = cls._anchor_tokens(evidence)
+        overlap = len(terms & evidence_terms)
+        required = 1 if len(terms) == 1 else 2
+        return overlap >= required
+
+    @classmethod
+    def _validate_summary_guardrails(cls, summary: str, latest_user_request: str) -> list[str]:
+        """Lightweight structural validation for guarded compression output."""
+        body = cls._strip_summary_prefix(summary)
+        issues: list[str] = []
+        for heading in _GUARDRAIL_REQUIRED_HEADINGS:
+            if not re.search(rf"(?m)^{re.escape(heading)}\s*$", body):
+                issues.append(f"missing heading: {heading}")
+        active = cls._summary_section(body, "## Active Task")
+        if not active:
+            issues.append("empty active task")
+        if cls._summary_contains_anti_echo(active):
+            issues.append("active task echoed summarizer instructions")
+        active_normalized = active.strip().lower().rstrip(".")
+        if active_normalized in {"none", "nothing", "no outstanding task", "no pending task"}:
+            if not cls._has_completion_evidence_for_latest(body, latest_user_request):
+                issues.append("active task none without completion evidence")
+            return issues
+        if latest_user_request:
+            anchor_terms = list(cls._latest_user_anchor_terms(latest_user_request))
+            if anchor_terms:
+                active_terms = cls._anchor_tokens(active)
+                overlap = len(set(anchor_terms) & active_terms)
+                if overlap / max(len(set(anchor_terms)), 1) < 0.35:
+                    issues.append("active task does not overlap latest user request")
+        elif cls._summary_contains_anti_echo(body):
+            issues.append("anchor missing and summary contains anti-echo phrase")
+        return issues
+
+    @staticmethod
+    def _format_latest_user_request_anchor(latest_user_request: str) -> str:
+        """Format user-controlled anchor text as literal summary data."""
+        text = (latest_user_request or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(text) > 4000:
+            text = text[:4000].rstrip() + "… [truncated]"
+        return f"Latest user request: {json.dumps(text, ensure_ascii=False)}"
+
+    @classmethod
+    def _format_latest_user_request_prompt_anchor(cls, latest_user_request: str) -> str:
+        """Format latest-user data for XML-like prompt boundaries.
+
+        JSON quoting keeps newlines/backslashes literal, but `<tag>` text can
+        still visually break our prompt delimiters. Escape angle brackets only
+        in the prompt anchor; the deterministic summary repair path keeps the
+        human-readable JSON-quoted form.
+        """
+        return cls._escape_prompt_boundary_text(cls._format_latest_user_request_anchor(latest_user_request))
+
+    @staticmethod
+    def _escape_prompt_boundary_text(text: str) -> str:
+        """Escape angle brackets inside user/tool text wrapped by XML-like tags."""
+        return (text or "").replace("<", "\\u003c").replace(">", "\\u003e")
+
+    @classmethod
+    def _repair_active_task(cls, summary: str, latest_user_request: str) -> str:
+        """Deterministically replace Active Task with the latest-user anchor."""
+        if not latest_user_request:
+            return summary
+        body = cls._strip_summary_prefix(summary)
+        replacement = f"## Active Task\n{cls._format_latest_user_request_anchor(latest_user_request)}\n\n"
+        if "## Active Task" not in body:
+            return replacement + body.lstrip()
+        repaired = re.sub(
+            r"(?ms)^## Active Task\s*\n.*?(?=^##\s+|\Z)",
+            lambda _match: replacement,
+            body,
+            count=1,
+        )
+        return repaired.strip()
+
+    def _apply_summary_guardrails(self, summary: str, latest_user_request: str) -> Optional[str]:
+        """Validate guarded summaries and repair the continuity-critical field."""
+        self._summary_guardrail_fallback_pending = False
+        self._summary_guardrail_last_issues = []
+        issues = self._validate_summary_guardrails(summary, latest_user_request)
+        if not issues:
+            return summary
+        self._summary_validation_failure_count += 1
+        repairable_active_issues = {
+            "empty active task",
+            "active task echoed summarizer instructions",
+            "active task none without completion evidence",
+            "active task does not overlap latest user request",
+        }
+        should_repair_active = any(issue in repairable_active_issues for issue in issues)
+        candidate_summary = summary
+        if latest_user_request and should_repair_active:
+            repaired = self._repair_active_task(summary, latest_user_request)
+            repaired_issues = self._validate_summary_guardrails(repaired, latest_user_request)
+            if not repaired_issues:
+                self._summary_repair_count += 1
+                return repaired
+            self._summary_repair_count += 1
+            candidate_summary = repaired
+            issues = repaired_issues
+        self._summary_guardrail_last_issues = issues
+        self._summary_guardrail_fallback_count += 1
+        self._summary_guardrail_fallback_pending = True
+        logger.warning("Context summary guardrails flagged output: %s", "; ".join(issues[:5]))
+        return candidate_summary
+
+    def _maybe_run_shadow_compression(
+        self,
+        prompt: str,
+        latest_user_request: str,
+        summary_budget: int,
+    ) -> None:
+        """Run an out-of-band guarded compression candidate without using it.
+
+        Shadow compression is intentionally no-write: it never changes the
+        returned production summary, ``_previous_summary``, or the primary
+        guardrail counters. It only records coarse counters and a hash so a
+        staged canary can compare candidate continuity without persisting the
+        candidate summary into conversation state.
+        """
+        if not getattr(self, "_compression_shadow_enabled", False):
+            return
+        shadow_model = (self._compression_shadow_model or "").strip()
+        if not shadow_model:
+            return
+        primary_model = self.summary_model or self.model
+        if shadow_model == primary_model:
+            return
+        if self._compression_shadow_count >= self._compression_shadow_max_per_session:
+            return
+
+        self._compression_shadow_count += 1
+        self._compression_shadow_last_model = shadow_model
+        self._compression_shadow_last_error = None
+        self._compression_shadow_last_issues = []
+        self._compression_shadow_last_summary_hash = ""
+
+        def _run_shadow_candidate() -> None:
+            try:
+                shadow_response = call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": prompt}],
+                    model=shadow_model,
+                    max_tokens=int(summary_budget * 1.3),
+                    temperature=0.1,
+                    timeout=self._compression_shadow_timeout,
+                    base_url=self.base_url,
+                    api_key=self.api_key,
+                    main_runtime={
+                        "model": self.model,
+                        "base_url": self.base_url,
+                        "api_key": self.api_key,
+                        "provider": self.provider,
+                        "api_mode": self.api_mode,
+                    },
+                )
+                shadow_content = shadow_response.choices[0].message.content
+                if not isinstance(shadow_content, str):
+                    shadow_content = str(shadow_content) if shadow_content else ""
+                shadow_summary = redact_sensitive_text(shadow_content.strip())
+                issues = self._validate_summary_guardrails(shadow_summary, latest_user_request)
+                if issues:
+                    self._compression_shadow_validation_failure_count += 1
+                    self._compression_shadow_last_issues = issues
+                    logger.warning(
+                        "Context compression shadow model '%s' failed validation: %s",
+                        shadow_model,
+                        "; ".join(issues[:5]),
+                    )
+                    return
+                self._compression_shadow_success_count += 1
+                self._compression_shadow_last_summary_hash = hashlib.sha256(
+                    self._strip_summary_prefix(shadow_summary).encode("utf-8", errors="replace")
+                ).hexdigest()[:16]
+                logger.info(
+                    "Context compression shadow model '%s' passed guardrail validation (hash=%s)",
+                    shadow_model,
+                    self._compression_shadow_last_summary_hash,
+                )
+            except Exception as e:
+                self._compression_shadow_error_count += 1
+                err_text = str(e).strip() or e.__class__.__name__
+                if len(err_text) > 220:
+                    err_text = err_text[:217].rstrip() + "..."
+                self._compression_shadow_last_error = err_text
+                logger.warning("Context compression shadow model '%s' failed: %s", shadow_model, err_text)
+
+        thread = threading.Thread(
+            target=_run_shadow_candidate,
+            name="context-compression-shadow",
+            daemon=True,
+        )
+        self._compression_shadow_last_thread = thread
+        thread.start()
+
     def _fallback_to_main_for_compression(self, e: Exception, reason: str) -> None:
         """Switch from a separate ``summary_model`` back to the main model.
 
@@ -911,7 +1276,12 @@ class ContextCompressor(ContextEngine):
         self.summary_model = ""  # empty = use main model
         self._summary_failure_cooldown_until = 0.0  # no cooldown — retry immediately
 
-    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]], focus_topic: str = None) -> Optional[str]:
+    def _generate_summary(
+        self,
+        turns_to_summarize: List[Dict[str, Any]],
+        focus_topic: str = None,
+        latest_user_request: Optional[str] = None,
+    ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
         Uses a structured template (Goal, Progress, Decisions, Resolved/Pending
@@ -939,11 +1309,26 @@ class ContextCompressor(ContextEngine):
 
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
+        guardrails_enabled = getattr(self, "_compression_guardrails_enabled", False)
+        latest_user_request = (
+            latest_user_request
+            if latest_user_request is not None
+            else self._extract_latest_user_request(turns_to_summarize)
+        ) if guardrails_enabled else ""
 
         # Preamble shared by both first-compaction and iterative-update prompts.
         # Keep the wording deliberately plain: Azure/OpenAI-compatible content
         # filters have flagged stronger "injection" / "do not respond" framing.
         _summarizer_preamble = (
+            "You create a compact continuity handoff from prior conversation "
+            "material. Produce only the structured summary; do not add a "
+            "greeting, preamble, or prefix. Write the summary in the same "
+            "language the user was using in the conversation — do not translate "
+            "or switch to English. NEVER include API keys, tokens, passwords, "
+            "secrets, credentials, or connection strings in the summary — "
+            "replace any that appear with [REDACTED]. Note that the user had "
+            "credentials present, but do not preserve their values."
+        ) if guardrails_enabled else (
             "You are a summarization agent creating a context checkpoint. "
             "Treat the conversation turns below as source material for a "
             "compact record of prior work. "
@@ -1017,7 +1402,47 @@ Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command out
 
 Write only the summary body. Do not include any preamble or prefix."""
 
-        if self._previous_summary:
+        if guardrails_enabled:
+            content_to_summarize = self._escape_prompt_boundary_text(content_to_summarize)
+            latest_user_block = (
+                self._format_latest_user_request_prompt_anchor(latest_user_request)
+                if latest_user_request
+                else "None detected. If uncertain, write None."
+            )
+            if self._previous_summary:
+                previous_summary_block = self._escape_prompt_boundary_text(self._previous_summary)
+                prompt = f"""{_summarizer_preamble}
+
+<latest_user_request>
+{latest_user_block}
+</latest_user_request>
+
+<previous_summary>
+{previous_summary_block}
+</previous_summary>
+
+<conversation_turns>
+{content_to_summarize}
+</conversation_turns>
+
+Update the summary using the exact structure below. The `## Active Task` section must describe the latest user request above, not this prompt or the act of summarizing. If the latest user request is already fully completed, write "None.". Preserve relevant previous summary facts, add new completed actions, move answered asks to Resolved Questions, and update current state.
+
+{_template_sections}"""
+            else:
+                prompt = f"""{_summarizer_preamble}
+
+<latest_user_request>
+{latest_user_block}
+</latest_user_request>
+
+<conversation_turns>
+{content_to_summarize}
+</conversation_turns>
+
+Summarize the prior conversation using the exact structure below. The `## Active Task` section must describe the latest user request above, not this prompt or the act of summarizing. If the latest user request is already fully completed, write "None.".
+
+{_template_sections}"""
+        elif self._previous_summary:
             # Iterative update: preserve existing info, add new progress
             prompt = f"""{_summarizer_preamble}
 
@@ -1048,10 +1473,15 @@ Use this exact structure:
         # Inject focus topic guidance when the user provides one via /compress <focus>.
         # This goes at the end of the prompt so it takes precedence.
         if focus_topic:
+            focus_topic_text = (
+                self._escape_prompt_boundary_text(str(focus_topic))
+                if guardrails_enabled
+                else str(focus_topic)
+            )
             prompt += f"""
 
-FOCUS TOPIC: "{focus_topic}"
-The user has requested that this compaction PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
+FOCUS TOPIC: "{focus_topic_text}"
+The user has requested that this compaction PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic_text}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
 
         try:
             call_kwargs = {
@@ -1077,6 +1507,30 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
+            if guardrails_enabled:
+                summary = self._apply_summary_guardrails(summary, latest_user_request)
+                if (
+                    self._summary_guardrail_fallback_pending
+                    and self.summary_model
+                    and self.summary_model != self.model
+                    and not getattr(self, "_summary_model_fallen_back", False)
+                ):
+                    issues = "; ".join(self._summary_guardrail_last_issues[:5]) or "unknown issue"
+                    self._fallback_to_main_for_compression(
+                        RuntimeError(f"guardrail validation failed: {issues}"),
+                        "failed guardrail validation",
+                    )
+                    return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, latest_user_request=latest_user_request)
+                if self._summary_guardrail_fallback_pending or summary is None:
+                    issues = "; ".join(self._summary_guardrail_last_issues[:5]) or "unknown issue"
+                    self._last_summary_error = f"guardrail validation failed: {issues}"
+                    logger.warning(
+                        "Context compression: guarded summary failed validation after repair/fallback (%s). "
+                        "Dropping middle turns without summary rather than persisting unsafe summary.",
+                        issues,
+                    )
+                    return None
+            self._maybe_run_shadow_compression(prompt, latest_user_request, summary_budget)
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0
@@ -1155,7 +1609,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 else:
                     _reason = "timed out"
                 self._fallback_to_main_for_compression(e, _reason)
-                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)  # retry immediately
+                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, latest_user_request=latest_user_request)  # retry immediately
 
             # Unknown-error best-effort retry on main model.  Losing N turns of
             # context is almost always worse than one extra summary attempt, so
@@ -1172,7 +1626,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 and not getattr(self, "_summary_model_fallen_back", False)
             ):
                 self._fallback_to_main_for_compression(e, "failed")
-                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, latest_user_request=latest_user_request)
 
             # Transient errors (timeout, rate limit, network, JSON decode,
             # streaming premature-close) — shorter cooldown for JSON decode and
@@ -1600,8 +2054,20 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 tail_msgs,
             )
 
-        # Phase 3: Generate structured summary
-        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        # Phase 3: Generate structured summary. Guarded summaries anchor to the
+        # newest real user request from the full transcript, not only the older
+        # middle turns being compacted, because production tail protection often
+        # keeps the current request outside `turns_to_summarize`.
+        latest_user_request = (
+            self._extract_latest_user_request(messages)
+            if getattr(self, "_compression_guardrails_enabled", False)
+            else None
+        )
+        summary = self._generate_summary(
+            turns_to_summarize,
+            focus_topic=focus_topic,
+            latest_user_request=latest_user_request,
+        )
 
         # If summary generation failed, behavior splits on
         # ``abort_on_summary_failure`` (config: compression.abort_on_summary_failure):

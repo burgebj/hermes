@@ -1239,8 +1239,16 @@ def init_agent(
         _aux_cfg = {}
     if isinstance(_aux_cfg, dict):
         _aux_context_config = _aux_cfg.get("context_length")
+        _compression_guardrails_cfg = _aux_cfg.get("guardrails", {})
+        if not isinstance(_compression_guardrails_cfg, dict):
+            _compression_guardrails_cfg = {}
+        _summary_model_override = str(_aux_cfg.get("model") or "")
+        if _summary_model_override == agent.model:
+            _summary_model_override = ""
     else:
         _aux_context_config = None
+        _compression_guardrails_cfg = {}
+        _summary_model_override = ""
     if _aux_context_config is not None:
         try:
             _aux_context_config = int(_aux_context_config)
@@ -1438,7 +1446,7 @@ def init_agent(
             protect_first_n=compression_protect_first,
             protect_last_n=compression_protect_last,
             summary_target_ratio=compression_target_ratio,
-            summary_model_override=None,
+            summary_model_override=_summary_model_override,
             quiet_mode=agent.quiet_mode,
             base_url=agent.base_url,
             api_key=getattr(agent, "api_key", ""),
@@ -1446,6 +1454,7 @@ def init_agent(
             provider=agent.provider,
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
+            compression_guardrails=_compression_guardrails_cfg,
         )
     agent.compression_enabled = compression_enabled
 
