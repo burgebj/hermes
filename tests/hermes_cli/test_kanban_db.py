@@ -3189,6 +3189,21 @@ def test_connect_refuses_corrupt_existing_file(tmp_path):
         kb.connect(db_path=db_path)
 
 
+def test_repeated_corrupt_db_probe_reuses_existing_backup(tmp_path):
+    db_path = tmp_path / "kanban.db"
+    _write_corrupt_db(db_path)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    with pytest.raises(kb.KanbanDbCorruptError) as first:
+        kb.connect(db_path=db_path)
+    with pytest.raises(kb.KanbanDbCorruptError) as second:
+        kb.connect(db_path=db_path)
+
+    assert first.value.backup_path == second.value.backup_path
+    backups = list(tmp_path.glob("kanban.db.corrupt.*.bak"))
+    assert backups == [first.value.backup_path]
+
+
 def test_locked_healthy_db_does_not_classify_as_corrupt(tmp_path, monkeypatch):
     """A transient lock during the probe must not produce a .corrupt backup
     and must not be reported as :class:`KanbanDbCorruptError`. Raw sqlite

@@ -71,6 +71,7 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -1042,6 +1043,24 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     resolved = path.resolve()
     parent = resolved.parent
     base_name = resolved.name  # basename only
+    try:
+        original_stat = resolved.stat()
+        original_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    # A gateway dispatcher ticks every minute. If a corrupt DB is left in
+    # place until an operator recovers it, every tick re-runs this guard.
+    # Preserve the first copy, but do not clone the same damaged bytes over
+    # and over into an accidental backup landfill.
+    for existing in sorted(parent.glob(f"{base_name}.corrupt.*.bak")):
+        try:
+            if existing.stat().st_size != original_stat.st_size:
+                continue
+            if hashlib.sha256(existing.read_bytes()).hexdigest() == original_hash:
+                return existing
+        except OSError:
+            continue
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     candidate = parent / f"{base_name}.corrupt.{stamp}.bak"
     # Defensive: candidate must still be inside parent after construction.
