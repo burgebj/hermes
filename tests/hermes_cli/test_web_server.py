@@ -2074,6 +2074,65 @@ skip_on_windows = pytest.mark.skipif(
 )
 
 
+class TestResolveChatArgv:
+    """Unit tests for _resolve_chat_argv — specifically the tui_workdir plumbing."""
+
+    def _call(self, monkeypatch, cfg_override, resume=None, sidecar_url=None):
+        """Stub out _make_tui_argv and load_config, then call _resolve_chat_argv."""
+        import hermes_cli.web_server as ws
+        from pathlib import Path
+
+        fake_argv = ["/usr/bin/node", "/fake/entry.js"]
+        fake_cwd = Path("/fake/ui-tui")
+
+        monkeypatch.setattr(
+            ws,
+            "_resolve_chat_argv",
+            ws._resolve_chat_argv,  # ensure we're testing the real function
+        )
+        monkeypatch.setattr(
+            "hermes_cli.web_server.load_config",
+            lambda: cfg_override,
+        )
+
+        import hermes_cli.main as main_mod
+
+        monkeypatch.setattr(
+            "hermes_cli.web_server._make_tui_argv" if hasattr(ws, "_make_tui_argv") else "hermes_cli.main._make_tui_argv",
+            lambda *a, **kw: (fake_argv, fake_cwd),
+        )
+        # _resolve_chat_argv imports _make_tui_argv inside the function body,
+        # so patch it on the main module directly.
+        monkeypatch.setattr(main_mod, "_make_tui_argv", lambda *a, **kw: (fake_argv, fake_cwd))
+
+        return ws._resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
+
+    def test_tui_workdir_sets_terminal_cwd(self, monkeypatch, tmp_path):
+        """dashboard.tui_workdir is expanded and forwarded as TERMINAL_CWD."""
+        cfg = {"dashboard": {"tui_workdir": str(tmp_path)}}
+        _argv, _cwd, env = self._call(monkeypatch, cfg)
+        assert env.get("TERMINAL_CWD") == str(tmp_path)
+
+    def test_tui_workdir_tilde_expanded(self, monkeypatch):
+        """Tilde in dashboard.tui_workdir is expanded."""
+        cfg = {"dashboard": {"tui_workdir": "~"}}
+        _argv, _cwd, env = self._call(monkeypatch, cfg)
+        import os
+        assert env.get("TERMINAL_CWD") == os.path.expanduser("~")
+        assert "~" not in env.get("TERMINAL_CWD", "")
+
+    def test_tui_workdir_empty_leaves_terminal_cwd_unset(self, monkeypatch):
+        """Empty dashboard.tui_workdir does not inject TERMINAL_CWD."""
+        cfg = {"dashboard": {"tui_workdir": ""}}
+        _argv, _cwd, env = self._call(monkeypatch, cfg)
+        assert "TERMINAL_CWD" not in env
+
+    def test_tui_workdir_absent_leaves_terminal_cwd_unset(self, monkeypatch):
+        """Missing dashboard key does not inject TERMINAL_CWD."""
+        _argv, _cwd, env = self._call(monkeypatch, {})
+        assert "TERMINAL_CWD" not in env
+
+
 @skip_on_windows
 class TestPtyWebSocket:
     @pytest.fixture(autouse=True)

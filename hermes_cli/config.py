@@ -1181,6 +1181,7 @@ DEFAULT_CONFIG = {
         # Set this to True to re-enable the surfaces with the understanding
         # that the numbers are a local lower-bound estimate, not billing.
         "show_token_analytics": False,
+        "tui_workdir": "",  # Working directory for the embedded TUI chat (sets TERMINAL_CWD). Empty = inherit cwd.
     },
 
     # Privacy settings
