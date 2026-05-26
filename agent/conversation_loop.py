@@ -61,7 +61,11 @@ from agent.nous_rate_guard import (
     record_nous_rate_limit,
 )
 from agent.process_bootstrap import _install_safe_stdio
-from agent.prompt_caching import apply_anthropic_cache_control
+from agent.prompt_cache_strategy import (
+    AnthropicInlineCacheStrategy,
+    NoCacheStrategy,
+    PromptCacheIntent,
+)
 from agent.retry_utils import jittered_backoff
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
@@ -889,18 +893,20 @@ def run_conversation(
             for idx, pfm in enumerate(agent.prefill_messages):
                 api_messages.insert(sys_offset + idx, pfm.copy())
 
-        # Apply Anthropic prompt caching for Claude models on native
-        # Anthropic, OpenRouter, and third-party Anthropic-compatible
-        # gateways. Auto-detected: if ``_use_prompt_caching`` is set,
-        # inject cache_control breakpoints (system + last 3 messages)
-        # to reduce input token costs by ~75% on multi-turn
-        # conversations.
-        if agent._use_prompt_caching:
-            api_messages = apply_anthropic_cache_control(
-                api_messages,
-                cache_ttl=agent._cache_ttl,
-                native_anthropic=agent._use_native_cache_layout,
-            )
+        # Apply prompt caching via the provider's cache strategy.
+        # Falls back to native-layout Anthropic markers for unknown
+        # third-party gateways that speak the Anthropic wire protocol.
+        from providers import get_provider_profile as _gpf_cl
+        _profile = _gpf_cl(agent.provider)
+        _strategy = _profile.cache_strategy_for(agent.model) if _profile else NoCacheStrategy()
+        if (
+            isinstance(_strategy, NoCacheStrategy)
+            and getattr(agent, "api_mode", None) == "anthropic_messages"
+            and "claude" in (agent.model or "").lower()
+        ):
+            _strategy = AnthropicInlineCacheStrategy(layout="native")
+        _intent = PromptCacheIntent(ttl=getattr(agent, "_cache_ttl", "5m"))
+        api_messages = _strategy.apply(api_messages, _intent)
 
         # Safety net: strip orphaned tool results / add stubs for missing
         # results before sending to the API.  Runs unconditionally — not
@@ -1771,8 +1777,7 @@ def run_conversation(
                     # server-side prefix caching and return
                     # ``prompt_tokens_details.cached_tokens``; users
                     # previously could not see their cache % because this
-                    # line was gated on ``_use_prompt_caching``, which is
-                    # only True for Anthropic-style marker injection.
+                    # not gated on whether the provider uses cache markers.
                     # ``canonical_usage`` is already normalised from all
                     # three API shapes (Anthropic / Codex / OpenAI-chat)
                     # so we can rely on its values directly.

@@ -78,12 +78,24 @@ class ToolCall:
 
 @dataclass
 class Usage:
-    """Token usage from an API response."""
+    """Token usage from an API response, canonical across wire formats.
+
+    Each transport's ``extract_usage()`` returns this shape regardless of
+    the underlying provider's field names. The Anthropic wire splits
+    cache fields at the top level (``cache_read_input_tokens`` /
+    ``cache_creation_input_tokens``); the OpenAI wire nests them in
+    ``prompt_tokens_details``. Both land here under
+    ``cache_read_tokens`` / ``cache_write_tokens``.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # Back-compat alias for cache_read_tokens used by older transport code.
     cached_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass

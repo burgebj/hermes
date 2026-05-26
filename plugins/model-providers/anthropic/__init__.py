@@ -13,6 +13,15 @@ logger = logging.getLogger(__name__)
 class AnthropicProfile(ProviderProfile):
     """Native Anthropic — uses x-api-key header, not Bearer."""
 
+    def cache_strategy_for(self, model: str):
+        from agent.prompt_cache_strategy import (
+            AnthropicInlineCacheStrategy,
+            NoCacheStrategy,
+        )
+        if "claude" in (model or "").lower():
+            return AnthropicInlineCacheStrategy(layout="native")
+        return NoCacheStrategy()
+
     def fetch_models(
         self,
         *,

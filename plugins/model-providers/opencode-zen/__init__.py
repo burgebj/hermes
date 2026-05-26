@@ -31,8 +31,29 @@ def _is_deepseek_thinking_model(model: str | None) -> bool:
     return m == "deepseek-reasoner"
 
 
-class OpenCodeGoProfile(ProviderProfile):
-    """OpenCode Go - model-specific reasoning controls."""
+class _OpenCodeFamilyCacheMixin:
+    """Shared cache_strategy_for for the OpenCode family (Zen + Go).
+
+    Both endpoints honor envelope-layout cache_control markers for Qwen
+    models; without them qwen3.6-plus reports 0% cached tokens.
+    """
+
+    def cache_strategy_for(self, model: str):
+        from agent.prompt_cache_strategy import (
+            AnthropicInlineCacheStrategy,
+            NoCacheStrategy,
+        )
+        if "qwen" in (model or "").lower():
+            return AnthropicInlineCacheStrategy(layout="envelope")
+        return NoCacheStrategy()
+
+
+class OpenCodeZenProfile(_OpenCodeFamilyCacheMixin, ProviderProfile):
+    """OpenCode Zen - inherits envelope-layout Qwen caching."""
+
+
+class OpenCodeGoProfile(_OpenCodeFamilyCacheMixin, ProviderProfile):
+    """OpenCode Go - model-specific reasoning controls + Qwen caching."""
 
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
@@ -82,7 +103,7 @@ class OpenCodeGoProfile(ProviderProfile):
         return extra_body, top_level
 
 
-opencode_zen = ProviderProfile(
+opencode_zen = OpenCodeZenProfile(
     name="opencode-zen",
     aliases=("opencode", "opencode_zen", "zen"),
     env_vars=("OPENCODE_ZEN_API_KEY",),

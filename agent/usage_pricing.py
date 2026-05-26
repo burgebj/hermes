@@ -677,68 +677,38 @@ def normalize_usage(
 ) -> CanonicalUsage:
     """Normalize raw API response usage into canonical token buckets.
 
-    Handles three API shapes:
-    - Anthropic: input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens
-    - Codex Responses: input_tokens includes cache tokens; input_tokens_details.cached_tokens separates them
-    - OpenAI Chat Completions: prompt_tokens includes cache tokens; prompt_tokens_details.cached_tokens separates them
-
-    In both Codex and OpenAI modes, input_tokens is derived by subtracting cache
-    tokens from the total — the API contract is that input/prompt totals include
-    cached tokens and the details object breaks them out.
+    Delegates per-wire-format field reads to ``ProviderTransport.extract_usage()``.
+    Each transport knows its own field names and quirks (e.g. Codex/OpenAI
+    include cached tokens in the prompt total — those transports subtract;
+    Anthropic's input_tokens is already net — no subtraction).
     """
     if not response_usage:
         return CanonicalUsage()
 
-    provider_name = (provider or "").strip().lower()
+    # Resolve which transport's extractor to use. Fall back to provider-name
+    # → api_mode mapping for callers that pass only ``provider``.
+    from agent.transports import get_transport
+
     mode = (api_mode or "").strip().lower()
+    if not mode:
+        provider_name = (provider or "").strip().lower()
+        if provider_name == "anthropic":
+            mode = "anthropic_messages"
+        else:
+            mode = "chat_completions"
 
-    if mode == "anthropic_messages" or provider_name == "anthropic":
-        input_tokens = _to_int(getattr(response_usage, "input_tokens", 0))
-        output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
-        cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
-        cache_write_tokens = _to_int(getattr(response_usage, "cache_creation_input_tokens", 0))
-    elif mode == "codex_responses":
-        input_total = _to_int(getattr(response_usage, "input_tokens", 0))
-        output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
-        details = getattr(response_usage, "input_tokens_details", None)
-        cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
-        cache_write_tokens = _to_int(
-            getattr(details, "cache_creation_tokens", 0) if details else 0
-        )
-        input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
-    else:
-        prompt_total = _to_int(getattr(response_usage, "prompt_tokens", 0))
-        output_tokens = _to_int(getattr(response_usage, "completion_tokens", 0))
-        details = getattr(response_usage, "prompt_tokens_details", None)
-        # Primary: OpenAI-style prompt_tokens_details. Fallback: Anthropic-style
-        # top-level fields that some OpenAI-compatible proxies (OpenRouter, Vercel
-        # AI Gateway, Cline) expose when routing Claude models — without this
-        # fallback, cache writes are undercounted as 0 and cache reads can be
-        # missed when the proxy only surfaces them at the top level.
-        # Port of cline/cline#10266.
-        cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
-        if not cache_read_tokens:
-            cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
-        cache_write_tokens = _to_int(
-            getattr(details, "cache_write_tokens", 0) if details else 0
-        )
-        if not cache_write_tokens:
-            cache_write_tokens = _to_int(
-                getattr(response_usage, "cache_creation_input_tokens", 0)
-            )
-        input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
+    transport = get_transport(mode)
+    if transport is None:
+        # No transport registered (e.g. test stub) — fall back to chat_completions.
+        transport = get_transport("chat_completions")
 
-    reasoning_tokens = 0
-    output_details = getattr(response_usage, "output_tokens_details", None)
-    if output_details:
-        reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
-
+    usage = transport.extract_usage(response_usage)
     return CanonicalUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-        reasoning_tokens=reasoning_tokens,
+        input_tokens=usage.prompt_tokens,
+        output_tokens=usage.completion_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
     )
 
 

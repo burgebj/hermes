@@ -100,6 +100,26 @@ class ProviderProfile:
         """
         return messages
 
+    def cache_strategy_for(self, model: str) -> Any:
+        """Return the prompt-cache strategy to use for this (provider, model).
+
+        Default: ``NoCacheStrategy()``. Provider plugins override to declare
+        their caching mechanism — typically returning
+        ``AnthropicInlineCacheStrategy(layout=...)`` for Claude/Qwen models
+        on the relevant wire format, or ``GeminiResourceCacheStrategy()``
+        for native Gemini.
+
+        Branching by ``(provider × model)`` lives in each plugin so the
+        agent loop can call this method without knowing any provider's
+        caching quirks. Replaces the centralized 8-branch
+        ``anthropic_prompt_cache_policy()`` that lived in agent_runtime_helpers.
+        """
+        # Late import keeps providers/base.py free of agent/ dependencies
+        # at module-load time (this file is imported very early).
+        from agent.prompt_cache_strategy import NoCacheStrategy
+
+        return NoCacheStrategy()
+
     def build_extra_body(
         self, *, session_id: str | None = None, **context: Any
     ) -> dict[str, Any]:

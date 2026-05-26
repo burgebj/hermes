@@ -115,6 +115,25 @@ class BedrockTransport(ProviderTransport):
             usage=usage,
         )
 
+    def extract_usage(self, response_usage: Any) -> "Usage":
+        """Extract canonical usage from a Bedrock usage object.
+
+        Bedrock's adapter normalizes the boto3 dict to a SimpleNamespace
+        with OpenAI-like ``prompt_tokens`` / ``completion_tokens`` before
+        this is reached. No cache fields on Bedrock.
+        """
+        from agent.transports.types import Usage
+
+        if response_usage is None:
+            return Usage()
+        prompt_tokens = int(getattr(response_usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(response_usage, "completion_tokens", 0) or 0)
+        return Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+
     def validate_response(self, response: Any) -> bool:
         """Check Bedrock response structure.
 

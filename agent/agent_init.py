@@ -462,15 +462,6 @@ def init_agent(
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
     
-    # Anthropic prompt caching: auto-enabled for Claude models on native
-    # Anthropic, OpenRouter, and third-party gateways that speak the
-    # Anthropic protocol (``api_mode == 'anthropic_messages'``). Reduces
-    # input costs by ~75% on multi-turn conversations. Uses system_and_3
-    # strategy (4 breakpoints). See ``_anthropic_prompt_cache_policy``
-    # for the layout-vs-transport decision.
-    agent._use_prompt_caching, agent._use_native_cache_layout = (
-        agent._anthropic_prompt_cache_policy()
-    )
     # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from
     # config.yaml under prompt_caching.cache_ttl; unknown values keep "5m".
     # 1h tier costs 2x on write vs 1.25x for 5m, but amortizes across long
@@ -954,14 +945,24 @@ def init_agent(
         print(f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)")
     
     # Show prompt caching status
-    if agent._use_prompt_caching and not agent.quiet_mode:
-        if agent._use_native_cache_layout and agent.provider == "anthropic":
-            source = "native Anthropic"
-        elif agent._use_native_cache_layout:
-            source = "Anthropic-compatible endpoint"
-        else:
-            source = "Claude via OpenRouter"
-        print(f"💾 Prompt caching: ENABLED ({source}, {agent._cache_ttl} TTL)")
+    if not agent.quiet_mode:
+        from agent.prompt_cache_strategy import (
+            AnthropicInlineCacheStrategy as _ACS,
+            NoCacheStrategy as _NCS,
+        )
+        from providers import get_provider_profile as _gpf_ai
+        _ai_profile = _gpf_ai(agent.provider)
+        _ai_strategy = _ai_profile.cache_strategy_for(agent.model) if _ai_profile else _NCS()
+        if isinstance(_ai_strategy, _NCS) and agent.api_mode == "anthropic_messages" and "claude" in (agent.model or "").lower():
+            _ai_strategy = _ACS(layout="native")
+        if isinstance(_ai_strategy, _ACS):
+            if _ai_strategy.layout == "native" and agent.provider == "anthropic":
+                source = "native Anthropic"
+            elif _ai_strategy.layout == "native":
+                source = "Anthropic-compatible endpoint"
+            else:
+                source = "Claude via OpenRouter"
+            print(f"💾 Prompt caching: ENABLED ({source}, {agent._cache_ttl} TTL)")
     
     # Session logging setup - auto-save conversation trajectories for debugging
     agent.session_start = datetime.now()
@@ -1613,8 +1614,6 @@ def init_agent(
         "api_mode": agent.api_mode,
         "api_key": getattr(agent, "api_key", ""),
         "client_kwargs": dict(agent._client_kwargs),
-        "use_prompt_caching": agent._use_prompt_caching,
-        "use_native_cache_layout": agent._use_native_cache_layout,
         # Context engine state that _try_activate_fallback() overwrites.
         # Use getattr for model/base_url/api_key/provider since plugin
         # engines may not have these (they're ContextCompressor-specific).

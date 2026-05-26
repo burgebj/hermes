@@ -210,18 +210,21 @@ class TestRestorePrimaryRuntime:
         assert agent.context_compressor.context_length == original_ctx_len
         assert agent.context_compressor.threshold_tokens == original_threshold
 
-    def test_restores_prompt_caching_flag(self):
+    def test_restore_provider_and_model(self):
+        """After fallback activation and restore, provider+model return to primary."""
         agent = _make_agent()
-        original_caching = agent._use_prompt_caching
+        original_provider = agent.provider
+        original_model = agent.model
 
-        # Simulate fallback changing the caching flag
         agent._fallback_activated = True
-        agent._use_prompt_caching = not original_caching
+        agent.provider = "anthropic"
+        agent.model = "claude-sonnet-4-20250514"
 
         with patch("run_agent.OpenAI", return_value=MagicMock()):
             agent._restore_primary_runtime()
 
-        assert agent._use_prompt_caching == original_caching
+        assert agent.provider == original_provider
+        assert agent.model == original_model
 
     def test_restore_survives_exception(self):
         """If client rebuild fails, the method returns False gracefully."""

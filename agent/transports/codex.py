@@ -250,6 +250,39 @@ class ResponsesApiTransport(ProviderTransport):
             provider_data=provider_data or None,
         )
 
+    def extract_usage(self, response_usage: Any) -> "Usage":
+        """Extract canonical usage from a Codex Responses API usage object.
+
+        Codex's ``input_tokens`` is GROSS — includes cache reads and (per
+        x.ai/OpenAI contract) cache writes too. Cache breakdown nests in
+        ``input_tokens_details.cached_tokens`` / ``.cache_creation_tokens``.
+        Subtract both out of input_tokens for net prompt count.
+        """
+        from agent.transports.types import Usage
+
+        if response_usage is None:
+            return Usage()
+        input_total = int(getattr(response_usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(response_usage, "output_tokens", 0) or 0)
+
+        details = getattr(response_usage, "input_tokens_details", None)
+        cache_read = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+        cache_write = int(getattr(details, "cache_creation_tokens", 0) or 0) if details else 0
+
+        out_details = getattr(response_usage, "output_tokens_details", None)
+        reasoning = int(getattr(out_details, "reasoning_tokens", 0) or 0) if out_details else 0
+
+        net_input = max(0, input_total - cache_read - cache_write)
+        return Usage(
+            prompt_tokens=net_input,
+            completion_tokens=output_tokens,
+            total_tokens=input_total + output_tokens,
+            cached_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            reasoning_tokens=reasoning,
+        )
+
     def validate_response(self, response: Any) -> bool:
         """Check Codex Responses API response has valid output structure.
 
