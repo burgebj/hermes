@@ -1,6 +1,8 @@
 """Tests for the SignalAttachmentScheduler token-bucket simulator."""
 import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -231,3 +233,72 @@ class TestSingleton:
         _reset_scheduler()
         s2 = get_scheduler()
         assert s1 is not s2
+
+
+# ─── TOCTOU Race Regression Tests (Issue #24745) ─────────────────────────────
+
+class TestGetSchedulerToctouRace:
+    """50-thread barrier tests for get_scheduler() double-checked locking."""
+
+    def setup_method(self):
+        _reset_scheduler()
+
+    def teardown_method(self):
+        _reset_scheduler()
+
+    def test_concurrent_calls_return_same_instance(self):
+        """All 50 concurrent callers must receive the exact same scheduler object."""
+        barrier = threading.Barrier(50)
+        results: list = []
+        results_lock = threading.Lock()
+
+        def call():
+            barrier.wait()
+            s = get_scheduler()
+            with results_lock:
+                results.append(id(s))
+
+        with ThreadPoolExecutor(max_workers=50) as pool:
+            futures = [pool.submit(call) for _ in range(50)]
+            for f in futures:
+                f.result()
+
+        assert len(results) == 50
+        assert len(set(results)) == 1, (
+            f"Expected 1 unique scheduler, got {len(set(results))} distinct ids"
+        )
+
+    def test_only_one_scheduler_constructed(self):
+        """SignalAttachmentScheduler() must be called exactly once under concurrency."""
+        import gateway.platforms.signal_rate_limit as rl_mod
+
+        construct_count = 0
+        count_lock = threading.Lock()
+        _OriginalScheduler = SignalAttachmentScheduler
+
+        class _SpyScheduler(_OriginalScheduler):
+            def __init__(self):
+                nonlocal construct_count
+                with count_lock:
+                    construct_count += 1
+                super().__init__()
+
+        original_cls = rl_mod.SignalAttachmentScheduler
+        rl_mod.SignalAttachmentScheduler = _SpyScheduler
+        try:
+            barrier = threading.Barrier(50)
+
+            def call():
+                barrier.wait()
+                get_scheduler()
+
+            with ThreadPoolExecutor(max_workers=50) as pool:
+                futures = [pool.submit(call) for _ in range(50)]
+                for f in futures:
+                    f.result()
+        finally:
+            rl_mod.SignalAttachmentScheduler = original_cls
+
+        assert construct_count == 1, (
+            f"SignalAttachmentScheduler() called {construct_count} times (expected 1)"
+        )
