@@ -4,18 +4,20 @@ Home Assistant platform adapter.
 Connects to the HA WebSocket API for real-time event monitoring.
 State-change events are converted to MessageEvent objects and forwarded
 to the agent for processing.  Outbound messages are delivered as HA
-persistent notifications.
+persistent notifications by default, or through a configured notify service.
 
 Requires:
 - aiohttp (already in messaging extras)
 - HASS_TOKEN env var (Long-Lived Access Token)
 - HASS_URL env var (default: http://homeassistant.local:8123)
+- HASS_NOTIFY_SERVICE env var (optional notify service, e.g. mobile_app_iphone)
 """
 
 import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -37,6 +39,7 @@ from gateway.platforms.base import (
 )
 
 logger = logging.getLogger(__name__)
+_NOTIFY_SERVICE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def check_ha_requirements() -> bool:
@@ -76,8 +79,10 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         extra = config.extra or {}
         token = config.token or os.getenv("HASS_TOKEN", "")
         url = extra.get("url") or os.getenv("HASS_URL", "http://homeassistant.local:8123")
+        notify_service = extra.get("notify_service") or os.getenv("HASS_NOTIFY_SERVICE", "")
         self._hass_url: str = url.rstrip("/")
         self._hass_token: str = token
+        self._notify_service: str = self._normalize_notify_service(notify_service)
 
         # Event filtering
         self._watch_domains: Set[str] = set(extra.get("watch_domains", []))
@@ -383,6 +388,21 @@ class HomeAssistantAdapter(BasePlatformAdapter):
     # Outbound messaging
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_notify_service(value: Any) -> str:
+        """Return a service name suitable for /api/services/notify/<service>."""
+        service = str(value or "").strip().strip("/")
+        if service.startswith("notify."):
+            service = service.split(".", 1)[1]
+        service = service.strip().strip("/")
+        if service and not _NOTIFY_SERVICE_RE.match(service):
+            logger.warning(
+                "Ignoring invalid Home Assistant notify service: %s",
+                value,
+            )
+            return ""
+        return service
+
     async def send(
         self,
         chat_id: str,
@@ -390,12 +410,15 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send a notification via HA REST API (persistent_notification.create).
+        """Send a notification via HA REST API.
 
         Uses the REST API instead of WebSocket to avoid a race condition
         with the event listener loop that reads from the same WS connection.
         """
-        url = f"{self._hass_url}/api/services/persistent_notification/create"
+        if self._notify_service:
+            url = f"{self._hass_url}/api/services/notify/{self._notify_service}"
+        else:
+            url = f"{self._hass_url}/api/services/persistent_notification/create"
         headers = {
             "Authorization": f"Bearer {self._hass_token}",
             "Content-Type": "application/json",
