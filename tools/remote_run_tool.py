@@ -136,6 +136,12 @@ REMOTE_RUN_SCHEMA = {
                                "The TCP connection timeout is fixed at 15s.",
                 "default": 60,
             },
+            "max_result_size_chars": {
+                "type": "integer",
+                "description": "Maximum combined stdout+stderr output size (default: 100000). "
+                               "Output beyond this is truncated with a '[truncated]' marker.",
+                "default": 100000,
+            },
         },
         "required": ["host", "command"],
     },
@@ -232,6 +238,7 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
     workdir = args.get("workdir")
     env = args.get("env")
     timeout = args.get("timeout", 60)
+    max_result_chars = args.get("max_result_size_chars", MAX_RESULT_SIZE_CHARS)
 
     client = paramiko.SSHClient()
 
@@ -297,13 +304,13 @@ def remote_run_handler(args: Dict[str, Any], **kwargs) -> str:
 
         # Truncate if combined output exceeds limit
         combined_size = len(out_text) + len(err_text)
-        if combined_size > MAX_RESULT_SIZE_CHARS:
+        if combined_size > max_result_chars:
             # Truncate proportionally
-            out_max = max(0, MAX_RESULT_SIZE_CHARS - len(err_text) - 100)
+            out_max = max(0, max_result_chars - len(err_text) - 100)
             if len(out_text) > out_max:
                 out_text = out_text[:out_max] + "\n... [stdout truncated]"
-            if combined_size > MAX_RESULT_SIZE_CHARS:
-                err_max = MAX_RESULT_SIZE_CHARS - len(out_text) - 100
+            if combined_size > max_result_chars:
+                err_max = max_result_chars - len(out_text) - 100
                 if len(err_text) > err_max:
                     err_text = err_text[:err_max] + "\n... [stderr truncated]"
 

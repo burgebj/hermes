@@ -64,9 +64,11 @@ def test_tool_schema_is_valid():
     """The schema has all required fields."""
     from tools.remote_run_tool import REMOTE_RUN_SCHEMA
     assert REMOTE_RUN_SCHEMA["name"] == "remote_run"
-    assert "host" in REMOTE_RUN_SCHEMA["parameters"]["properties"]
-    assert "command" in REMOTE_RUN_SCHEMA["parameters"]["properties"]
+    props = REMOTE_RUN_SCHEMA["parameters"]["properties"]
+    assert "host" in props
+    assert "command" in props
     assert REMOTE_RUN_SCHEMA["parameters"]["required"] == ["host", "command"]
+    assert "max_result_size_chars" in props
 
 
 # ---------------------------------------------------------------------------
