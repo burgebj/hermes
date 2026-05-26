@@ -65,6 +65,10 @@ class NousPortalAdapter(UpstreamAdapter):
         return "Nous Portal"
 
     @property
+    def auth_hint(self) -> str:
+        return "hermes auth add nous --type oauth"
+
+    @property
     def allowed_paths(self) -> FrozenSet[str]:
         return _ALLOWED_PATHS
 
@@ -104,7 +108,7 @@ class NousPortalAdapter(UpstreamAdapter):
             state = self._read_state()
             if state is None:
                 raise RuntimeError(
-                    "Not logged into Nous Portal. Run `hermes login nous` first."
+                    "Not logged into Nous Portal. Run `hermes auth add nous --type oauth` first."
                 )
 
             try:
@@ -135,7 +139,7 @@ class NousPortalAdapter(UpstreamAdapter):
             if not agent_key:
                 raise RuntimeError(
                     "Nous Portal refresh did not return a usable agent_key. "
-                    "Try `hermes login nous` to re-authenticate."
+                    "Try `hermes auth add nous --type oauth` to re-authenticate."
                 )
 
             base_url = (
