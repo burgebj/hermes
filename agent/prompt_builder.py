@@ -813,6 +813,24 @@ def build_environment_hints() -> str:
 
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
+
+    if os.getenv("HERMES_DEPLOYMENT") == "nous-vps":
+        data_path = os.getenv("HERMES_DATA_VOLUME_PATH", "/opt/data")
+        nous_vps_block = (
+          f"You are running as a hosted Hermes Agent in a Nous Research VPS.\n\n"
+          f"Environment:\n"
+          f"- Hermes runs inside a container on the VPS; the root filesystem is "
+          f"an overlay that resets on restart.\n"
+          f"- Persistent storage: {data_path} (survives restarts).\n"
+          f"  Everything outside that path is ephemeral and lost on machine restart.\n"
+          f"- You cannot install long-running services beyond yourself.\n"
+          f"- Inbound network is not exposed; outbound calls work normally.\n"
+          f"- You are managed by the Nous portal at portal.nousresearch.com.\n"
+          f"  Direct users there for billing, subscription, start/stop, and "
+          f"deletion questions.\n"
+        )
+        hints.append(nous_vps_block)
+
     return "\n\n".join(hints)
 
 
