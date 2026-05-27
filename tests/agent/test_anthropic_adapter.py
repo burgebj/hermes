@@ -1207,6 +1207,51 @@ class TestBuildAnthropicKwargs:
         assert encoded == "mcp__mcp__filesystem__read__file"
         assert "mcp_filesystem" not in encoded
 
+    def test_oauth_tool_name_encoding_handles_already_encoded_names_idempotently(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "mcp__browser__get__images",
+                    "description": "Already encoded browser image tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="mcp__browser__get__images",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__browser__get__images"
+        assert kwargs["tool_choice"] == {
+            "type": "tool",
+            "name": "mcp__browser__get__images",
+        }
+
+    def test_oauth_tool_name_encoding_converts_legacy_mcp_prefix_losslessly(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "mcp_terminal",
+                    "description": "Legacy single-underscore MCP-like name",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="mcp_terminal",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__mcp__terminal"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "mcp__mcp__terminal"}
+
     def test_oauth_history_encodes_local_tool_names_consistently(self):
         kwargs = build_anthropic_kwargs(
             model="claude-sonnet-4-6",
