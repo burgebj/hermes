@@ -1305,6 +1305,11 @@ DEFAULT_CONFIG = {
         # dashboard. Set false to suppress the hint.
         "tui_agents_nudge": True,
         "bell_on_complete": False,
+        "answer_bell": {
+            "enabled": False,
+            "command": "~/.local/bin/hermes-discord-bell",
+            "message": "끝",
+        },
         "show_reasoning": False,
         "streaming": False,
         "timestamps": False,      # Show [HH:MM] on user and assistant labels
