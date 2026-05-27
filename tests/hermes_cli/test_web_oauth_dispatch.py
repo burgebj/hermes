@@ -19,15 +19,44 @@ The fix:
 
 These tests pin the corrected behavior.
 """
+import asyncio
+import time
+from datetime import datetime, timezone
 from unittest.mock import patch
 
-import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 from hermes_cli.web_server import _SESSION_TOKEN, app
 
 client = TestClient(app)
 HEADERS = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+
+
+def _fake_nous_device_data():
+    return {
+        "device_code": "device-code",
+        "user_code": "NOUS-1234",
+        "verification_uri": "https://portal.nousresearch.com/device",
+        "verification_uri_complete": (
+            "https://portal.nousresearch.com/device?user_code=NOUS-1234"
+        ),
+        "expires_in": 600,
+        "interval": 5,
+    }
+
+
+def _invoke_scope_refusal():
+    request = httpx.Request("POST", "https://portal.nousresearch.com/oauth/device/code")
+    response = httpx.Response(
+        400,
+        json={
+            "error": "invalid_scope",
+            "error_description": "unsupported scope inference:invoke",
+        },
+        request=request,
+    )
+    return httpx.HTTPStatusError("invalid scope", request=request, response=response)
 
 
 def test_minimax_login_does_not_launch_anthropic_flow():
@@ -46,6 +75,9 @@ def test_minimax_login_does_not_launch_anthropic_flow():
     ), patch(
         "hermes_cli.auth._minimax_pkce_pair",
         return_value=("verifier-stub", "challenge-stub", "stub-state"),
+    ), patch(
+        "hermes_cli.web_server._minimax_poller",
+        return_value=None,
     ):
         resp = client.post(
             "/api/providers/oauth/minimax-oauth/start",
@@ -65,6 +97,160 @@ def test_minimax_login_does_not_launch_anthropic_flow():
     assert "minimax" in body["verification_url"].lower()
     assert body["user_code"] == "ABCD-1234"
     assert body["expires_in"] == 600
+
+
+def test_nous_dashboard_device_flow_honors_legacy_scope_override(monkeypatch):
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import web_server as ws
+
+    requested_scopes = []
+
+    def fake_request_device_code(**kwargs):
+        requested_scopes.append(kwargs["scope"])
+        return _fake_nous_device_data()
+
+    monkeypatch.setenv(auth_mod.NOUS_LEGACY_SESSION_KEYS_ENV, "true")
+    monkeypatch.setattr(auth_mod, "_request_device_code", fake_request_device_code)
+    monkeypatch.setattr(ws, "_nous_poller", lambda sid: None)
+
+    result = asyncio.run(ws._start_device_code_flow("nous"))
+    try:
+        assert requested_scopes == [auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE]
+        assert result["flow"] == "device_code"
+        assert result["user_code"] == "NOUS-1234"
+        assert (
+            ws._oauth_sessions[result["session_id"]]["scope"]
+            == auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE
+        )
+    finally:
+        ws._oauth_sessions.pop(result["session_id"], None)
+
+
+def test_nous_dashboard_device_flow_retries_legacy_scope_on_invoke_refusal(monkeypatch):
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import web_server as ws
+
+    requested_scopes = []
+
+    def fake_request_device_code(**kwargs):
+        requested_scopes.append(kwargs["scope"])
+        if len(requested_scopes) == 1:
+            raise _invoke_scope_refusal()
+        return _fake_nous_device_data()
+
+    monkeypatch.delenv(auth_mod.NOUS_LEGACY_SESSION_KEYS_ENV, raising=False)
+    monkeypatch.setattr(auth_mod, "_request_device_code", fake_request_device_code)
+    monkeypatch.setattr(ws, "_nous_poller", lambda sid: None)
+
+    result = asyncio.run(ws._start_device_code_flow("nous"))
+    try:
+        assert requested_scopes == [
+            auth_mod.DEFAULT_NOUS_SCOPE,
+            auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE,
+        ]
+        assert (
+            ws._oauth_sessions[result["session_id"]]["scope"]
+            == auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE
+        )
+    finally:
+        ws._oauth_sessions.pop(result["session_id"], None)
+
+
+def test_nous_dashboard_poller_preserves_effective_scope_when_token_omits_scope(monkeypatch):
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import web_server as ws
+
+    session_id = "nous-effective-scope-test"
+    ws._oauth_sessions[session_id] = {
+        "session_id": session_id,
+        "provider": "nous",
+        "flow": "device_code",
+        "created_at": time.time(),
+        "status": "pending",
+        "error_message": None,
+        "portal_base_url": "https://portal.nousresearch.com",
+        "client_id": "hermes-cli",
+        "device_code": "device-code",
+        "interval": 5,
+        "expires_at": time.time() + 600,
+        "scope": auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE,
+    }
+    captured_state = {}
+
+    def fake_refresh_nous_oauth_from_state(state, **kwargs):
+        captured_state.update(state)
+        return {**state, "agent_key": "legacy-agent-key"}
+
+    monkeypatch.setattr(
+        auth_mod,
+        "_poll_for_token",
+        lambda **kwargs: {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        },
+    )
+    monkeypatch.setattr(
+        auth_mod,
+        "refresh_nous_oauth_from_state",
+        fake_refresh_nous_oauth_from_state,
+    )
+    monkeypatch.setattr(auth_mod, "persist_nous_credentials", lambda state: None)
+
+    try:
+        ws._nous_poller(session_id)
+        assert captured_state["scope"] == auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE
+        assert ws._oauth_sessions[session_id]["status"] == "approved"
+    finally:
+        ws._oauth_sessions.pop(session_id, None)
+
+
+def test_minimax_dashboard_poller_accepts_absolute_ms_expired_in():
+    """Dashboard MiniMax completion must accept unix-ms token expiry values."""
+    from hermes_cli import web_server as ws
+
+    now = datetime.now(timezone.utc)
+    abs_ms = int((now.timestamp() + 1800) * 1000)
+    session_id = "minimax-absolute-ms-test"
+    ws._oauth_sessions[session_id] = {
+        "session_id": session_id,
+        "provider": "minimax-oauth",
+        "flow": "device_code",
+        "created_at": time.time(),
+        "status": "pending",
+        "error_message": None,
+        "portal_base_url": "https://api.minimax.io",
+        "client_id": "client-id",
+        "user_code": "ABCD-1234",
+        "code_verifier": "verifier",
+        "interval_ms": 2000,
+        "expired_in_raw": abs_ms,
+        "region": "global",
+    }
+    captured_state = {}
+
+    try:
+        with patch(
+            "hermes_cli.auth._minimax_poll_token",
+            return_value={
+                "status": "success",
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expired_in": abs_ms,
+                "token_type": "Bearer",
+            },
+        ), patch(
+            "hermes_cli.auth._minimax_save_auth_state",
+            side_effect=lambda state: captured_state.update(state),
+        ):
+            ws._minimax_poller(session_id)
+    finally:
+        ws._oauth_sessions.pop(session_id, None)
+
+    assert captured_state["access_token"] == "access"
+    assert 1790 <= captured_state["expires_in"] <= 1810
+    assert datetime.fromisoformat(captured_state["expires_at"]).year < 9999
 
 
 def test_anthropic_pkce_branch_still_works():
