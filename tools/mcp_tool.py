@@ -1210,9 +1210,9 @@ class MCPServerTask:
         "_task", "_ready", "_shutdown_event", "_reconnect_event",
         "_tools", "_error", "_config",
         "_sampling", "_registered_tool_names", "_auth_type", "_refresh_lock",
-        "_connected_at",
+        "_rpc_lock", "_connected_at", "initialize_result",
+        "_reclaim_inflight", "_pending_refresh_tasks",
     )
-
     def __init__(self, name: str):
         self.name = name
         self.session: Optional[Any] = None
@@ -1237,6 +1237,9 @@ class MCPServerTask:
         # by run() to decide whether a disconnect should reset the
         # consecutive-retry counter.
         self._connected_at: float = 0.0
+        self._rpc_lock = asyncio.Lock()
+        self._pending_refresh_tasks = set()
+        self._reclaim_inflight = {}
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -1494,6 +1497,7 @@ class MCPServerTask:
                 ) as session:
                     self.initialize_result = await session.initialize()
                     self.session = session
+                    self._connected_at = time.monotonic()
                     await self._discover_tools()
                     self._ready.set()
                     # stdio transport does not use OAuth, but we still honor
@@ -1508,13 +1512,8 @@ class MCPServerTask:
             # Mark them as orphans so the next cleanup sweep can reap them.
             if new_pids:
                 with _lock:
-                    _stdio_pids.update(new_pids)
-            async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                await session.initialize()
-                self.session = session
-                await self._discover_tools()
-                self._ready.set()
-                self._connected_at = time.monotonic()
+                    for _pid in new_pids:
+                        _stdio_pids[_pid] = self.name
                 # Poll subprocess liveness while waiting for shutdown so a
                 # silently-killed child doesn't leave run() blocked when the
                 # stream reader fails to surface the disconnect. Without
@@ -1540,7 +1539,8 @@ class MCPServerTask:
                 finally:
                     if new_pids:
                         with _lock:
-                            _stdio_pids.difference_update(new_pids)
+                            for _pid in new_pids:
+                                _stdio_pids.pop(_pid, None)
 
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""
