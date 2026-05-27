@@ -115,6 +115,7 @@ class TestCmdStatus:
             base_url = None
             ai_peer = "hermes"
             peer_name = "eri"
+            pin_peer_name = False
             recall_mode = "hybrid"
             user_observe_me = True
             user_observe_others = False
@@ -154,3 +155,122 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert "FAILED (Invalid API key)" in out
         assert "Connection... OK" not in out
+
+    def test_surfaces_pin_peer_name_in_status(self, monkeypatch, capsys, tmp_path):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        cfg_path = tmp_path / "honcho.json"
+        cfg_path.write_text("{}")
+
+        class FakeConfig:
+            enabled = True
+            api_key = "root-key"
+            workspace_id = "hermes"
+            host = "hermes"
+            base_url = None
+            ai_peer = "hermes"
+            peer_name = "eri"
+            pin_peer_name = True
+            recall_mode = "hybrid"
+            user_observe_me = True
+            user_observe_others = False
+            ai_observe_me = False
+            ai_observe_others = True
+            write_frequency = "async"
+            session_strategy = "per-session"
+            context_tokens = 800
+            dialectic_reasoning_level = "low"
+            reasoning_level_cap = "high"
+            reasoning_heuristic = True
+            raw = {}
+            raw = {}
+
+            def resolve_session_name(self):
+                return "hermes"
+
+        monkeypatch.setattr(honcho_cli, "_read_config", lambda: {"apiKey": "***"})
+        monkeypatch.setattr(honcho_cli, "_config_path", lambda: cfg_path)
+        monkeypatch.setattr(honcho_cli, "_local_config_path", lambda: cfg_path)
+        monkeypatch.setattr(honcho_cli, "_active_profile_name", lambda: "default")
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
+            lambda host=None: FakeConfig(),
+        )
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client.get_honcho_client",
+            lambda cfg: object(),
+        )
+        monkeypatch.setattr(honcho_cli, "_show_peer_cards", lambda hcfg, client: None)
+        monkeypatch.setitem(__import__("sys").modules, "honcho", SimpleNamespace())
+
+        honcho_cli.cmd_status(SimpleNamespace(all=False))
+
+        out = capsys.readouterr().out
+        assert "Pin peer name:  True" in out
+
+
+class TestCmdSetup:
+    def test_wizard_persists_pin_peer_name_choice(self, monkeypatch, tmp_path):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        cfg_path = tmp_path / "honcho.json"
+        written = {}
+        prompts = iter([
+            "cloud",
+            "",
+            "alice",
+            "y",
+            "hermes",
+            "shared-workspace",
+            "directional",
+            "async",
+            "hybrid",
+            "uncapped",
+            "2",
+            "low",
+            "per-session",
+        ])
+
+        class FakeConfig:
+            workspace_id = "shared-workspace"
+            peer_name = "alice"
+            ai_peer = "hermes"
+            observation_mode = "directional"
+            write_frequency = "async"
+            recall_mode = "hybrid"
+            session_strategy = "per-session"
+
+            def resolve_session_name(self):
+                return "hermes"
+
+        monkeypatch.setattr(honcho_cli, "_read_config", lambda: {"apiKey": "root-key", "hosts": {}})
+        monkeypatch.setattr(honcho_cli, "_config_path", lambda: cfg_path)
+        monkeypatch.setattr(honcho_cli, "_local_config_path", lambda: cfg_path)
+        monkeypatch.setattr(honcho_cli, "_ensure_sdk_installed", lambda: True)
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.setattr(honcho_cli, "_prompt", lambda *args, **kwargs: next(prompts))
+        monkeypatch.setattr(honcho_cli, "_write_config", lambda cfg, path=None: written.setdefault("cfg", cfg))
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client.reset_honcho_client",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
+            lambda host=None: FakeConfig(),
+        )
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client.get_honcho_client",
+            lambda cfg: object(),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {},
+        )
+        monkeypatch.setattr(
+            "hermes_cli.config.save_config",
+            lambda cfg: None,
+        )
+
+        honcho_cli.cmd_setup(SimpleNamespace())
+
+        assert written["cfg"]["hosts"]["hermes"]["pinPeerName"] is True

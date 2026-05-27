@@ -425,6 +425,22 @@ def cmd_setup(args) -> None:
     if new_peer:
         hermes_host["peerName"] = new_peer
 
+    current_pin = hermes_host.get("pinPeerName")
+    if current_pin is None:
+        current_pin = cfg.get("pinPeerName")
+    current_pin = current_pin is True
+    print("\n  Pin peerName across front-ends:")
+    print("    y -- keep the configured user peer for one human across Telegram/CLI/etc.")
+    print("    n -- let gateway user IDs scope memory per user (default for multi-user bots)")
+    new_pin = _prompt(
+        "Pin peerName across front-ends? (single user, multi-instance)",
+        default="y" if current_pin else "n",
+    ).strip().lower()
+    if new_pin in ("y", "yes", "true", "1", "on"):
+        hermes_host["pinPeerName"] = True
+    elif new_pin in ("n", "no", "false", "0", "off"):
+        hermes_host["pinPeerName"] = False
+
     current_ai = hermes_host.get("aiPeer") or cfg.get("aiPeer", "hermes")
     new_ai = _prompt("AI peer name", default=current_ai)
     if new_ai:
@@ -681,6 +697,7 @@ def cmd_status(args) -> None:
 
     print(f"  AI peer:        {hcfg.ai_peer}")
     print(f"  User peer:      {hcfg.peer_name or 'not set'}")
+    print(f"  Pin peer name:  {hcfg.pin_peer_name}")
     print(f"  Session key:    {hcfg.resolve_session_name()}")
     print(f"  Session strat:  {hcfg.session_strategy}")
     print(f"  Recall mode:    {hcfg.recall_mode}")
