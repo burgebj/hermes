@@ -44,6 +44,91 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List, Union
 
+
+def _collect_current_turn_media_tags(
+    final_response: str,
+    result_messages: List[Dict[str, Any]],
+    history_media_paths: set,
+) -> tuple[List[str], bool]:
+    """Return MEDIA tags found in current tool results but not already delivered.
+
+    TTS tools already return MEDIA tags. Image generation providers generally
+    return JSON with an ``image`` field instead, so this normalizes both shapes
+    before gateway delivery.
+    """
+    media_tags: List[str] = []
+    has_voice_directive = False
+    existing_response_media_paths = set()
+    if "MEDIA:" in final_response:
+        for match in re.finditer(r'MEDIA:(\S+)', final_response):
+            path = match.group(1).strip().rstrip('",}')
+            if path:
+                existing_response_media_paths.add(path)
+
+    def add_media_path(path: str) -> None:
+        path = str(path or "").strip().strip("`\"'")
+        path = path.rstrip('",}')
+        if not path:
+            return
+        if path in history_media_paths or path in existing_response_media_paths:
+            return
+        media_tags.append(f"MEDIA:{path}")
+
+    for msg in result_messages:
+        if msg.get("role") not in ("tool", "function"):
+            continue
+        content = msg.get("content", "")
+        for path in _extract_media_paths_from_tool_content(content):
+            add_media_path(path)
+        if isinstance(content, str) and "[[audio_as_voice]]" in content:
+            has_voice_directive = True
+
+    seen = set()
+    unique_tags = []
+    for tag in media_tags:
+        if tag not in seen:
+            seen.add(tag)
+            unique_tags.append(tag)
+    return unique_tags, has_voice_directive
+
+
+def _extract_media_paths_from_tool_content(content: Any) -> List[str]:
+    """Extract local/media paths from tool result content.
+
+    Covers both tools that return literal ``MEDIA:/path`` tags and tools that
+    return JSON payloads such as ``{"success": true, "image": "/path.png"}``.
+    """
+    paths: List[str] = []
+    if isinstance(content, str) and "MEDIA:" in content:
+        for match in re.finditer(r'MEDIA:(\S+)', content):
+            path = match.group(1).strip().rstrip('",}')
+            if path:
+                paths.append(path)
+
+    try:
+        tool_data = json.loads(content) if isinstance(content, str) else content
+    except Exception:
+        tool_data = None
+    if isinstance(tool_data, dict) and tool_data.get("success"):
+        image_value = tool_data.get("image")
+        if isinstance(image_value, str):
+            paths.append(image_value)
+        elif isinstance(image_value, dict):
+            image_path = image_value.get("path") or image_value.get("url")
+            if isinstance(image_path, str):
+                paths.append(image_path)
+        images_value = tool_data.get("images")
+        if isinstance(images_value, list):
+            for image_item in images_value:
+                if isinstance(image_item, str):
+                    paths.append(image_item)
+                elif isinstance(image_item, dict):
+                    image_path = image_item.get("path") or image_item.get("url")
+                    if isinstance(image_path, str):
+                        paths.append(image_path)
+    return paths
+
+
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
 # patches (tests/gateway/test_usage_command.py) target
@@ -688,7 +773,15 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
 # ordinary outputs. Only tools that intentionally create deliverable media
 # artifacts should be eligible for automatic append when the model omits them
 # from the final gateway reply.
-_AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool"}
+_AUTO_APPEND_MEDIA_TOOL_NAMES = {
+    "text_to_speech",
+    "text_to_speech_tool",
+    # Image generation providers return JSON payloads ({"success": true,
+    # "image": "/path.png"}) rather than literal MEDIA: tags. They are
+    # bona-fide artifact producers, so allowlist them and normalize their
+    # JSON shape into MEDIA: tags below for native delivery (#19106).
+    "image_generate",
+}
 
 
 # Extension-anchored MEDIA: matcher for tool results. Mirrors the dispatch-site
@@ -755,14 +848,24 @@ def _collect_auto_append_media_tags(
         if tool_name_by_call_id.get(call_id) not in _AUTO_APPEND_MEDIA_TOOL_NAMES:
             continue
         content = str(msg.get("content") or "")
-        if "MEDIA:" not in content:
-            continue
-        for match in _TOOL_MEDIA_RE.finditer(content):
-            path = match.group(1).strip().rstrip('\",}')
+        # Literal MEDIA: tags (TTS path) — extension-anchored precision guard.
+        if "MEDIA:" in content:
+            for match in _TOOL_MEDIA_RE.finditer(content):
+                path = match.group(1).strip().rstrip('",}')
+                if path and path not in history_media_paths:
+                    media_tags.append(f"MEDIA:{path}")
+            if "[[audio_as_voice]]" in content:
+                has_voice_directive = True
+        # JSON artifact payloads (image_generate path) — normalize the
+        # {"success": true, "image"/"images": ...} shape into MEDIA: tags.
+        # Safe here because the producer-tool allowlist already gated this
+        # message to a bona-fide artifact producer (#19106).
+        for path in _extract_media_paths_from_tool_content(content):
+            path = str(path or "").strip().strip("`\"'").rstrip('",}')
             if path and path not in history_media_paths:
-                media_tags.append(f"MEDIA:{path}")
-        if "[[audio_as_voice]]" in content:
-            has_voice_directive = True
+                tag = f"MEDIA:{path}"
+                if tag not in media_tags:
+                    media_tags.append(tag)
 
     return media_tags, has_voice_directive
 
@@ -1331,6 +1434,8 @@ def _build_media_placeholder(event) -> str:
         mtype = media_types[i] if i < len(media_types) else ""
         if mtype.startswith("image/") or getattr(event, "message_type", None) == MessageType.PHOTO:
             parts.append(f"[User sent an image: {url}]")
+        elif mtype.startswith("video/") or getattr(event, "message_type", None) == MessageType.VIDEO:
+            parts.append(f"[User sent a video: {url}]")
         elif mtype.startswith("audio/"):
             parts.append(f"[User sent audio: {url}]")
         else:
@@ -8665,6 +8770,7 @@ class GatewayRunner:
         if event.media_urls:
             image_paths = []
             audio_paths = []
+            video_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
@@ -8678,6 +8784,8 @@ class GatewayRunner:
                     and event.message_type not in {MessageType.AUDIO, MessageType.DOCUMENT}
                 ):
                     audio_paths.append(path)
+                if mtype.startswith("video/") or event.message_type == MessageType.VIDEO:
+                    video_paths.append(path)
 
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
@@ -8753,6 +8861,17 @@ class GatewayRunner:
                     f"Ask the user what they'd like you to do with it, or pass the path to a transcription or media tool.]"
                 )
                 message_text = f"{_note}\n\n{message_text}"
+
+        if video_paths:
+            notes = []
+            for path in video_paths:
+                basename = os.path.basename(path)
+                notes.append(
+                    f"[The user sent a video: '{basename}'. "
+                    f"The file is saved at: {path}. "
+                    f"Use this local path directly for video-processing tools or terminal commands.]"
+                )
+            message_text = "\n".join(notes + ([message_text] if message_text else []))
 
         if event.media_urls and event.message_type == MessageType.DOCUMENT:
             import mimetypes as _mimetypes
@@ -18336,25 +18455,18 @@ class GatewayRunner:
                 channel_prompt=channel_prompt,
             )
             
-            # Collect MEDIA paths already in history so we can exclude them
-            # from the current turn's extraction. This is compression-safe:
-            # even if the message list shrinks, we know which paths are old.
+            # Collect media paths already in history so we can exclude them
+            # from the current turn's extraction. This covers both literal
+            # MEDIA tags and JSON tool payloads from image generation.
+            # Compression-safe: even if the message list shrinks, we know
+            # which paths are old.
             _history_media_paths: set = set()
             for _hm in agent_history:
                 if _hm.get("role") in {"tool", "function"}:
                     _hc = _hm.get("content", "")
-                    if "MEDIA:" in _hc:
-                        _TOOL_MEDIA_RE = re.compile(
-                            r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:png|jpe?g|gif|webp|'
-                            r'mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|'
-                            r'flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|'
-                            r'txt|csv|apk|ipa))',
-                            re.IGNORECASE
-                        )
-                        for _match in _TOOL_MEDIA_RE.finditer(_hc):
-                            _p = _match.group(1).strip().rstrip('",}')
-                            if _p:
-                                _history_media_paths.add(_p)
+                    for _p in _extract_media_paths_from_tool_content(_hc):
+                        if _p:
+                            _history_media_paths.add(_p)
             
             # Register per-session gateway approval callback so dangerous
             # command approval blocks the agent thread (mirrors CLI input()).
@@ -18640,6 +18752,15 @@ class GatewayRunner:
             # append any that aren't already present in the final response, so the
             # adapter's extract_media() can find and deliver the files exactly once.
             #
+            # We delegate the per-message extraction to the local helper so that
+            # tools returning JSON payloads (image gen providers) are normalized
+            # the same way as tools returning literal ``MEDIA:`` tags. Path-based
+            # dedup against ``_history_media_paths`` (collected before
+            # ``run_conversation``) is the secondary guard inside the helper and
+            # the sole guard on the fallback branch taken when mid-run context
+            # compression shrinks the message list below the original history
+            # length, preserving the compression-safe behaviour of #160.
+            #
             # Scope the scan to THIS turn's tool results only. ``agent_history``
             # was passed into run_conversation as ``conversation_history``, so the
             # agent's returned ``messages`` list is ``agent_history`` followed by
@@ -18653,6 +18774,14 @@ class GatewayRunner:
             # also the sole guard on the fallback branch taken when mid-run
             # context compression shrinks the message list below the original
             # history length, preserving the compression-safe behaviour of #160.
+            #
+            # Layered on upstream's producer-tool allowlist (#16721): the helper
+            # only delivers media from tools that intentionally emit artifacts
+            # (TTS + image generation, see _AUTO_APPEND_MEDIA_TOOL_NAMES), so an
+            # example ``MEDIA:/path`` string in docs/logs/search output is never
+            # auto-delivered. The helper also normalizes image-gen JSON payloads
+            # (``{"success": true, "image": "/path"}``) into MEDIA: tags so
+            # generated images are delivered as native attachments (#19106).
             if "MEDIA:" not in final_response:
                 media_tags, has_voice_directive = _collect_auto_append_media_tags(
                     result.get("messages", []),

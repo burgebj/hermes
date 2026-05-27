@@ -621,50 +621,46 @@ app.post('/send-media', async (req, res) => {
       return res.status(404).json({ error: `File not found: ${filePath}` });
     }
 
-    const buffer = readFileSync(filePath);
     const ext = filePath.toLowerCase().split('.').pop();
     const type = mediaType || inferMediaType(ext);
     let msgPayload;
 
     switch (type) {
       case 'image':
-        msgPayload = { image: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
+        msgPayload = { image: { url: filePath }, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
         break;
       case 'video':
-        msgPayload = { video: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
+        msgPayload = { video: { url: filePath }, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
         break;
       case 'audio': {
         // WhatsApp only renders a native voice bubble (ptt) when the file is ogg/opus.
         // If the caller passes mp3, wav, m4a etc. (e.g. from Edge TTS / NeuTTS),
         // silently convert to ogg/opus via ffmpeg so ptt is always honoured.
-        let audioBuffer = buffer;
+        let audioPath = filePath;
         let audioExt = ext;
         const needsConversion = !['ogg', 'opus'].includes(ext);
-        let tmpPath = null;
         if (needsConversion) {
-          tmpPath = path.join(tmpdir(), `hermes_voice_${randomBytes(6).toString('hex')}.ogg`);
+          const tmpPath = path.join(tmpdir(), `hermes_voice_${randomBytes(6).toString('hex')}.ogg`);
           try {
             execSync(
               `ffmpeg -y -i ${JSON.stringify(filePath)} -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
               { timeout: 30000, stdio: 'pipe' }
             );
-            audioBuffer = readFileSync(tmpPath);
+            audioPath = tmpPath;
             audioExt = 'ogg';
           } catch (convErr) {
             // ffmpeg not available or conversion failed — fall back to original format
             console.warn('[bridge] ffmpeg conversion failed, sending as file attachment:', convErr.message);
-          } finally {
-            try { if (tmpPath && existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_) {}
           }
         }
         const audioMime = (audioExt === 'ogg' || audioExt === 'opus') ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
-        msgPayload = { audio: audioBuffer, mimetype: audioMime, ptt: audioExt === 'ogg' || audioExt === 'opus' };
+        msgPayload = { audio: { url: audioPath }, mimetype: audioMime, ptt: audioExt === 'ogg' || audioExt === 'opus' };
         break;
       }
       case 'document':
       default:
         msgPayload = {
-          document: buffer,
+          document: readFileSync(filePath),
           fileName: fileName || path.basename(filePath),
           caption: caption || undefined,
           mimetype: MIME_MAP[ext] || 'application/octet-stream',

@@ -148,7 +148,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "message": {
                 "type": "string",
-                "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/report.pdf') in the message — the platform will deliver it as a native media attachment."
+                "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/report.pdf') for a file under a Hermes media cache or HERMES_MEDIA_ALLOW_DIRS — the platform will deliver it as a native media attachment. When already replying inside WhatsApp after image_generate, prefer returning MEDIA:/exact/path in the final response instead of calling send_message; do not add TTS audio unless explicitly requested."
             }
         },
         "required": []
@@ -785,11 +785,27 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- WhatsApp: native media attachment support via the live bridge adapter ---
+    if platform == Platform.WHATSAPP and media_files:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_whatsapp_via_adapter(
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else [],
+                thread_id=thread_id,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, whatsapp, yuanbao and feishu; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -797,7 +813,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, whatsapp, yuanbao and feishu"
         )
 
     last_result = None
@@ -848,6 +864,84 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         warnings.append(warning)
         last_result["warnings"] = warnings
     return last_result
+
+
+async def _send_whatsapp_via_adapter(chat_id, message, media_files=None, thread_id=None):
+    """Send WhatsApp text and MEDIA attachments through the running bridge adapter."""
+    media_files = media_files or []
+    try:
+        from gateway.config import Platform
+        from gateway.platforms.base import should_send_media_as_audio
+        from gateway.run import _gateway_runner_ref
+
+        runner = _gateway_runner_ref()
+        adapter = runner.adapters.get(Platform.WHATSAPP) if runner else None
+        if not adapter:
+            return {"error": "No live WhatsApp adapter available. Is the Hermes gateway running with WhatsApp connected?"}
+
+        metadata = {"thread_id": thread_id} if thread_id else None
+        last_message_id = None
+        warnings = []
+
+        if message and message.strip():
+            text_result = await adapter.send(
+                chat_id=chat_id,
+                content=message,
+                metadata=metadata,
+            )
+            if not text_result.success:
+                return {"error": f"WhatsApp text send failed: {text_result.error}"}
+            last_message_id = text_result.message_id
+
+        for media_path, is_voice in media_files:
+            if not os.path.exists(media_path):
+                warning = f"Media file not found, skipping: {media_path}"
+                logger.warning(warning)
+                warnings.append(warning)
+                continue
+
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in _IMAGE_EXTS and not is_voice:
+                media_result = await adapter.send_image_file(
+                    chat_id=chat_id,
+                    image_path=media_path,
+                    metadata=metadata,
+                )
+            elif ext in _VIDEO_EXTS:
+                media_result = await adapter.send_video(
+                    chat_id=chat_id,
+                    video_path=media_path,
+                    metadata=metadata,
+                )
+            elif should_send_media_as_audio("whatsapp", ext, is_voice=is_voice):
+                media_result = await adapter.send_voice(
+                    chat_id=chat_id,
+                    audio_path=media_path,
+                    metadata=metadata,
+                )
+            else:
+                media_result = await adapter.send_document(
+                    chat_id=chat_id,
+                    file_path=media_path,
+                    metadata=metadata,
+                )
+
+            if not media_result.success:
+                warning = _sanitize_error_text(f"Failed to send WhatsApp media {media_path}: {media_result.error}")
+                logger.warning(warning)
+                warnings.append(warning)
+            else:
+                last_message_id = media_result.message_id
+
+        if not last_message_id and warnings:
+            return {"error": "; ".join(warnings)}
+
+        result = {"success": True, "message_id": last_message_id}
+        if warnings:
+            result["warnings"] = warnings
+        return result
+    except Exception as e:
+        return _error(f"WhatsApp media send failed: {e}")
 
 
 def _is_telegram_thread_not_found(error: Exception) -> bool:
