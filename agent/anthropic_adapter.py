@@ -335,6 +335,7 @@ _OAUTH_SYSTEM_TEXT_REPLACEMENTS = (
     ("session_search", "session lookup"),
     ("skill_manage", "skill editor"),
     ("MEDIA:", "FILE:"),
+    ("HEARTBEAT_OK", "NO_ACTION_NEEDED"),
     ("Hermes", "Claude Code"),
 )
 

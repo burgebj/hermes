@@ -1281,14 +1281,22 @@ class TestBuildAnthropicKwargs:
     def test_oauth_system_text_sanitizes_proxy_classifier_triggers(self):
         text = (
             "Hermes Agent from Nous Research can use session_search, "
-            "skill_manage(action='patch'), and MEDIA:/tmp/file.png."
+            "skill_manage(action='patch'), MEDIA:/tmp/file.png, and "
+            "reply HEARTBEAT_OK when idle."
         )
 
         sanitized = _sanitize_oauth_system_text(text)
 
         assert "Claude Code" in sanitized
         assert "Anthropic" in sanitized
-        for trigger in ("Hermes", "Nous Research", "session_search", "skill_manage", "MEDIA:"):
+        for trigger in (
+            "Hermes",
+            "Nous Research",
+            "session_search",
+            "skill_manage",
+            "MEDIA:",
+            "HEARTBEAT_OK",
+        ):
             assert trigger not in sanitized
 
     def test_reasoning_config_maps_to_manual_thinking_for_pre_4_6_models(self):
