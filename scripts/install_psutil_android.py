@@ -30,7 +30,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # Pin a version we know patches cleanly. Update when a newer psutil
 # changes the marker line shape and we need to follow upstream.
@@ -42,6 +42,52 @@ PSUTIL_URL = (
 
 MARKER = 'LINUX = sys.platform.startswith("linux")'
 REPLACEMENT = 'LINUX = sys.platform.startswith(("linux", "android"))'
+
+
+def _safe_extract_psutil_sdist(tar: tarfile.TarFile, dest: Path) -> None:
+    """Safely extract the pinned psutil sdist into ``dest``.
+
+    Treat the downloaded archive as untrusted at the filesystem boundary:
+    reject absolute paths, ``..`` traversal, symlinks, hardlinks, device files,
+    and other special members before anything is written outside the temporary
+    build directory.
+    """
+    dest_resolved = dest.resolve()
+    validated_members: list[tuple[tarfile.TarInfo, Path]] = []
+    for member in tar.getmembers():
+        if (
+            Path(member.name).is_absolute()
+            or PureWindowsPath(member.name).is_absolute()
+        ):
+            raise RuntimeError(
+                f"Refusing to extract psutil sdist member with absolute path: {member.name!r}"
+            )
+
+        target = (dest / member.name).resolve()
+        try:
+            target.relative_to(dest_resolved)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Refusing to extract psutil sdist member outside temp dir: {member.name!r}"
+            ) from exc
+
+        if not (member.isdir() or member.isfile()):
+            raise RuntimeError(
+                f"Refusing to extract unsupported psutil sdist member: {member.name!r}"
+            )
+        validated_members.append((member, target))
+
+    for member, target in validated_members:
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = tar.extractfile(member)
+        if source is None:
+            raise RuntimeError(f"Could not read psutil sdist member: {member.name!r}")
+        with source, target.open("wb") as fh:
+            shutil.copyfileobj(source, fh)
 
 
 def _resolve_install_cmd(pip_arg: str | None, prefer_uv: bool) -> list[str]:
@@ -83,11 +129,12 @@ def main() -> int:
         archive = tmp_path / "psutil.tar.gz"
         urllib.request.urlretrieve(PSUTIL_URL, archive)
         with tarfile.open(archive) as tar:
-            tar.extractall(tmp_path)
+            _safe_extract_psutil_sdist(tar, tmp_path)
 
         try:
             src_root = next(
-                p for p in tmp_path.iterdir()
+                p
+                for p in tmp_path.iterdir()
                 if p.is_dir() and p.name.startswith("psutil-")
             )
         except StopIteration:
