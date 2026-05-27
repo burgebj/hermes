@@ -34,6 +34,18 @@ _cached_tz_name: Optional[str] = None
 _cache_resolved: bool = False
 
 
+def reset_cache() -> None:
+    """Force the timezone cache to be re-resolved on the next call.
+
+    Call this after modifying the ``timezone`` key in config.yaml or
+    changing the ``HERMES_TIMEZONE`` environment variable.
+    """
+    global _cached_tz, _cached_tz_name, _cache_resolved
+    _cached_tz = None
+    _cached_tz_name = None
+    _cache_resolved = False
+
+
 def _resolve_timezone_name() -> str:
     """Read the configured IANA timezone string (or empty string).
 
