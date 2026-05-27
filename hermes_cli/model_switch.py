@@ -1239,13 +1239,20 @@ def list_authenticated_providers(
         if not has_creds:
             continue
 
-        # Use curated list, falling back to models.dev if no curated list.
-        # For preferred providers, merge models.dev entries into the curated
-        # catalog so newly released models (e.g. mimo-v2.5-pro on opencode-go)
-        # show up in the picker without requiring a Hermes release.
-        model_ids = curated.get(hermes_id, [])
-        if hermes_id in _MODELS_DEV_PREFERRED:
-            model_ids = _merge_with_models_dev(hermes_id, model_ids)
+        # GitHub-backed providers need the live catalog here as well.
+        # Otherwise section 1 consumes the provider first and section 2 never
+        # gets a chance to replace the static curated list with the live one.
+        if hermes_id in {"copilot", "copilot-acp"}:
+            model_ids = provider_model_ids(hermes_id)
+        else:
+            # Use curated list, falling back to models.dev if no curated list.
+            # For preferred providers, merge models.dev entries into the
+            # curated catalog so newly released models (e.g. mimo-v2.5-pro on
+            # opencode-go) show up in the picker without requiring a Hermes
+            # release.
+            model_ids = curated.get(hermes_id, [])
+            if hermes_id in _MODELS_DEV_PREFERRED:
+                model_ids = _merge_with_models_dev(hermes_id, model_ids)
         total = len(model_ids)
         top = model_ids[:max_models]
 
