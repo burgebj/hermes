@@ -18287,6 +18287,82 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
+def _existing_pid_is_service_supervised(pid: int) -> bool:
+    """Return True when ``pid`` is currently managed by launchd or systemd.
+
+    Defence-in-depth for ``hermes gateway run --replace``: when an external
+    caller (e.g. ``hermes-web-ui``'s startup hook) re-invokes the gateway
+    while the canonical service-managed instance is healthy, we want to bow
+    out rather than SIGTERM the service and trigger a supervisor restart
+    loop.  See issue #27041.
+    """
+    if pid <= 0:
+        return False
+    try:
+        from hermes_cli.gateway import _get_service_pids
+    except Exception:
+        return False
+    try:
+        return pid in _get_service_pids()
+    except Exception:
+        return False
+
+
+def _running_under_service_supervisor() -> bool:
+    """Return True when this process was launched directly by launchd/systemd.
+
+    Detected via the parent PID:
+
+    * macOS — launchd is always PID 1, so PPID==1 is the only legitimate
+      service-launched case.
+    * Linux — systemd is PID 1 for system-scope units; user-scope units are
+      launched by the per-user ``systemd --user`` manager, whose ``comm`` is
+      ``systemd`` (or ``(systemd)`` on older kernels).
+    """
+    try:
+        ppid = os.getppid()
+    except (OSError, AttributeError):
+        return False
+    if ppid <= 1:
+        return True
+    if sys.platform == "darwin":
+        return False
+    try:
+        with open(f"/proc/{ppid}/comm", "r", encoding="utf-8") as fh:
+            comm = fh.read().strip()
+    except (OSError, ValueError):
+        return False
+    return comm in {"systemd", "(systemd)"}
+
+
+def _replace_force_env_set() -> bool:
+    """Return True when ``HERMES_GATEWAY_REPLACE_FORCE`` is set to a truthy value."""
+    return os.environ.get("HERMES_GATEWAY_REPLACE_FORCE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _should_skip_supervised_replace(existing_pid: int) -> bool:
+    """Decide whether ``--replace`` should bow out instead of SIGTERM'ing ``existing_pid``.
+
+    Returns ``True`` when:
+      * ``existing_pid`` is supervised by launchd / systemd, AND
+      * this process was NOT itself launched by that supervisor (so the
+        ``--replace`` invocation is coming from an unrelated caller such as
+        ``hermes-web-ui``'s startup hook — see #27041), AND
+      * the ``HERMES_GATEWAY_REPLACE_FORCE`` escape hatch is not set.
+    """
+    if existing_pid <= 0:
+        return False
+    if _replace_force_env_set():
+        return False
+    if not _existing_pid_is_service_supervised(existing_pid):
+        return False
+    if _running_under_service_supervisor():
+        return False
+    return True
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -18317,6 +18393,40 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     existing_pid = get_running_pid()
     if existing_pid is not None and existing_pid != os.getpid():
         if replace:
+            # ── Service-supervisor guard ─────────────────────────────────
+            # ``hermes gateway run --replace`` is intended to be the *only*
+            # process that signals an old instance to step down: typically
+            # systemd's ExecStart line or launchd's ProgramArguments.  When
+            # an unrelated launcher (e.g. ``hermes-web-ui``'s startup
+            # ``gatewayManager.startAll()`` hook — see #27041) shells out
+            # to ``hermes gateway run --replace`` while a launchd/systemd
+            # managed gateway is already healthy, the SIGTERM we'd send
+            # below just bounces off the supervisor's KeepAlive policy and
+            # triggers a restart loop (each new --replace kills the
+            # supervisor-respawned PID, which the supervisor then revives,
+            # which the next --replace kills, …).  Detect that situation
+            # and exit cleanly so rogue --replace callers become a no-op.
+            #
+            # Legitimate restarts via ``hermes gateway restart`` (which
+            # calls ``launchctl kickstart`` / ``systemctl restart``) are
+            # unaffected — by the time the supervisor relaunches the
+            # gateway, the old PID is already gone and ``existing_pid`` is
+            # ``None`` here.  Escape hatch: ``HERMES_GATEWAY_REPLACE_FORCE=1``.
+            if _should_skip_supervised_replace(existing_pid):
+                logger.warning(
+                    "Existing gateway PID %d is supervised by launchd/systemd; "
+                    "refusing to replace it from an unsupervised --replace call. "
+                    "Use 'hermes gateway restart' to restart the service, or set "
+                    "HERMES_GATEWAY_REPLACE_FORCE=1 to override.",
+                    existing_pid,
+                )
+                print(
+                    f"\nℹ Gateway already running under launchd/systemd "
+                    f"(PID {existing_pid}).\n"
+                    f"   Skipping --replace to avoid a supervisor restart loop.\n"
+                    f"   Use 'hermes gateway restart' to restart the service.\n"
+                )
+                return True
             existing_start_time = get_process_start_time(existing_pid)
             logger.info(
                 "Replacing existing gateway instance (PID %d) with --replace.",
