@@ -132,6 +132,20 @@ class TestConfigYamlRouting:
         assert "vercel_runtime: python3.13" in config
         assert "TERMINAL_VERCEL_RUNTIME=python3.13" in env_content
 
+    def test_terminal_docker_extra_args_goes_to_config_and_env(self, _isolated_hermes_home):
+        set_config_value("terminal.docker_extra_args", '["--read-only", "--tmpfs", "/root:rw,exec,size=1g,mode=1777"]')
+        config = _read_config(_isolated_hermes_home)
+        env_content = _read_env(_isolated_hermes_home)
+        assert "docker_extra_args:" in config
+        assert 'TERMINAL_DOCKER_EXTRA_ARGS=["--read-only", "--tmpfs", "/root:rw,exec,size=1g,mode=1777"]' in env_content
+
+    def test_terminal_docker_forward_env_goes_to_config_and_env(self, _isolated_hermes_home):
+        set_config_value("terminal.docker_forward_env", '["GITHUB_TOKEN", "NPM_TOKEN"]')
+        config = _read_config(_isolated_hermes_home)
+        env_content = _read_env(_isolated_hermes_home)
+        assert "docker_forward_env:" in config
+        assert 'TERMINAL_DOCKER_FORWARD_ENV=["GITHUB_TOKEN", "NPM_TOKEN"]' in env_content
+
 
 # ---------------------------------------------------------------------------
 # Empty / falsy values — regression tests for #4277

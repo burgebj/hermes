@@ -24,7 +24,13 @@ mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
 """
 
 import ast
+import importlib
 import inspect
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
 
 
 def _extract_dict_values(source: str, dict_name: str) -> set[str]:
@@ -224,3 +230,88 @@ def test_docker_env_is_bridged_everywhere():
     assert "docker_env" in _gateway_env_map_keys()
     assert "docker_env" in _save_config_env_sync_keys()
     assert "TERMINAL_DOCKER_ENV" in _terminal_tool_env_var_names()
+
+
+def test_docker_extra_args_is_bridged_everywhere():
+    """Regression pin for docker_extra_args being silently ignored.
+
+    ``terminal.docker_extra_args`` lets operators pass extra flags (e.g.
+    ``--read-only``, ``--security-opt``) to ``docker run``.  It was present
+    in terminal_tool._get_env_config but missing from all three bridge
+    maps, so config.yaml values were dropped before reaching the tool.
+    """
+    assert "docker_extra_args" in _cli_env_map_keys()
+    assert "docker_extra_args" in _gateway_env_map_keys()
+    assert "docker_extra_args" in _save_config_env_sync_keys()
+    assert "TERMINAL_DOCKER_EXTRA_ARGS" in _terminal_tool_env_var_names()
+
+
+def test_docker_forward_env_is_bridged_everywhere():
+    """Regression pin for docker_forward_env being silently ignored.
+
+    ``terminal.docker_forward_env`` controls which host env vars are
+    forwarded into the Docker container.  Like docker_extra_args, it
+    was read by terminal_tool but missing from the _config_to_env_sync
+    bridge, so ``hermes config set`` could not update it.
+    """
+    assert "docker_forward_env" in _cli_env_map_keys()
+    assert "docker_forward_env" in _gateway_env_map_keys()
+    assert "docker_forward_env" in _save_config_env_sync_keys()
+    assert "TERMINAL_DOCKER_FORWARD_ENV" in _terminal_tool_env_var_names()
+
+
+# ---------------------------------------------------------------------------
+# Gateway bridge behaviour — list-valued keys must be JSON-encoded
+# ---------------------------------------------------------------------------
+
+class TestGatewayBridge:
+    """gateway/run.py bridges config.yaml → env vars at module load time."""
+
+    def test_docker_extra_args_yaml_to_env_bridge(self, tmp_path, monkeypatch):
+        """terminal.docker_extra_args (list) is JSON-encoded into the env."""
+        extra_args = ["--read-only", "--tmpfs", "/root:rw,exec,size=1g,mode=1777"]
+        hermes_home = tmp_path / "hermes_test_bridge"
+        hermes_home.mkdir(exist_ok=True)
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            f"terminal:\n  docker_extra_args: {json.dumps(extra_args)}\n"
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("TERMINAL_DOCKER_EXTRA_ARGS", raising=False)
+        monkeypatch.delenv("TERMINAL_DOCKER_FORWARD_ENV", raising=False)
+
+        # Force re-import so module-level bridge runs against our temp config.
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("gateway.run"):
+                del sys.modules[mod_name]
+
+        import gateway.run as _gr  # noqa: F401
+
+        env_val = os.environ.get("TERMINAL_DOCKER_EXTRA_ARGS")
+        assert env_val is not None
+        assert json.loads(env_val) == extra_args
+
+    def test_docker_forward_env_yaml_to_env_bridge(self, tmp_path, monkeypatch):
+        """terminal.docker_forward_env (list) is JSON-encoded into the env."""
+        forward_env = ["GITHUB_TOKEN", "NPM_TOKEN"]
+        hermes_home = tmp_path / "hermes_test_bridge"
+        hermes_home.mkdir(exist_ok=True)
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            f"terminal:\n  docker_forward_env: {json.dumps(forward_env)}\n"
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("TERMINAL_DOCKER_EXTRA_ARGS", raising=False)
+        monkeypatch.delenv("TERMINAL_DOCKER_FORWARD_ENV", raising=False)
+
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("gateway.run"):
+                del sys.modules[mod_name]
+
+        import gateway.run as _gr  # noqa: F401
+
+        env_val = os.environ.get("TERMINAL_DOCKER_FORWARD_ENV")
+        assert env_val is not None
+        assert json.loads(env_val) == forward_env
