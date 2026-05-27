@@ -11,6 +11,11 @@ import tempfile
 import time
 from pathlib import Path
 
+from agent.credential_exposure_policy import (
+    DEFAULT_CREDENTIAL_EXPOSURE_POLICY,
+    HERMES_CREDENTIAL_ENV_BLOCKLIST,
+    HERMES_CREDENTIAL_FORCE_PREFIX,
+)
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 from hermes_cli._subprocess_compat import windows_hide_flags
 
@@ -73,102 +78,8 @@ def _resolve_safe_cwd(cwd: str) -> str:
 
 
 # Hermes-internal env vars that should NOT leak into terminal subprocesses.
-_HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
-
-
-def _build_provider_env_blocklist() -> frozenset:
-    """Derive the blocklist from provider, tool, and gateway config."""
-    blocked: set[str] = set()
-
-    try:
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        for pconfig in PROVIDER_REGISTRY.values():
-            blocked.update(pconfig.api_key_env_vars)
-            if pconfig.base_url_env_var:
-                blocked.add(pconfig.base_url_env_var)
-    except ImportError:
-        pass
-
-    try:
-        from hermes_cli.config import OPTIONAL_ENV_VARS
-        for name, metadata in OPTIONAL_ENV_VARS.items():
-            category = metadata.get("category")
-            if category in {"tool", "messaging"}:
-                blocked.add(name)
-            elif category == "setting" and metadata.get("password"):
-                blocked.add(name)
-    except ImportError:
-        pass
-
-    blocked.update({
-        "OPENAI_BASE_URL",
-        "OPENAI_API_KEY",
-        "OPENAI_API_BASE",
-        "OPENAI_ORG_ID",
-        "OPENAI_ORGANIZATION",
-        "OPENROUTER_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "LLM_MODEL",
-        "GOOGLE_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "MISTRAL_API_KEY",
-        "GROQ_API_KEY",
-        "TOGETHER_API_KEY",
-        "PERPLEXITY_API_KEY",
-        "COHERE_API_KEY",
-        "FIREWORKS_API_KEY",
-        "XAI_API_KEY",
-        "HELICONE_API_KEY",
-        "PARALLEL_API_KEY",
-        "FIRECRAWL_API_KEY",
-        "FIRECRAWL_API_URL",
-        "TELEGRAM_HOME_CHANNEL",
-        "TELEGRAM_HOME_CHANNEL_NAME",
-        "DISCORD_HOME_CHANNEL",
-        "DISCORD_HOME_CHANNEL_NAME",
-        "DISCORD_REQUIRE_MENTION",
-        "DISCORD_FREE_RESPONSE_CHANNELS",
-        "DISCORD_AUTO_THREAD",
-        "SLACK_HOME_CHANNEL",
-        "SLACK_HOME_CHANNEL_NAME",
-        "SLACK_ALLOWED_USERS",
-        "WHATSAPP_ENABLED",
-        "WHATSAPP_MODE",
-        "WHATSAPP_ALLOWED_USERS",
-        "SIGNAL_HTTP_URL",
-        "SIGNAL_ACCOUNT",
-        "SIGNAL_ALLOWED_USERS",
-        "SIGNAL_GROUP_ALLOWED_USERS",
-        "SIGNAL_HOME_CHANNEL",
-        "SIGNAL_HOME_CHANNEL_NAME",
-        "SIGNAL_IGNORE_STORIES",
-        "HASS_TOKEN",
-        "HASS_URL",
-        "EMAIL_ADDRESS",
-        "EMAIL_PASSWORD",
-        "EMAIL_IMAP_HOST",
-        "EMAIL_SMTP_HOST",
-        "EMAIL_HOME_ADDRESS",
-        "EMAIL_HOME_ADDRESS_NAME",
-        "GATEWAY_ALLOWED_USERS",
-        "GH_TOKEN",
-        "GITHUB_APP_ID",
-        "GITHUB_APP_PRIVATE_KEY_PATH",
-        "GITHUB_APP_INSTALLATION_ID",
-        "MODAL_TOKEN_ID",
-        "MODAL_TOKEN_SECRET",
-        "DAYTONA_API_KEY",
-        "VERCEL_OIDC_TOKEN",
-        "VERCEL_TOKEN",
-        "VERCEL_PROJECT_ID",
-        "VERCEL_TEAM_ID",
-    })
-    return frozenset(blocked)
-
-
-_HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
+_HERMES_PROVIDER_ENV_FORCE_PREFIX = HERMES_CREDENTIAL_FORCE_PREFIX
+_HERMES_PROVIDER_ENV_BLOCKLIST = HERMES_CREDENTIAL_ENV_BLOCKLIST
 
 
 def _inject_context_hermes_home(env: dict) -> None:
@@ -190,30 +101,24 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
 
-    sanitized: dict[str, str] = {}
+    sanitized = DEFAULT_CREDENTIAL_EXPOSURE_POLICY.sanitize_terminal_env(
+        base_env,
+        extra_env,
+        is_passthrough=_is_passthrough,
+    )
+    _apply_local_subprocess_env_overrides(sanitized)
+    return sanitized
 
-    for key, value in (base_env or {}).items():
-        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
-            continue
-        if key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
-            sanitized[key] = value
 
-    for key, value in (extra_env or {}).items():
-        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
-            real_key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            sanitized[real_key] = value
-        elif key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
-            sanitized[key] = value
-
-    _inject_context_hermes_home(sanitized)
+def _apply_local_subprocess_env_overrides(env: dict) -> None:
+    """Apply Hermes runtime overrides after credential filtering."""
+    _inject_context_hermes_home(env)
 
     # Per-profile HOME isolation for background processes (same as _make_run_env).
     from hermes_constants import get_subprocess_home
     _profile_home = get_subprocess_home()
     if _profile_home:
-        sanitized["HOME"] = _profile_home
-
-    return sanitized
+        env["HOME"] = _profile_home
 
 
 def _find_bash() -> str:
@@ -287,14 +192,11 @@ def _make_run_env(env: dict) -> dict:
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
 
-    merged = dict(os.environ | env)
-    run_env = {}
-    for k, v in merged.items():
-        if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
-            real_key = k[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            run_env[real_key] = v
-        elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
-            run_env[k] = v
+    run_env = DEFAULT_CREDENTIAL_EXPOSURE_POLICY.sanitize_terminal_env(
+        os.environ,
+        env,
+        is_passthrough=_is_passthrough,
+    )
     existing_path = run_env.get("PATH", "")
     # The "/usr/bin not already present → inject sane POSIX path" heuristic
     # only makes sense on POSIX.  On Windows the PATH separator is ";"
@@ -307,15 +209,7 @@ def _make_run_env(env: dict) -> dict:
     if not _IS_WINDOWS and "/usr/bin" not in existing_path.split(":"):
         run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
 
-    _inject_context_hermes_home(run_env)
-
-    # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
-    # npm …) into {HERMES_HOME}/home/ when that directory exists.  Only the
-    # subprocess sees the override — the Python process keeps the real HOME.
-    from hermes_constants import get_subprocess_home
-    _profile_home = get_subprocess_home()
-    if _profile_home:
-        run_env["HOME"] = _profile_home
+    _apply_local_subprocess_env_overrides(run_env)
 
     # Inject ContextVar-based session vars into subprocess env.
     # ContextVars don't propagate to child processes, so we bridge them here.

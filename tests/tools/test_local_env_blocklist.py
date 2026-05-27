@@ -142,6 +142,37 @@ class TestProviderEnvBlocklist:
         for var in leaked_vars:
             assert var not in result_env, f"{var} leaked into subprocess env"
 
+    def test_aws_sdk_credential_vars_are_stripped(self):
+        """SDK-style Bedrock credentials must not leak into terminal env."""
+        leaked_vars = {
+            "AWS_BEARER_TOKEN_BEDROCK": "bedrock-bearer",
+            "AWS_ACCESS_KEY_ID": "AKIAFAKE",
+            "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            "AWS_SESSION_TOKEN": "session-token",
+            "AWS_PROFILE": "prod-admin",
+            "AWS_DEFAULT_PROFILE": "default-admin",
+            "AWS_SHARED_CREDENTIALS_FILE": "/home/user/.aws/credentials",
+            "AWS_CONFIG_FILE": "/home/user/.aws/config",
+            "AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/Admin",
+            "AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/secrets/token",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI": "http://169.254.170.2/creds",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN": "container-token",
+        }
+        result_env = _run_with_env(extra_os_env=leaked_vars)
+
+        for var in leaked_vars:
+            assert var not in result_env, f"{var} leaked into subprocess env"
+
+    def test_aws_region_is_preserved(self):
+        """Non-credential AWS settings can still flow to ordinary tools."""
+        result_env = _run_with_env(extra_os_env={
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
+        })
+
+        assert result_env["AWS_REGION"] == "us-east-1"
+        assert result_env["AWS_DEFAULT_REGION"] == "us-east-1"
+
     def test_safe_vars_are_preserved(self):
         """Standard env vars (PATH, HOME, USER) must still be passed through."""
         result_env = _run_with_env()
@@ -297,6 +328,11 @@ class TestBlocklistCoverage:
             "VERCEL_TEAM_ID",
         }
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
+
+    def test_aws_sdk_credential_vars_are_in_blocklist(self):
+        from agent.credential_exposure_policy import AWS_SDK_CREDENTIAL_ENV_VARS
+
+        assert AWS_SDK_CREDENTIAL_ENV_VARS.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
 
 
 class TestSanePathIncludesHomebrew:
