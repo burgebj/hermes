@@ -242,6 +242,29 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     atomic_json_write(path, payload, indent=None, separators=(",", ":"))
 
 
+def _runtime_status_belongs_to_current_process(
+    payload: dict[str, Any],
+    current_record: dict[str, Any],
+) -> bool:
+    """Return True when a persisted status file belongs to this gateway run."""
+    try:
+        payload_pid = int(payload["pid"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    if payload_pid != current_record.get("pid"):
+        return False
+
+    payload_start = payload.get("start_time")
+    current_start = current_record.get("start_time")
+    if payload_start is not None and current_start is not None:
+        return payload_start == current_start
+
+    # On platforms without process start-time support, PID is the strongest
+    # available continuity signal for writes from the same live process.
+    return payload_start is None and current_start is None
+
+
 def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
     pid_path = pid_path or _get_pid_path()
     if not pid_path.exists():
@@ -514,9 +537,17 @@ def write_runtime_status(
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
-    payload = _read_json_file(path) or _build_runtime_status_record()
     current_record = _build_pid_record()
-    payload.setdefault("platforms", {})
+    existing_payload = _read_json_file(path)
+    if existing_payload is not None and _runtime_status_belongs_to_current_process(
+        existing_payload,
+        current_record,
+    ):
+        payload = existing_payload
+    else:
+        payload = _build_runtime_status_record()
+    if not isinstance(payload.get("platforms"), dict):
+        payload["platforms"] = {}
     payload["kind"] = current_record["kind"]
     payload["pid"] = current_record["pid"]
     payload["argv"] = current_record["argv"]

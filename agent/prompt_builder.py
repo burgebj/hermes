@@ -767,7 +767,10 @@ def build_environment_hints() -> str:
 
         host_lines.append(f"User home directory: {os.path.expanduser('~')}")
         try:
-            host_lines.append(f"Current working directory: {os.getcwd()}")
+            current_cwd = os.getenv("TERMINAL_CWD") or os.getcwd()
+            host_lines.append(
+                f"Current working directory: {os.path.expanduser(current_cwd)}"
+            )
         except OSError:
             pass
 

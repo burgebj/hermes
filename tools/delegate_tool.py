@@ -1531,9 +1531,11 @@ def _run_single_child(
                 duration,
             )
 
-            # When a subagent times out BEFORE making any API call, dump a
-            # diagnostic to help users (and us) see what the child was doing.
-            # See #14726 — without this, 0-API-call hangs are black boxes.
+            # When a subagent times out, dump a diagnostic to help users (and
+            # us) see what the child was doing. 0-API-call hangs need prompt /
+            # transport diagnostics; in-flight API/tool/network hangs need the
+            # same child activity and stack artifact so partial work is not a
+            # black box.
             diagnostic_path: Optional[str] = None
             child_api_calls = 0
             try:
@@ -1541,7 +1543,7 @@ def _run_single_child(
                 child_api_calls = int(_summary.get("api_call_count", 0) or 0)
             except Exception:
                 pass
-            if is_timeout and child_api_calls == 0:
+            if is_timeout:
                 diagnostic_path = _dump_subagent_timeout_diagnostic(
                     child=child,
                     task_index=task_index,
@@ -1552,8 +1554,9 @@ def _run_single_child(
                 )
                 if diagnostic_path:
                     logger.warning(
-                        "Subagent %d 0-API-call timeout — diagnostic written to %s",
+                        "Subagent %d timeout after %d API call(s) — diagnostic written to %s",
                         task_index,
+                        child_api_calls,
                         diagnostic_path,
                     )
 
@@ -1589,6 +1592,8 @@ def _run_single_child(
                         f"{child_api_calls} API call(s) completed — likely "
                         f"stuck on a slow API call or unresponsive network request."
                     )
+                    if diagnostic_path:
+                        _err += f" Diagnostic: {diagnostic_path}"
             else:
                 _err = str(_timeout_exc)
 

@@ -875,6 +875,33 @@ class TestEnvironmentHints:
         assert "hostname" not in result
         assert "WSL" not in result
 
+    def test_build_environment_hints_uses_terminal_cwd_for_local_backend(
+        self, monkeypatch, tmp_path
+    ):
+        """Local-backend prompt cwd must match the terminal tool's default cwd.
+
+        Cron/worktree launchers set TERMINAL_CWD without chdir-ing the Hermes
+        process. If the prompt advertises os.getcwd() instead, the model may
+        pass that stale path back as an explicit terminal(workdir=...),
+        overriding the correct session default.
+        """
+        import agent.prompt_builder as _pb
+        import sys, platform
+
+        session_cwd = tmp_path / "project"
+        session_cwd.mkdir()
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(platform, "system", lambda: "Linux")
+        monkeypatch.setattr(platform, "release", lambda: "6.8.0-generic")
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.setenv("TERMINAL_CWD", str(session_cwd))
+        _pb._clear_backend_probe_cache()
+
+        result = _pb.build_environment_hints()
+
+        assert f"Current working directory: {session_cwd}" in result
+
     def test_build_environment_hints_on_windows_local(self, monkeypatch):
         import agent.prompt_builder as _pb
         import sys
