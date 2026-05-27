@@ -395,19 +395,26 @@ def build_gemini_request(
     top_p: Optional[float] = None,
     stop: Any = None,
     thinking_config: Any = None,
+    cached_content_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     contents, system_instruction = _build_gemini_contents(messages)
     request: Dict[str, Any] = {"contents": contents}
-    if system_instruction:
-        request["systemInstruction"] = system_instruction
 
-    gemini_tools = _translate_tools_to_gemini(tools)
-    if gemini_tools:
-        request["tools"] = gemini_tools
+    if cached_content_name:
+        # systemInstruction and tools are encoded in the cached resource;
+        # re-sending them causes a 400. toolConfig is also disallowed.
+        request["cachedContent"] = cached_content_name
+    else:
+        if system_instruction:
+            request["systemInstruction"] = system_instruction
 
-    tool_config = _translate_tool_choice_to_gemini(tool_choice)
-    if tool_config:
-        request["toolConfig"] = tool_config
+        gemini_tools = _translate_tools_to_gemini(tools)
+        if gemini_tools:
+            request["tools"] = gemini_tools
+
+        tool_config = _translate_tool_choice_to_gemini(tool_choice)
+        if tool_config:
+            request["toolConfig"] = tool_config
 
     generation_config: Dict[str, Any] = {}
     if temperature is not None:
@@ -881,8 +888,10 @@ class GeminiNativeClient:
         **_: Any,
     ) -> Any:
         thinking_config = None
+        cached_content_name = None
         if isinstance(extra_body, dict):
             thinking_config = extra_body.get("thinking_config") or extra_body.get("thinkingConfig")
+            cached_content_name = extra_body.get("gemini_cached_content_name") or None
 
         request = build_gemini_request(
             messages=messages or [],
@@ -893,6 +902,7 @@ class GeminiNativeClient:
             top_p=top_p,
             stop=stop,
             thinking_config=thinking_config,
+            cached_content_name=cached_content_name,
         )
 
         if stream:

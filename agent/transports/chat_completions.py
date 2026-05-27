@@ -511,6 +511,7 @@ class ChatCompletionsTransport(ProviderTransport):
             base_url=params.get("base_url"),
             reasoning_config=reasoning_config,
             openrouter_min_coding_score=params.get("openrouter_min_coding_score"),
+            gemini_cached_content_name=params.get("gemini_cached_content_name"),
         )
         if profile_body:
             extra_body.update(profile_body)
@@ -625,19 +626,46 @@ class ChatCompletionsTransport(ProviderTransport):
             return False
         return True
 
-    def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
-        """Extract OpenRouter/OpenAI cache stats from prompt_tokens_details."""
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return None
-        details = getattr(usage, "prompt_tokens_details", None)
-        if details is None:
-            return None
-        cached = getattr(details, "cached_tokens", 0) or 0
-        written = getattr(details, "cache_write_tokens", 0) or 0
-        if cached or written:
-            return {"cached_tokens": cached, "creation_tokens": written}
-        return None
+    def extract_usage(self, response_usage: Any) -> "Usage":
+        """Extract canonical usage from an OpenAI-wire response.usage object.
+
+        OpenAI/OpenRouter's ``prompt_tokens`` is GROSS (includes cache hits).
+        This method subtracts cached and write tokens to produce a net
+        ``prompt_tokens`` for the canonical ``Usage`` shape.
+
+        Cache fields nest under ``prompt_tokens_details``. Some proxies
+        (OpenRouter, Vercel AI Gateway, Cline) surface Anthropic-style
+        top-level fields when routing Claude — fall back to those if
+        the details object is absent or zero (port of cline/cline#10266).
+        """
+        from agent.transports.types import Usage
+
+        if response_usage is None:
+            return Usage()
+        prompt_total = int(getattr(response_usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(response_usage, "completion_tokens", 0) or 0)
+
+        details = getattr(response_usage, "prompt_tokens_details", None)
+        cache_read = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+        if not cache_read:
+            cache_read = int(getattr(response_usage, "cache_read_input_tokens", 0) or 0)
+        cache_write = int(getattr(details, "cache_write_tokens", 0) or 0) if details else 0
+        if not cache_write:
+            cache_write = int(getattr(response_usage, "cache_creation_input_tokens", 0) or 0)
+
+        out_details = getattr(response_usage, "output_tokens_details", None)
+        reasoning = int(getattr(out_details, "reasoning_tokens", 0) or 0) if out_details else 0
+
+        net_prompt = max(0, prompt_total - cache_read - cache_write)
+        return Usage(
+            prompt_tokens=net_prompt,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_total + completion_tokens,
+            cached_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            reasoning_tokens=reasoning,
+        )
 
 
 # Auto-register on import

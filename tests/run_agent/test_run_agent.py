@@ -751,7 +751,9 @@ class TestInit:
             mock_anthropic.Anthropic.assert_called_once()
 
     def test_prompt_caching_claude_openrouter(self):
-        """Claude model via OpenRouter should enable prompt caching."""
+        """Claude model via OpenRouter should use envelope-layout cache strategy."""
+        from agent.prompt_cache_strategy import AnthropicInlineCacheStrategy
+        from providers import get_provider_profile
         with (
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
@@ -759,16 +761,22 @@ class TestInit:
         ):
             a = AIAgent(
                 api_key="test-k...7890",
+                provider="openrouter",
                 model="anthropic/claude-sonnet-4-20250514",
                 base_url="https://openrouter.ai/api/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
             )
-            assert a._use_prompt_caching is True
+            profile = get_provider_profile(a.provider)
+            strategy = profile.cache_strategy_for(a.model)
+            assert isinstance(strategy, AnthropicInlineCacheStrategy)
+            assert strategy.layout == "envelope"
 
     def test_prompt_caching_non_claude(self):
-        """Non-Claude model should disable prompt caching."""
+        """Non-Claude model on OpenRouter should return NoCacheStrategy."""
+        from agent.prompt_cache_strategy import NoCacheStrategy
+        from providers import get_provider_profile
         with (
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
@@ -776,16 +784,21 @@ class TestInit:
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
+                provider="openrouter",
                 base_url="https://openrouter.ai/api/v1",
                 model="openai/gpt-4o",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
             )
-            assert a._use_prompt_caching is False
+            profile = get_provider_profile(a.provider)
+            strategy = profile.cache_strategy_for(a.model)
+            assert isinstance(strategy, NoCacheStrategy)
 
     def test_prompt_caching_non_openrouter(self):
-        """Custom base_url (not OpenRouter) should disable prompt caching."""
+        """Custom provider with no registered profile returns NoCacheStrategy."""
+        from agent.prompt_cache_strategy import NoCacheStrategy
+        from providers import get_provider_profile
         with (
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
@@ -799,10 +812,15 @@ class TestInit:
                 skip_context_files=True,
                 skip_memory=True,
             )
-            assert a._use_prompt_caching is False
+            # Agent with no provider set → no profile → NoCacheStrategy.
+            profile = get_provider_profile(a.provider)
+            strategy = profile.cache_strategy_for(a.model) if profile else NoCacheStrategy()
+            assert isinstance(strategy, NoCacheStrategy)
 
     def test_prompt_caching_native_anthropic(self):
-        """Native Anthropic provider should enable prompt caching."""
+        """Native Anthropic provider auto-detected from base_url uses native cache strategy."""
+        from agent.prompt_cache_strategy import AnthropicInlineCacheStrategy
+        from providers import get_provider_profile
         with (
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
@@ -811,12 +829,17 @@ class TestInit:
             a = AIAgent(
                 api_key="test-key-1234567890",
                 base_url="https://api.anthropic.com/v1/",
+                model="claude-sonnet-4-6",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
             )
             assert a.api_mode == "anthropic_messages"
-            assert a._use_prompt_caching is True
+            assert a.provider == "anthropic"
+            profile = get_provider_profile(a.provider)
+            strategy = profile.cache_strategy_for(a.model)
+            assert isinstance(strategy, AnthropicInlineCacheStrategy)
+            assert strategy.layout == "native"
 
     def test_prompt_caching_cache_ttl_defaults_without_config(self):
         """cache_ttl stays 5m when prompt_caching is absent from config."""
@@ -4572,6 +4595,9 @@ class TestFallbackAnthropicProvider:
         assert agent.client is None
 
     def test_fallback_to_anthropic_enables_prompt_caching(self, agent):
+        """After fallback to Anthropic, provider+model yield a native cache strategy."""
+        from agent.prompt_cache_strategy import AnthropicInlineCacheStrategy
+        from providers import get_provider_profile
         agent._fallback_activated = False
         agent._fallback_model = {"provider": "anthropic", "model": "claude-sonnet-4-20250514"}
         agent._fallback_chain = [agent._fallback_model]
@@ -4588,7 +4614,10 @@ class TestFallbackAnthropicProvider:
         ):
             agent._try_activate_fallback()
 
-        assert agent._use_prompt_caching is True
+        profile = get_provider_profile(agent.provider)
+        strategy = profile.cache_strategy_for(agent.model) if profile else None
+        assert isinstance(strategy, AnthropicInlineCacheStrategy)
+        assert strategy.layout == "native"
 
     def test_fallback_to_openrouter_uses_openai_client(self, agent):
         agent._fallback_activated = False

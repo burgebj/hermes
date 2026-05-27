@@ -611,6 +611,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             anthropic_max_output=_ant_max,
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
+            gemini_cached_content_name=getattr(agent, "_gemini_cached_content_name", None),
         )
 
     # ── Legacy flag path ────────────────────────────────────────────
@@ -1064,15 +1065,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 # not only after a later credential-rotation rebuild.
                 agent._replace_primary_openai_client(reason="fallback_timeout_apply")
 
-        # Re-evaluate prompt caching for the new provider/model
-        agent._use_prompt_caching, agent._use_native_cache_layout = (
-            agent._anthropic_prompt_cache_policy(
-                provider=fb_provider,
-                base_url=fb_base_url,
-                api_mode=fb_api_mode,
-                model=fb_model,
-            )
-        )
+
 
         # LM Studio: preload before probing the fallback's context length.
         agent._ensure_lmstudio_runtime_loaded()

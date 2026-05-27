@@ -16,7 +16,6 @@ Methods covered:
 * ``restore_primary_runtime`` — un-do fallback activation
 * ``extract_reasoning`` — pull reasoning fields out of API responses
 * ``dump_api_request_debug`` — write request body for post-mortem
-* ``anthropic_prompt_cache_policy`` — compute cache_control breakpoints
 * ``create_openai_client`` — build the per-agent OpenAI SDK client
 """
 
@@ -43,7 +42,7 @@ from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_res
 from agent.trajectory import convert_scratchpad_to_think
 from agent.credential_pool import STATUS_EXHAUSTED
 from agent.error_classifier import classify_api_error, FailoverReason
-from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
+from utils import env_var_enabled, atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -902,14 +901,6 @@ def restore_primary_runtime(agent) -> bool:
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
         agent._client_kwargs = dict(rt["client_kwargs"])
-        agent._use_prompt_caching = rt["use_prompt_caching"]
-        # Default to native layout when the restored snapshot predates the
-        # native-vs-proxy split (older sessions saved before this PR).
-        agent._use_native_cache_layout = rt.get(
-            "use_native_cache_layout",
-            agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
-        )
-
         # ── Rebuild client for the primary provider ──
         if agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
@@ -1125,112 +1116,6 @@ def dump_api_request_debug(
 
 
 
-def anthropic_prompt_cache_policy(
-    agent,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_mode: Optional[str] = None,
-    model: Optional[str] = None,
-) -> tuple[bool, bool]:
-    """Decide whether to apply Anthropic prompt caching and which layout to use.
-
-    Returns ``(should_cache, use_native_layout)``:
-      * ``should_cache`` — inject ``cache_control`` breakpoints for this
-        request (applies to OpenRouter Claude, native Anthropic, and
-        third-party gateways that speak the native Anthropic protocol).
-      * ``use_native_layout`` — place markers on the *inner* content
-        blocks (native Anthropic accepts and requires this layout);
-        when False markers go on the message envelope (OpenRouter and
-        OpenAI-wire proxies expect the looser layout).
-
-    Third-party providers using the native Anthropic transport
-    (``api_mode == 'anthropic_messages'`` + Claude-named model) get
-    caching with the native layout so they benefit from the same
-    cost reduction as direct Anthropic callers, provided their
-    gateway implements the Anthropic cache_control contract
-    (MiniMax, Zhipu GLM, LiteLLM's Anthropic proxy mode all do).
-
-    Qwen / Alibaba-family models on OpenCode, OpenCode Go, and direct
-    Alibaba (DashScope) also honour Anthropic-style ``cache_control``
-    markers on OpenAI-wire chat completions. Upstream pi-mono #3392 /
-    pi #3393 documented this for opencode-go Qwen. Without markers
-    these providers serve zero cache hits, re-billing the full prompt
-    on every turn.
-    """
-    eff_provider = (provider if provider is not None else agent.provider) or ""
-    eff_base_url = base_url if base_url is not None else (agent.base_url or "")
-    eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
-    eff_model = (model if model is not None else agent.model) or ""
-
-    model_lower = eff_model.lower()
-    provider_lower = eff_provider.lower()
-    is_claude = "claude" in model_lower
-    is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
-    # Nous Portal proxies to OpenRouter behind the scenes — identical
-    # OpenAI-wire envelope cache_control semantics. Treat it as an
-    # OpenRouter-equivalent endpoint for caching layout purposes.
-    is_nous_portal = "nousresearch" in eff_base_url.lower()
-    is_anthropic_wire = eff_api_mode == "anthropic_messages"
-    is_native_anthropic = (
-        is_anthropic_wire
-        and (eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com")
-    )
-
-    if is_native_anthropic:
-        return True, True
-    if (is_openrouter or is_nous_portal) and is_claude:
-        return True, False
-    # Nous Portal Qwen (e.g. qwen3.6-plus) takes the same envelope-layout
-    # cache_control path as Portal Claude. Portal proxies to OpenRouter
-    # and the upstream Qwen route accepts cache_control markers; without
-    # this branch the alibaba-family check below only matches
-    # provider=opencode/alibaba and Portal traffic falls through to
-    # (False, False), serving 0% cache hits and re-billing the full
-    # prompt on every turn.
-    if is_nous_portal and "qwen" in model_lower:
-        return True, False
-    if is_anthropic_wire and is_claude:
-        # Third-party Anthropic-compatible gateway.
-        return True, True
-
-    # MiniMax on its Anthropic-compatible endpoint serves its own
-    # model family (MiniMax-M2.7, M2.5, M2.1, M2) with documented
-    # cache_control support (0.1× read pricing, 5-minute TTL).  The
-    # blanket is_claude gate above excludes these — opt them in
-    # explicitly via provider id or host match so users on
-    # provider=minimax / minimax-cn (or custom endpoints pointing at
-    # api.minimax.io/anthropic / api.minimaxi.com/anthropic) get the
-    # same cost reduction as Claude traffic.
-    # Docs: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
-    if is_anthropic_wire:
-        is_minimax_provider = provider_lower in {"minimax", "minimax-cn"}
-        is_minimax_host = (
-            base_url_host_matches(eff_base_url, "api.minimax.io")
-            or base_url_host_matches(eff_base_url, "api.minimaxi.com")
-        )
-        if is_minimax_provider or is_minimax_host:
-            return True, True
-
-    # Qwen/Alibaba on OpenCode (Zen/Go) and native DashScope: OpenAI-wire
-    # transport that accepts Anthropic-style cache_control markers and
-    # rewards them with real cache hits.  Without this branch
-    # qwen3.6-plus on opencode-go reports 0% cached tokens and burns
-    # through the subscription on every turn.
-    model_is_qwen = "qwen" in model_lower
-    provider_is_alibaba_family = provider_lower in {
-        "opencode", "opencode-zen", "opencode-go", "alibaba",
-    }
-    if provider_is_alibaba_family and model_is_qwen:
-        # Envelope layout (native_anthropic=False): markers on inner
-        # content parts, not top-level tool messages.  Matches
-        # pi-mono's "alibaba" cacheControlFormat.
-        return True, False
-
-    return False, False
-
-
-
 def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
     from agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
     # Treat client_kwargs as read-only. Callers pass agent._client_kwargs (or shallow
@@ -1437,15 +1322,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             shared=True,
         )
 
-    # ── Re-evaluate prompt caching ──
-    agent._use_prompt_caching, agent._use_native_cache_layout = (
-        agent._anthropic_prompt_cache_policy(
-            provider=new_provider,
-            base_url=agent.base_url,
-            api_mode=api_mode,
-            model=new_model,
-        )
-    )
+
 
     # ── LM Studio: preload before probing context length ──
     agent._ensure_lmstudio_runtime_loaded()
@@ -1498,8 +1375,6 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         "api_mode": agent.api_mode,
         "api_key": getattr(agent, "api_key", ""),
         "client_kwargs": dict(agent._client_kwargs),
-        "use_prompt_caching": agent._use_prompt_caching,
-        "use_native_cache_layout": agent._use_native_cache_layout,
         "compressor_model": getattr(_cc, "model", agent.model) if _cc else agent.model,
         "compressor_base_url": getattr(_cc, "base_url", agent.base_url) if _cc else agent.base_url,
         "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",
@@ -2254,7 +2129,6 @@ __all__ = [
     "restore_primary_runtime",
     "extract_reasoning",
     "dump_api_request_debug",
-    "anthropic_prompt_cache_policy",
     "create_openai_client",
     "switch_model",
     "invoke_tool",

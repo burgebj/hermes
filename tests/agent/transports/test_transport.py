@@ -43,7 +43,10 @@ class TestProviderTransportABC:
         t = Minimal()
         assert t.api_mode == "test_minimal"
         assert t.validate_response(None) is True  # default
-        assert t.extract_cache_stats(None) is None  # default
+        # extract_usage default returns a zeroed Usage, not None.
+        default_usage = t.extract_usage(None)
+        assert default_usage.prompt_tokens == 0
+        assert default_usage.cache_read_tokens == 0
         assert t.map_finish_reason("end_turn") == "end_turn"  # default passthrough
 
 
@@ -142,20 +145,38 @@ class TestAnthropicTransport:
         assert transport.map_finish_reason("model_context_window_exceeded") == "length"
         assert transport.map_finish_reason("unknown") == "stop"
 
-    def test_extract_cache_stats_none_usage(self, transport):
-        r = SimpleNamespace(usage=None)
-        assert transport.extract_cache_stats(r) is None
+    def test_extract_usage_none(self, transport):
+        result = transport.extract_usage(None)
+        assert result.prompt_tokens == 0
+        assert result.cache_read_tokens == 0
+        assert result.cache_write_tokens == 0
 
-    def test_extract_cache_stats_with_cache(self, transport):
-        usage = SimpleNamespace(cache_read_input_tokens=100, cache_creation_input_tokens=50)
-        r = SimpleNamespace(usage=usage)
-        result = transport.extract_cache_stats(r)
-        assert result == {"cached_tokens": 100, "creation_tokens": 50}
+    def test_extract_usage_with_cache(self, transport):
+        usage = SimpleNamespace(
+            input_tokens=200,
+            output_tokens=50,
+            cache_read_input_tokens=100,
+            cache_creation_input_tokens=50,
+        )
+        result = transport.extract_usage(usage)
+        assert result.cache_read_tokens == 100
+        assert result.cached_tokens == 100  # back-compat alias
+        assert result.cache_write_tokens == 50
+        # Anthropic input_tokens is already net — no subtraction.
+        assert result.prompt_tokens == 200
+        assert result.completion_tokens == 50
 
-    def test_extract_cache_stats_zero(self, transport):
-        usage = SimpleNamespace(cache_read_input_tokens=0, cache_creation_input_tokens=0)
-        r = SimpleNamespace(usage=usage)
-        assert transport.extract_cache_stats(r) is None
+    def test_extract_usage_zero(self, transport):
+        usage = SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        )
+        result = transport.extract_usage(usage)
+        assert result.cache_read_tokens == 0
+        assert result.cache_write_tokens == 0
+        assert result.prompt_tokens == 10
 
     def test_normalize_response_text(self, transport):
         """Test normalization of a simple text response."""
