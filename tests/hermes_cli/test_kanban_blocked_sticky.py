@@ -168,31 +168,34 @@ def test_unblock_clears_sticky_state_and_lets_block_recover(kanban_home: Path) -
     """``hermes kanban unblock`` (or the ``kanban_unblock`` tool) is
     the only legitimate way out of a worker-initiated block.  After
     unblock, a *subsequent* circuit-breaker block on the same task
-    must again be eligible for auto-recovery."""
+    must again be eligible for auto-recovery — but only if the task
+    has parents whose completion could change the conditions."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="t")
-        kb.claim_task(conn, tid)
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+        kb.complete_task(conn, parent, result="ok")
+        kb.claim_task(conn, child)
         kb.block_task(
-            conn, tid,
+            conn, child,
             reason="review-required: ...",
-            expected_run_id=kb.get_task(conn, tid).current_run_id,
+            expected_run_id=kb.get_task(conn, child).current_run_id,
         )
-        assert kb.unblock_task(conn, tid)
+        assert kb.unblock_task(conn, child)
         # After unblock the task is no longer blocked at all.
-        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.get_task(conn, child).status == "ready"
 
         # Now simulate a *later* circuit-breaker block (no new
         # ``blocked`` event, just status flip).  The most recent
         # block/unblock event is ``unblocked`` → guard does not fire
         # → recompute can recover.
         conn.execute(
-            "UPDATE tasks SET status='blocked' WHERE id=?", (tid,),
+            "UPDATE tasks SET status='blocked' WHERE id=?", (child,),
         )
         conn.commit()
 
         promoted = kb.recompute_ready(conn)
         assert promoted == 1
-        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.get_task(conn, child).status == "ready"
 
 
 # ---------------------------------------------------------------------------

@@ -2241,12 +2241,25 @@ def recompute_ready(conn: sqlite3.Connection) -> int:
 
     ``blocked`` tasks are also considered for promotion (so a task
     blocked purely by a parent dependency unblocks itself when the
-    parent completes), *except* when the most recent block event was a
-    worker-initiated ``kanban_block`` — those stay blocked until an
-    explicit ``kanban_unblock`` (#28712).  Without that guard, a
-    ``review-required`` handoff would auto-respawn, the fresh worker
-    would find nothing to do, exit cleanly, get recorded as a protocol
-    violation, and the cycle would repeat indefinitely.
+    parent completes), *except* when:
+
+    * The most recent ``{blocked, unblocked}`` event is ``blocked``
+      (worker- or operator-initiated ``kanban_block``) — a sticky
+      block that survives until explicit ``kanban_unblock`` (#28712).
+
+    * The task has **no parents** and is blocked by the circuit breaker
+      (``gave_up`` event, not ``blocked``).  A parentless blocked task
+      has no dependency to wait for; promoting it would create an
+      infinite crash loop since the failure condition (bad profile,
+      missing skill, auth error) cannot be resolved by re-dispatch.
+      These tasks stay ``blocked`` until an operator runs
+      ``kanban_unblock`` or the underlying issue is fixed.
+
+    On promotion of a circuit-breaker-blocked task **with parents**
+    (i.e. a parent just completed), the ``consecutive_failures`` counter
+    is reset to 0 — the conditions that caused the failure may have
+    changed.  This preserves the original auto-recovery semantics of
+    #40c1decb3 for tasks that have a legitimate dependency chain.
     """
     promoted = 0
     with write_txn(conn):
@@ -2268,17 +2281,41 @@ def recompute_ready(conn: sqlite3.Connection) -> int:
                 "WHERE l.child_id = ?",
                 (task_id,),
             ).fetchall()
+            # Vacuous-truth guard: if the task has no parents, a
+            # circuit-breaker block has nothing to wait for.  Promoting
+            # it back to ready only re-queues tasks that crash on every
+            # dispatch tick, creating an infinite crash loop
+            # (gave_up → promote → spawn → crash → gave_up → …).
+            # Parentless tasks blocked by the circuit breaker should
+            # stay blocked until a human intervenes with
+            # ``kanban_unblock``.
+            has_parents = len(parents) > 0
             if all(p["status"] in ("done", "archived") for p in parents):
                 # Blocked tasks also get their failure counters reset —
                 # this is effectively an auto-unblock (circuit-breaker
                 # recovery; worker-initiated blocks are skipped above).
                 if cur_status == "blocked":
-                    conn.execute(
-                        "UPDATE tasks SET status = 'ready', "
-                        "consecutive_failures = 0, last_failure_error = NULL "
-                        "WHERE id = ? AND status = 'blocked'",
-                        (task_id,),
-                    )
+                    # Only reset failure counters when the conditions
+                    # that caused the block have actually changed (a
+                    # parent completed).  For circuit-breaker blocks on
+                    # parentless tasks the failure was deterministic and
+                    # resetting would let the dispatcher re-spawn and
+                    # crash on every tick.
+                    if has_parents:
+                        conn.execute(
+                            "UPDATE tasks SET status = 'ready', "
+                            "consecutive_failures = 0, last_failure_error = NULL "
+                            "WHERE id = ? AND status = 'blocked'",
+                            (task_id,),
+                        )
+                    else:
+                        # Parentless blocked task (circuit-breaker) —
+                        # skip promotion entirely.  The sticky-block
+                        # check above already catches worker-initiated
+                        # blocks; this catches the non-sticky
+                        # circuit-breaker path for tasks with no
+                        # parents to complete.
+                        continue
                 else:
                     conn.execute(
                         "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
