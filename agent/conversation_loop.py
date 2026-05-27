@@ -2519,15 +2519,15 @@ def run_conversation(
                     # Fall through to normal error handling if compression
                     # is exhausted or didn't help.
 
-                # Eager fallback for rate-limit errors (429 or quota exhaustion).
+                # Eager fallback for rate-limit errors (429 or quota exhaustion)
+                # and billing/credit exhaustion (402).
                 # When a fallback model is configured, switch immediately instead
                 # of burning through retries with exponential backoff -- the
                 # primary provider won't recover within the retry window.
-                is_rate_limited = classified.reason in {
-                    FailoverReason.rate_limit,
-                    FailoverReason.billing,
-                }
-                if is_rate_limited and agent._fallback_index < len(agent._fallback_chain):
+                is_rate_limited = classified.reason == FailoverReason.rate_limit
+                is_billing = classified.reason == FailoverReason.billing
+                is_rate_or_billing = is_rate_limited or is_billing
+                if is_rate_or_billing and agent._fallback_index < len(agent._fallback_chain):
                     # Don't eagerly fallback if credential pool rotation may
                     # still recover.  See _pool_may_recover_from_rate_limit
                     # for the single-credential-pool and CloudCode-quota
@@ -2538,7 +2538,10 @@ def run_conversation(
                         base_url=getattr(agent, "base_url", None),
                     )
                     if not pool_may_recover:
-                        agent._emit_status("⚠️ Rate limited — switching to fallback provider...")
+                        if is_billing:
+                            agent._emit_status("⚠️ Billing/credit exhausted — switching to fallback provider...")
+                        else:
+                            agent._emit_status("⚠️ Rate limited — switching to fallback provider...")
                         if agent._try_activate_fallback(reason=classified.reason):
                             retry_count = 0
                             compression_attempts = 0
@@ -2914,7 +2917,10 @@ def run_conversation(
                 if is_client_error:
                     # Try fallback before aborting — a different provider
                     # may not have the same issue (rate limit, auth, etc.)
-                    agent._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
+                    if is_billing:
+                        agent._emit_status(f"⚠️ Billing/credit exhausted (HTTP {status_code}) — trying fallback...")
+                    else:
+                        agent._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
                     if agent._try_activate_fallback():
                         retry_count = 0
                         compression_attempts = 0
@@ -2924,15 +2930,30 @@ def run_conversation(
                         agent._dump_api_request_debug(
                             api_kwargs, reason="non_retryable_client_error", error=api_error,
                         )
-                    agent._emit_status(
-                        f"❌ Non-retryable error (HTTP {status_code}): "
-                        f"{agent._summarize_api_error(api_error)}"
-                    )
+                    if is_billing:
+                        agent._emit_status(
+                            f"❌ Credit/spend limit error (HTTP {status_code}): "
+                            f"{agent._summarize_api_error(api_error)}"
+                        )
+                    else:
+                        agent._emit_status(
+                            f"❌ Non-retryable error (HTTP {status_code}): "
+                            f"{agent._summarize_api_error(api_error)}"
+                        )
                     agent._vprint(f"{agent.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
                     agent._vprint(f"{agent.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
                     agent._vprint(f"{agent.log_prefix}   🌐 Endpoint: {_base}", force=True)
+                    # Actionable guidance for billing / spend-limit errors
+                    if classified.reason == FailoverReason.billing:
+                        agent._vprint(f"{agent.log_prefix}   💡 This is a billing / spend-limit error. Your API key is valid but has", force=True)
+                        agent._vprint(f"{agent.log_prefix}      reached its spending cap or your account balance is exhausted.", force=True)
+                        agent._vprint(f"{agent.log_prefix}      To fix:", force=True)
+                        agent._vprint(f"{agent.log_prefix}      1. Check your provider billing dashboard and raise the spend limit, or", force=True)
+                        agent._vprint(f"{agent.log_prefix}      2. Top up your account balance.", force=True)
+                        if base_url_host_matches(str(_base), "openrouter.ai"):
+                            agent._vprint(f"{agent.log_prefix}      3. Check credits: https://openrouter.ai/settings/credits", force=True)
                     # Actionable guidance for common auth errors
-                    if classified.is_auth or classified.reason == FailoverReason.billing:
+                    elif classified.is_auth:
                         if _provider in {"openai-codex", "xai-oauth", "nous"} and status_code == 401:
                             if _provider == "openai-codex":
                                 agent._vprint(f"{agent.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
@@ -3003,7 +3024,9 @@ def run_conversation(
                         primary_recovery_attempted = False
                         continue
                     _final_summary = agent._summarize_api_error(api_error)
-                    if is_rate_limited:
+                    if is_billing:
+                        agent._emit_status(f"💳 Credit/spend limit reached after {max_retries} retries — {_final_summary}")
+                    elif is_rate_limited:
                         agent._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
                     else:
                         agent._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
@@ -3067,9 +3090,9 @@ def run_conversation(
                         "error": _final_summary,
                     }
 
-                # For rate limits, respect the Retry-After header if present
+                # For rate limits and billing, respect the Retry-After header if present
                 _retry_after = None
-                if is_rate_limited:
+                if is_rate_or_billing:
                     _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
                     if _resp_headers and hasattr(_resp_headers, "get"):
                         _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
@@ -3079,7 +3102,9 @@ def run_conversation(
                             except (TypeError, ValueError):
                                 pass
                 wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
-                if is_rate_limited:
+                if is_billing:
+                    agent._emit_status(f"💳 Credit/spend limit reached. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
+                elif is_rate_limited:
                     agent._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
                 else:
                     agent._emit_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
