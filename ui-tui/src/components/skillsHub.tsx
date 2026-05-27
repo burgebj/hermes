@@ -1,17 +1,16 @@
-import { Box, Text, useInput, useStdout } from '@hermes/ink'
+import { Box, Text, useInput } from '@hermes/ink'
 import { useEffect, useState } from 'react'
 
 import type { GatewayClient } from '../gatewayClient.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 
-import { OverlayHint, useOverlayKeys, windowItems, windowOffset } from './overlayControls.js'
+import { OverlayHint, overlayPanelWidth, useOverlayKeys, windowItems, windowOffset } from './overlayControls.js'
 
 const VISIBLE = 12
-const MIN_WIDTH = 40
 const MAX_WIDTH = 90
 
-export function SkillsHub({ gw, onClose, t }: SkillsHubProps) {
+export function SkillsHub({ cols, gw, onClose, t }: SkillsHubProps) {
   const [skillsByCat, setSkillsByCat] = useState<Record<string, string[]>>({})
   const [selectedCat, setSelectedCat] = useState('')
   const [catIdx, setCatIdx] = useState(0)
@@ -22,8 +21,7 @@ export function SkillsHub({ gw, onClose, t }: SkillsHubProps) {
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
 
-  const { stdout } = useStdout()
-  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, (stdout?.columns ?? 80) - 6))
+  const width = overlayPanelWidth(cols, MAX_WIDTH)
 
   useEffect(() => {
     gw.request<{ skills?: Record<string, string[]> }>('skills.manage', { action: 'list' })
@@ -302,6 +300,7 @@ interface SkillInfo {
 }
 
 interface SkillsHubProps {
+  cols: number
   gw: GatewayClient
   onClose: () => void
   t: Theme

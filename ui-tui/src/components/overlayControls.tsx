@@ -38,6 +38,9 @@ export function windowItems<T>(items: T[], selected: number, visible: number) {
   }
 }
 
+export const overlayPanelWidth = (availableCols: number, max: number) =>
+  Math.max(1, Math.min(max, Math.max(1, availableCols - 6)))
+
 interface OverlayHintProps {
   children: string
   t: Theme

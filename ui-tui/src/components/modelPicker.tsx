@@ -1,4 +1,4 @@
-import { Box, Text, useInput, useStdout } from '@hermes/ink'
+import { Box, Text, useInput } from '@hermes/ink'
 import { useEffect, useMemo, useState } from 'react'
 
 import { providerDisplayNames } from '../domain/providers.js'
@@ -8,15 +8,14 @@ import type { ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 
-import { OverlayHint, useOverlayKeys, windowItems } from './overlayControls.js'
+import { OverlayHint, overlayPanelWidth, useOverlayKeys, windowItems } from './overlayControls.js'
 
 const VISIBLE = 12
-const MIN_WIDTH = 40
 const MAX_WIDTH = 90
 
 type Stage = 'provider' | 'key' | 'model' | 'disconnect'
 
-export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPickerProps) {
+export function ModelPicker({ cols, gw, onCancel, onSelect, sessionId, t }: ModelPickerProps) {
   const [providers, setProviders] = useState<ModelOptionProvider[]>([])
   const [currentModel, setCurrentModel] = useState('')
   const [err, setErr] = useState('')
@@ -29,12 +28,9 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
   const [keySaving, setKeySaving] = useState(false)
   const [keyError, setKeyError] = useState('')
 
-  const { stdout } = useStdout()
-  // Pin the picker to a stable width so the FloatBox parent (which shrinks-
-  // to-fit with alignSelf="flex-start") doesn't resize as long provider /
-  // model names scroll into view, and so `wrap="truncate-end"` on each row
-  // has an actual constraint to truncate against.
-  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, (stdout?.columns ?? 80) - 6))
+  // Pin the picker to the composer width so the FloatBox chrome and its
+  // right border stay aligned with the actual overlay lane, not the full TTY.
+  const width = overlayPanelWidth(cols, MAX_WIDTH)
 
   useEffect(() => {
     gw.request<ModelOptionsResponse>('model.options', sessionId ? { session_id: sessionId } : {})
@@ -366,6 +362,7 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
       (p, i) => {
         const authMark = p.authenticated === false ? '○' : p.is_current ? '*' : '●'
         const modelCount = p.total_models ?? p.models?.length ?? 0
+
         const suffix = p.authenticated === false
           ? (p.auth_type === 'api_key' ? '(no key)' : '(needs setup)')
           : `${modelCount} models`
@@ -498,6 +495,7 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
 }
 
 interface ModelPickerProps {
+  cols: number
   gw: GatewayClient
   onCancel: () => void
   onSelect: (value: string) => void

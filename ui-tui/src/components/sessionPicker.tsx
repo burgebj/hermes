@@ -1,4 +1,4 @@
-import { Box, Text, useInput, useStdout } from '@hermes/ink'
+import { Box, Text, useInput } from '@hermes/ink'
 import { useEffect, useState } from 'react'
 
 import type { GatewayClient } from '../gatewayClient.js'
@@ -6,10 +6,9 @@ import type { SessionDeleteResponse, SessionListItem, SessionListResponse } from
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 
-import { OverlayHint, useOverlayKeys, windowOffset } from './overlayControls.js'
+import { OverlayHint, overlayPanelWidth, useOverlayKeys, windowOffset } from './overlayControls.js'
 
 const VISIBLE = 15
-const MIN_WIDTH = 60
 const MAX_WIDTH = 120
 
 const age = (ts: number) => {
@@ -26,7 +25,7 @@ const age = (ts: number) => {
   return `${Math.floor(d)}d ago`
 }
 
-export function SessionPicker({ gw, onCancel, onSelect, t }: SessionPickerProps) {
+export function SessionPicker({ cols, gw, onCancel, onSelect, t }: SessionPickerProps) {
   const [items, setItems] = useState<SessionListItem[]>([])
   const [err, setErr] = useState('')
   const [sel, setSel] = useState(0)
@@ -36,8 +35,7 @@ export function SessionPicker({ gw, onCancel, onSelect, t }: SessionPickerProps)
   const [confirmDelete, setConfirmDelete] = useState<null | number>(null)
   const [deleting, setDeleting] = useState(false)
 
-  const { stdout } = useStdout()
-  const width = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, (stdout?.columns ?? 80) - 6))
+  const width = overlayPanelWidth(cols, MAX_WIDTH)
 
   useOverlayKeys({ onClose: onCancel })
 
@@ -220,6 +218,7 @@ export function SessionPicker({ gw, onCancel, onSelect, t }: SessionPickerProps)
 }
 
 interface SessionPickerProps {
+  cols: number
   gw: GatewayClient
   onCancel: () => void
   onSelect: (id: string) => void

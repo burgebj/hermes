@@ -10,6 +10,7 @@ import { TextInput } from './textInput.js'
 const OPTS = ['once', 'session', 'always', 'deny'] as const
 const LABELS = { always: 'Always allow', deny: 'Deny', once: 'Allow once', session: 'Allow this session' } as const
 const CMD_PREVIEW_LINES = 10
+const promptPanelWidth = (cols: number) => Math.max(1, cols - 2)
 
 type ApprovalKey = {
   downArrow?: boolean
@@ -60,8 +61,9 @@ export function approvalAction(ch: string, key: ApprovalKey, sel: number): Appro
   return { kind: 'noop' }
 }
 
-export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
+export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptProps) {
   const [sel, setSel] = useState(0)
+  const width = promptPanelWidth(cols)
 
   useInput((ch, key) => {
     const action = approvalAction(ch, key, sel)
@@ -78,9 +80,9 @@ export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
   const overflow = rawLines.length - shown.length
 
   return (
-    <Box borderColor={t.color.warn} borderStyle="double" flexDirection="column" paddingX={1}>
-      <Text bold color={t.color.warn}>
-        ⚠ approval required · {req.description}
+    <Box borderColor={t.color.warn} borderStyle="double" flexDirection="column" paddingX={1} width={width}>
+      <Text bold color={t.color.warn} wrap="truncate-end">
+        !  approval required · {req.description}
       </Text>
 
       <Box flexDirection="column" paddingLeft={1}>
@@ -100,15 +102,21 @@ export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
       <Text />
 
       {OPTS.map((o, i) => (
-        <Text key={o}>
-          <Text bold={sel === i} color={sel === i ? t.color.warn : t.color.muted} inverse={sel === i}>
-            {sel === i ? '▸ ' : '  '}
-            {i + 1}. {LABELS[o]}
-          </Text>
+        <Text
+          bold={sel === i}
+          color={sel === i ? t.color.warn : t.color.muted}
+          inverse={sel === i}
+          key={o}
+          wrap="wrap"
+        >
+          {sel === i ? '▸ ' : '  '}
+          {i + 1}. {LABELS[o]}
         </Text>
       ))}
 
-      <Text color={t.color.muted}>↑/↓ select · Enter confirm · 1-4 quick pick · Esc/Ctrl+C deny</Text>
+      <Text color={t.color.muted} wrap="truncate-end">
+        ↑/↓ select · Enter confirm · 1-4 quick pick · Esc/Ctrl+C deny
+      </Text>
     </Box>
   )
 }
@@ -118,9 +126,11 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
   const [custom, setCustom] = useState('')
   const [typing, setTyping] = useState(false)
   const choices = req.choices ?? []
+  const width = promptPanelWidth(cols)
+  const contentWidth = Math.max(1, width - 2)
 
   const heading = (
-    <Text bold>
+    <Text bold wrap="truncate-end">
       <Text color={t.color.accent}>ask</Text>
       <Text color={t.color.text}> {req.question}</Text>
     </Text>
@@ -158,7 +168,7 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
 
   if (typing || !choices.length) {
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" width={width}>
         {heading}
 
         <Box>
@@ -166,7 +176,7 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
           <TextInput columns={Math.max(20, cols - 6)} onChange={setCustom} onSubmit={onAnswer} value={custom} />
         </Box>
 
-        <Text color={t.color.muted}>
+        <Text color={t.color.muted} wrap="truncate-end">
           Enter send · Esc {choices.length ? 'back' : 'cancel'} ·{' '}
           {isMac ? 'Cmd+C copy · Cmd+V paste · Ctrl+C cancel' : 'Ctrl+C cancel'}
         </Text>
@@ -175,25 +185,44 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
   }
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={width}>
       {heading}
 
-      {[...choices, 'Other (type your answer)'].map((c, i) => (
-        <Text key={i}>
-          <Text bold={sel === i} color={sel === i ? t.color.label : t.color.muted} inverse={sel === i}>
-            {sel === i ? '▸ ' : '  '}
-            {i + 1}. {c}
-          </Text>
-        </Text>
-      ))}
+      {[...choices, 'Other (type your answer)'].map((c, i) => {
+        const prefix = `${sel === i ? '▸ ' : '  '}${i + 1}. `
 
-      <Text color={t.color.muted}>↑/↓ select · Enter confirm · 1-{choices.length} quick pick · Esc/Ctrl+C cancel</Text>
+        return (
+          <Box key={i}>
+            <Box width={prefix.length}>
+              <Text bold={sel === i} color={sel === i ? t.color.label : t.color.muted} inverse={sel === i}>
+                {prefix}
+              </Text>
+            </Box>
+            <Box width={Math.max(1, contentWidth - prefix.length)}>
+              <Text
+                bold={sel === i}
+                color={sel === i ? t.color.label : t.color.muted}
+                inverse={sel === i}
+                wrap="wrap-trim"
+              >
+                {c}
+              </Text>
+            </Box>
+          </Box>
+        )
+      })}
+
+      <Text color={t.color.muted} wrap="truncate-end">
+        ↑/↓ select · Enter confirm · 1-{choices.length} quick pick · Esc/Ctrl+C cancel
+      </Text>
     </Box>
   )
 }
 
-export function ConfirmPrompt({ onCancel, onConfirm, req, t }: ConfirmPromptProps) {
+export function ConfirmPrompt({ cols = 80, onCancel, onConfirm, req, t }: ConfirmPromptProps) {
   const [sel, setSel] = useState(0)
+  const width = promptPanelWidth(cols)
+  const contentWidth = Math.max(1, width - 4)
 
   useInput((ch, key) => {
     const lower = ch.toLowerCase()
@@ -227,14 +256,14 @@ export function ConfirmPrompt({ onCancel, onConfirm, req, t }: ConfirmPromptProp
   ]
 
   return (
-    <Box borderColor={accent} borderStyle="double" flexDirection="column" paddingX={1}>
-      <Text bold color={accent}>
-        {req.danger ? '⚠' : '?'} {req.title}
+    <Box borderColor={accent} borderStyle="double" flexDirection="column" paddingX={1} width={width}>
+      <Text bold color={accent} wrap="truncate-end">
+        {req.danger ? '!' : '?'}  {req.title}
       </Text>
 
       {req.detail ? (
         <Box paddingLeft={1}>
-          <Text color={t.color.text} wrap="truncate-end">
+          <Text color={t.color.text} wrap="wrap">
             {req.detail}
           </Text>
         </Box>
@@ -243,18 +272,27 @@ export function ConfirmPrompt({ onCancel, onConfirm, req, t }: ConfirmPromptProp
       <Text />
 
       {rows.map((row, i) => (
-        <Text key={row.label}>
-          <Text color={sel === i ? accent : t.color.muted}>{sel === i ? '▸ ' : '  '}</Text>
-          <Text color={sel === i ? row.color : t.color.muted}>{row.label}</Text>
-        </Text>
+        <Box key={row.label}>
+          <Box width={2}>
+            <Text color={sel === i ? accent : t.color.muted}>{sel === i ? '▸ ' : '  '}</Text>
+          </Box>
+          <Box width={Math.max(1, contentWidth - 2)}>
+            <Text color={sel === i ? row.color : t.color.muted} wrap="wrap-trim">
+              {row.label}
+            </Text>
+          </Box>
+        </Box>
       ))}
 
-      <Text color={t.color.muted}>↑/↓ select · Enter confirm · Y/N quick · Esc cancel</Text>
+      <Text color={t.color.muted} wrap="truncate-end">
+        ↑/↓ select · Enter confirm · Y/N quick · Esc cancel
+      </Text>
     </Box>
   )
 }
 
 interface ApprovalPromptProps {
+  cols?: number
   onChoice: (s: string) => void
   req: ApprovalReq
   t: Theme
@@ -269,6 +307,7 @@ interface ClarifyPromptProps {
 }
 
 interface ConfirmPromptProps {
+  cols?: number
   onCancel: () => void
   onConfirm: () => void
   req: ConfirmReq

@@ -29,7 +29,7 @@ export function PromptZone({
   if (overlay.approval) {
     return (
       <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
-        <ApprovalPrompt onChoice={onApprovalChoice} req={overlay.approval} t={theme} />
+        <ApprovalPrompt cols={cols} onChoice={onApprovalChoice} req={overlay.approval} t={theme} />
       </Box>
     )
   }
@@ -46,7 +46,7 @@ export function PromptZone({
 
     return (
       <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
-        <ConfirmPrompt onCancel={onCancel} onConfirm={onConfirm} req={req} t={theme} />
+        <ConfirmPrompt cols={cols} onCancel={onCancel} onConfirm={onConfirm} req={req} t={theme} />
       </Box>
     )
   }
@@ -122,6 +122,7 @@ export function FloatingOverlays({
       {overlay.picker && (
         <FloatBox color={theme.color.border}>
           <SessionPicker
+            cols={cols}
             gw={gw}
             onCancel={() => patchOverlayState({ picker: false })}
             onSelect={onPickerSelect}
@@ -133,6 +134,7 @@ export function FloatingOverlays({
       {overlay.modelPicker && (
         <FloatBox color={theme.color.border}>
           <ModelPicker
+            cols={cols}
             gw={gw}
             onCancel={() => patchOverlayState({ modelPicker: false })}
             onSelect={onModelSelect}
@@ -144,7 +146,7 @@ export function FloatingOverlays({
 
       {overlay.skillsHub && (
         <FloatBox color={theme.color.border}>
-          <SkillsHub gw={gw} onClose={() => patchOverlayState({ skillsHub: false })} t={theme} />
+          <SkillsHub cols={cols} gw={gw} onClose={() => patchOverlayState({ skillsHub: false })} t={theme} />
         </FloatBox>
       )}
 
