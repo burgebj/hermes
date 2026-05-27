@@ -22,6 +22,11 @@ from typing import Dict, List, Optional, Any
 logger = logging.getLogger(__name__)
 
 
+def _is_whatsapp_broadcast_or_status_id(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    return raw == "status@s.whatsapp.net" or raw.endswith("@broadcast")
+
+
 def _now() -> datetime:
     """Return the current local time."""
     return datetime.now()
@@ -313,6 +318,17 @@ def build_session_context_prompt(
         if redact_pii:
             uid = _hash_sender_id(uid)
         lines.append(f"**User ID:** {uid}")
+
+    if context.source.platform != Platform.LOCAL:
+        lines.append("")
+        lines.append(
+            "**Identity safety:** The Current Session Context above is authoritative "
+            "for who is speaking in this chat. Long-term memory/user-profile blocks "
+            "may describe the agent owner or other known people; do NOT treat "
+            "those blocks as the current speaker's identity unless they explicitly "
+            "match this Source/User. Do not address the current speaker as the owner "
+            "unless the Current Session Context says the current User is the owner."
+        )
 
     # Platform-specific behavioral notes
     if context.source.platform == Platform.SLACK:
@@ -709,7 +725,33 @@ class SessionStore:
                     data = json.load(f)
                     for key, entry_data in data.items():
                         try:
-                            self._entries[key] = SessionEntry.from_dict(entry_data)
+                            origin_data = entry_data.get("origin") or {}
+                            if (
+                                origin_data.get("platform") == Platform.WHATSAPP.value
+                                and _is_whatsapp_broadcast_or_status_id(origin_data.get("chat_id"))
+                            ):
+                                # WhatsApp status/story and broadcast-list IDs are
+                                # inbound-only aliases, not real delivery/session
+                                # lanes. Keeping them active lets later messages
+                                # resume polluted transcripts or exposes bad
+                                # targets via channel_directory.
+                                logger.info("Dropping non-deliverable WhatsApp session key %s", key)
+                                continue
+                            entry = SessionEntry.from_dict(entry_data)
+                            if (
+                                entry.origin
+                                and entry.origin.platform == Platform.WHATSAPP
+                                and _is_whatsapp_broadcast_or_status_id(entry.origin.chat_id_alt)
+                            ):
+                                # Existing sessions created before the adapter fix
+                                # may have processed a status as if it were a DM.
+                                # Force a clean slate next time that human sends a
+                                # real message; do not resume the status transcript.
+                                entry.suspended = True
+                                entry.resume_pending = False
+                                entry.resume_reason = None
+                                entry.last_resume_marked_at = None
+                            self._entries[key] = entry
                         except (ValueError, KeyError):
                             # Skip entries with unknown/removed platform values
                             continue

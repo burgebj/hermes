@@ -265,6 +265,49 @@ class TestBuildFromSessions:
         assert "Coaching Chat / topic 17585" in names
         assert "Coaching Chat / topic 17587" in names
 
+    def test_skips_whatsapp_broadcast_and_status_sessions(self, tmp_path):
+        self._write_sessions(tmp_path, {
+            "status": {
+                "origin": {
+                    "platform": "whatsapp",
+                    "chat_id": "status@broadcast",
+                    "chat_name": "Status sender",
+                },
+                "chat_type": "dm",
+            },
+            "broadcast_list": {
+                "origin": {
+                    "platform": "whatsapp",
+                    "chat_id": "1778109128@broadcast",
+                    "chat_name": "Jorge Alberto Pasillas",
+                    "user_id": "230893885100129@lid",
+                },
+                "chat_type": "dm",
+            },
+            "sender_dm": {
+                "origin": {
+                    "platform": "whatsapp",
+                    "chat_id": "230893885100129@lid",
+                    "chat_id_alt": "1778109128@broadcast",
+                    "chat_name": "Jorge Alberto Pasillas",
+                    "user_id": "230893885100129@lid",
+                },
+                "chat_type": "dm",
+            },
+        })
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("whatsapp")
+
+        assert entries == [
+            {
+                "id": "230893885100129@lid",
+                "name": "Jorge Alberto Pasillas",
+                "type": "dm",
+                "thread_id": None,
+            }
+        ]
+
 
 class TestFormatDirectoryForDisplay:
     def test_empty_directory(self, tmp_path):

@@ -343,6 +343,9 @@ class TestBuildSessionContextPrompt:
         prompt = build_session_context_prompt(ctx)
 
         assert "WhatsApp" in prompt or "whatsapp" in prompt.lower()
+        assert "**User:** Phone User" in prompt
+        assert "Current Session Context above is authoritative" in prompt
+        assert "Do not address the current speaker as the owner" in prompt
 
     def test_multi_user_thread_prompt(self):
         """Shared thread sessions show multi-user note instead of single user."""
@@ -1238,3 +1241,58 @@ class TestRewriteTranscriptPreservesReasoning:
             "before user",
             "before assistant",
         ]
+
+
+class TestSessionStoreWhatsAppContaminationCleanup:
+    def test_drops_broadcast_status_sessions_and_suspends_status_aliases(self, tmp_path):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        payload = {
+            "agent:main:whatsapp:dm:status": {
+                "session_key": "agent:main:whatsapp:dm:status",
+                "session_id": "status_sid",
+                "created_at": "2026-05-06T15:30:00",
+                "updated_at": "2026-05-06T15:30:00",
+                "display_name": "Status sender",
+                "platform": "whatsapp",
+                "chat_type": "dm",
+                "origin": {
+                    "platform": "whatsapp",
+                    "chat_id": "status@broadcast",
+                    "chat_name": "Status sender",
+                    "chat_type": "dm",
+                    "user_id": "119610628124676@lid",
+                    "user_name": "Status sender",
+                },
+            },
+            "agent:main:whatsapp:dm:5215540990699": {
+                "session_key": "agent:main:whatsapp:dm:5215540990699",
+                "session_id": "jessi_sid",
+                "created_at": "2026-05-08T07:29:00",
+                "updated_at": "2026-05-08T07:29:00",
+                "display_name": "Jessica",
+                "platform": "whatsapp",
+                "chat_type": "dm",
+                "origin": {
+                    "platform": "whatsapp",
+                    "chat_id": "144492044791824@lid",
+                    "chat_id_alt": "status@broadcast",
+                    "chat_name": "Jessica",
+                    "chat_type": "dm",
+                    "user_id": "144492044791824@lid",
+                    "user_name": "Jessica",
+                },
+                "resume_pending": True,
+                "resume_reason": "restart_timeout",
+            },
+        }
+        (sessions_dir / "sessions.json").write_text(json.dumps(payload))
+
+        store = SessionStore(sessions_dir=sessions_dir, config=GatewayConfig())
+        store._ensure_loaded()
+
+        assert "agent:main:whatsapp:dm:status" not in store._entries
+        entry = store._entries["agent:main:whatsapp:dm:5215540990699"]
+        assert entry.suspended is True
+        assert entry.resume_pending is False
+        assert entry.resume_reason is None

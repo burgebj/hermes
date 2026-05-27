@@ -51,6 +51,11 @@ const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cac
 const PAIR_ONLY = args.includes('--pair-only');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
+const GROUP_POLICY = String(process.env.WHATSAPP_GROUP_POLICY || 'open').trim().toLowerCase();
+const ALLOWED_GROUPS = new Set(String(process.env.WHATSAPP_ALLOWED_GROUPS || process.env.WHATSAPP_GROUP_ALLOWED_USERS || '')
+  .split(/[\n,]+/)
+  .map(s => s.trim())
+  .filter(Boolean));
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -122,6 +127,12 @@ function trackSentMessageId(sent) {
 function normalizeWhatsAppId(value) {
   if (!value) return '';
   return String(value).replace(':', '@');
+}
+
+function isAllowedGroup(chatId) {
+  if (GROUP_POLICY === 'disabled') return false;
+  if (GROUP_POLICY === 'allowlist') return ALLOWED_GROUPS.has(chatId);
+  return true;
 }
 
 function getMessageContent(msg) {
@@ -289,29 +300,48 @@ async function startSocket() {
       // themselves — stranger DMs / group pings must never reach the
       // Python gateway, otherwise a pairing-code reply fires in response
       // to arbitrary incoming messages (#8389).
-      if (!msg.key.fromMe) {
-        if (WHATSAPP_MODE === 'self-chat') {
+      if (!msg.key.fromMe && WHATSAPP_MODE === 'self-chat') {
+        try {
+          console.log(JSON.stringify({
+            event: 'ignored',
+            reason: 'self_chat_mode_rejects_non_self',
+            chatId,
+            senderId,
+          }));
+        } catch {}
+        continue;
+      }
+
+      // Drop disallowed groups before parsing/downloading media.  Allowed groups
+      // must pass regardless of sender so the Python gateway can keep group
+      // context and decide whether replying is valuable.
+      if (isGroup && !isAllowedGroup(chatId)) {
+        if (WHATSAPP_DEBUG) {
           try {
             console.log(JSON.stringify({
               event: 'ignored',
-              reason: 'self_chat_mode_rejects_non_self',
+              reason: 'group_policy_mismatch',
               chatId,
               senderId,
             }));
           } catch {}
-          continue;
         }
-        if (!matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
-          try {
-            console.log(JSON.stringify({
-              event: 'ignored',
-              reason: 'allowlist_mismatch',
-              chatId,
-              senderId,
-            }));
-          } catch {}
-          continue;
-        }
+        continue;
+      }
+
+      // Check allowlist for DMs from others (resolve LID ↔ phone aliases).  Do
+      // not apply the DM sender allowlist inside allowed groups; group policy is
+      // the privacy boundary there.
+      if (!isGroup && !msg.key.fromMe && !matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
+        try {
+          console.log(JSON.stringify({
+            event: 'ignored',
+            reason: 'allowlist_mismatch',
+            chatId,
+            senderId,
+          }));
+        } catch {}
+        continue;
       }
 
       const messageContent = getMessageContent(msg);

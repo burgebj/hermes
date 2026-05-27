@@ -33,10 +33,24 @@ def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     return name
 
 
+def _is_non_deliverable_broadcast_id(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    return raw == "status@s.whatsapp.net" or raw.endswith("@broadcast")
+
+
 def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
     chat_id = origin.get("chat_id")
     if not chat_id:
         return None
+
+    # WhatsApp status/story and broadcast-list IDs are inbound-only aliases.
+    # They are not valid delivery targets; exposing them in channel_directory
+    # lets send_message(action="list") advertise targets that either fail or
+    # misroute. The WhatsApp adapter should route those events to senderId and
+    # keep the broadcast id only as chat_id_alt for audit/debugging.
+    if origin.get("platform") == "whatsapp" and _is_non_deliverable_broadcast_id(chat_id):
+        return None
+
     thread_id = origin.get("thread_id")
     if thread_id:
         return f"{chat_id}:{thread_id}"

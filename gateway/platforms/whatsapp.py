@@ -494,26 +494,37 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return cleaned.strip() or text
 
     def _should_process_message(self, data: Dict[str, Any]) -> bool:
-        chat_id_raw = str(data.get("chatId") or "")
+        raw_chat_id = str(data.get("chatId") or "")
+        raw_sender_id = str(data.get("senderId") or data.get("from") or "")
+
         # WhatsApp uses pseudo-chats for Status updates (Stories) and
         # Channel/Newsletter broadcasts. These are not real conversations
         # and the agent should never reply to them — even in self-chat mode
         # where the bridge may surface them as "fromMe" events.
-        if self._is_broadcast_chat(chat_id_raw):
+        # NOTE: generic broadcast-list JIDs (e.g. ``1778109128@broadcast``)
+        # are real DMs delivered through a broadcast list — the sender is a
+        # normal contact and we route replies to them. Only status updates
+        # and channel/newsletter posts are unaddressable.
+        def _is_unaddressable_broadcast(jid: str) -> bool:
+            cid = (jid or "").strip().lower()
+            return cid == "status@broadcast" or cid.endswith("@newsletter")
+
+        if _is_unaddressable_broadcast(raw_chat_id) or _is_unaddressable_broadcast(raw_sender_id):
             return False
+
         is_group = data.get("isGroup", False)
         if is_group:
-            chat_id = chat_id_raw
+            chat_id = raw_chat_id
             if not self._is_group_allowed(chat_id):
                 return False
         else:
-            sender_id = str(data.get("senderId") or data.get("from") or "")
+            sender_id = raw_sender_id
             if not self._is_dm_allowed(sender_id):
                 return False
             # DMs that pass the policy gate are always processed
             return True
         # Group messages: check mention / free-response settings
-        chat_id = str(data.get("chatId") or "")
+        chat_id = raw_chat_id
         if chat_id in self._whatsapp_free_response_chats():
             return True
         if not self._whatsapp_require_mention():
@@ -658,6 +669,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
             bridge_env = os.environ.copy()
             if self._reply_prefix is not None:
                 bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
+            bridge_env["WHATSAPP_GROUP_POLICY"] = self._group_policy
+            if self._group_allow_from:
+                allowed_groups = ",".join(sorted(self._group_allow_from))
+                bridge_env["WHATSAPP_GROUP_ALLOWED_USERS"] = allowed_groups
+                bridge_env["WHATSAPP_ALLOWED_GROUPS"] = allowed_groups
 
             self._bridge_process = subprocess.Popen(
                 [
@@ -1279,14 +1295,32 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Determine chat type
             is_group = data.get("isGroup", False)
             chat_type = "group" if is_group else "dm"
+
+            # WhatsApp broadcast-list messages arrive with chatId like
+            # ``1778109128@broadcast`` and senderId set to the human's JID/LID.
+            # Replies to the broadcast JID are not deliverable, so treat these as
+            # DMs from the sender while preserving the broadcast id as an alias.
+            raw_chat_id = str(data.get("chatId") or "")
+            sender_id = str(data.get("senderId") or "")
+            source_chat_id = raw_chat_id
+            source_chat_id_alt = None
+            if (
+                not is_group
+                and raw_chat_id.endswith("@broadcast")
+                and sender_id
+                and not sender_id.endswith("@broadcast")
+            ):
+                source_chat_id = sender_id
+                source_chat_id_alt = raw_chat_id
             
             # Build source
             source = self.build_source(
-                chat_id=data.get("chatId", ""),
+                chat_id=source_chat_id,
                 chat_name=data.get("chatName"),
                 chat_type=chat_type,
                 user_id=data.get("senderId"),
                 user_name=data.get("senderName"),
+                chat_id_alt=source_chat_id_alt,
             )
             
             # Download media URLs to the local cache so agent tools

@@ -17094,6 +17094,74 @@ class GatewayRunner:
 
     # ------------------------------------------------------------------
 
+    def _should_skip_user_profile_for_source(
+        self,
+        *,
+        source: SessionSource,
+        session_key: Optional[str] = None,
+        user_config: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Return True when the global USER profile should be hidden.
+
+        Built-in USER.md describes the agent owner.  In gateway chats with
+        other people, injecting it as "USER PROFILE (who the user is)" is a
+        direct identity hazard: the model may address a contact as the owner
+        even when Current Session Context says otherwise.  Keep MEMORY.md
+        available for contact-specific facts, but only include USER.md when
+        the inbound source can be proven to be the platform home/owner user.
+        """
+        if not source or source.platform == Platform.LOCAL:
+            return False
+
+        platform = source.platform
+        platform_name = platform.value if hasattr(platform, "value") else str(platform)
+        home_ids: set[str] = set()
+
+        try:
+            home = self.config.get_home_channel(platform) if getattr(self, "config", None) else None
+            if home and home.chat_id:
+                home_ids.add(str(home.chat_id))
+        except Exception:
+            pass
+
+        try:
+            cfg = user_config or {}
+            pdata = (cfg.get("platforms") or {}).get(platform_name) or {}
+            hdata = pdata.get("home_channel") or {}
+            if isinstance(hdata, dict) and hdata.get("chat_id"):
+                home_ids.add(str(hdata.get("chat_id")))
+        except Exception:
+            pass
+
+        def _digits(value: str) -> str:
+            return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+        home_digits = {_digits(h) for h in home_ids if _digits(h)}
+        source_values = {
+            str(source.chat_id or ""),
+            str(source.user_id or ""),
+            str(getattr(source, "chat_id_alt", "") or ""),
+            str(getattr(source, "user_id_alt", "") or ""),
+        }
+
+        # Exact IDs cover Telegram/Discord/etc. and WhatsApp's non-LID DMs.
+        if home_ids.intersection(source_values):
+            return False
+
+        # WhatsApp session keys canonicalize LID senders to phone digits:
+        #   agent:main:whatsapp:dm:521...
+        #   agent:main:whatsapp:group:<chat_jid>:521...
+        # Use that canonical tail to identify the owner even when the inbound
+        # event uses an @lid chat/user id.
+        key_parts = [p for p in str(session_key or "").split(":") if p]
+        key_tail_digits = _digits(key_parts[-1]) if key_parts else ""
+        source_digits = {_digits(v) for v in source_values if _digits(v)}
+        if home_digits and (home_digits.intersection(source_digits) or key_tail_digits in home_digits):
+            return False
+
+        # No proof that this speaker is the owner.  Hide USER.md.
+        return True
+
     async def _run_agent(
         self,
         message: str,
@@ -17994,12 +18062,20 @@ class GatewayRunner:
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
+            skip_user_profile = self._should_skip_user_profile_for_source(
+                source=source,
+                session_key=session_key,
+                user_config=user_config,
+            )
             _sig = self._agent_config_signature(
                 turn_route["model"],
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
-                cache_keys=self._extract_cache_busting_config(user_config),
+                cache_keys={
+                    **self._extract_cache_busting_config(user_config),
+                    "skip_user_profile": skip_user_profile,
+                },
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
             )
@@ -18042,6 +18118,7 @@ class GatewayRunner:
                     provider_sort=pr.get("sort"),
                     provider_require_parameters=pr.get("require_parameters", False),
                     provider_data_collection=pr.get("data_collection"),
+                    skip_user_profile=skip_user_profile,
                     session_id=session_id,
                     platform=platform_key,
                     user_id=source.user_id,

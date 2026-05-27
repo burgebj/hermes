@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -199,8 +200,50 @@ def test_dm_policy_allowlist_allows_listed_sender():
 
 def test_dm_policy_open_allows_all_dms():
     adapter = _make_adapter(dm_policy="open")
-
     assert adapter._should_process_message(_dm_message("hello")) is True
+
+
+def test_whatsapp_status_updates_are_not_processed_as_dms():
+    adapter = _make_adapter(dm_policy="open")
+
+    assert adapter._should_process_message(_dm_message(
+        "Regresemos al momento en dónde la vida se veía así 🤍✨",
+        chatId="status@broadcast",
+        senderId="144492044791824@lid",
+        **{"from": "144492044791824@lid"},
+    )) is False
+
+
+def test_whatsapp_broadcast_list_dm_routes_through_sender_policy():
+    adapter = _make_adapter(dm_policy="allowlist", allow_from=["230893885100129@lid"])
+
+    assert adapter._should_process_message(_dm_message(
+        "hola hal",
+        chatId="1778109128@broadcast",
+        senderId="230893885100129@lid",
+        **{"from": "230893885100129@lid"},
+    )) is True
+
+
+
+def test_broadcast_dm_routes_replies_to_sender_not_broadcast_jid():
+    adapter = _make_adapter(dm_policy="allowlist", allow_from=["230893885100129@lid"])
+
+    event = asyncio.run(adapter._build_message_event(_dm_message(
+        "hola hal",
+        **{
+            "chatId": "1778109128@broadcast",
+            "senderId": "230893885100129@lid",
+            "from": "230893885100129@lid",
+            "senderName": "Jorge Alberto Pasillas",
+            "chatName": "Jorge Alberto Pasillas",
+        },
+    )))
+
+    assert event is not None
+    assert event.source.chat_id == "230893885100129@lid"
+    assert event.source.chat_id_alt == "1778109128@broadcast"
+    assert event.source.user_id == "230893885100129@lid"
 
 
 # --- New group_policy tests ---
@@ -234,6 +277,16 @@ def test_group_policy_allowlist_allows_listed_group():
     # Listed group — passes the allowlist gate, mention still required
     assert adapter._should_process_message(_group_message("hello")) is False
     assert adapter._should_process_message(_group_message("agus test")) is True
+
+
+def test_group_policy_allowlist_allows_listed_group_without_direct_trigger_when_mentions_disabled():
+    adapter = _make_adapter(
+        group_policy="allowlist",
+        group_allow_from=["120363001234567890@g.us"],
+        require_mention=False,
+    )
+
+    assert adapter._should_process_message(_group_message("ambient group context")) is True
 
 
 def test_group_policy_open_allows_all_groups():
