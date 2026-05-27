@@ -1,4 +1,4 @@
-import { Box, type ScrollBoxHandle, Text } from '@hermes/ink'
+import { Box, type ScrollBoxHandle, stringWidth, Text } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
@@ -23,9 +23,7 @@ const HEART_COLORS = ['#ff5fa2', '#ff4d6d']
 // Keep verb segment width stable so status-bar content to the right doesn't
 // jitter when the ticker rotates between short/long verbs.
 export const VERB_PAD_LEN = VERBS.reduce((max, v) => Math.max(max, v.length), 0) + 1 // + ellipsis
-export const DURATION_PAD_LEN = 7 // e.g. "  9s", "1m 05s", "59m 59s"
 export const padVerb = (verb: string) => `${verb}…`.padEnd(VERB_PAD_LEN, ' ')
-export const padTickerDuration = (ms: number) => fmtDuration(ms).padStart(DURATION_PAD_LEN, ' ')
 
 // Compact alternates for the `emoji` and `ascii` indicator styles.
 // Each entry is a fixed-width (display-width) glyph.
@@ -114,7 +112,7 @@ function FaceTicker({ color, startedAt }: { color: string; startedAt?: null | nu
   // verb segment is hidden (e.g. `unicode` spinner style).  When the verb
   // IS shown, its trailing padding already provides the gap, so the extra
   // space is harmless.
-  const durationSegment = startedAt ? ` · ${padTickerDuration(now - startedAt)}` : ''
+  const durationSegment = startedAt ? ` · ${fmtDuration(now - startedAt)}` : ''
 
   return (
     <Text color={color}>
@@ -150,6 +148,23 @@ function ctxBar(pct: number | undefined, w = 10) {
   const filled = Math.round((p / 100) * w)
 
   return '█'.repeat(filled) + '░'.repeat(w - filled)
+}
+
+export function statusRuleWidths(cols: number, cwdLabel: string) {
+  const width = Math.max(1, Math.floor(cols || 1))
+  const desiredSeparatorWidth = width >= 24 ? 3 : 1
+  const minLeftWidth = width >= 24 ? 8 : 1
+  const maxRightWidth = Math.max(0, width - desiredSeparatorWidth - minLeftWidth)
+
+  if (!cwdLabel || maxRightWidth <= 0) {
+    return { leftWidth: width, rightWidth: 0, separatorWidth: 0 }
+  }
+
+  const rightWidth = Math.max(0, Math.min(stringWidth(cwdLabel), maxRightWidth))
+  const separatorWidth = rightWidth > 0 ? desiredSeparatorWidth : 0
+  const leftWidth = Math.max(1, width - separatorWidth - rightWidth)
+
+  return { leftWidth, rightWidth, separatorWidth }
 }
 
 function SpawnHud({ t }: { t: Theme }) {
@@ -299,7 +314,7 @@ export function StatusRule({
       : ''
 
   const bar = usage.context_max ? ctxBar(pct) : ''
-  const leftWidth = Math.max(12, cols - cwdLabel.length - 3)
+  const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, cwdLabel)
 
   return (
     <Box height={1}>
@@ -325,6 +340,14 @@ export function StatusRule({
               <SessionDuration startedAt={sessionStartedAt} />
             </Text>
           ) : null}
+          {typeof usage.compressions === 'number' && usage.compressions > 0 ? (
+            <Text color={t.color.muted}>
+              {' │ '}
+              <Text color={usage.compressions >= 10 ? t.color.error : usage.compressions >= 5 ? t.color.warn : t.color.muted}>
+                cmp {usage.compressions}
+              </Text>
+            </Text>
+          ) : null}
           <SpawnHud t={t} />
           {voiceLabel ? (
             <Text
@@ -343,8 +366,16 @@ export function StatusRule({
         </Text>
       </Box>
 
-      <Text color={t.color.border}> ─ </Text>
-      <Text color={t.color.label}>{cwdLabel}</Text>
+      {rightWidth > 0 ? (
+        <>
+          <Text color={t.color.border}>{separatorWidth >= 3 ? ' ─ ' : ' '}</Text>
+          <Box flexShrink={0} width={rightWidth}>
+            <Text color={t.color.label} wrap="truncate-end">
+              {cwdLabel}
+            </Text>
+          </Box>
+        </>
+      ) : null}
     </Box>
   )
 }
