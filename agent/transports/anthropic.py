@@ -88,7 +88,7 @@ class AnthropicTransport(ProviderTransport):
         from agent.transports.types import ToolCall
 
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
-        _MCP_PREFIX = "mcp_"
+        _MCP_PREFIX = "mcp__"
 
         text_parts = []
         reasoning_parts = []
@@ -106,13 +106,19 @@ class AnthropicTransport(ProviderTransport):
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
-                    stripped = name[len(_MCP_PREFIX):]
-                    # Only strip the mcp_ prefix for OAuth-injected tools
-                    # (where Hermes adds the prefix when sending to Anthropic
-                    # and must remove it on the way back).  Native MCP server
-                    # tools (from mcp_servers: in config.yaml) are registered
-                    # in the tool registry under their FULL mcp_<server>_<tool>
-                    # name and must NOT be stripped.  GH-25255.
+                    decoded = name[len(_MCP_PREFIX):].replace("__", "_")
+                    # Only strip/decode the OAuth prefix when the decoded name
+                    # exists in the local registry. Native MCP tools are
+                    # registered as mcp_<server>_<tool>, so decoding preserves
+                    # the full registry name instead of dropping the server.
+                    from tools.registry import registry as _tool_registry
+                    if (_tool_registry.get_entry(decoded)
+                            and not _tool_registry.get_entry(name)):
+                        name = decoded
+                elif strip_tool_prefix and name.startswith("mcp_"):
+                    # Backward-compatible normalization for responses stored
+                    # before the Claude-Code OAuth double-underscore prefix.
+                    stripped = name[len("mcp_"):]
                     from tools.registry import registry as _tool_registry
                     if (_tool_registry.get_entry(stripped)
                             and not _tool_registry.get_entry(name)):
