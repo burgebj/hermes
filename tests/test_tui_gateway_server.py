@@ -808,6 +808,147 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_ws_transport_disconnect_closes_idle_session_resources(monkeypatch):
+    transport = types.SimpleNamespace(is_closed=True)
+    calls = {"ended": [], "worker_closed": 0, "agent_closed": 0}
+
+    class _DB:
+        def end_session(self, session_id, end_reason):
+            calls["ended"].append((session_id, end_reason))
+
+    class _Worker:
+        def close(self):
+            calls["worker_closed"] += 1
+
+    agent = types.SimpleNamespace(session_id="session-key")
+    agent.close = lambda: calls.__setitem__("agent_closed", calls["agent_closed"] + 1)
+    agent.commit_memory_session = lambda _history: None
+
+    server._sessions["sid"] = _session(
+        agent=agent,
+        transport=transport,
+        slash_worker=_Worker(),
+        history=[{"role": "assistant", "content": "done", "finish_reason": "stop"}],
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *args: None)
+
+    try:
+        closed = server._close_sessions_for_transport(transport, "tui_disconnect")
+
+        assert closed == 1
+        assert "sid" not in server._sessions
+        assert calls["ended"] == [("session-key", "tui_disconnect")]
+        assert calls["worker_closed"] == 1
+        assert calls["agent_closed"] == 1
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_ws_transport_disconnect_respects_idle_reap_grace(monkeypatch):
+    now = time.time()
+    transport = types.SimpleNamespace(is_closed=True)
+    calls = {"ended": [], "worker_closed": 0, "agent_closed": 0}
+
+    class _DB:
+        def end_session(self, session_id, end_reason):
+            calls["ended"].append((session_id, end_reason))
+
+    class _Worker:
+        def close(self):
+            calls["worker_closed"] += 1
+
+    agent = types.SimpleNamespace(session_id="session-key")
+    agent.close = lambda: calls.__setitem__("agent_closed", calls["agent_closed"] + 1)
+    agent.commit_memory_session = lambda _history: None
+
+    server._sessions["sid"] = _session(
+        agent=agent,
+        transport=transport,
+        slash_worker=_Worker(),
+        last_seen_at=now,
+        created_at=now,
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *args: None)
+
+    try:
+        assert server._close_sessions_for_transport(transport, "tui_disconnect") == 0
+        assert "sid" in server._sessions
+        assert calls == {"ended": [], "worker_closed": 0, "agent_closed": 0}
+
+        closed = server._reap_confirmed_idle_sessions(
+            grace_seconds=30.0,
+            now=now + 31.0,
+            end_reason="tui_disconnect",
+        )
+
+        assert closed == 1
+        assert "sid" not in server._sessions
+        assert calls["ended"] == [("session-key", "tui_disconnect")]
+        assert calls["worker_closed"] == 1
+        assert calls["agent_closed"] == 1
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_ws_transport_disconnect_detaches_running_session_for_deferred_close(monkeypatch):
+    transport = object()
+    worker = types.SimpleNamespace(
+        close=lambda: (_ for _ in ()).throw(AssertionError("closed running worker"))
+    )
+    server._sessions["sid"] = _session(
+        transport=transport,
+        slash_worker=worker,
+        running=True,
+    )
+
+    try:
+        closed = server._close_sessions_for_transport(transport, "tui_disconnect")
+
+        assert closed == 0
+        assert "sid" in server._sessions
+        assert server._sessions["sid"]["transport"] is server._stdio_transport
+        assert server._sessions["sid"]["_close_when_idle"] == "tui_disconnect"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_orphaned_running_session_closes_after_turn_clears_running(monkeypatch):
+    calls = {"ended": [], "worker_closed": 0, "agent_closed": 0}
+
+    class _DB:
+        def end_session(self, session_id, end_reason):
+            calls["ended"].append((session_id, end_reason))
+
+    class _Worker:
+        def close(self):
+            calls["worker_closed"] += 1
+
+    agent = types.SimpleNamespace(session_id="session-key")
+    agent.close = lambda: calls.__setitem__("agent_closed", calls["agent_closed"] + 1)
+    agent.commit_memory_session = lambda _history: None
+    session = _session(
+        agent=agent,
+        slash_worker=_Worker(),
+        running=False,
+        _close_when_idle="tui_disconnect",
+    )
+    server._sessions["sid"] = session
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *args: None)
+
+    try:
+        assert server._close_session_if_marked_idle("sid", session) is True
+
+        assert "sid" not in server._sessions
+        assert calls["ended"] == [("session-key", "tui_disconnect")]
+        assert calls["worker_closed"] == 1
+        assert calls["agent_closed"] == 1
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_init_session_fires_reset_hook(monkeypatch):
     hooks = []
 
@@ -3132,6 +3273,27 @@ def test_mirror_slash_compress_does_not_prelock_history(monkeypatch):
     assert seen["compress"]
     assert seen["sync"]
     assert ("session.info", "sid", {"model": "x"}) in emitted
+
+
+def test_slash_worker_waiter_reaps_exited_process():
+    queue_mod = __import__("queue")
+
+    class _Proc:
+        def __init__(self):
+            self.wait_called = False
+
+        def wait(self):
+            self.wait_called = True
+            return 0
+
+    worker = server._SlashWorker.__new__(server._SlashWorker)
+    worker.proc = _Proc()
+    worker.stdout_queue = queue_mod.Queue()
+
+    server._SlashWorker._wait_for_exit(worker)
+
+    assert worker.proc.wait_called is True
+    assert worker.stdout_queue.get_nowait() is None
 
 
 # ---------------------------------------------------------------------------
