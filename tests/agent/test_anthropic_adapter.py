@@ -1122,6 +1122,70 @@ class TestBuildAnthropicKwargs:
         assert kwargs["tools"][0]["name"] == "mcp__terminal"
         assert "mcp_terminal" not in str(kwargs["tools"])
 
+    def test_oauth_concrete_tool_choice_uses_encoded_tool_name(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="terminal",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__terminal"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "mcp__terminal"}
+
+    def test_oauth_concrete_tool_choice_escapes_embedded_underscores(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "browser_get_images",
+                    "description": "List browser images",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="browser_get_images",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        encoded = "mcp__browser__get__images"
+        assert kwargs["tools"][0]["name"] == encoded
+        assert kwargs["tool_choice"] == {"type": "tool", "name": encoded}
+
+    def test_non_oauth_concrete_tool_choice_keeps_local_tool_name(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="terminal",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=False,
+        )
+
+        assert kwargs["tools"][0]["name"] == "terminal"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "terminal"}
+
     def test_oauth_tool_name_encoding_escapes_embedded_underscores(self):
         kwargs = build_anthropic_kwargs(
             model="claude-sonnet-4-6",
