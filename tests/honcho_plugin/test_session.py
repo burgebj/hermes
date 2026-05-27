@@ -230,6 +230,21 @@ class TestPeerLookupHelpers:
             search_query="neuralancer",
         )
 
+    def test_set_peer_card_uses_same_observer_target_as_get_peer_card(self):
+        mgr, session = self._make_cached_manager()
+        assistant_peer = MagicMock()
+        assistant_peer.set_card.return_value = ["Role: DevOps"]
+        mgr._get_or_create_peer = MagicMock(return_value=assistant_peer)
+
+        result = mgr.set_peer_card(session.key, ["Role: DevOps"], peer="user")
+
+        assert result == ["Role: DevOps"]
+        mgr._get_or_create_peer.assert_called_once_with(session.assistant_peer_id)
+        assistant_peer.set_card.assert_called_once_with(
+            ["Role: DevOps"],
+            target=session.user_peer_id,
+        )
+
     def test_search_context_unified_mode_uses_user_self_context(self):
         mgr, session = self._make_cached_manager()
         mgr._ai_observe_others = False
