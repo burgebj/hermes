@@ -365,8 +365,11 @@ The setup wizard installs dependencies automatically and only installs what's ne
 | `retain_user_prefix` | `User` | Label used before user turns in auto-retained transcripts |
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
 | `recall_tags` | — | Tags to filter on recall |
+| `recall_types` | — | Optional list of Hindsight memory types to recall. Unset means all available types |
 
-See [plugin README](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference.
+If long-running sessions start injecting repeated synthesized memories, set `"recall_types": ["observation"]` in `$HERMES_HOME/hindsight/config.json` to limit automatic recall to direct observations. This reduces repeated `experience` / `world` context, at the cost of excluding those synthesized memory layers from automatic recall.
+
+See [plugin README](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference and trade-offs.
 
 ---
 
