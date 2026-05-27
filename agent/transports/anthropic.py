@@ -111,6 +111,8 @@ class AnthropicTransport(ProviderTransport):
                     # registry isn't reliably populated in test/early-init paths.
                     name = name[len(_MCP_PREFIX):].replace("__", "_")
                 elif strip_tool_prefix and name.startswith("mcp_"):
+                    # Legacy single-underscore MCP prefix from pre-OAuth
+                    # responses. Always strip when decoding OAuth responses.
                     name = name[len("mcp_"):]
                 tool_calls.append(
                     ToolCall(
