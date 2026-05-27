@@ -2110,10 +2110,24 @@ _orphan_stdio_pids: set = set()
 def _snapshot_child_pids() -> set:
     """Return a set of current child process PIDs.
 
-    Uses /proc on Linux, falls back to psutil, then empty set.
-    Used by _run_stdio to identify the subprocess spawned by stdio_client.
+    Uses ps --ppid on WSL2 (where /proc/children is broken for
+    multi-threaded processes), falls back to /proc on other Linux,
+    then psutil, then empty set.
     """
     my_pid = os.getpid()
+
+    # Try `ps --ppid` first — works on WSL2 where /proc/children
+    # returns empty for multi-threaded processes (Hermes has 12+ threads).
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ps", "--ppid", str(my_pid), "-o", "pid=", "--no-headers"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return {int(p) for p in result.stdout.split()}
+    except Exception:
+        pass
 
     # Linux: read from /proc
     try:
