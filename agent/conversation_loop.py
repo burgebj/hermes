@@ -1774,6 +1774,64 @@ def run_conversation(
                                 # just re-run the same API call from the current
                                 # message state, giving the model another chance.
                                 continue
+
+                            # Retry already exhausted.  Before giving up, try
+                            # to compress the context — repeated truncation of
+                            # tool-call JSON is a strong signal the prompt has
+                            # grown past the model's reliable structured-output
+                            # window even when the API itself reports no
+                            # context-length error.  Without this escape hatch,
+                            # high-context models (e.g. 1M-token Gemini) get
+                            # stuck in an infinite tool-loop because their
+                            # compression threshold (`context_length *
+                            # threshold_percent`) sits far above the point at
+                            # which their JSON output starts truncating.
+                            # See: https://github.com/NousResearch/hermes-agent/issues/31600
+                            if (
+                                agent.compression_enabled
+                                and compression_attempts < max_compression_attempts
+                            ):
+                                compression_attempts += 1
+                                agent._vprint(
+                                    f"{agent.log_prefix}⚠️  Truncated tool call response detected again — "
+                                    f"attempting context compression ({compression_attempts}/{max_compression_attempts}) "
+                                    f"to recover before giving up...",
+                                    force=True,
+                                )
+                                try:
+                                    original_len = len(messages)
+                                    messages, active_system_prompt = agent._compress_context(
+                                        messages, system_message,
+                                        approx_tokens=approx_tokens,
+                                        task_id=effective_task_id,
+                                    )
+                                    # Compression starts a new SQLite session;
+                                    # mirror the other compression call sites
+                                    # so flushes write to the new session.
+                                    conversation_history = None
+                                except Exception as _compress_err:
+                                    logger.warning(
+                                        "Compression on truncated-tool-call recovery failed: %s",
+                                        _compress_err,
+                                    )
+                                    original_len = 0  # force the give-up branch
+                                else:
+                                    if len(messages) < original_len:
+                                        agent._emit_status(
+                                            f"🗜️ Compressed {original_len} → {len(messages)} messages, "
+                                            f"retrying after tool-call truncation..."
+                                        )
+                                        # Reset the per-turn truncation counter so
+                                        # the post-compression retry gets its own
+                                        # 1-attempt budget instead of inheriting
+                                        # the pre-compression exhaustion.
+                                        truncated_tool_call_retries = 0
+                                        restart_with_compressed_messages = True
+                                        break
+
+                            # Compression didn't recover (disabled, exhausted,
+                            # failed, or no reduction) — surface any buffered
+                            # status before giving up for good.
                             agent._flush_status_buffer()
                             if _is_stub_stall:
                                 agent._vprint(
