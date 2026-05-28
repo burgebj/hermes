@@ -631,6 +631,7 @@ const sidebars: SidebarsConfig = {
         'user-guide/messaging/wecom-callback',
         'user-guide/messaging/weixin',
         'user-guide/messaging/bluebubbles',
+        'user-guide/messaging/photon',
         'user-guide/messaging/qqbot',
         'user-guide/messaging/yuanbao',
         'user-guide/messaging/teams',
