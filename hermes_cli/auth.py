@@ -90,6 +90,7 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CLAUDE_CODE_ACP_BASE_URL = "acp://claude-code"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
@@ -228,6 +229,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "claude-code-acp": ProviderConfig(
+        id="claude-code-acp",
+        name="Claude Code ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CLAUDE_CODE_ACP_BASE_URL,
+        base_url_env_var="CLAUDE_CODE_ACP_BASE_URL",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -5892,6 +5900,48 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     return {
         "provider": provider_id,
         "api_key": "copilot-acp",
+        "base_url": base_url.rstrip("/"),
+        "command": resolved_command or command,
+        "args": args,
+        "source": "process",
+    }
+
+
+def resolve_claude_code_acp_credentials(
+    provider_id: str = "claude-code-acp",
+) -> dict:
+    """Resolve Claude Code ACP subprocess credentials."""
+    pconfig = PROVIDER_REGISTRY.get(provider_id)
+    if not pconfig or pconfig.auth_type != "external_process":
+        raise AuthError(
+            f"Provider '{provider_id}' is not an external-process provider.",
+            provider=provider_id,
+            code="invalid_provider",
+        )
+
+    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    if not base_url:
+        base_url = pconfig.inference_base_url
+
+    command = (
+        os.getenv("HERMES_CLAUDE_CODE_ACP_COMMAND", "").strip()
+        or os.getenv("CLAUDE_ACP_PATH", "").strip()
+        or "npx"
+    )
+    raw_args = os.getenv("HERMES_CLAUDE_CODE_ACP_ARGS", "").strip()
+    args = shlex.split(raw_args) if raw_args else ["-y", "@agentclientprotocol/claude-agent-acp"]
+    resolved_command = shutil.which(command) if command else None
+    if not resolved_command and not base_url.startswith("acp+tcp://"):
+        raise AuthError(
+            f"Could not find the Claude Code ACP command '{command}'. "
+            "Install Node.js 20+ or set HERMES_CLAUDE_CODE_ACP_COMMAND/CLAUDE_ACP_PATH.",
+            provider=provider_id,
+            code="missing_claude_code_cli",
+        )
+
+    return {
+        "provider": provider_id,
+        "api_key": "claude-code-acp",
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

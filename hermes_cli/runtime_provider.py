@@ -1465,6 +1465,20 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    if provider == "claude-code-acp":
+        from hermes_cli.auth import resolve_claude_code_acp_credentials
+        creds = resolve_claude_code_acp_credentials(provider)
+        return {
+            "provider": "claude-code-acp",
+            "api_mode": "chat_completions",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "command": creds.get("command", ""),
+            "args": list(creds.get("args") or []),
+            "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
     # Anthropic (native Messages API)
     if provider == "anthropic":
         # Allow base URL override from config.yaml model.base_url, but only
