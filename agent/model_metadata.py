@@ -837,6 +837,15 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
     Cache key is ``model@base_url`` so the same model name served from
     different providers can have different limits.
     """
+    # Never persist non-positive values — a 0 or negative context length
+    # is always a bug and would poison the cache, causing downstream
+    # `get_model_context_length()` to return 0 (since `0 is not None`).
+    if length <= 0:
+        logger.warning(
+            "Refusing to cache non-positive context length %s -> %s tokens",
+            f"{model}@{base_url}", length,
+        )
+        return
     key = f"{model}@{base_url}"
     cache = _load_context_cache()
     if cache.get(key) == length:
@@ -1491,43 +1500,55 @@ def get_model_context_length(
     if base_url and provider != "lmstudio":
         cached = get_cached_context_length(model, base_url)
         if cached is not None:
-            # Invalidate stale Codex OAuth cache entries: pre-PR #14935 builds
-            # resolved gpt-5.x to the direct-API value (e.g. 1.05M) via
-            # models.dev and persisted it. Codex OAuth caps at 272K for every
-            # slug, so any cached Codex entry at or above 400K is a leftover
-            # from the old resolution path. Drop it and fall through to the
-            # live /models probe in step 5 below.
-            if provider == "openai-codex" and cached >= 400_000:
-                logger.info(
-                    "Dropping stale Codex cache entry %s@%s -> %s (pre-fix value); "
-                    "re-resolving via live /models probe",
-                    model, base_url, f"{cached:,}",
+            # Reject non-positive cached values — a 0 or negative value
+            # is always a bug (corrupted cache, probe failure, or manual
+            # edit).  Without this guard, `0 is not None` short-circuits
+            # the resolution chain and the compressor gets context_length=0,
+            # breaking every status-bar and /usage display downstream.
+            if cached <= 0:
+                logger.warning(
+                    "Dropping non-positive cache entry %s@%s -> %s; re-resolving",
+                    model, base_url, cached,
                 )
                 _invalidate_cached_context_length(model, base_url)
-            # Invalidate stale 32k cache entries for Kimi-family models.
-            elif cached <= 32768 and _model_name_suggests_kimi(model):
-                logger.info(
-                    "Dropping stale Kimi cache entry %s@%s -> %s (OpenRouter underreport); "
-                    "re-resolving via hardcoded defaults",
-                    model, base_url, f"{cached:,}",
-                )
-                _invalidate_cached_context_length(model, base_url)
-            # Nous Portal: the portal /v1/models endpoint is authoritative.
-            # Bypass the persistent cache so step 5b can always reconcile
-            # against it — this corrects pre-fix entries seeded from the
-            # OR catalog (the same OR underreport class that the Kimi/Qwen
-            # DEFAULT_CONTEXT_LENGTHS overrides exist to mitigate) without
-            # touching the on-disk file when the portal is unreachable.
-            # The in-memory 300s endpoint metadata cache makes the per-call
-            # cost amortise to ~0 within a process.
-            elif _infer_provider_from_url(base_url) == "nous":
-                logger.debug(
-                    "Bypassing persistent cache for %s@%s (Nous portal authoritative)",
-                    model, base_url,
-                )
-                # Fall through; step 5b reconciles and overwrites if portal responds.
             else:
-                return cached
+                # Invalidate stale Codex OAuth cache entries: pre-PR #14935 builds
+                # resolved gpt-5.x to the direct-API value (e.g. 1.05M) via
+                # models.dev and persisted it. Codex OAuth caps at 272K for every
+                # slug, so any cached Codex entry at or above 400K is a leftover
+                # from the old resolution path. Drop it and fall through to the
+                # live /models probe in step 5 below.
+                if provider == "openai-codex" and cached >= 400_000:
+                    logger.info(
+                        "Dropping stale Codex cache entry %s@%s -> %s (pre-fix value); "
+                        "re-resolving via live /models probe",
+                        model, base_url, f"{cached:,}",
+                    )
+                    _invalidate_cached_context_length(model, base_url)
+                # Invalidate stale 32k cache entries for Kimi-family models.
+                elif cached <= 32768 and _model_name_suggests_kimi(model):
+                    logger.info(
+                        "Dropping stale Kimi cache entry %s@%s -> %s (OpenRouter underreport); "
+                        "re-resolving via hardcoded defaults",
+                        model, base_url, f"{cached:,}",
+                    )
+                    _invalidate_cached_context_length(model, base_url)
+                # Nous Portal: the portal /v1/models endpoint is authoritative.
+                # Bypass the persistent cache so step 5b can always reconcile
+                # against it — this corrects pre-fix entries seeded from the
+                # OR catalog (the same OR underreport class that the Kimi/Qwen
+                # DEFAULT_CONTEXT_LENGTHS overrides exist to mitigate) without
+                # touching the on-disk file when the portal is unreachable.
+                # The in-memory 300s endpoint metadata cache makes the per-call
+                # cost amortise to ~0 within a process.
+                elif _infer_provider_from_url(base_url) == "nous":
+                    logger.debug(
+                        "Bypassing persistent cache for %s@%s (Nous portal authoritative)",
+                        model, base_url,
+                    )
+                    # Fall through; step 5b reconciles and overwrites if portal responds.
+                else:
+                    return cached
 
     # 1b. AWS Bedrock — use static context length table.
     # Bedrock's ListFoundationModels API doesn't expose context window sizes,
