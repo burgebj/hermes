@@ -1565,6 +1565,47 @@ class TestTryMainAgentModelFallback:
         assert client is None
 
 
+class TestResolveSingleProviderKwargs:
+    """Regression for #27555: _resolve_single_provider must use the kwarg names
+    that resolve_provider_client actually accepts, otherwise every entry in
+    auxiliary.<task>.fallback_chain is silently skipped via TypeError.
+    """
+
+    def test_forwards_base_url_and_api_key_as_explicit_kwargs(self):
+        from agent.auxiliary_client import _resolve_single_provider
+        fake_client = MagicMock()
+        with patch("agent.auxiliary_client.resolve_provider_client",
+                   return_value=(fake_client, "mimo-v2-omni")) as rpc:
+            client = _resolve_single_provider(
+                "xiaomi-tp",
+                model="mimo-v2-omni",
+                base_url="https://xm.example/v1",
+                api_key="xm-test-key",
+            )
+        assert client is fake_client
+        rpc.assert_called_once_with(
+            provider="xiaomi-tp",
+            model="mimo-v2-omni",
+            explicit_base_url="https://xm.example/v1",
+            explicit_api_key="xm-test-key",
+        )
+
+    def test_real_resolve_provider_client_accepts_forwarded_kwargs(self):
+        """Real-signature smoke test: catches a future rename of either kwarg."""
+        from agent.auxiliary_client import _resolve_single_provider
+        # `custom` provider + explicit base_url/api_key is the cheapest path
+        # through resolve_provider_client that doesn't touch the network.
+        client = _resolve_single_provider(
+            "custom",
+            model="some-model",
+            base_url="https://example.invalid/v1",
+            api_key="sk-test",
+        )
+        # We only care that no TypeError bubbled up — the returned client may
+        # be a real OpenAI() instance, which is fine; it never gets called.
+        assert client is not None
+
+
 # ---------------------------------------------------------------------------
 # Gate: _resolve_api_key_provider must skip anthropic when not configured
 # ---------------------------------------------------------------------------
