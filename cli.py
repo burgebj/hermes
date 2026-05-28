@@ -693,6 +693,16 @@ try:
 except Exception:
     pass  # Skin engine is optional — default skin used if unavailable
 
+# Start appearance watcher for auto-skin switching
+try:
+    from hermes_cli.skin_engine import start_appearance_watcher
+    def _on_appearance_change(new_skin_name: str):
+        from hermes_cli.skin_engine import set_active_skin
+        set_active_skin(new_skin_name)
+    start_appearance_watcher(_on_appearance_change)
+except Exception:
+    pass
+
 # Initialize tool preview length from config
 try:
     from agent.display import set_tool_preview_max_len
@@ -9515,9 +9525,19 @@ class HermesCLI:
         # _DIM is now a fixed dim+italic ANSI escape (terminal-default fg)
         # so it doesn't need re-resolving on skin switch.
         if save_config_value("display.skin", new_skin):
-            print(f"  Skin set to: {new_skin} (saved)")
+            if new_skin == "auto":
+                from hermes_cli.skin_engine import get_resolved_auto_skin
+                resolved = get_resolved_auto_skin() or "?"
+                print(f"  Skin set to: auto (resolved: {resolved}) (saved)")
+            else:
+                print(f"  Skin set to: {new_skin} (saved)")
         else:
-            print(f"  Skin set to: {new_skin}")
+            if new_skin == "auto":
+                from hermes_cli.skin_engine import get_resolved_auto_skin
+                resolved = get_resolved_auto_skin() or "?"
+                print(f"  Skin set to: auto (resolved: {resolved})")
+            else:
+                print(f"  Skin set to: {new_skin}")
         print("  Note: banner colors will update on next session start.")
         if self._apply_tui_skin_style():
             print("  Prompt + TUI colors updated.")
