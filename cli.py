@@ -386,6 +386,7 @@ def load_cli_config() -> Dict[str, Any]:
         "compression": {
             "enabled": True,      # Auto-compress when approaching context limit
             "threshold": 0.50,    # Compress at 50% of model's context limit
+            "status_messages": True,  # Show user-facing lifecycle messages during context compression
         },
         "agent": {
             "max_turns": 90,  # Default max tool-calling iterations (shared with subagents)
