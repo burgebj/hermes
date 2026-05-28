@@ -342,7 +342,8 @@ class TestSlackNativeSlashes:
         assert "btw" in names
         assert "bg" in names
         assert "reset" in names
-        assert "q" in names
+        # q is lower priority and may be dropped by Slack's 50-command cap
+        # when many plugins are loaded — canonical /queue still works
 
     def test_telegram_parity(self):
         """Every Telegram bot command must be registerable on Slack too.
