@@ -362,7 +362,7 @@ if _FORCE_IPV4_EARLY:
 import logging
 import threading
 import time as _time
-from datetime import datetime
+from datetime import datetime, UTC
 
 from hermes_cli import __version__, __release_date__
 logger = logging.getLogger(__name__)
@@ -6870,8 +6870,8 @@ def _format_time_ago(iso_ts: str) -> str:
         from datetime import datetime, timezone
         ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        delta = datetime.now(timezone.utc) - ts
+            ts = ts.replace(tzinfo=UTC)
+        delta = datetime.now(UTC) - ts
         secs = int(delta.total_seconds())
         if secs < 60:
             return "just now"
@@ -7192,7 +7192,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
 
     from datetime import datetime, timezone
 
-    stash_name = datetime.now(timezone.utc).strftime(
+    stash_name = datetime.now(UTC).strftime(
         "hermes-update-autostash-%Y%m%d-%H%M%S"
     )
     print("→ Local changes detected — stashing before update...")

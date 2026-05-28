@@ -24,6 +24,7 @@ from hermes_cli.nous_subscription import get_nous_subscription_features
 from hermes_cli.runtime_provider import resolve_requested_provider
 from hermes_constants import OPENROUTER_MODELS_URL
 from tools.tool_backend_helpers import managed_nous_tools_enabled
+from datetime import UTC
 
 def check_mark(ok: bool) -> str:
     if ok:
@@ -55,7 +56,7 @@ def _format_iso_timestamp(value) -> str:
     try:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
     except Exception:
         return value
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -88,6 +89,7 @@ def _effective_provider_label() -> str:
 
 
 from hermes_constants import is_termux as _is_termux
+from datetime import UTC
 
 
 def show_status(args):
@@ -275,7 +277,7 @@ def show_status(args):
     qwen_exp = qwen_status.get("expires_at_ms")
     if qwen_exp:
         from datetime import datetime, timezone
-        print(f"    Access exp: {datetime.fromtimestamp(int(qwen_exp) / 1000, tz=timezone.utc).isoformat()}")
+        print(f"    Access exp: {datetime.fromtimestamp(int(qwen_exp) / 1000, tz=UTC).isoformat()}")
     if qwen_status.get("error") and not qwen_logged_in:
         print(f"    Error:      {qwen_status.get('error')}")
 
