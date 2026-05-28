@@ -227,7 +227,7 @@ def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
         return None
     try:
         raw = path.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     if not raw:
         return None

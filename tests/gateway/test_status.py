@@ -941,3 +941,32 @@ class TestReadProcessCmdlinePsFallback:
         )
         result = status._read_process_cmdline(12345)
         assert "hermes_cli/main.py" in result
+
+
+class TestReadJsonFile:
+    """Tests for _read_json_file UnicodeDecodeError handling."""
+
+    def test_read_json_file_returns_none_on_unicode_decode_error(self, tmp_path):
+        """Corrupted file with non-UTF-8 bytes is treated as missing."""
+        corrupted = tmp_path / "gateway_state.json"
+        # Valid JSON followed by TLS record garbage
+        corrupted.write_bytes(b'{"gateway_state": "running"}\n\x17\x03\x03\x00\x13')
+
+        result = status._read_json_file(corrupted)
+        assert result is None
+
+    def test_read_json_file_parses_valid_json(self, tmp_path):
+        """Valid JSON is parsed correctly."""
+        valid = tmp_path / "state.json"
+        valid.write_text('{"key": "value", "n": 42}', encoding="utf-8")
+
+        result = status._read_json_file(valid)
+        assert result == {"key": "value", "n": 42}
+
+    def test_read_json_file_returns_none_on_empty_file(self, tmp_path):
+        """Empty file is treated as missing."""
+        empty = tmp_path / "empty.json"
+        empty.write_text("", encoding="utf-8")
+
+        result = status._read_json_file(empty)
+        assert result is None
