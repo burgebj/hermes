@@ -2200,7 +2200,7 @@ class TestPtyWebSocket:
 
         winsize_script = (
             "import fcntl, struct, termios, time; "
-            "time.sleep(0.15); "
+            "time.sleep(0.5); "
             "rows, cols, *_ = struct.unpack('HHHH', "
             "fcntl.ioctl(0, termios.TIOCGWINSZ, b'\\0' * 8)); "
             "print(cols); print(rows)"
