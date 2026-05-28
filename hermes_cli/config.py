@@ -4769,6 +4769,35 @@ _FALLBACK_COMMENT = """
 #   model: anthropic/claude-sonnet-4
 """
 
+_MESSAGING_FIREWALL_COMMENT = """
+# ── Messaging Firewall ────────────────────────────────────────────────
+# Confirm-before-send gate for outbound messages (send_message tool).
+# OFF by default. When enabled, the agent may READ and COMPOSE freely,
+# but DELIVERY to a third party requires explicit human approval —
+# Vitalik Buterin's "Human + LLM 2-of-2" model. Sends to self / the
+# home channel, trusted_targets, auto_approve matches, allow-policy
+# platforms, and cron jobs pass without a prompt. Interactive approval
+# currently works in CLI sessions; gateway sends that need confirmation
+# fail closed (denied) until the gateway approval UI ships.
+#
+# messaging_firewall:
+#   enabled: false
+#   self_targets:               # always allowed (owner's own accounts)
+#     - "signal:+155****4567"
+#     - "email:me@example.com"
+#   trusted_targets:            # never require confirmation (glob ok)
+#     - "telegram:-1001234567890"
+#     - "discord:#bot-home"
+#   platform_policy:            # per-platform: allow | confirm | deny
+#     discord: confirm
+#     signal: confirm
+#   auto_approve:               # (target, message) rules that skip the prompt
+#     - target_pattern: "*"
+#       message_pattern: "Scheduled:"
+#   approval_timeout: 300       # seconds before an un-answered prompt denies
+#   gate_cron: false            # set true to gate cron-scheduled sends too
+"""
+
 
 _COMMENTED_SECTIONS = """
 # ── Security ──────────────────────────────────────────────────────────
@@ -4836,6 +4865,9 @@ def save_config(config: Dict[str, Any]):
             fb_is_valid = bool(fb.get("provider") and fb.get("model"))
         if not fb_is_valid:
             parts.append(_FALLBACK_COMMENT)
+        mf = normalized.get("messaging_firewall")
+        if not isinstance(mf, dict) or not mf:
+            parts.append(_MESSAGING_FIREWALL_COMMENT)
 
         atomic_yaml_write(
             config_path,

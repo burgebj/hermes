@@ -298,6 +298,68 @@ def _handle_send(args):
         except Exception as e:
             return json.dumps({"error": f"Failed to open Slack DM: {e}"})
 
+    # --- Messaging Firewall Gate -------------------------------------------
+    # Confirm-before-send for outbound messages to third parties. Reads
+    # ~/.hermes/config.yaml fresh; a no-op unless messaging_firewall.enabled
+    # is true. Sends to self / home channel, trusted targets, auto-approve
+    # patterns, allow-policy platforms, and cron jobs pass without a prompt.
+    # Everything else blocks for explicit human approval. See
+    # docs/integrations/MESSAGING_FIREWALL_DESIGN.md.
+    try:
+        from tools.send_firewall import (
+            evaluate_send_policy,
+            is_enabled as _firewall_enabled,
+            request_approval,
+        )
+
+        if _firewall_enabled():
+            decision = evaluate_send_policy(
+                platform=platform_name,
+                chat_id=chat_id,
+                message=cleaned_message,
+                target_label=target,
+                used_home_channel=used_home_channel,
+            )
+            if decision.needs_confirmation:
+                from tools.approval import get_current_session_key
+                session_key = get_current_session_key()
+                approved, edited_message = request_approval(
+                    platform=platform_name,
+                    chat_id=chat_id,
+                    message=cleaned_message,
+                    target_label=target,
+                    session_key=session_key,
+                )
+                if not approved:
+                    return json.dumps({
+                        "error": (
+                            f"Message to {target} was blocked by the messaging "
+                            "firewall (not approved by user)."
+                        ),
+                        "firewall": "denied",
+                    })
+                if edited_message is not None and edited_message != cleaned_message:
+                    # Re-derive everything from the human-edited text: the
+                    # [[as_document]] directive, media attachments, and the
+                    # mirror preview may all differ from the original.
+                    force_document_attachments = "[[as_document]]" in edited_message
+                    media_files, cleaned_message = BasePlatformAdapter.extract_media(edited_message)
+                    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+                    mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
+            elif not decision.allowed:
+                # Platform policy == "deny": hard block, no prompt.
+                return json.dumps({
+                    "error": (
+                        f"Message to {target} was blocked by the messaging "
+                        f"firewall (platform policy: deny)."
+                    ),
+                    "firewall": "policy_denied",
+                })
+    except ImportError:
+        # send_firewall unavailable -> behave as if firewall is off.
+        pass
+    # --- End Messaging Firewall Gate ---------------------------------------
+
     try:
         from model_tools import _run_async
         result = _run_async(

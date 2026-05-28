@@ -308,6 +308,42 @@ terminal:
 #   tirith_fail_open: true      # Allow commands if tirith unavailable
 
 # =============================================================================
+# Messaging Firewall (confirm-before-send)
+# =============================================================================
+# Optional gate on the send_message tool. OFF by default. When enabled, the
+# agent may READ incoming messages and COMPOSE replies freely, but DELIVERY to
+# a third party requires explicit human confirmation — a "Human + LLM 2-of-2"
+# security model inspired by Vitalik Buterin's messaging-daemon. This blunts
+# prompt-injection / compromised-skill exfiltration: a hijacked agent still
+# cannot quietly message someone on your behalf.
+#
+# Decision order (first match wins): disabled -> cron-exempt -> send-to-self /
+# home channel -> trusted_targets -> auto_approve -> platform_policy -> confirm.
+#
+# Interactive approval currently works in CLI sessions (prompt with full message
+# preview + approve/edit/always/deny). In gateway sessions a send that needs
+# confirmation FAILS CLOSED (is denied) until the gateway approval UI ships —
+# use trusted_targets / platform_policy: allow to permit specific gateway sends.
+#
+# messaging_firewall:
+#   enabled: false               # master switch (opt-in)
+#   self_targets:                # always allowed — the owner's own accounts
+#     - "signal:+155****4567"
+#     - "email:me@example.com"
+#   trusted_targets:             # never require confirmation (fnmatch globs ok)
+#     - "telegram:-1001234567890"
+#     - "discord:#bot-home"
+#   platform_policy:             # per-platform: allow | confirm | deny
+#     discord: confirm
+#     signal: confirm
+#     email: confirm
+#   auto_approve:                # (target, message) rules that skip the prompt
+#     - target_pattern: "*"      # any platform (fnmatch glob)
+#       message_pattern: "Scheduled:"   # prefix OR glob match on the message
+#   approval_timeout: 300        # seconds before an un-answered prompt denies
+#   gate_cron: false             # set true to gate cron-scheduled sends too
+
+# =============================================================================
 # Browser Tool Configuration
 # =============================================================================
 browser:
