@@ -25,6 +25,24 @@ from tools.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
 
+_SNAPSHOT_SECRET_ENV_RE = (
+    r"(^|[^[:alnum:]])(TOKEN|SECRET|PASSWORD|PASSWD|KEY|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|"
+    r"CREDENTIALS?|AUTHORIZATION|BEARER)([^[:alnum:]]|$)"
+)
+
+
+def _snapshot_export_command(target: str) -> str:
+    """Write non-secret exported variables to *target* for session replay."""
+    # ``export -p`` emits shell-safe declarations.  Keep the session snapshot
+    # useful for PATH/HOME/etc. but do not persist credentials into /tmp-backed
+    # hermes-snap-*.sh files.  Avoid a broad ``AUTH`` match so SSH_AUTH_SOCK and
+    # XAUTHORITY survive; explicit AUTHORIZATION/BEARER cover HTTP credentials.
+    return (
+        "export -p | "
+        f"grep -Eiv {shlex.quote(_SNAPSHOT_SECRET_ENV_RE)} "
+        f"> {target}"
+    )
+
 # Opt-in debug tracing for the interrupt/activity/poll machinery.  Set
 # HERMES_DEBUG_INTERRUPT=1 to log loop entry/exit, periodic heartbeats, and
 # every is_interrupted() state change from _wait_for_process.  Off by default
@@ -370,7 +388,7 @@ class BaseEnvironment(ABC):
         _quoted_snap = shlex.quote(self._snapshot_path)
         _quoted_cwd_file = shlex.quote(self._cwd_file)
         bootstrap = (
-            f"export -p > {_quoted_snap}\n"
+            f"{_snapshot_export_command(_quoted_snap)}\n"
             f"declare -f | grep -vE '^_[^_]' >> {_quoted_snap}\n"
             f"alias -p >> {_quoted_snap}\n"
             f"echo 'shopt -s expand_aliases' >> {_quoted_snap}\n"
@@ -449,9 +467,9 @@ class BaseEnvironment(ABC):
         parts.append(f"eval '{escaped}'")
         parts.append("__hermes_ec=$?")
 
-        # Re-dump env vars to snapshot (last-writer-wins for concurrent calls)
+        # Re-dump non-secret env vars to snapshot (last-writer-wins for concurrent calls)
         if self._snapshot_ready:
-            parts.append(f"export -p > {_quoted_snap} 2>/dev/null || true")
+            parts.append(f"{_snapshot_export_command(_quoted_snap)} 2>/dev/null || true")
 
         # Write CWD to file (local reads this) and stdout marker (remote parses this)
         parts.append(f"pwd -P > {_quoted_cwd_file} 2>/dev/null || true")
