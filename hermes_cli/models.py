@@ -636,6 +636,66 @@ def union_with_portal_free_recommendations(
     return (augmented_ids, augmented_pricing)
 
 
+def union_with_portal_recommendations(
+    curated_ids: list[str],
+    pricing: dict[str, dict[str, str]],
+    portal_base_url: str = "",
+    *,
+    force_refresh: bool = False,
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Augment curated list with Portal free + paid recommended models.
+
+    Single-call variant of ``union_with_portal_free_recommendations``
+    and ``union_with_portal_paid_recommendations`` — fetches the
+    ``/api/nous/recommended-models`` endpoint once and merges BOTH
+    ``freeRecommendedModels`` and ``paidRecommendedModels`` into the
+    curated list.  Synthesizes zero-cost pricing for free models so
+    :func:`partition_nous_models_by_tier` keeps them selectable.
+
+    Failures (network, parse, missing field) are silent and degrade to
+    returning the inputs unchanged.
+    """
+    try:
+        payload = fetch_nous_recommended_models(
+            portal_base_url, force_refresh=force_refresh
+        )
+    except Exception:
+        return (list(curated_ids), dict(pricing))
+
+    if not isinstance(payload, dict):
+        return (list(curated_ids), dict(pricing))
+
+    portal_ids: list[str] = []
+    augmented_pricing = dict(pricing)
+
+    free_block = payload.get("freeRecommendedModels")
+    if isinstance(free_block, list):
+        for entry in free_block:
+            name = _extract_model_name(entry)
+            if name and name not in portal_ids:
+                portal_ids.append(name)
+                if name not in augmented_pricing:
+                    augmented_pricing[name] = {"prompt": "0", "completion": "0"}
+
+    paid_block = payload.get("paidRecommendedModels")
+    if isinstance(paid_block, list):
+        for entry in paid_block:
+            name = _extract_model_name(entry)
+            if name and name not in portal_ids:
+                portal_ids.append(name)
+
+    if not portal_ids:
+        return (list(curated_ids), dict(pricing))
+
+    augmented_ids = list(curated_ids)
+    seen = set(augmented_ids)
+    new_ones = [mid for mid in portal_ids if mid not in seen]
+    if new_ones:
+        augmented_ids = new_ones + augmented_ids
+
+    return (augmented_ids, augmented_pricing)
+
+
 def union_with_portal_paid_recommendations(
     curated_ids: list[str],
     pricing: dict[str, dict[str, str]],

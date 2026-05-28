@@ -1166,7 +1166,26 @@ def list_authenticated_providers(
     # newly added Portal models surface in the /model picker without
     # requiring a Hermes release. Falls back to the in-repo
     # _PROVIDER_MODELS["nous"] snapshot when the manifest is unreachable.
+    # Also merges in Portal API free + paid recommended models from the
+    # /api/nous/recommended-models endpoint so recently-launched models
+    # (both free like DeepSeek V4 Flash and paid) appear in the gateway
+    # /model picker — matching the interactive CLI's behavior. Uses a
+    # single-call combined helper that fetches both tiers in one request
+    # rather than detecting the user's tier and conditionally calling
+    # separate helpers.
     curated["nous"] = get_curated_nous_model_ids()
+    _portal_base_url = os.environ.get(
+        "NOUS_PORTAL_URL",
+    ) or "https://portal.nousresearch.com"
+    try:
+        from hermes_cli.models import union_with_portal_recommendations
+        portal_ids, _ = union_with_portal_recommendations(
+            curated["nous"], {}, _portal_base_url,
+        )
+        if portal_ids:
+            curated["nous"] = portal_ids
+    except Exception:
+        pass
     # Ollama Cloud uses dynamic discovery (no static curated list)
     if "ollama-cloud" not in curated:
         from hermes_cli.models import fetch_ollama_cloud_models

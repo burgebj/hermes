@@ -313,8 +313,12 @@ class TestIntegrationWithModelsModule:
                 )
             )
 
+            from hermes_cli import models as _models
+
             with patch.object(
                 model_catalog, "_fetch_manifest", return_value=_valid_manifest()
+            ), patch.object(
+                _models, "fetch_nous_recommended_models", return_value={}
             ):
                 picker = list_picker_providers(
                     current_provider="nous", max_models=99
