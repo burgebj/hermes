@@ -10,6 +10,7 @@ rendered with Rich Markdown.  Otherwise a default confirmation is shown.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import shutil
@@ -810,8 +811,14 @@ def _discover_all_plugins() -> list:
     return list(seen.values())
 
 
-def cmd_list() -> None:
-    """List all plugins (bundled + user) with enabled/disabled state."""
+def cmd_list(*, json_output: bool = False) -> None:
+    """List all plugins, optionally as stable machine-readable JSON."""
+    if json_output:
+        from hermes_cli.plugins import list_plugin_inventory
+
+        print(json.dumps(list_plugin_inventory(), indent=2, sort_keys=True))
+        return
+
     from rich.console import Console
     from rich.table import Table
 
@@ -1649,7 +1656,7 @@ def plugins_command(args) -> None:
     elif action == "disable":
         cmd_disable(args.name)
     elif action in {"list", "ls"}:
-        cmd_list()
+        cmd_list(json_output=getattr(args, "json", False))
     elif action is None:
         cmd_toggle()
     else:

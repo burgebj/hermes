@@ -12911,7 +12911,14 @@ Examples:
     )
     plugins_remove.add_argument("name", help="Plugin directory name to remove")
 
-    plugins_subparsers.add_parser("list", aliases=["ls"], help="List installed plugins")
+    plugins_list = plugins_subparsers.add_parser(
+        "list", aliases=["ls"], help="List installed plugins"
+    )
+    plugins_list.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit stable read-only plugin inventory JSON",
+    )
 
     plugins_enable = plugins_subparsers.add_parser(
         "enable", help="Enable a disabled plugin"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import types
@@ -816,3 +817,248 @@ class TestNoAutoActivation:
         # The old code had: "Even with default config, check if a plugin registered one"
         # The fix removes this. Verify it's gone.
         assert "Even with default config, check if a plugin registered one" not in source
+
+
+# ── plugin inventory contract ───────────────────────────────────────────────
+
+def _write_inventory_plugin(
+    root: Path,
+    relative: str,
+    manifest: dict,
+    init_body: str = "raise RuntimeError('plugin code executed')\n",
+) -> Path:
+    plugin_dir = root.joinpath(*relative.split("/"))
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "plugin.yaml").write_text(yaml.safe_dump(manifest))
+    (plugin_dir / "__init__.py").write_text(init_body)
+    return plugin_dir
+
+
+def test_plugin_inventory_scans_manifests_without_executing_code(tmp_path, monkeypatch):
+    from hermes_cli.plugins import list_plugin_inventory
+
+    bundled = tmp_path / "bundled"
+    hermes_home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"enabled": ["user-tool"]}})
+    )
+
+    _write_inventory_plugin(
+        bundled,
+        "image_gen/openai",
+        {
+            "name": "openai",
+            "version": "1.2.3",
+            "kind": "backend",
+            "hooks": ["pre_tool_call"],
+            "provides_tools": ["image_generate"],
+        },
+    )
+    _write_inventory_plugin(
+        hermes_home / "plugins",
+        "user-tool",
+        {"name": "user-tool", "version": "0.1.0", "kind": "standalone"},
+    )
+
+    inventory = list_plugin_inventory(include_project=False, schema_version=1)
+    with pytest.raises(ValueError):
+        list_plugin_inventory(schema_version=2)
+    plugins = {plugin["key"]: plugin for plugin in inventory["plugins"]}
+
+    assert plugins["image_gen/openai"]["effective_status"] == "auto_active"
+    assert plugins["image_gen/openai"]["provides_hooks"] == ["pre_tool_call"]
+    assert plugins["image_gen/openai"]["provides_tools"] == ["image_generate"]
+    assert plugins["user-tool"]["config_status"] == "explicitly_enabled"
+
+
+def test_plugin_inventory_status_aliases_and_project_opt_in(tmp_path, monkeypatch):
+    from hermes_cli.plugins import list_plugin_inventory
+
+    bundled = tmp_path / "bundled"
+    hermes_home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "plugins": {"disabled": ["openai", "honcho", "openrouter-provider"]},
+                "memory": {"provider": "honcho"},
+                "model": {"provider": "openrouter"},
+            }
+        )
+    )
+
+    _write_inventory_plugin(bundled, "image_gen/openai", {"name": "openai", "kind": "backend"})
+    _write_inventory_plugin(bundled, "memory/honcho", {"name": "honcho", "kind": "exclusive"})
+    _write_inventory_plugin(
+        bundled,
+        "model-providers/openrouter",
+        {"name": "openrouter-provider", "kind": "model-provider"},
+    )
+    _write_inventory_plugin(project / ".hermes" / "plugins", "proj", {"name": "proj"})
+
+    inventory = list_plugin_inventory(include_project=True)
+    plugins = {plugin["key"]: plugin for plugin in inventory["plugins"]}
+
+    assert plugins["image_gen/openai"]["effective_status"] == "disabled"
+    assert plugins["image_gen/openai"]["matched_config_key"] == "openai"
+    assert plugins["memory/honcho"]["effective_status"] == "provider_selected"
+    assert "matched_config_key" not in plugins["memory/honcho"]
+    assert plugins["model-providers/openrouter"]["effective_status"] == "provider_selected"
+    assert "matched_config_key" not in plugins["model-providers/openrouter"]
+    assert plugins["proj"]["source"] == "project"
+
+
+def test_plugin_inventory_uses_runtime_platform_keys(tmp_path, monkeypatch):
+    from hermes_cli.plugins import PluginManager, list_plugin_inventory
+
+    bundled = tmp_path / "bundled"
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"disabled": ["irc-platform"]}})
+    )
+    _write_inventory_plugin(
+        bundled,
+        "platforms/irc",
+        {"name": "irc-platform", "kind": "platform", "version": "1.0.0"},
+    )
+
+    runtime_platform_keys = {
+        manifest.key
+        for manifest in PluginManager()._scan_directory(
+            bundled / "platforms", source="bundled"
+        )
+    }
+    inventory = list_plugin_inventory(include_project=False)
+    plugins = {plugin["key"]: plugin for plugin in inventory["plugins"]}
+
+    assert runtime_platform_keys == {"irc-platform"}
+    assert "irc-platform" in plugins
+    assert "platforms/irc" not in plugins
+    assert plugins["irc-platform"]["effective_status"] == "disabled"
+
+
+def test_plugin_inventory_disabled_matching_matches_runtime_aliases(tmp_path, monkeypatch):
+    from hermes_cli.plugins import list_plugin_inventory
+
+    bundled = tmp_path / "bundled"
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"disabled": ["irc"]}})
+    )
+    _write_inventory_plugin(
+        bundled,
+        "platforms/irc",
+        {"name": "irc-platform", "kind": "platform", "version": "1.0.0"},
+    )
+
+    plugins = {
+        plugin["key"]: plugin
+        for plugin in list_plugin_inventory(include_project=False)["plugins"]
+    }
+
+    assert plugins["irc-platform"]["effective_status"] == "auto_active"
+
+
+def test_plugin_inventory_reports_unknown_kind_warning(tmp_path, monkeypatch):
+    from hermes_cli.plugins import list_plugin_inventory
+
+    bundled = tmp_path / "bundled"
+    hermes_home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    _write_inventory_plugin(hermes_home / "plugins", "odd", {"name": "odd", "kind": "general"})
+
+    inventory = list_plugin_inventory(include_project=False)
+    odd = next(plugin for plugin in inventory["plugins"] if plugin["key"] == "odd")
+
+    assert odd["kind"] == "standalone"
+    assert any(warning["code"] == "unknown_kind" for warning in inventory["warnings"])
+
+
+def test_plugin_inventory_coerces_manifest_scalars_to_json_safe_values(tmp_path, monkeypatch):
+    from hermes_cli.plugins import list_plugin_inventory
+
+    bundled = tmp_path / "bundled"
+    hermes_home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    hermes_home.mkdir(parents=True, exist_ok=True)
+
+    numeric = bundled / "numeric"
+    numeric.mkdir(parents=True)
+    (numeric / "plugin.yaml").write_text(
+        "name: 123\ndescription: 2024-01-01\nrequires_env:\n  - name: TOKEN\n    default: 2024-01-02\n"
+    )
+    (numeric / "__init__.py").write_text("raise RuntimeError('plugin code executed')\n")
+    _write_inventory_plugin(bundled, "alpha", {"name": "alpha"})
+
+    inventory = list_plugin_inventory(include_project=False)
+    json.dumps(inventory)
+    plugins = {plugin["key"]: plugin for plugin in inventory["plugins"]}
+
+    assert "123" in plugins
+    assert plugins["123"]["name"] == "123"
+    assert plugins["123"]["description"] == "2024-01-01"
+    assert plugins["123"]["requires_env"] == [
+        {"name": "TOKEN", "default": "2024-01-02"}
+    ]
+
+
+def test_plugin_inventory_entry_points_do_not_load(monkeypatch, tmp_path):
+    from hermes_cli.plugins import ENTRY_POINTS_GROUP, list_plugin_inventory
+
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(tmp_path / "bundled"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    fake_ep = MagicMock()
+    fake_ep.name = "ep-plugin"
+    fake_ep.value = "ep_mod:register"
+    fake_ep.group = ENTRY_POINTS_GROUP
+    fake_ep.load.side_effect = AssertionError("entry point loaded")
+
+    class EntryPoints:
+        def select(self, *, group):
+            assert group == ENTRY_POINTS_GROUP
+            return [fake_ep]
+
+    monkeypatch.setattr("importlib.metadata.entry_points", lambda: EntryPoints())
+
+    inventory = list_plugin_inventory(include_project=False)
+    ep_plugin = next(plugin for plugin in inventory["plugins"] if plugin["key"] == "ep-plugin")
+
+    assert ep_plugin["source"] == "entrypoint"
+    assert ep_plugin["entrypoint"] == "ep_mod:register"
+    fake_ep.load.assert_not_called()
+
+
+def test_cmd_list_json_outputs_pure_json(monkeypatch, capsys):
+    from hermes_cli.plugins_cmd import cmd_list
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.list_plugin_inventory",
+        lambda: {
+            "schema_version": 1,
+            "metadata": {},
+            "summary": {"total": 0},
+            "plugins": [],
+            "warnings": [],
+        },
+    )
+
+    cmd_list(json_output=True)
+    output = capsys.readouterr().out
+
+    assert json.loads(output)["schema_version"] == 1

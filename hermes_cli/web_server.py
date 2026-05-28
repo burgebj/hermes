@@ -4532,6 +4532,19 @@ def _merged_plugins_hub() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/plugins/inventory")
+async def get_plugin_inventory(request: Request):
+    """Stable read-only agent plugin inventory contract (session protected)."""
+    _require_token(request)
+    from hermes_cli.plugins import list_plugin_inventory
+
+    try:
+        return list_plugin_inventory()
+    except Exception as exc:
+        _log.warning("plugins/inventory failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to build plugin inventory.") from exc
+
+
 @app.get("/api/dashboard/plugins/hub")
 async def get_plugins_hub(request: Request):
     """Unified agent plugins + dashboard extension metadata (session protected)."""
