@@ -13,10 +13,12 @@ Verifies that:
 from __future__ import annotations
 
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 
 import run_agent
+from agent.codex_runtime import _codex_memory_tool_hint
 from agent.transports.codex_app_server_session import CodexAppServerSession, TurnResult
 
 
@@ -231,6 +233,46 @@ class TestRunConversationCodexPath:
         ):
             agent.run_conversation("hi")
         assert not client_mock.chat.completions.create.called
+
+    def test_session_title_reaches_codex_mcp_env(self, fake_session, monkeypatch):
+        captured = {}
+
+        def fake_init(self, **kwargs):
+            captured.update(kwargs)
+
+        agent = _make_codex_agent()
+        agent.session_id = "sess-123"
+        agent._session_db = SimpleNamespace(
+            get_session_title=lambda session_id: (
+                "Project Alpha" if session_id == "sess-123" else ""
+            )
+        )
+        monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
+
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            agent.run_conversation("hi")
+
+        assert captured["env"]["HERMES_SESSION_TITLE"] == "Project Alpha"
+        assert captured["env"]["HERMES_SKIP_MEMORY"] == "1"
+
+
+class TestCodexMemoryToolHint:
+    def test_no_memory_manager_leaves_message_unchanged(self):
+        agent = SimpleNamespace(_memory_manager=None)
+        assert _codex_memory_tool_hint(agent, "hello") == "hello"
+
+    def test_memory_tools_are_mapped_to_hermes_tools_mcp(self):
+        class FakeMemoryManager:
+            def get_all_tool_names(self):
+                return {"memos_search", "memos_skill_list"}
+
+        agent = SimpleNamespace(_memory_manager=FakeMemoryManager())
+        out = _codex_memory_tool_hint(agent, "请调用 memos_search")
+
+        assert "hermes-tools" in out
+        assert "memos_search" in out
+        assert "memos_skill_list" in out
+        assert out.endswith("请调用 memos_search")
 
 
 class TestReviewForkApiModeDowngrade:

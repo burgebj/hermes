@@ -26,6 +26,35 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def _codex_memory_tool_hint(agent, user_message: str) -> str:
+    """Tell Codex app-server how Hermes memory tools map onto MCP tools.
+
+    The app-server runtime owns its own tool loop. Hermes exposes provider
+    tools like memos_search through the hermes-tools MCP server, not as native
+    OpenAI function names. Without a short bridge note, the model can list MCP
+    tools but still conclude that an exact `memos_search` function is absent.
+    """
+    memory_manager = getattr(agent, "_memory_manager", None)
+    if not memory_manager:
+        return user_message
+    try:
+        tool_names = sorted(str(name) for name in memory_manager.get_all_tool_names())
+    except Exception:
+        return user_message
+    if not tool_names:
+        return user_message
+
+    tool_list = ", ".join(tool_names)
+    return (
+        "[Hermes system note for Codex runtime: Active Hermes memory-provider "
+        f"tools are exposed through the MCP server `hermes-tools`: {tool_list}. "
+        "When the user asks to call one of these tools, call the corresponding "
+        "`hermes-tools` MCP tool. Do not say the tool is unavailable merely "
+        "because it is exposed through MCP.]\n\n"
+        f"{user_message}"
+    )
+
+
 def run_codex_app_server_turn(
     agent,
     *,
@@ -57,9 +86,56 @@ def run_codex_app_server_turn(
             approval_callback = _get_approval_callback()
         except Exception:
             approval_callback = None
+        codex_env: dict[str, str] = {}
+        if getattr(agent, "session_id", None):
+            codex_env["HERMES_SESSION_ID"] = str(agent.session_id)
+            codex_env["HERMES_CODEX_SESSION_ID"] = str(agent.session_id)
+        if getattr(agent, "platform", None):
+            codex_env["HERMES_PLATFORM"] = str(agent.platform)
+        if getattr(agent, "enabled_toolsets", None) is not None:
+            codex_env["HERMES_ENABLED_TOOLSETS"] = ",".join(
+                str(item) for item in (agent.enabled_toolsets or [])
+            )
+        if getattr(agent, "disabled_toolsets", None) is not None:
+            codex_env["HERMES_DISABLED_TOOLSETS"] = ",".join(
+                str(item) for item in (agent.disabled_toolsets or [])
+            )
+        if getattr(agent, "skip_memory", False):
+            codex_env["HERMES_SKIP_MEMORY"] = "1"
+        # Give hermes-tools MCP callbacks enough identity context to initialize
+        # the active memory provider with the same scoping as the parent agent.
+        optional_agent_env = {
+            "HERMES_USER_ID": "_user_id",
+            "HERMES_USER_NAME": "_user_name",
+            "HERMES_CHAT_ID": "_chat_id",
+            "HERMES_CHAT_NAME": "_chat_name",
+            "HERMES_CHAT_TYPE": "_chat_type",
+            "HERMES_THREAD_ID": "_thread_id",
+            "HERMES_GATEWAY_SESSION_KEY": "_gateway_session_key",
+        }
+        for env_name, attr_name in optional_agent_env.items():
+            value = getattr(agent, attr_name, None)
+            if value:
+                codex_env[env_name] = str(value)
+        if getattr(agent, "_session_db", None) and getattr(agent, "session_id", None):
+            try:
+                session_title = agent._session_db.get_session_title(agent.session_id)
+                if session_title:
+                    codex_env["HERMES_SESSION_TITLE"] = str(session_title)
+            except Exception:
+                pass
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            profile_name = get_active_profile_name()
+            if profile_name:
+                codex_env["HERMES_AGENT_IDENTITY"] = str(profile_name)
+                codex_env["HERMES_AGENT_WORKSPACE"] = "hermes"
+        except Exception:
+            pass
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
             approval_callback=approval_callback,
+            env=codex_env,
         )
 
     # NOTE: the user message is ALREADY appended to messages by the
@@ -67,7 +143,9 @@ def run_codex_app_server_turn(
     # return reaches us. Do NOT append again — that would duplicate.
 
     try:
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        turn = agent._codex_session.run_turn(
+            user_input=_codex_memory_tool_hint(agent, user_message)
+        )
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         # Crash → unconditionally drop the session so the next turn

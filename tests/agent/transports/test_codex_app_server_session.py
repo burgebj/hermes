@@ -163,6 +163,23 @@ class TestLifecycle:
         assert params["cwd"] == "/tmp"
         assert "permissions" not in params  # see session.ensure_started() comment
 
+    def test_ensure_started_passes_env_to_client_factory(self):
+        captured = {}
+        client = FakeClient()
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return client
+
+        s = CodexAppServerSession(
+            cwd="/tmp",
+            client_factory=factory,
+            env={"HERMES_SESSION_ID": "sess-123"},
+        )
+        s.ensure_started()
+
+        assert captured["env"] == {"HERMES_SESSION_ID": "sess-123"}
+
     def test_close_idempotent(self):
         client = FakeClient()
         s = make_session(client)

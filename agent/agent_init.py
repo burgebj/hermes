@@ -455,6 +455,7 @@ def init_agent(
     # Store toolset filtering options
     agent.enabled_toolsets = enabled_toolsets
     agent.disabled_toolsets = disabled_toolsets
+    agent.skip_memory = skip_memory
     
     # Model response configuration
     agent.max_tokens = max_tokens  # None = use model default

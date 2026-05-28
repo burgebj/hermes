@@ -8,6 +8,8 @@ build helper assembles a server when the SDK is present.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
@@ -97,6 +99,238 @@ class TestModuleSurface:
             assert orch_tool in EXPOSED_TOOLS, (
                 f"{orch_tool!r} missing from codex callback"
             )
+
+    def test_memory_tool_specs_from_dynamic_provider(self):
+        """Memory-provider tools are dynamic and do not live in the static
+        Hermes registry. The codex MCP bridge must still be able to surface
+        them, otherwise providers like MemOS are invisible on codex runtime."""
+        from agent.transports import hermes_tools_mcp_server as m
+
+        class FakeMemoryManager:
+            def get_all_tool_schemas(self):
+                return [
+                    {
+                        "name": "memos_search",
+                        "description": "Search MemOS",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    }
+                ]
+
+        specs = m._memory_tool_specs(FakeMemoryManager())
+        assert "memos_search" in specs
+        assert specs["memos_search"]["parameters"]["required"] == ["query"]
+
+    def test_memory_enabled_respects_toolset_filter(self, monkeypatch):
+        from agent.transports import hermes_tools_mcp_server as m
+
+        cfg = {
+            "memory": {
+                "enabled": True,
+                "memory_enabled": True,
+                "provider": "memtensor",
+            }
+        }
+
+        monkeypatch.setenv("HERMES_ENABLED_TOOLSETS", "development")
+        assert not m._memory_enabled(cfg)
+
+        monkeypatch.setenv("HERMES_ENABLED_TOOLSETS", "development,memory")
+        assert m._memory_enabled(cfg)
+
+        monkeypatch.setenv("HERMES_ENABLED_TOOLSETS", "all")
+        assert m._memory_enabled(cfg)
+
+        monkeypatch.setenv("HERMES_ENABLED_TOOLSETS", "*")
+        assert m._memory_enabled(cfg)
+
+        monkeypatch.setenv("HERMES_DISABLED_TOOLSETS", "memory")
+        assert not m._memory_enabled(cfg)
+
+        monkeypatch.setenv("HERMES_DISABLED_TOOLSETS", "all")
+        assert not m._memory_enabled(cfg)
+
+        monkeypatch.setenv("HERMES_DISABLED_TOOLSETS", "*")
+        assert not m._memory_enabled(cfg)
+
+        monkeypatch.delenv("HERMES_ENABLED_TOOLSETS", raising=False)
+        monkeypatch.delenv("HERMES_DISABLED_TOOLSETS", raising=False)
+        monkeypatch.setenv("HERMES_SKIP_MEMORY", "1")
+        assert not m._memory_enabled(cfg)
+
+    def test_build_server_applies_parent_toolset_filters(self, monkeypatch):
+        """Static Hermes tools must respect the parent agent's toolset filter.
+
+        Otherwise a codex_app_server session with enabled_toolsets=["memory"]
+        can still see web/browser tools through the MCP callback.
+        """
+        from agent.transports import hermes_tools_mcp_server as m
+        import mcp.server.fastmcp as fastmcp_mod
+        import model_tools
+
+        captured = {}
+
+        class FakeFastMCP:
+            def __init__(self, *args, **kwargs):
+                self.tools = {}
+
+            def add_tool(self, fn, *, name, description):
+                self.tools[name] = fn
+
+        def fake_get_tool_definitions(**kwargs):
+            captured.update(kwargs)
+            if kwargs.get("enabled_toolsets") == ["memory"]:
+                return []
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search web",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+
+        monkeypatch.setenv("HERMES_ENABLED_TOOLSETS", "memory")
+        monkeypatch.setenv("HERMES_DISABLED_TOOLSETS", "browser")
+        monkeypatch.setattr(fastmcp_mod, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(model_tools, "get_tool_definitions", fake_get_tool_definitions)
+        monkeypatch.setattr(m, "_build_memory_manager_for_mcp", lambda: None)
+
+        server = m._build_server()
+
+        assert captured["enabled_toolsets"] == ["memory"]
+        assert captured["disabled_toolsets"] == ["browser"]
+        assert "web_search" not in server.tools
+
+    def test_build_server_registers_dynamic_memory_tools(self, monkeypatch):
+        """Regression guard for MemOS under codex_app_server: memos_search is
+        not in get_tool_definitions(), so _build_server must merge the active
+        MemoryManager schemas explicitly."""
+        from agent.transports import hermes_tools_mcp_server as m
+        import mcp.server.fastmcp as fastmcp_mod
+        import model_tools
+
+        class FakeMemoryManager:
+            def __init__(self):
+                self.shutdown_called = False
+
+            def get_all_tool_schemas(self):
+                return [
+                    {
+                        "name": "memos_search",
+                        "description": "Search MemOS",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ]
+
+            def handle_tool_call(self, tool_name, args):
+                return '{"ok": true}'
+
+            def shutdown_all(self):
+                self.shutdown_called = True
+
+        class FakeFastMCP:
+            def __init__(self, *args, **kwargs):
+                self.tools = {}
+
+            def add_tool(self, fn, *, name, description):
+                self.tools[name] = {
+                    "fn": fn,
+                    "description": description,
+                }
+
+        fake_manager = FakeMemoryManager()
+        monkeypatch.setattr(fastmcp_mod, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda **kwargs: [],
+        )
+        monkeypatch.setattr(m, "_build_memory_manager_for_mcp", lambda: fake_manager)
+
+        server = m._build_server()
+
+        assert "memos_search" in server.tools
+        assert server.tools["memos_search"]["fn"](query="abc") == '{"ok": true}'
+
+    def test_memory_manager_bootstrap_passes_session_title(self, monkeypatch, tmp_path):
+        """MCP memory tools must resolve provider scope like the parent agent."""
+        from agent.transports import hermes_tools_mcp_server as m
+        import agent.memory_manager as memory_manager_mod
+        import hermes_cli.config as config_mod
+        import hermes_constants as constants_mod
+        import plugins.memory as memory_plugins_mod
+
+        captured = {}
+
+        class FakeProvider:
+            name = "memtensor"
+
+            def is_available(self):
+                return True
+
+        class FakeMemoryManager:
+            def add_provider(self, provider):
+                captured["provider"] = provider.name
+
+            def initialize_all(self, session_id, **kwargs):
+                captured["session_id"] = session_id
+                captured.update(kwargs)
+
+        monkeypatch.setattr(
+            config_mod,
+            "load_config",
+            lambda: {
+                "memory": {
+                    "enabled": True,
+                    "memory_enabled": True,
+                    "provider": "memtensor",
+                }
+            },
+        )
+        monkeypatch.setattr(memory_plugins_mod, "load_memory_provider", lambda name: FakeProvider())
+        monkeypatch.setattr(memory_manager_mod, "MemoryManager", FakeMemoryManager)
+        monkeypatch.setattr(constants_mod, "get_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_SESSION_ID", "sess-123")
+        monkeypatch.setenv("HERMES_SESSION_TITLE", "Project Alpha")
+
+        assert m._build_memory_manager_for_mcp() is not None
+        assert captured["session_id"] == "sess-123"
+        assert captured["session_title"] == "Project Alpha"
+
+    def test_generated_handler_uses_schema_args_not_kwargs(self):
+        """FastMCP must see `query`, not a synthetic `kwargs` argument."""
+        from agent.transports import hermes_tools_mcp_server as m
+        from mcp.server.fastmcp.tools import Tool
+
+        handler = m._make_mcp_handler(
+            tool_name="memos_search",
+            description="Search MemOS",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "maxResults": {"type": "integer", "default": 10},
+                },
+                "required": ["query"],
+            },
+            dispatcher=lambda kwargs: json.dumps(kwargs),
+        )
+        tool = Tool.from_function(
+            handler,
+            name="memos_search",
+            description="Search MemOS",
+        )
+
+        assert "query" in tool.parameters["properties"]
+        assert "kwargs" not in tool.parameters["properties"]
+        result = asyncio.run(tool.run({"query": "abc", "maxResults": 3}))
+        assert json.loads(result) == {"query": "abc", "maxResults": 3}
 
 
 class TestMain:
