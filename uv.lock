@@ -1528,6 +1528,9 @@ modal = [
 nemo-relay = [
     { name = "nemo-relay" },
 ]
+oxylabs = [
+    { name = "oxylabs-ai-studio" },
+]
 parallel-web = [
     { name = "parallel-web" },
 ]
@@ -1650,6 +1653,7 @@ requires-dist = [
     { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = "==0.3" },
     { name = "numpy", marker = "extra == 'voice'", specifier = "==2.4.3" },
     { name = "openai", specifier = "==2.24.0" },
+    { name = "oxylabs-ai-studio", marker = "extra == 'oxylabs'", specifier = "==0.2.20" },
     { name = "parallel-web", marker = "extra == 'parallel-web'", specifier = "==0.4.2" },
     { name = "pathspec", specifier = "==1.1.1" },
     { name = "pillow", specifier = "==12.2.0" },
@@ -1691,7 +1695,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'web'", specifier = "==0.41.0" },
     { name = "youtube-transcript-api", marker = "extra == 'youtube'", specifier = "==1.2.4" },
 ]
-provides-extras = ["anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "hindsight", "dev", "messaging", "cron", "slack", "matrix", "wecom", "cli", "tts-premium", "voice", "pty", "honcho", "vision", "mcp", "nemo-relay", "homeassistant", "sms", "computer-use", "acp", "mistral", "bedrock", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "youtube", "web", "all"]
+provides-extras = ["anthropic", "exa", "firecrawl", "parallel-web", "oxylabs", "fal", "edge-tts", "modal", "daytona", "hindsight", "dev", "messaging", "cron", "slack", "matrix", "wecom", "cli", "tts-premium", "voice", "pty", "honcho", "vision", "mcp", "nemo-relay", "homeassistant", "sms", "computer-use", "acp", "mistral", "bedrock", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "youtube", "web", "all"]
 
 [[package]]
 name = "hf-xet"
@@ -2673,6 +2677,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/50/fc/c47bb04a1d8a941a4061307e1eddfa331ed4d0ab13d8a9781e6db256940a/opentelemetry_util_http-0.60b1.tar.gz", hash = "sha256:0d97152ca8c8a41ced7172d29d3622a219317f74ae6bb3027cfbdcf22c3cc0d6", size = 11053, upload-time = "2025-12-11T13:37:25.115Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/5c/d3f1733665f7cd582ef0842fb1d2ed0bc1fba10875160593342d22bba375/opentelemetry_util_http-0.60b1-py3-none-any.whl", hash = "sha256:66381ba28550c91bee14dcba8979ace443444af1ed609226634596b4b0faf199", size = 8947, upload-time = "2025-12-11T13:36:37.151Z" },
+]
+
+[[package]]
+name = "oxylabs-ai-studio"
+version = "0.2.20"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "tenacity" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e6/f3/be85d45068d7c63a5b0dfdcb49eb67050c6dad7db8a5a83bdec81ece5edc/oxylabs_ai_studio-0.2.20.tar.gz", hash = "sha256:4a5e699b840b90a02fab9f610695f2be8ddd52d92fc838bb828335381cef4221", size = 2389925, upload-time = "2025-12-04T14:56:10.184Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/32/ea81eaabaf2569781ae17bc2d79c1692e5a44b759b242283847b18c52a6c/oxylabs_ai_studio-0.2.20-py3-none-any.whl", hash = "sha256:3e14ebb9bfce1339d08f375f37b8ac0725cacc670374cae6a03df4b7afe15391", size = 16496, upload-time = "2025-12-04T14:56:08.593Z" },
 ]
 
 [[package]]
