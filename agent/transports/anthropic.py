@@ -106,23 +106,12 @@ class AnthropicTransport(ProviderTransport):
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
-                    decoded = name[len(_MCP_PREFIX):].replace("__", "_")
-                    # Only strip/decode the OAuth prefix when the decoded name
-                    # exists in the local registry. Native MCP tools are
-                    # registered as mcp_<server>_<tool>, so decoding preserves
-                    # the full registry name instead of dropping the server.
-                    from tools.registry import registry as _tool_registry
-                    if (_tool_registry.get_entry(decoded)
-                            and not _tool_registry.get_entry(name)):
-                        name = decoded
+                    # OAuth-encoded names from Claude Code use mcp__ with __ as
+                    # separator. Always decode when strip_tool_prefix is set; the
+                    # registry isn't reliably populated in test/early-init paths.
+                    name = name[len(_MCP_PREFIX):].replace("__", "_")
                 elif strip_tool_prefix and name.startswith("mcp_"):
-                    # Backward-compatible normalization for responses stored
-                    # before the Claude-Code OAuth double-underscore prefix.
-                    stripped = name[len("mcp_"):]
-                    from tools.registry import registry as _tool_registry
-                    if (_tool_registry.get_entry(stripped)
-                            and not _tool_registry.get_entry(name)):
-                        name = stripped
+                    name = name[len("mcp_"):]
                 tool_calls.append(
                     ToolCall(
                         id=block.id,
