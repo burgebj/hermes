@@ -1658,14 +1658,14 @@ def run_conversation(
                             if assistant_message.content:
                                 truncated_response_parts.append(assistant_message.content)
 
-                            if length_continue_retries < 3:
-                                _is_partial_stream_stub = (
-                                    getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
-                                )
-                                _dropped_tools = getattr(
-                                    response, "_dropped_tool_names", None
-                                )
+                            _is_partial_stream_stub = (
+                                getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
+                            )
+                            _dropped_tools = getattr(
+                                response, "_dropped_tool_names", None
+                            )
 
+                            if length_continue_retries < 3:
                                 if _is_partial_stream_stub and _dropped_tools:
                                     _tool_list = ", ".join(_dropped_tools[:3])
                                     agent._vprint(
@@ -1697,6 +1697,53 @@ def run_conversation(
                                 agent._session_messages = messages
                                 restart_with_length_continuation = True
                                 break
+
+                            # Continuation retries exhausted.  When the stub
+                            # signature is a partial-stream-stub with dropped
+                            # tool calls, the most likely cause is a provider
+                            # content-safety filter terminating the stream
+                            # mid-delivery (e.g. MiniMax ``output new_sensitive
+                            # (1027)``).  This filter is content-deterministic
+                            # — every retry hits the same trigger — so the
+                            # chunking-guidance continuation prompt is futile
+                            # against the same primary.  Escalate to the
+                            # configured fallback chain before giving up so
+                            # the user's fallback_providers actually fire on
+                            # this class of failure (issue #32421).
+                            if (
+                                _is_partial_stream_stub
+                                and _dropped_tools
+                                and agent._fallback_index < len(agent._fallback_chain)
+                            ):
+                                _tool_list = ", ".join(_dropped_tools[:3])
+                                agent._vprint(
+                                    f"{agent.log_prefix}⚠️  Stream repeatedly stalled mid "
+                                    f"tool-call ({_tool_list}) — likely provider "
+                                    f"content filter; switching to fallback...",
+                                    force=True,
+                                )
+                                agent._emit_status(
+                                    "⚠️ Stream stalled mid tool-call — switching to fallback..."
+                                )
+                                if agent._try_activate_fallback():
+                                    # Roll back the failed continuation thread
+                                    # so the fallback provider sees the clean
+                                    # pre-stall message state instead of the
+                                    # accumulated partial assistant turns and
+                                    # continuation prompts we wrote while
+                                    # fighting the primary's filter.
+                                    messages = agent._get_messages_up_to_last_assistant(messages)
+                                    agent._session_messages = messages
+                                    length_continue_retries = 0
+                                    truncated_response_parts = []
+                                    retry_count = 0
+                                    compression_attempts = 0
+                                    primary_recovery_attempted = False
+                                    # Re-enter the inner API-retry loop against
+                                    # the new (fallback) backend, matching the
+                                    # pattern used by the other fallback-on-
+                                    # exhaustion sites in this file.
+                                    continue
 
                             partial_response = agent._strip_think_blocks("".join(truncated_response_parts)).strip()
                             agent._cleanup_task_resources(effective_task_id)
