@@ -27,6 +27,9 @@ and MoonshotAI/kimi-cli#1595:
    single object schema applied to every array element.  Collapse tuple
    ``items`` to the first element schema (or ``{}`` if the tuple is empty).
    (Ported from anomalyco/opencode#24730.)
+6. JSON Schema type unions (``type: ["string", "null"]``) are valid in
+   draft schemas but Moonshot expects a single scalar type.  Collapse to the
+   first non-null scalar type before doing scalar enum cleanup.
 
 The ``#/definitions/...`` → ``#/$defs/...`` rewrite for draft-07 refs is
 handled separately in ``tools/mcp_tool._normalize_mcp_input_schema`` so it
@@ -48,6 +51,27 @@ _SCHEMA_LIST_KEYS = frozenset({"anyOf", "oneOf", "allOf", "prefixItems"})
 
 # Keys whose values are a single nested schema.
 _SCHEMA_NODE_KEYS = frozenset({"items", "contains", "not", "additionalProperties", "propertyNames"})
+
+
+def _scalar_schema_type(value: Any) -> str | None:
+    """Return a scalar JSON-Schema type from ``value`` if one is present.
+
+    Standard JSON Schema permits union types such as ``["string", "null"]``.
+    Moonshot's flavored validator wants a single scalar type, and the old
+    membership checks used sets directly against ``node["type"]``.  When MCP
+    tools supplied a list-type union, that raised ``TypeError: unhashable type:
+    'list'`` before the request ever reached the provider.
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, list):
+        for item in value:
+            scalar = _scalar_schema_type(item)
+            if scalar and scalar != "null":
+                return scalar
+        return None
+    return None
 
 
 def _repair_schema(node: Any, is_schema: bool = True) -> Any:
@@ -109,7 +133,7 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
     if "anyOf" in repaired and isinstance(repaired["anyOf"], list):
         repaired.pop("type", None)
         non_null = [b for b in repaired["anyOf"]
-                    if isinstance(b, dict) and b.get("type") != "null"]
+                    if isinstance(b, dict) and _scalar_schema_type(b.get("type")) != "null"]
         if non_null and len(non_null) < len(repaired["anyOf"]):
             # Drop the anyOf wrapper — keep only the non-null branch.
             # If there's a single non-null branch, promote it and fall
@@ -131,6 +155,16 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
     # parameter schemas — strip it.
     repaired.pop("nullable", None)
 
+    # Rule 6: collapse JSON-Schema union types to a scalar Moonshot type.
+    # Keep this before missing-type inference and enum cleanup so both paths
+    # can treat node["type"] as hashable/scalar.
+    if "type" in repaired and isinstance(repaired.get("type"), list):
+        scalar_type = _scalar_schema_type(repaired.get("type"))
+        if scalar_type:
+            repaired["type"] = scalar_type
+        else:
+            repaired.pop("type", None)
+
     # Rule 1: property schemas without type need one.  $ref nodes are exempt
     # — their type comes from the referenced definition.
     # Fill missing type BEFORE Rule 3 so enum cleanup can check the type.
@@ -143,7 +177,7 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
     # Strip null and empty-string from enum values, and if the enum becomes
     # empty, drop it entirely.
     if "enum" in repaired and isinstance(repaired["enum"], list):
-        node_type = repaired.get("type")
+        node_type = _scalar_schema_type(repaired.get("type"))
         if node_type in {"string", "integer", "number", "boolean"}:
             cleaned = [v for v in repaired["enum"]
                        if v is not None and v != ""]
@@ -166,8 +200,11 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
 
 def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
     """Infer a reasonable ``type`` if this schema node has none."""
-    if "type" in node and node["type"] not in {None, ""}:
-        return node
+    existing_type = _scalar_schema_type(node.get("type"))
+    if existing_type:
+        if node.get("type") == existing_type:
+            return node
+        return {**node, "type": existing_type}
 
     # Heuristic: presence of ``properties`` → object, ``items`` → array, ``enum``
     # → type of first enum value, else fall back to ``string`` (safest scalar).

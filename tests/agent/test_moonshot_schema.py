@@ -119,6 +119,62 @@ class TestMissingTypeFilled:
         assert out["properties"]["payload"]["$ref"] == "#/$defs/Payload"
 
 
+class TestUnionTypeCollapsed:
+    """Rule 6: JSON-Schema type unions must not crash Moonshot sanitizer."""
+
+    def test_type_list_collapses_to_first_non_null_scalar(self):
+        params = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": ["string", "null"],
+                    "enum": ["alpha", "", None],
+                },
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        query = out["properties"]["query"]
+        assert query["type"] == "string"
+        assert query["enum"] == ["alpha"]
+
+    def test_type_list_all_null_gets_inferred(self):
+        params = {
+            "type": "object",
+            "properties": {
+                "tags": {"type": ["null", ""], "items": {"type": "string"}},
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["tags"]["type"] == "array"
+
+    def test_sanitize_tool_list_handles_list_valued_type(self):
+        """Regression for Ollama/Kimi fallback: tool schemas can include
+        list-valued JSON-Schema ``type`` entries from current tool metadata.
+        """
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "example",
+                    "description": "Example",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "choices": {
+                                "type": ["array", "null"],
+                                "items": {"type": ["string", "null"]},
+                            }
+                        },
+                    },
+                },
+            }
+        ]
+        out = sanitize_moonshot_tools(tools)
+        choices = out[0]["function"]["parameters"]["properties"]["choices"]
+        assert choices["type"] == "array"
+        assert choices["items"]["type"] == "string"
+
+
 class TestAnyOfParentType:
     """Rule 2: type must not appear at the anyOf parent level.
 
