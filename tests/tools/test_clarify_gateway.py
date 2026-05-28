@@ -221,6 +221,185 @@ class TestGatewayTextIntercept:
         pending = cm.get_pending_for_session("sk-tf")
         assert pending is not None
         assert pending.clarify_id == "id-tf"
-        
+
         # Clean up
         cm.clear_session("sk-tf")
+
+
+# ===========================================================================
+# Persistence (#32762) — entries survive a SIGTERM restart
+# ===========================================================================
+
+class TestClarifyPersistence:
+    """Pending clarify entries must survive a gateway restart so late
+    button taps are acknowledged instead of silently dropped (#32762).
+    """
+
+    def setup_method(self):
+        _clear_clarify_state()
+
+    def _isolate_persist(self, tmp_path):
+        from tools import clarify_gateway as cm
+        path = tmp_path / "clarify_pending.json"
+        cm.set_persist_path(path)
+        return path
+
+    def _reset_persist(self):
+        from tools import clarify_gateway as cm
+        cm.set_persist_path(None)
+
+    def test_register_writes_persist_file(self, tmp_path):
+        """register() flushes the entry to the JSON sidecar."""
+        from tools import clarify_gateway as cm
+        import json
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            cm.register("p1", "sk-p1", "Pick?", ["a", "b"])
+            assert path.exists()
+            payload = json.loads(path.read_text())
+            ids = [e["clarify_id"] for e in payload["entries"]]
+            assert "p1" in ids
+        finally:
+            self._reset_persist()
+
+    def test_restore_round_trip_survives_simulated_restart(self, tmp_path):
+        """Register → wipe in-memory state (SIGTERM) → restore_pending
+        rebuilds _entries with restored=True; resolve still acknowledges
+        the late tap.
+        """
+        from tools import clarify_gateway as cm
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            cm.register("p2", "sk-p2", "Pick?", ["x", "y"])
+            assert path.exists()
+
+            # Simulate SIGTERM — new process boots with empty memory.
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+
+            # New gateway calls restore_pending on startup.
+            restored = cm.restore_pending(timeout_seconds=600.0)
+            assert len(restored) == 1
+            entry = restored[0]
+            assert entry.clarify_id == "p2"
+            assert entry.session_key == "sk-p2"
+            assert entry.choices == ["x", "y"]
+            assert entry.restored is True
+            assert cm.was_restored("p2") is True
+
+            # Late button tap now lands on the restored entry instead of
+            # returning False — this is the user-visible bug from #32762.
+            # Capture the entry reference before resolve, since restored
+            # entries are cleaned out of _entries immediately on resolve
+            # (no waiter to do it).
+            with cm._lock:
+                live_entry = cm._entries["p2"]
+            ok = cm.resolve_gateway_clarify("p2", "x")
+            assert ok is True
+            assert live_entry.response == "x"
+            assert live_entry.event.is_set()
+            with cm._lock:
+                assert "p2" not in cm._entries
+            # Persist file no longer references the resolved entry.
+            import json
+            payload = json.loads(path.read_text())
+            assert all(e["clarify_id"] != "p2" for e in payload["entries"])
+        finally:
+            self._reset_persist()
+
+    def test_restore_drops_expired_entries(self, tmp_path):
+        """Entries older than the configured timeout are dropped — the
+        agent that asked has long given up."""
+        from tools import clarify_gateway as cm
+        import time as _t
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            entry = cm.register("p3", "sk-p3", "Pick?", ["a"])
+            # Backdate the on-disk record so restore_pending sees it as
+            # past-timeout.
+            import json
+            payload = json.loads(path.read_text())
+            for raw in payload["entries"]:
+                raw["registered_at"] = _t.time() - 3600.0
+            path.write_text(json.dumps(payload))
+
+            # Clear in-memory and restore with a 600s timeout.
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+            restored = cm.restore_pending(timeout_seconds=600.0)
+            assert restored == []
+            assert "p3" not in cm._entries
+            # And the persist file no longer references the dropped id.
+            payload2 = json.loads(path.read_text())
+            assert all(e["clarify_id"] != "p3" for e in payload2["entries"])
+        finally:
+            self._reset_persist()
+
+    def test_wait_for_response_removes_persisted_entry(self, tmp_path):
+        """When wait_for_response times out, the persisted record is
+        removed so the next restart doesn't replay a stale entry."""
+        from tools import clarify_gateway as cm
+        import json
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            cm.register("p4", "sk-p4", "Pick?", ["a"])
+            assert path.exists()
+            cm.wait_for_response("p4", timeout=0.05)
+            payload = json.loads(path.read_text())
+            assert all(e["clarify_id"] != "p4" for e in payload["entries"])
+        finally:
+            self._reset_persist()
+
+    def test_clear_session_removes_persisted_entries(self, tmp_path):
+        """clear_session() prunes the JSON sidecar so suspended sessions
+        don't leave ghost entries that a future restart would restore."""
+        from tools import clarify_gateway as cm
+        import json
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            cm.register("p5", "sk-p5", "Pick?", ["a"])
+            cm.register("p6", "sk-p5", "Pick?", ["b"])
+            cm.clear_session("sk-p5")
+            payload = json.loads(path.read_text())
+            ids = [e["clarify_id"] for e in payload["entries"]]
+            assert "p5" not in ids
+            assert "p6" not in ids
+        finally:
+            self._reset_persist()
+
+    def test_restore_skips_duplicate_in_memory_entry(self, tmp_path):
+        """If a clarify_id is already live in memory, restore_pending
+        must not clobber the live entry (which has a real Event a thread
+        may be waiting on)."""
+        from tools import clarify_gateway as cm
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            live = cm.register("p7", "sk-p7", "Q?", ["a"])
+            # Persist file now exists.  Restoring with the live entry
+            # still in _entries must be a no-op for that id.
+            restored = cm.restore_pending(timeout_seconds=600.0)
+            assert restored == []
+            with cm._lock:
+                assert cm._entries["p7"] is live
+        finally:
+            self._reset_persist()
+
+    def test_was_restored_false_for_live_entry(self, tmp_path):
+        """was_restored() distinguishes live entries from rehydrated ones."""
+        from tools import clarify_gateway as cm
+
+        path = self._isolate_persist(tmp_path)
+        try:
+            cm.register("p8", "sk-p8", "Q?", ["a"])
+            assert cm.was_restored("p8") is False
+            assert cm.was_restored("nope") is False
+        finally:
+            self._reset_persist()

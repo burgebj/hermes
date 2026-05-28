@@ -3454,6 +3454,20 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 session_key = self._clarify_state.get(clarify_id)
                 if not session_key:
+                    # Adapter map lost (gateway restart, #32762) — fall
+                    # back to the clarify primitive, which is rehydrated
+                    # from disk on startup.  If the entry survived the
+                    # restart, recover the session_key so the tap is
+                    # acknowledged instead of silently dropped.
+                    try:
+                        from tools.clarify_gateway import _entries as _clarify_entries  # type: ignore
+                        _persisted = _clarify_entries.get(clarify_id)
+                        if _persisted is not None:
+                            session_key = _persisted.session_key
+                            self._clarify_state[clarify_id] = session_key
+                    except Exception:
+                        pass
+                if not session_key:
                     await query.answer(text="This prompt has already been resolved.")
                     return
 
@@ -3508,6 +3522,19 @@ class TelegramAdapter(BasePlatformAdapter):
                     # rather than nothing.
                     resolved_text = f"choice {idx + 1}"
 
+                # Detect whether the entry was rehydrated from disk
+                # (gateway restart between ask and tap, #32762).  When
+                # restored, no agent thread is waiting — we still record
+                # the response and acknowledge the tap, but the user
+                # message says the session was reset so they know to
+                # re-trigger instead of waiting forever.
+                _entry_restored = False
+                try:
+                    from tools.clarify_gateway import was_restored as _was_restored
+                    _entry_restored = bool(_was_restored(clarify_id))
+                except Exception:
+                    _entry_restored = False
+
                 # Pop state and resolve
                 self._clarify_state.pop(clarify_id, None)
                 try:
@@ -3517,10 +3544,28 @@ class TelegramAdapter(BasePlatformAdapter):
                     logger.error("[%s] resolve_gateway_clarify failed: %s", self.name, exc)
                     resolved = False
 
-                await query.answer(text=f"✓ {resolved_text[:60]}")
+                if _entry_restored:
+                    ack_text = (
+                        "⚠️ Session restarted — your answer was recorded but "
+                        "the agent run ended. Please /retry."
+                    )
+                    edited_text = (
+                        f"❓ {_html.escape(query.message.text or '')}\n\n"
+                        f"<b>{_html.escape(user_display)}:</b> {_html.escape(resolved_text)}\n\n"
+                        f"<i>⚠️ Gateway restarted before this answer arrived — "
+                        f"please /retry to re-run the agent.</i>"
+                    )
+                else:
+                    ack_text = f"✓ {resolved_text[:60]}"
+                    edited_text = (
+                        f"❓ {_html.escape(query.message.text or '')}\n\n"
+                        f"<b>{_html.escape(user_display)}:</b> {_html.escape(resolved_text)}"
+                    )
+
+                await query.answer(text=ack_text)
                 try:
                     await query.edit_message_text(
-                        text=f"❓ {_html.escape(query.message.text or '')}\n\n<b>{_html.escape(user_display)}:</b> {_html.escape(resolved_text)}",
+                        text=edited_text,
                         parse_mode=ParseMode.HTML,
                         reply_markup=None,
                     )
@@ -3529,8 +3574,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 if resolved:
                     logger.info(
-                        "Telegram clarify button resolved (id=%s, choice=%r, user=%s)",
-                        clarify_id, resolved_text, user_display,
+                        "Telegram clarify button resolved (id=%s, choice=%r, user=%s, restored=%s)",
+                        clarify_id, resolved_text, user_display, _entry_restored,
                     )
                 else:
                     logger.warning(

@@ -4436,6 +4436,23 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("Process checkpoint recovery: %s", e)
 
+        # Re-hydrate pending clarify-button entries (#32762).  When the
+        # gateway is killed by SIGTERM between an agent posting a clarify
+        # prompt and the user tapping a button, the in-memory entry was
+        # lost and the tap silently failed.  Restoring from the JSON
+        # sidecar lets the next process at least acknowledge the tap and
+        # tell the user the session was reset.  Best-effort.
+        try:
+            from tools import clarify_gateway as _clarify_mod
+            _restored = _clarify_mod.restore_pending()
+            if _restored:
+                logger.info(
+                    "Recovered %d pending clarify entr%s from previous run",
+                    len(_restored), "y" if len(_restored) == 1 else "ies",
+                )
+        except Exception as e:
+            logger.warning("Clarify state recovery: %s", e)
+
         # Suspend sessions that were active when the gateway last exited.
         # This prevents stuck sessions from being blindly resumed on restart,
         # which can create an unrecoverable loop (#7536).  Suspended sessions

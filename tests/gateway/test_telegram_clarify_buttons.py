@@ -352,6 +352,75 @@ class TestTelegramClarifyCallback:
         assert adapter._clarify_state["cidC"] == "sk-auth"
 
     @pytest.mark.asyncio
+    async def test_button_after_gateway_restart_recovers_session(self, tmp_path):
+        """Regression for #32762: when the gateway is killed between an
+        agent posting a clarify prompt and the user tapping a button, the
+        adapter-side ``_clarify_state`` map is empty.  The callback must
+        fall back to the persisted clarify primitive (rehydrated on
+        boot), acknowledge the tap, and tell the user the session was
+        reset instead of silently saying "already resolved".
+        """
+        from tools import clarify_gateway as cm
+
+        # Simulate: previous process registered "cidR" and persisted it.
+        cm.set_persist_path(tmp_path / "clarify_pending.json")
+        try:
+            cm.register("cidR", "sk-restart", "Pick", ["red", "green"])
+
+            # Simulate SIGTERM — wipe in-memory state and rehydrate.
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+            restored = cm.restore_pending(timeout_seconds=600.0)
+            assert len(restored) == 1
+            restored_entry = restored[0]
+
+            # New process: adapter has an empty _clarify_state map.
+            adapter = _make_adapter()
+            assert "cidR" not in adapter._clarify_state
+
+            query = AsyncMock()
+            query.data = "cl:cidR:1"  # green
+            query.message = MagicMock()
+            query.message.chat_id = 12345
+            query.message.text = "Pick"
+            query.from_user = MagicMock()
+            query.from_user.id = "777"
+            query.from_user.first_name = "Tester"
+            query.answer = AsyncMock()
+            query.edit_message_text = AsyncMock()
+
+            update = MagicMock()
+            update.callback_query = query
+            context = MagicMock()
+
+            with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+                await adapter._handle_callback_query(update, context)
+
+            # Tap was acknowledged (not silently dropped, not "already resolved").
+            query.answer.assert_called_once()
+            ack_text = query.answer.call_args[1]["text"].lower()
+            assert "already" not in ack_text
+            assert "session restarted" in ack_text or "restart" in ack_text
+
+            # The clarify primitive recorded the user's choice on the
+            # restored entry.  (Restored entries are cleaned out of
+            # _entries immediately on resolve — no waiter to do it — so
+            # we read the response off the restored_entry reference.)
+            assert restored_entry.response == "green"
+            assert restored_entry.event.is_set()
+
+            # Original message edited with the "session restarted" hint.
+            query.edit_message_text.assert_called_once()
+            edited = query.edit_message_text.call_args[1]["text"].lower()
+            assert "retry" in edited or "restart" in edited
+        finally:
+            cm.set_persist_path(None)
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+
+    @pytest.mark.asyncio
     async def test_invalid_choice_token(self):
         from tools import clarify_gateway as cm
 
