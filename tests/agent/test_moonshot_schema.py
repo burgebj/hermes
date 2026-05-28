@@ -101,6 +101,50 @@ class TestMissingTypeFilled:
         out = sanitize_moonshot_tool_parameters(params)
         assert out["properties"]["tags"]["items"]["type"] == "string"
 
+    def test_union_type_array_normalised_to_first_concrete(self):
+        """JSON Schema union types (``type: ["number", "string"]``) used to
+        crash ``_fill_missing_type`` with ``TypeError: unhashable type: 'list'``
+        because lists are not hashable for set-membership testing.  Moonshot
+        rejects union arrays anyway, so we normalise to the first concrete
+        (non-null) type. Regression test for #30095.
+        """
+        params = {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": ["number", "string"],
+                    "description": "Max results",
+                },
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["limit"]["type"] == "number"
+        assert out["properties"]["limit"]["description"] == "Max results"
+
+    def test_union_type_array_skips_null_entry(self):
+        """``["null", "string"]`` collapses to ``string`` — null entries
+        are dropped during normalisation (Moonshot rejects null types)."""
+        params = {
+            "type": "object",
+            "properties": {
+                "name": {"type": ["null", "string"]},
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["name"]["type"] == "string"
+
+    def test_union_type_array_all_null_falls_back_to_string(self):
+        """A degenerate ``["null"]`` falls back to ``string`` rather than
+        crashing or leaving the list in place."""
+        params = {
+            "type": "object",
+            "properties": {
+                "x": {"type": ["null"]},
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["x"]["type"] == "string"
+
     def test_ref_node_is_not_given_synthetic_type(self):
         """$ref nodes should NOT get a synthetic type — the referenced
         definition supplies it, and Moonshot would reject the conflict."""

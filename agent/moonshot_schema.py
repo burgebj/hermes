@@ -134,8 +134,23 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
 
 
 def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
-    """Infer a reasonable ``type`` if this schema node has none."""
-    if "type" in node and node["type"] not in {None, ""}:
+    """Infer a reasonable ``type`` if this schema node has none.
+
+    JSON Schema permits ``type`` to be a list of strings (union types, e.g.
+    ``["number", "string"]``).  Moonshot rejects union type arrays — it
+    requires a single scalar type — and the previous ``not in {None, ""}``
+    set-membership check crashed with ``TypeError: unhashable type: 'list'``
+    when given a list.  Normalise list types to the first concrete (non-null)
+    entry so the rest of the pipeline sees a plain string type.
+    """
+    node_type = node.get("type")
+    if isinstance(node_type, list):
+        concrete = next(
+            (t for t in node_type if t not in (None, "null", "")),
+            "string",
+        )
+        return {**node, "type": concrete}
+    if "type" in node and node_type not in {None, ""}:
         return node
 
     # Heuristic: presence of ``properties`` → object, ``items`` → array, ``enum``
