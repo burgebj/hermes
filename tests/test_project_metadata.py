@@ -1,6 +1,8 @@
 """Regression tests for packaging metadata in pyproject.toml."""
 
+import json
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -20,6 +22,17 @@ def _load_setuptools_config():
 
 def _load_package_data():
     return _load_setuptools_config()["package-data"]
+
+
+def test_mcp_registry_name_is_lowercase_and_matches_readme_marker():
+    """Official MCP server names should stay canonical and lowercase."""
+    root = Path(__file__).resolve().parents[1]
+    server_json = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert server_json["name"] == "io.github.nousresearch/hermes-agent"
+    assert server_json["name"] == server_json["name"].lower()
+    assert re.search(r"<!--\s*mcp-name:\s*io\.github\.nousresearch/hermes-agent\s*-->", readme)
 
 
 def test_matrix_extra_not_in_all():
