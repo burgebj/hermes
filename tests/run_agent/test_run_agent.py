@@ -2369,6 +2369,60 @@ class TestConcurrentToolExecution:
         assert json.loads(result) == {"error": "Blocked"}
         assert agent._turns_since_memory == 5
 
+    def test_sequential_pre_tool_call_receives_session_id_and_tool_call_id(self, agent, monkeypatch):
+        """Sequential path should forward session_id and tool_call_id to
+        get_pre_tool_call_block_message so plugin hooks can correlate."""
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"test"}',
+            call_id="call-abc-123",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+
+        captured_kwargs = {}
+        def _capture_block(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return None  # don't block
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            _capture_block,
+        )
+        agent.session_id = "test-session-42"
+        with patch("run_agent.handle_function_call", return_value='{"results":[]}'):
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        assert captured_kwargs["session_id"] == "test-session-42"
+        assert captured_kwargs["tool_call_id"] == "call-abc-123"
+
+    def test_concurrent_pre_tool_call_receives_session_id_and_tool_call_id(self, agent, monkeypatch):
+        """Concurrent path should forward session_id and tool_call_id to
+        get_pre_tool_call_block_message so plugin hooks can correlate."""
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"test"}',
+            call_id="call-xyz-789",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+
+        captured_kwargs = {}
+        def _capture_block(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return None  # don't block
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            _capture_block,
+        )
+        agent.session_id = "test-session-99"
+        with patch("run_agent.handle_function_call", return_value='{"results":[]}'):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        assert captured_kwargs["session_id"] == "test-session-99"
+        assert captured_kwargs["tool_call_id"] == "call-xyz-789"
+
 
 class TestPathsOverlap:
     """Unit tests for the _paths_overlap helper."""
