@@ -5052,6 +5052,34 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
+def _quote_env_value(value: str) -> str:
+    """Quote a .env value when it contains characters that the dotenv spec
+    treats specially in unquoted form.
+
+    The most damaging case is ``#``: python-dotenv (and most other .env
+    parsers) treat an unquoted ``#`` as the start of an inline comment, so
+    a token like ``sk-ant-oat01-abc#xyz`` round-trips back as
+    ``sk-ant-oat01-abc`` and authentication fails with 401 (see #30355).
+
+    We also quote values that contain ``"``, ``'``, or leading/trailing
+    whitespace.  Inner ``"`` and ``\\`` are escaped per the dotenv spec.
+    Values that don't need quoting are returned unchanged so existing
+    files stay diff-stable.
+    """
+    if value == "":
+        return value
+    needs_quoting = (
+        "#" in value
+        or '"' in value
+        or "'" in value
+        or value != value.strip()
+    )
+    if not needs_quoting:
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hermes/.env."""
     if is_managed():
@@ -5078,11 +5106,15 @@ def save_env_value(key: str, value: str):
         # Sanitize on every read: split concatenated keys, drop stale placeholders
         lines = _sanitize_env_lines(lines)
 
+    # Quote values containing characters dotenv treats specially (#, ", etc.)
+    # so they round-trip through python-dotenv intact.  See #30355.
+    serialized_value = _quote_env_value(value)
+
     # Find and update or append
     found = False
     for i, line in enumerate(lines):
         if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
+            lines[i] = f"{key}={serialized_value}\n"
             found = True
             break
 
@@ -5090,7 +5122,7 @@ def save_env_value(key: str, value: str):
         # Ensure there's a newline at the end of the file before appending
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
-        lines.append(f"{key}={value}\n")
+        lines.append(f"{key}={serialized_value}\n")
     
     fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
     # Preserve original permissions so Docker volume mounts aren't clobbered.
