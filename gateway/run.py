@@ -18218,6 +18218,27 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     from hermes_logging import setup_logging
     setup_logging(hermes_home=_hermes_home, mode="gateway")
 
+    # Credential-broker SIGHUP reload hook. Lets
+    # operators flip security.credential_broker.enabled in config.yaml and
+    # invalidate the broker cache with `kill -HUP <pid>` instead of a full
+    # gateway restart. POSIX-only — Windows path returns False silently.
+    # The function itself swallows any install error so a signal-handling
+    # quirk on the host never breaks startup.
+    try:
+        from agent.secret_broker import install_broker_signal_handler
+        if install_broker_signal_handler():
+            logger.info("SIGHUP reload handler installed (broker cache).")
+        else:
+            logger.info(
+                "SIGHUP reload handler not installed (Windows or unsupported); "
+                "restart the gateway to pick up broker config changes."
+            )
+    except Exception as exc:
+        logger.info(
+            "SIGHUP reload handler skipped: %s. "
+            "Restart the gateway to pick up broker config changes.", exc,
+        )
+
     # Periodic process memory usage logging (gateway only) — emits a
     # grep-friendly "[MEMORY] rss=...MB ..." line every N minutes so
     # slow leaks in the long-lived gateway process show up as a time
