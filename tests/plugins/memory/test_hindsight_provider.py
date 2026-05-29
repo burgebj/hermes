@@ -223,7 +223,11 @@ class TestConfig:
         p = provider_with_config(recall_types=[])
         assert p._recall_types == ["observation"]
 
-    def test_custom_config_values(self, provider_with_config):
+    def test_custom_config_values(self, provider_with_config, monkeypatch):
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._patch_hindsight_json",
+            lambda *args, **kwargs: None,
+        )
         p = provider_with_config(
             retain_tags=["tag1", "tag2"],
             retain_source="hermes",
@@ -259,6 +263,71 @@ class TestConfig:
         assert p._recall_prompt_preamble == "Custom preamble:"
         assert p._recall_max_input_chars == 500
         assert p._bank_mission == "Test agent mission"
+
+    def test_bank_missions_sync_to_banks_api(self, provider_with_config, monkeypatch):
+        calls = []
+
+        def fake_patch(api_url, api_key, path, payload, *, timeout):
+            calls.append({
+                "api_url": api_url,
+                "api_key": api_key,
+                "path": path,
+                "payload": payload,
+                "timeout": timeout,
+            })
+
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._patch_hindsight_json",
+            fake_patch,
+        )
+
+        provider_with_config(
+            bank_id="test bank/with slash",
+            bank_mission="Reflect around the user mission",
+            bank_retain_mission="Retain durable facts only",
+            timeout=120,
+        )
+
+        assert calls == [
+            {
+                "api_url": "http://localhost:9999",
+                "api_key": "test-key",
+                "path": "/v1/default/banks/test%20bank%2Fwith%20slash/config",
+                "payload": {
+                    "reflect_mission": "Reflect around the user mission",
+                    "retain_mission": "Retain durable facts only",
+                },
+                "timeout": 10.0,
+            },
+            {
+                "api_url": "http://localhost:9999",
+                "api_key": "test-key",
+                "path": "/v1/default/banks/test%20bank%2Fwith%20slash",
+                "payload": {"mission": "Reflect around the user mission"},
+                "timeout": 10.0,
+            },
+        ]
+
+    def test_bank_retain_mission_sync_does_not_require_profile_mission(
+        self,
+        provider_with_config,
+        monkeypatch,
+    ):
+        calls = []
+
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._patch_hindsight_json",
+            lambda api_url, api_key, path, payload, *, timeout: calls.append((path, payload)),
+        )
+
+        provider_with_config(bank_retain_mission="Retain durable facts only")
+
+        assert calls == [
+            (
+                "/v1/default/banks/test-bank/config",
+                {"retain_mission": "Retain durable facts only"},
+            )
+        ]
 
     def test_config_from_env_fallback(self, tmp_path, monkeypatch):
         """When no config file exists, falls back to env vars."""
@@ -1569,4 +1638,3 @@ class TestShutdown:
         embedded.close.assert_called_once()
         assert embedded._client is None
         assert provider._client is None
-

@@ -188,6 +188,41 @@ def _check_api_supports_update_mode_append(api_url: str,
     return supported
 
 
+def _patch_hindsight_json(
+    api_url: str,
+    api_key: str | None,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> None:
+    """PATCH a JSON payload to the Hindsight Banks API."""
+    import urllib.error
+    import urllib.request
+
+    if not api_url:
+        raise ValueError("missing api_url")
+    url = api_url.rstrip("/") + path
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="PATCH",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Dedicated event loop for Hindsight async calls (one per process, reused).
 # Avoids creating ephemeral loops that leak aiohttp sessions.
@@ -1045,6 +1080,58 @@ class HindsightMemoryProvider(MemoryProvider):
                 return str(url)
         return self._api_url or ""
 
+    def _sync_bank_missions(self) -> None:
+        """Apply configured bank mission fields to Hindsight Banks API."""
+        mission = str(self._bank_mission or "").strip()
+        retain_mission = str(self._bank_retain_mission or "").strip()
+        if not mission and not retain_mission:
+            return
+
+        import urllib.parse
+
+        api_url = self._probe_url()
+        if not api_url:
+            logger.debug("Hindsight bank mission sync skipped: no API URL")
+            return
+
+        bank_id = urllib.parse.quote(str(self._bank_id), safe="")
+        timeout = min(float(self._timeout or _DEFAULT_TIMEOUT), 10.0)
+        config_payload: dict[str, str] = {}
+        if mission:
+            config_payload["reflect_mission"] = mission
+        if retain_mission:
+            config_payload["retain_mission"] = retain_mission
+
+        try:
+            if config_payload:
+                _patch_hindsight_json(
+                    api_url,
+                    self._api_key,
+                    f"/v1/default/banks/{bank_id}/config",
+                    config_payload,
+                    timeout=timeout,
+                )
+            if mission:
+                _patch_hindsight_json(
+                    api_url,
+                    self._api_key,
+                    f"/v1/default/banks/{bank_id}",
+                    {"mission": mission},
+                    timeout=timeout,
+                )
+            logger.info(
+                "Hindsight bank mission sync applied: bank=%s reflect=%s retain=%s",
+                self._bank_id,
+                bool(mission),
+                bool(retain_mission),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Hindsight bank mission sync failed for bank=%s: %s",
+                self._bank_id,
+                exc,
+            )
+
     def _resolve_retain_target(self, fallback_document_id: str) -> tuple[str, str | None]:
         """Pick (document_id, update_mode) based on live API capability.
 
@@ -1229,6 +1316,9 @@ class HindsightMemoryProvider(MemoryProvider):
                      self._retain_async, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
                      self._tags, self._recall_tags)
 
+        if self._mode != "local_embedded":
+            self._sync_bank_missions()
+
         # For local mode, start the embedded daemon in the background so it
         # doesn't block the chat. Redirect stdout/stderr to a log file to
         # prevent rich startup output from spamming the terminal.
@@ -1265,6 +1355,7 @@ class HindsightMemoryProvider(MemoryProvider):
                             client._manager.stop(profile)
 
                     client._ensure_started()
+                    self._sync_bank_missions()
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write("\n=== Daemon started successfully ===\n")
                 except Exception as e:
