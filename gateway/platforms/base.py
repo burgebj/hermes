@@ -2458,6 +2458,23 @@ class BasePlatformAdapter(ABC):
         return safe_paths
 
     @staticmethod
+    def _is_safe_media_path(path: str) -> bool:
+        """Validate that a MEDIA: path is within the Hermes cache directory.
+
+        Rejects absolute paths, parent-directory traversal, and paths outside
+        the designated media cache to prevent arbitrary file reads via prompt
+        injection.
+        """
+        cache_dir = os.path.realpath(os.path.join(
+            os.path.expanduser("~"), ".hermes", "media_cache"
+        ))
+        try:
+            resolved = os.path.realpath(os.path.expanduser(path))
+        except (ValueError, OSError):
+            return False
+        return resolved.startswith(cache_dir + os.sep) or resolved == cache_dir
+
+    @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
@@ -2504,7 +2521,7 @@ class BasePlatformAdapter(ABC):
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
-            if path:
+            if path and BasePlatformAdapter._is_safe_media_path(path):
                 media.append((os.path.expanduser(path), has_voice_tag))
 
         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
