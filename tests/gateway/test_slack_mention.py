@@ -4,8 +4,9 @@ Tests for Slack mention gating (require_mention / free_response_channels).
 Follows the same pattern as test_whatsapp_group_gating.py.
 """
 
+import asyncio
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from gateway.config import Platform, PlatformConfig
 
@@ -55,7 +56,7 @@ CHANNEL_ID = "C0AQWDLHY9M"
 OTHER_CHANNEL_ID = "C9999999999"
 
 
-def _make_adapter(require_mention=None, strict_mention=None, free_response_channels=None, allowed_channels=None):
+def _make_adapter(require_mention=None, strict_mention=None, free_response_channels=None, allowed_channels=None, reply_in_thread=None):
     extra = {}
     if require_mention is not None:
         extra["require_mention"] = require_mention
@@ -65,12 +66,16 @@ def _make_adapter(require_mention=None, strict_mention=None, free_response_chann
         extra["free_response_channels"] = free_response_channels
     if allowed_channels is not None:
         extra["allowed_channels"] = allowed_channels
+    if reply_in_thread is not None:
+        extra["reply_in_thread"] = reply_in_thread
 
     adapter = object.__new__(SlackAdapter)
     adapter.platform = Platform.SLACK
     adapter.config = PlatformConfig(enabled=True, extra=extra)
     adapter._bot_user_id = BOT_USER_ID
     adapter._team_bot_user_ids = {}
+    adapter._slack_last_seen = {}
+    adapter._save_slack_last_seen = MagicMock()
     return adapter
 
 
@@ -344,6 +349,126 @@ def test_bot_uid_none_processes_channel_message():
     else:
         result = True  # gating skipped, message processed
     assert result is True
+
+
+async def _capture_slack_message_event(adapter, event):
+    """Run the real Slack inbound handler and return the produced MessageEvent."""
+    captured = []
+
+    adapter._dedup = MagicMock(is_duplicate=MagicMock(return_value=False))
+    adapter._bot_user_id = BOT_USER_ID
+    adapter._team_bot_user_ids = {}
+    adapter._channel_team = {}
+    adapter._assistant_threads = {}
+    adapter._thread_context_cache = {}
+    adapter._reacting_message_ids = set()
+    adapter._mentioned_threads = set()
+    adapter._bot_message_ts = set()
+    adapter._BOT_TS_MAX = 5000
+    adapter._MENTIONED_THREADS_MAX = 5000
+    adapter._lookup_assistant_thread_metadata = MagicMock(return_value={})
+    adapter._has_active_session_for_thread = MagicMock(return_value=False)
+    adapter._fetch_thread_context = AsyncMock(return_value="")
+    adapter._fetch_thread_parent_text = AsyncMock(return_value="")
+    adapter._resolve_user_name = AsyncMock(return_value="Jason Nickel")
+    adapter.handle_message = AsyncMock(side_effect=lambda msg: captured.append(msg))
+
+    await adapter._handle_slack_message(event)
+    assert captured, "Slack handler did not emit a MessageEvent"
+    return captured[0]
+
+
+def test_top_level_channel_reply_in_thread_false_does_not_synthesize_thread_ts():
+    adapter = _make_adapter(require_mention=False, reply_in_thread=False)
+
+    msg_event = asyncio.run(_capture_slack_message_event(
+        adapter,
+        {
+            "type": "message",
+            "channel": CHANNEL_ID,
+            "channel_type": "channel",
+            "team": "T1",
+            "user": "U_JASON",
+            "text": "first top-level message",
+            "ts": "1710000000.000100",
+        },
+    ))
+
+    assert msg_event.source.chat_type == "group"
+    assert msg_event.source.thread_id is None
+    assert msg_event.reply_to_message_id is None
+
+
+def test_top_level_channel_reply_in_thread_true_keeps_per_message_thread_ts():
+    adapter = _make_adapter(require_mention=False, reply_in_thread=True)
+
+    msg_event = asyncio.run(_capture_slack_message_event(
+        adapter,
+        {
+            "type": "message",
+            "channel": CHANNEL_ID,
+            "channel_type": "channel",
+            "team": "T1",
+            "user": "U_JASON",
+            "text": "first top-level message",
+            "ts": "1710000000.000200",
+        },
+    ))
+
+    assert msg_event.source.thread_id == "1710000000.000200"
+    assert msg_event.reply_to_message_id is None
+
+
+def test_real_channel_thread_reply_preserves_thread_ts_when_reply_in_thread_false():
+    adapter = _make_adapter(require_mention=False, reply_in_thread=False)
+
+    msg_event = asyncio.run(_capture_slack_message_event(
+        adapter,
+        {
+            "type": "message",
+            "channel": CHANNEL_ID,
+            "channel_type": "channel",
+            "team": "T1",
+            "user": "U_JASON",
+            "text": "reply in a real thread",
+            "ts": "1710000000.000301",
+            "thread_ts": "1710000000.000300",
+        },
+    ))
+
+    assert msg_event.source.thread_id == "1710000000.000300"
+    assert msg_event.reply_to_message_id == "1710000000.000300"
+
+
+def test_slack_ts_newer_compares_slack_timestamps():
+    assert SlackAdapter._slack_ts_newer("1710000000.000301", "1710000000.000300") is True
+    assert SlackAdapter._slack_ts_newer("1710000000.000300", "1710000000.000301") is False
+
+
+def test_slack_catch_up_replays_history_chronologically():
+    adapter = _make_adapter(require_mention=False)
+    adapter._slack_last_seen = {"T1:C0AQWDLHY9M": "1710000000.000100"}
+    adapter._handle_slack_message = AsyncMock()
+
+    client = MagicMock()
+    client.conversations_history = AsyncMock(return_value={
+        "messages": [
+            {"type": "message", "user": "U2", "text": "second", "ts": "1710000000.000300"},
+            {"type": "message", "user": "U1", "text": "first", "ts": "1710000000.000200"},
+        ]
+    })
+
+    replayed = asyncio.run(adapter._catch_up_slack_conversation(
+        client,
+        "T1",
+        {"id": CHANNEL_ID, "is_channel": True},
+    ))
+
+    assert replayed == 2
+    assert [call.args[0]["text"] for call in adapter._handle_slack_message.call_args_list] == ["first", "second"]
+    assert all(call.args[0]["channel"] == CHANNEL_ID for call in adapter._handle_slack_message.call_args_list)
+    assert all(call.args[0]["team"] == "T1" for call in adapter._handle_slack_message.call_args_list)
+    assert all(call.args[0]["channel_type"] == "channel" for call in adapter._handle_slack_message.call_args_list)
 
 
 # ---------------------------------------------------------------------------

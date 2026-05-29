@@ -2344,6 +2344,37 @@ def _interrupted_call_result() -> str:
     }, ensure_ascii=False)
 
 
+_MEM0_GET_ALL_FILTER_ERROR = "Top-level entity parameters"
+
+
+def _mem0_list_fallback_arguments(server_name: str, tool_name: str, args: dict, error_text: str) -> Optional[dict]:
+    """Build a safe fallback for the known broken Mem0 MCP list wrapper.
+
+    Some Mem0 MCP servers expose ``list_memories(args={user_id, limit})`` but
+    internally still call ``MemoryClient.get_all(user_id=...)``. Modern mem0ai
+    rejects that shape and requires ``get_all(filters={"user_id": ...})``.
+    When we cannot patch the remote server directly, approximate list via the
+    server's working semantic search endpoint using a whitespace query.
+    """
+    if server_name != "mem0" or tool_name != "list_memories":
+        return None
+    if _MEM0_GET_ALL_FILTER_ERROR not in (error_text or ""):
+        return None
+
+    payload = args.get("args") if isinstance(args, dict) else None
+    if not isinstance(payload, dict):
+        payload = args if isinstance(args, dict) else {}
+
+    user_id = payload.get("user_id") or "jason"
+    try:
+        limit = int(payload.get("limit", 50))
+    except (TypeError, ValueError):
+        limit = 50
+    # The server's search schema caps limit at 50; list advertises 500.
+    limit = max(1, min(limit, 50))
+    return {"args": {"query": " ", "user_id": user_id, "limit": limit}}
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -2465,11 +2496,31 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 for block in (result.content or []):
                     if hasattr(block, "text"):
                         error_text += block.text
-                return json.dumps({
-                    "error": _sanitize_error(
-                        error_text or "MCP tool returned an error"
+
+                fallback_args = _mem0_list_fallback_arguments(server_name, tool_name, args, error_text)
+                if fallback_args is not None:
+                    logger.info(
+                        "MCP mem0/list_memories hit get_all(user_id=...) compatibility error; "
+                        "falling back to search_memories whitespace query"
                     )
-                }, ensure_ascii=False)
+                    async with server._rpc_lock:
+                        result = await server.session.call_tool("search_memories", arguments=fallback_args)
+                    if result.isError:
+                        fallback_error = ""
+                        for block in (result.content or []):
+                            if hasattr(block, "text"):
+                                fallback_error += block.text
+                        return json.dumps({
+                            "error": _sanitize_error(
+                                fallback_error or error_text or "MCP tool returned an error"
+                            )
+                        }, ensure_ascii=False)
+                else:
+                    return json.dumps({
+                        "error": _sanitize_error(
+                            error_text or "MCP tool returned an error"
+                        )
+                    }, ensure_ascii=False)
 
             # Collect text from content blocks. MCP tool results can also
             # include ImageContent blocks (screenshot / Blockbench / Playwright
@@ -2515,7 +2566,13 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             try:
                 parsed = json.loads(result)
                 if "error" in parsed:
-                    _bump_server_error(server_name)
+                    # MCP ``isError`` results are application/tool errors: bad
+                    # arguments, validation failures, upstream API errors from
+                    # the tool implementation, etc. They prove the server is
+                    # reachable, so they must not trip the transport-level
+                    # circuit breaker and block unrelated tools on the same
+                    # MCP server.
+                    _reset_server_error(server_name)
                 else:
                     _reset_server_error(server_name)  # success — reset
             except (json.JSONDecodeError, TypeError):

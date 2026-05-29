@@ -303,6 +303,7 @@ class SlackAdapter(BasePlatformAdapter):
     """
 
     MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
+    _LAST_SEEN_STATE_VERSION = 1
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SLACK)
@@ -348,6 +349,142 @@ class SlackAdapter(BasePlatformAdapter):
         # (channel_id, user_id) to avoid cross-user collisions.
         # Each value: {"response_url": str, "ts": float}
         self._slash_command_contexts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._slack_last_seen: Dict[str, str] = self._load_slack_last_seen()
+
+    def _slack_last_seen_path(self):
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "state" / "slack_last_seen.json"
+
+    @staticmethod
+    def _slack_last_seen_key(team_id: str, channel_id: str) -> str:
+        return f"{team_id or '_'}:{channel_id}"
+
+    @staticmethod
+    def _slack_ts_newer(candidate: str, current: str = "") -> bool:
+        if not candidate:
+            return False
+        try:
+            return float(candidate) > float(current or 0)
+        except (TypeError, ValueError):
+            return bool(candidate and candidate != current)
+
+    def _load_slack_last_seen(self) -> Dict[str, str]:
+        path = self._slack_last_seen_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        channels = payload.get("channels", payload)
+        if not isinstance(channels, dict):
+            return {}
+        return {str(k): str(v) for k, v in channels.items() if v}
+
+    def _save_slack_last_seen(self) -> None:
+        path = self._slack_last_seen_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "version": self._LAST_SEEN_STATE_VERSION,
+                        "updated_at": time.time(),
+                        "channels": dict(sorted(self._slack_last_seen.items())),
+                    },
+                    sort_keys=True,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except OSError as exc:
+            logger.debug("[Slack] Failed to persist last-seen state: %s", exc)
+
+    def _record_slack_last_seen(self, event: dict, *, channel_id: str = "", team_id: str = "") -> None:
+        channel = channel_id or event.get("channel", "")
+        ts = event.get("ts", "")
+        if not channel or not ts:
+            return
+        team = team_id or event.get("team") or event.get("team_id") or self._channel_team.get(channel, "")
+        key = self._slack_last_seen_key(team, channel)
+        current = self._slack_last_seen.get(key, "")
+        if self._slack_ts_newer(ts, current):
+            self._slack_last_seen[key] = ts
+            self._save_slack_last_seen()
+
+    @staticmethod
+    def _conversation_channel_type(channel: dict) -> str:
+        if channel.get("is_im"):
+            return "im"
+        if channel.get("is_mpim"):
+            return "mpim"
+        if channel.get("is_group") or channel.get("is_private"):
+            return "group"
+        return "channel"
+
+    async def _catch_up_slack_conversation(self, client: Any, team_id: str, channel: dict) -> int:
+        channel_id = channel.get("id", "")
+        if not channel_id:
+            return 0
+        oldest = self._slack_last_seen.get(self._slack_last_seen_key(team_id, channel_id))
+        if not oldest:
+            return 0
+        try:
+            result = await client.conversations_history(
+                channel=channel_id,
+                oldest=oldest,
+                inclusive=False,
+                limit=100,
+            )
+        except Exception as exc:
+            logger.debug("[Slack] Catch-up history failed for %s: %s", channel_id, exc)
+            return 0
+
+        messages = list((result or {}).get("messages", []) or [])
+        if not messages:
+            return 0
+        channel_type = self._conversation_channel_type(channel)
+        replayed = 0
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            event = dict(message)
+            event.setdefault("type", "message")
+            event["channel"] = channel_id
+            event["team"] = team_id
+            event["channel_type"] = channel_type
+            await self._handle_slack_message(event)
+            replayed += 1
+        return replayed
+
+    async def _catch_up_slack_missed_messages(self) -> None:
+        """Replay messages posted while Socket Mode was disconnected."""
+        total = 0
+        for team_id, client in list(self._team_clients.items()):
+            for types in ("public_channel,private_channel", "im,mpim"):
+                cursor = None
+                while True:
+                    try:
+                        result = await client.conversations_list(
+                            types=types,
+                            exclude_archived=True,
+                            limit=200,
+                            cursor=cursor,
+                        )
+                    except Exception as exc:
+                        logger.debug("[Slack] Catch-up conversations.list failed for %s: %s", types, exc)
+                        break
+                    for channel in (result or {}).get("channels", []) or []:
+                        if channel.get("is_channel") and channel.get("is_member") is False:
+                            continue
+                        total += await self._catch_up_slack_conversation(client, team_id, channel)
+                    cursor = ((result or {}).get("response_metadata") or {}).get("next_cursor")
+                    if not cursor:
+                        break
+        if total:
+            logger.info("[Slack] Replayed %d missed message(s) from Web API history", total)
 
     def _describe_slack_api_error(self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Convert Slack API auth/permission failures into actionable user-facing text."""
@@ -691,6 +828,7 @@ class SlackAdapter(BasePlatformAdapter):
                 "[Slack] Socket Mode connected (%d workspace(s))",
                 len(self._team_clients),
             )
+            await self._catch_up_slack_missed_messages()
             return True
 
         except Exception as e:  # pragma: no cover - defensive logging
@@ -1768,6 +1906,7 @@ class SlackAdapter(BasePlatformAdapter):
         """Handle an incoming Slack message event."""
         # Dedup: Slack Socket Mode can redeliver events after reconnects (#4777)
         event_ts = event.get("ts", "")
+        self._record_slack_last_seen(event)
         if event_ts and self._dedup.is_duplicate(event_ts):
             return
 
@@ -1928,6 +2067,7 @@ class SlackAdapter(BasePlatformAdapter):
         # Track which workspace owns this channel
         if team_id and channel_id:
             self._channel_team[channel_id] = team_id
+            self._record_slack_last_seen(event, channel_id=channel_id, team_id=team_id)
 
         # Determine if this is a DM or channel message
         channel_type = event.get("channel_type", "")
@@ -1936,18 +2076,29 @@ class SlackAdapter(BasePlatformAdapter):
         is_dm = channel_type in {"im", "mpim"}  # Both 1:1 and group DMs
 
         # Build thread_ts for session keying.
-        # In channels: fall back to ts so each top-level @mention starts a
-        #   new thread/session (the bot always replies in a thread).
+        # In real Slack threads, use the real parent thread_ts so replies share
+        # one Hermes session.
+        #
+        # For top-level channel messages, only synthesize thread_ts=ts when the
+        # bot will also reply in-thread. If reply_in_thread=false, synthesizing
+        # a per-message thread id creates a brand-new Hermes session for every
+        # top-level channel message, which looks like Slack amnesia in listen-all
+        # channels. In that mode, leave thread_ts unset so normal group session
+        # rules apply (per-user by default via group_sessions_per_user=true).
+        #
         # In DMs: fall back to ts so each top-level DM reply thread gets
-        #   its own session key (matching channel behavior). Set
-        #   dm_top_level_threads_as_sessions: false in config to revert to
-        #   legacy single-session-per-DM-channel behavior.
+        # its own session key (matching channel-thread behavior). Set
+        # dm_top_level_threads_as_sessions: false in config to revert to
+        # legacy single-session-per-DM-channel behavior.
+        real_thread_ts = event.get("thread_ts") or assistant_meta.get("thread_ts")
         if is_dm:
-            thread_ts = event.get("thread_ts") or assistant_meta.get("thread_ts")
+            thread_ts = real_thread_ts
             if not thread_ts and self._dm_top_level_threads_as_sessions():
                 thread_ts = ts
         else:
-            thread_ts = event.get("thread_ts") or ts  # ts fallback for channels
+            thread_ts = real_thread_ts
+            if not thread_ts and self.config.extra.get("reply_in_thread", True):
+                thread_ts = ts
 
         # In channels, respond if:
         #   0. Channel is in free_response_channels, OR require_mention is

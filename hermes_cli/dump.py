@@ -100,9 +100,16 @@ def _count_skills(hermes_home: Path) -> int:
 
 def _count_mcp_servers(config: dict) -> int:
     """Count configured MCP servers."""
-    mcp = config.get("mcp", {})
-    servers = mcp.get("servers", {})
-    return len(servers)
+    servers = config.get("mcp_servers")
+    if isinstance(servers, dict):
+        return len(servers)
+
+    # Legacy pre-v0.6 config shape. Keep this fallback so dumps from old
+    # profiles remain useful, but the documented/live shape is top-level
+    # ``mcp_servers``.
+    legacy_mcp = config.get("mcp")
+    legacy_servers = legacy_mcp.get("servers", {}) if isinstance(legacy_mcp, dict) else {}
+    return len(legacy_servers) if isinstance(legacy_servers, dict) else 0
 
 
 def _cron_summary(hermes_home: Path) -> str:

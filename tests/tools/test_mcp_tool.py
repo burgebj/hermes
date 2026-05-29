@@ -521,6 +521,38 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
+    def test_mcp_application_error_does_not_trip_server_circuit_breaker(self):
+        """Tool-level validation/API errors should not mark the MCP server unreachable."""
+        from tools.mcp_tool import (
+            _make_tool_handler,
+            _server_breaker_opened_at,
+            _server_error_counts,
+            _servers,
+        )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result("validation failed", is_error=True)
+        )
+        server = _make_mock_server("test_srv", session=mock_session)
+        _servers["test_srv"] = server
+        _server_error_counts.pop("test_srv", None)
+        _server_breaker_opened_at.pop("test_srv", None)
+
+        try:
+            handler = _make_tool_handler("test_srv", "bad_args", 120)
+            with self._patch_mcp_loop():
+                for _ in range(3):
+                    result = json.loads(handler({}))
+                    assert result == {"error": "validation failed"}
+
+            assert _server_error_counts.get("test_srv", 0) == 0
+            assert "test_srv" not in _server_breaker_opened_at
+        finally:
+            _servers.pop("test_srv", None)
+            _server_error_counts.pop("test_srv", None)
+            _server_breaker_opened_at.pop("test_srv", None)
+
     def test_disconnected_server(self):
         from tools.mcp_tool import _make_tool_handler, _servers
 
