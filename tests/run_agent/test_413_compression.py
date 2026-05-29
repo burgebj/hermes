@@ -442,10 +442,19 @@ class TestPreflightCompression:
     def test_preflight_compresses_oversized_history(self, agent):
         """When loaded history exceeds the model's context threshold, compress before API call."""
         agent.compression_enabled = True
-        # Set a small context so the history is "oversized", but large enough
-        # that the compressed result (2 short messages) fits in a single pass.
+        # Set a small context so the history is "oversized", but the
+        # threshold must be high enough that the post-compression
+        # estimate (~257 tokens with tool schemas + 2 short messages)
+        # genuinely lands under it. Otherwise the new cascade-saturation
+        # bailout (test_preflight_cascade_saturation.py) fires instead
+        # of the under-threshold break, and preflight returns a
+        # structured failed result before any API call happens. The
+        # original 200-token threshold was implicitly relying on
+        # Hermes attempting a doomed API call past the still-oversized
+        # post-compression tape; that scenario is now the bailout, not
+        # this success path.
         agent.context_compressor.context_length = 2000
-        agent.context_compressor.threshold_tokens = 200
+        agent.context_compressor.threshold_tokens = 500
 
         # Build a history that will be large enough to trigger preflight
         # (each message ~50 chars ≈ 13 tokens, 40 messages ≈ 520 tokens > 200 threshold)

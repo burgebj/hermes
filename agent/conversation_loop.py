@@ -616,6 +616,7 @@ def run_conversation(
             )
             # May need multiple passes for very large sessions with small
             # context windows (each pass summarises the middle N turns).
+            _preflight_saturated = False
             for _pass in range(3):
                 _orig_len = len(messages)
                 messages, active_system_prompt = agent._compress_context(
@@ -623,7 +624,13 @@ def run_conversation(
                     task_id=effective_task_id,
                 )
                 if len(messages) >= _orig_len:
-                    break  # Cannot compress further
+                    # Compression returned the same (or more) messages —
+                    # we entered the block because tokens >= threshold AND
+                    # this pass didn't help, so we're still over threshold
+                    # with no path forward. Mark saturated so the
+                    # post-loop bailout fires.
+                    _preflight_saturated = True
+                    break
                 # Compression created a new session — clear the history
                 # reference so _flush_messages_to_session_db writes ALL
                 # compressed messages to the new session's SQLite, not
@@ -648,6 +655,57 @@ def run_conversation(
                 )
                 if _preflight_tokens < agent.context_compressor.threshold_tokens:
                     break  # Under threshold
+            else:
+                # ``for…else`` runs only when the loop completes without
+                # break. That means three full compression passes ran AND
+                # the under-threshold break never fired on the last pass —
+                # tokens are still ≥ threshold after the maximum cascade.
+                _preflight_saturated = True
+
+            # Cascade-saturation bailout: when preflight cannot get under
+            # threshold within the 3-pass cap, the first API call in the
+            # main loop is structurally doomed — the model server will
+            # return context-overflow, the post-API recovery chain will
+            # also saturate, and run_conversation will eventually return
+            # ``compression_exhausted=True`` after wasting 4+ seconds of
+            # doomed work + spawning more transient compression-only
+            # sessions in the chain. Return the same structured error
+            # immediately so callers (oneshot, gateway, kanban) see a
+            # clean failure result at session start instead.
+            if _preflight_saturated:
+                logger.warning(
+                    "Preflight compression saturated: %d-pass cascade "
+                    "could not get under %s threshold (final estimate ~%s tokens). "
+                    "Bailing before doomed first API call.",
+                    _pass + 1,
+                    f"{agent.context_compressor.threshold_tokens:,}",
+                    f"{_preflight_tokens:,}",
+                )
+                agent._emit_warning(
+                    f"⚠ Preflight compression saturated — context is "
+                    f"~{_preflight_tokens:,} tokens after "
+                    f"{_pass + 1} compression pass(es), still over the "
+                    f"{agent.context_compressor.threshold_tokens:,}-token "
+                    "threshold. Cannot fit this conversation into the "
+                    "current model's window. Try /new to start fresh, "
+                    "a longer-context model, or a smaller prompt."
+                )
+                agent._persist_session(messages, conversation_history)
+                return {
+                    "messages": messages,
+                    "completed": False,
+                    "api_calls": 0,
+                    "error": (
+                        f"Preflight compression saturated: ~{_preflight_tokens:,} "
+                        f"tokens still exceeds "
+                        f"{agent.context_compressor.threshold_tokens:,}-token "
+                        f"threshold after {_pass + 1} compression pass(es). "
+                        "Conversation cannot fit in this model's context window."
+                    ),
+                    "partial": True,
+                    "failed": True,
+                    "compression_exhausted": True,
+                }
 
     # Plugin hook: pre_llm_call
     # Fired once per turn before the tool-calling loop.  Plugins can
