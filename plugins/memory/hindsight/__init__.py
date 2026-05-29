@@ -401,6 +401,23 @@ def _load_simple_env(path) -> dict[str, str]:
     return values
 
 
+_EMBEDDED_PROFILE_ENV_PASSTHROUGH = {
+    "llm_max_concurrent": "HINDSIGHT_API_LLM_MAX_CONCURRENT",
+    "llm_timeout": "HINDSIGHT_API_LLM_TIMEOUT",
+    "retain_llm_max_concurrent": "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT",
+    "reflect_llm_max_concurrent": "HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT",
+    "consolidation_llm_max_concurrent": "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT",
+    "retain_max_concurrent": "HINDSIGHT_API_RETAIN_MAX_CONCURRENT",
+    "worker_max_slots": "HINDSIGHT_API_WORKER_MAX_SLOTS",
+    "worker_retain_max_slots": "HINDSIGHT_API_WORKER_RETAIN_MAX_SLOTS",
+    "worker_consolidation_max_slots": "HINDSIGHT_API_WORKER_CONSOLIDATION_MAX_SLOTS",
+    "recall_max_concurrent": "HINDSIGHT_API_RECALL_MAX_CONCURRENT",
+    "recall_max_tokens": "HINDSIGHT_API_RECALL_MAX_TOKENS",
+    "reflect_max_context_tokens": "HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS",
+    "reflect_wall_timeout": "HINDSIGHT_API_REFLECT_WALL_TIMEOUT",
+}
+
+
 def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None) -> dict[str, str]:
     """Build the profile-scoped env file that standalone hindsight-embed consumes."""
     current_key = llm_api_key
@@ -426,6 +443,26 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     }
     if current_base_url:
         env_values["HINDSIGHT_API_LLM_BASE_URL"] = str(current_base_url)
+
+    # Hindsight's embedded daemon reads only this generated .env file. Mirror
+    # runtime tuning knobs from Hermes' config.json into daemon env vars;
+    # otherwise local LM Studio deployments silently fall back to cloud-oriented
+    # defaults such as llm_max_concurrent=32 and worker_max_slots=10.
+    for config_key, env_key in _EMBEDDED_PROFILE_ENV_PASSTHROUGH.items():
+        value = config.get(config_key)
+        if value is not None and value != "":
+            env_values[env_key] = str(value)
+
+    # Preserve explicit raw HINDSIGHT_API_* / HINDSIGHT_EMBED_* overrides stored
+    # in config.json for forward compatibility with newer Hindsight releases.
+    for key, value in config.items():
+        if (
+            isinstance(key, str)
+            and (key.startswith("HINDSIGHT_API_") or key.startswith("HINDSIGHT_EMBED_"))
+            and value is not None
+            and value != ""
+        ):
+            env_values[key] = str(value)
 
     idle_timeout = (
         config.get("idle_timeout")
@@ -918,6 +955,17 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._idle_timeout = idle_timeout
                 kwargs["idle_timeout"] = idle_timeout
                 self._client = HindsightEmbedded(**kwargs)
+
+                # HindsightEmbedded builds its own daemon config from constructor
+                # args and otherwise drops embedded-runtime env knobs. Merge the
+                # full generated profile env into that daemon config so local
+                # LM Studio tuning in config.json actually reaches hindsight-api.
+                embedded_env = _build_embedded_profile_env(
+                    self._config,
+                    llm_api_key=kwargs.get("llm_api_key") or None,
+                )
+                if hasattr(self._client, "config"):
+                    self._client.config.update(embedded_env)
             else:
                 from hindsight_client import Hindsight
                 timeout = self._timeout or _DEFAULT_TIMEOUT
@@ -945,6 +993,8 @@ class HindsightMemoryProvider(MemoryProvider):
                 "connection refused",
                 "connect call failed",
                 "clientconnectorerror",
+                "server disconnected",
+                "serverdisconnectederror",
             )
         )
 
@@ -1176,7 +1226,15 @@ class HindsightMemoryProvider(MemoryProvider):
             or os.environ.get("HINDSIGHT_RETAIN_TAGS", "")
         )
         self._tags = self._retain_tags or None
-        self._recall_tags = self._config.get("recall_tags") or None
+        configured_recall_tags = (
+            self._config.get("recall_tags")
+            if self._config.get("recall_tags") is not None
+            else os.environ.get("HINDSIGHT_RECALL_TAGS", "")
+        )
+        if configured_recall_tags == "auto":
+            self._recall_tags = None
+        else:
+            self._recall_tags = _normalize_retain_tags(configured_recall_tags) or None
         self._recall_tags_match = self._config.get("recall_tags_match", "any")
         self._retain_source = str(
             self._config.get("retain_source") or os.environ.get("HINDSIGHT_RETAIN_SOURCE", "")
@@ -1246,25 +1304,53 @@ class HindsightMemoryProvider(MemoryProvider):
                     from rich.console import Console
                     dem.console = Console(file=open(log_path, "a", encoding="utf-8"), force_terminal=False)
 
-                    client = self._get_client()
                     profile = self._config.get("profile", "hermes")
 
                     # Update the profile .env to match our current config so
                     # the daemon always starts with the right settings.
-                    # If the config changed and the daemon is running, stop it.
+                    # Preserve the existing local LLM key when config.json does
+                    # not carry one; otherwise every fresh provider process sees
+                    # a spurious config diff and stops the daemon while another
+                    # foreground retain/recall call may be using it.
                     profile_env = _embedded_profile_env_path(self._config)
-                    expected_env = _build_embedded_profile_env(self._config)
                     saved = _load_simple_env(profile_env)
+                    llm_api_key = (
+                        self._config.get("llmApiKey")
+                        or self._config.get("llm_api_key")
+                        or os.environ.get("HINDSIGHT_LLM_API_KEY", "")
+                        or saved.get("HINDSIGHT_API_LLM_API_KEY", "")
+                    )
+                    expected_env = _build_embedded_profile_env(
+                        self._config,
+                        llm_api_key=llm_api_key or None,
+                    )
                     config_changed = saved != expected_env
 
                     if config_changed:
-                        profile_env = _materialize_embedded_profile_env(self._config)
-                        if client._manager.is_running(profile):
-                            with open(log_path, "a", encoding="utf-8") as f:
-                                f.write("\n=== Config changed, restarting daemon ===\n")
-                            client._manager.stop(profile)
+                        _materialize_embedded_profile_env(
+                            self._config,
+                            llm_api_key=llm_api_key or None,
+                        )
+
+                    client = self._get_client()
+                    if config_changed and client._manager.is_running(profile):
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write("\n=== Config changed, restarting daemon ===\n")
+                        client._manager.stop(profile)
 
                     client._ensure_started()
+
+                    # hindsight-embed registers the profile after startup by
+                    # rewriting the profile env with only HINDSIGHT_API_* keys.
+                    # Restore Hermes' full materialized env afterwards so the
+                    # next provider process does not see a false config diff and
+                    # restart the daemon while a foreground operation is using it.
+                    assert self._config is not None
+                    _materialize_embedded_profile_env(
+                        self._config,
+                        llm_api_key=llm_api_key or None,
+                    )
+
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write("\n=== Daemon started successfully ===\n")
                 except Exception as e:
