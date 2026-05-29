@@ -25,6 +25,7 @@ def isolate_env(monkeypatch):
         "XAI_BASE_URL",
         "MINIMAX_API_KEY",
         "MISTRAL_API_KEY",
+        "DEEPGRAM_API_KEY",
         "GEMINI_API_KEY",
         "GEMINI_BASE_URL",
         "GOOGLE_API_KEY",
@@ -169,6 +170,24 @@ class TestDotenvFallbackPerProvider:
 
         assert "GEMINI_API_KEY" in seen_lookups
         assert captured["params"]["key"] == "gemini-dotenv-key"
+
+    def test_deepgram_reads_dotenv_key(self, tmp_path):
+        from tools import tts_tool
+
+        captured: dict = {}
+
+        def fake_post(url, **kwargs):
+            captured["headers"] = kwargs.get("headers", {})
+            response = MagicMock()
+            response.status_code = 200
+            response.content = b"audio"
+            return response
+
+        with patch.object(tts_tool, "get_env_value", return_value="deepgram-dotenv-key"), \
+             patch("requests.post", side_effect=fake_post):
+            tts_tool._generate_deepgram_tts("hi", str(tmp_path / "out.mp3"), {})
+
+        assert captured["headers"]["Authorization"] == "Token deepgram-dotenv-key"
 
 
 class TestRegressionGuard:

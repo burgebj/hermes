@@ -138,6 +138,7 @@ def show_status(args):
         "StepFun Step Plan": "STEPFUN_API_KEY",
         "MiniMax": "MINIMAX_API_KEY",
         "MiniMax-CN": "MINIMAX_CN_API_KEY",
+        "Deepgram": "DEEPGRAM_API_KEY",
         "Firecrawl": "FIRECRAWL_API_KEY",
         "Tavily": "TAVILY_API_KEY",
         "Browser Use": "BROWSER_USE_API_KEY",  # Optional — local browser works without this

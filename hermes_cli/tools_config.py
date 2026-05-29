@@ -257,6 +257,15 @@ TOOL_CATEGORIES = {
                 "tts_provider": "gemini",
             },
             {
+                "name": "Deepgram Aura TTS",
+                "badge": "paid",
+                "tag": "Many Aura voices, native Opus output",
+                "env_vars": [
+                    {"key": "DEEPGRAM_API_KEY", "prompt": "Deepgram API key", "url": "https://console.deepgram.com/"},
+                ],
+                "tts_provider": "deepgram",
+            },
+            {
                 "name": "KittenTTS",
                 "badge": "local · free",
                 "tag": "Lightweight local ONNX TTS (~25MB), no API key",

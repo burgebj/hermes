@@ -9,6 +9,7 @@ Built-in TTS providers:
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
+- Deepgram Aura TTS: Many Aura voices, native Opus, needs DEEPGRAM_API_KEY
 - xAI TTS: Grok voices, uses xAI Grok OAuth credentials or XAI_API_KEY
 - NeuTTS (local, free, no API key): On-device TTS via neutts
 - KittenTTS (local, free, no API key): On-device 25MB model
@@ -177,6 +178,8 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_DEEPGRAM_TTS_MODEL = "aura-2-thalia-en"
+DEFAULT_DEEPGRAM_TTS_BASE_URL = "https://api.deepgram.com/v1"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -202,6 +205,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
     "mistral": 4000,      # conservative; no published per-request cap
     "gemini": 5000,       # Gemini TTS caps at ~8k input tokens / ~655s audio
+    "deepgram": 4000,     # conservative; Deepgram recommends chunking long text
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
@@ -349,6 +353,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "xai",
     "mistral",
     "gemini",
+    "deepgram",
     "neutts",
     "kittentts",
     "piper",
@@ -1162,6 +1167,65 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
 
 
 # ===========================================================================
+# Provider: Deepgram Aura TTS
+# ===========================================================================
+def _generate_deepgram_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using Deepgram's Text-to-Speech REST API."""
+    import requests
+
+    api_key = (get_env_value("DEEPGRAM_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("DEEPGRAM_API_KEY not set. Get one at https://console.deepgram.com/")
+
+    dg_config = tts_config.get("deepgram", {})
+    model = str(dg_config.get("model", DEFAULT_DEEPGRAM_TTS_MODEL)).strip() or DEFAULT_DEEPGRAM_TTS_MODEL
+    base_url = str(
+        dg_config.get("base_url")
+        or get_env_value("DEEPGRAM_TTS_BASE_URL")
+        or DEFAULT_DEEPGRAM_TTS_BASE_URL
+    ).strip().rstrip("/")
+
+    params: Dict[str, Any] = {"model": model}
+    lower_output = output_path.lower()
+    if lower_output.endswith(".ogg"):
+        params.update({"encoding": "opus", "container": "ogg"})
+    elif lower_output.endswith(".wav"):
+        params.update({"encoding": "linear16", "container": "wav"})
+
+    for key in ("encoding", "container", "sample_rate", "bit_rate", "speed"):
+        value = dg_config.get(key)
+        if value not in (None, ""):
+            params[key] = value
+
+    response = requests.post(
+        f"{base_url}/speak",
+        headers={
+            "Authorization": f"Token {api_key}",
+            "Content-Type": "application/json",
+        },
+        params=params,
+        json={"text": text},
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        detail = response.text[:500]
+        try:
+            err_body = response.json()
+            detail = err_body.get("err_msg") or err_body.get("message") or detail
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Deepgram TTS API error (HTTP {response.status_code}): {detail}"
+        )
+
+    with open(output_path, "wb") as f:
+        f.write(response.content)
+
+    return output_path
+
+
+# ===========================================================================
 # Provider: MiniMax TTS
 # ===========================================================================
 def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
@@ -1909,7 +1973,7 @@ def text_to_speech_tool(
             file_path = out_dir / f"tts_{timestamp}.{fmt}"
         # Use .ogg for Telegram with providers that support native Opus output,
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
-        elif want_opus and provider in {"openai", "elevenlabs", "mistral", "gemini"}:
+        elif want_opus and provider in {"openai", "elevenlabs", "mistral", "gemini", "deepgram"}:
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
@@ -1993,6 +2057,10 @@ def text_to_speech_tool(
         elif provider == "gemini":
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
+
+        elif provider == "deepgram":
+            logger.info("Generating speech with Deepgram Aura TTS...")
+            _generate_deepgram_tts(text, file_str, tts_config)
 
         elif provider == "neutts":
             if not _check_neutts_available():
@@ -2102,7 +2170,7 @@ def text_to_speech_tool(
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in {"elevenlabs", "openai", "mistral", "gemini"}:
+        elif provider in {"elevenlabs", "openai", "mistral", "gemini", "deepgram"}:
             voice_compatible = want_opus and file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
@@ -2182,6 +2250,8 @@ def check_tts_requirements() -> bool:
     except Exception:
         pass
     if get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY"):
+        return True
+    if get_env_value("DEEPGRAM_API_KEY"):
         return True
     try:
         _import_mistral_client()
