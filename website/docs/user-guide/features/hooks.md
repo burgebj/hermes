@@ -82,10 +82,65 @@ async def handle(event_type: str, context: dict):
 | `agent:step` | Each iteration of the tool-calling loop | `platform`, `user_id`, `session_id`, `iteration`, `tool_names` |
 | `agent:end` | Agent finishes processing | `platform`, `user_id`, `session_id`, `message`, `response` |
 | `command:*` | Any slash command executed | `platform`, `user_id`, `command`, `args` |
+| `tui:<sub-event>` | TUI dispatch event mirrored to the bus (see below) | `session_id`, `payload` (raw TUI payload) |
 
 #### Wildcard Matching
 
-Handlers registered for `command:*` fire for any `command:` event (`command:model`, `command:reset`, etc.). Monitor all slash commands with a single subscription.
+Handlers registered for `command:*` fire for any `command:<name>` event (`command:model`, `command:reset`, etc.) — useful for monitoring all slash commands with a single subscription. The same pattern works for `tui:*` to receive every TUI dispatch event.
+
+Wildcards match **one** colon-separated namespace level: `foo:*` matches every `foo:<anything>` event, but does not cross another colon (a handler for `agent:*` does not fire for an unrelated `gateway:startup`).
+
+#### `tui:*` events
+
+The TUI gateway (`hermes --tui` or the embedded dashboard PTY) mirrors every JSON-RPC event it sends to the front-end onto the hook bus under the `tui:` namespace. Each handler receives `context = {"session_id": str, "payload": dict}` — the `payload` matches the JSON-RPC event payload the TUI wrote to stdout for that frame.
+
+Common sub-events:
+
+| Sub-event | When it fires |
+|-----------|--------------|
+| `tui:tool.start` | A tool call begins |
+| `tui:tool.progress` | A long-running tool reports progress |
+| `tui:tool.complete` | A tool call finishes |
+| `tui:message.start` / `message.delta` / `message.complete` | Assistant message lifecycle |
+| `tui:reasoning.available` | Reasoning content for the latest turn |
+| `tui:thinking.delta` | Streamed thinking text |
+| `tui:session.info` | Session metadata changed (model, tools, etc.) |
+| `tui:status.update` | Inline status line update |
+| `tui:error` | Error frame |
+
+This list isn't exhaustive — anything ``_emit`` writes ends up on the bus. The full set is whatever `tui_gateway/server.py:_emit` happens to send today; payload shapes are documented alongside the front-end consumers in `ui-tui/src/`.
+
+Subscribers fire **synchronously** inside the TUI's hot dispatch path, so handlers should be cheap (push to a queue, set an `asyncio.Event`, etc.) and never block. Exceptions inside a handler are caught and logged — they never break TUI dispatch.
+
+### Programmatic registration
+
+Discovery from `~/.hermes/hooks/` is the common path, but plugins, tests, and built-in code can also register handlers in-process:
+
+```python
+from gateway.hooks import get_default_registry
+
+def on_tool_start(event_type, context):
+    name = context["payload"].get("name", "?")
+    print(f"[my-plugin] {event_type} -> {name}")
+
+unregister = get_default_registry().register("tui:tool.start", on_tool_start)
+# ... later, to clean up:
+unregister()
+```
+
+`HookRegistry.register(event_type, handler, *, name=None)` accepts the same handler signature as discovered hooks (`handle(event_type, context)`, sync or async) and returns a no-arg callable that removes that specific handler. Other handlers on the same event are unaffected.
+
+For callers that cannot `await` — the TUI's `_emit` is a good example — fire events via the synchronous path:
+
+```python
+registry.emit_sync("tui:tool.start", {"session_id": "s1", "payload": {...}})
+```
+
+`emit_sync` runs sync handlers immediately; async handlers are scheduled on the running event loop when one is available, or skipped with a one-time per-handler warning when there isn't.
+
+### Per-process registries
+
+Each Hermes process (gateway, TUI) has its **own** `HookRegistry`. Hooks dropped into `~/.hermes/hooks/` are discovered independently in each process. A handler registered programmatically in the gateway's registry is **not** visible to the TUI's registry and vice-versa — if you want a single subscriber to observe both surfaces, drop a `HOOK.yaml` so each process picks it up on startup.
 
 ### Examples
 

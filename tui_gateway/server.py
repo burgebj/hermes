@@ -388,6 +388,38 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     if payload is not None:
         params["payload"] = payload
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    _publish_tui_hook(event, sid, payload)
+
+
+def _publish_tui_hook(event: str, sid: str, payload: dict | None) -> None:
+    """Mirror a TUI gateway dispatch event onto the hook bus.
+
+    Every call from ``_emit`` produces a ``tui:<event>`` hook event so plugins
+    can observe TUI activity (tool starts, message deltas, etc.) without
+    forking ``_emit`` itself. Wrapped in a broad try/except — a bus subscriber
+    bug must never break the main JSON-RPC dispatch path that already wrote
+    the event to stdout above.
+
+    The import is deferred to first call to keep TUI cold-start cheap; the
+    gateway hook module isn't otherwise needed in the TUI process.
+    """
+    try:
+        global _hook_registry  # noqa: PLW0603 — module-level cache by design
+        if _hook_registry is None:
+            from gateway.hooks import get_default_registry  # local import
+            _hook_registry = get_default_registry()
+        _hook_registry.emit_sync(  # type: ignore[union-attr]
+            f"tui:{event}",
+            {"session_id": sid, "payload": payload or {}},
+        )
+    except Exception:
+        # Never propagate. Hook bus is best-effort.
+        pass
+
+
+# Lazily-resolved on first ``_emit`` call. Cached in module scope so the
+# steady-state cost of mirroring is a dict lookup, not an import.
+_hook_registry: "object | None" = None
 
 
 def _status_update(sid: str, kind: str, text: str | None = None):

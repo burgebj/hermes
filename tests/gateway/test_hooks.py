@@ -316,3 +316,256 @@ class TestEmitCollect:
         await reg.emit_collect("agent:start")  # no context arg
 
         assert captured == [("agent:start", {})]
+
+
+class TestRegister:
+    """Tests for the programmatic ``HookRegistry.register`` API."""
+
+    def test_registers_handler(self):
+        reg = HookRegistry()
+        calls: list = []
+
+        def handler(event_type, context):
+            calls.append((event_type, context))
+
+        reg.register("agent:start", handler)
+
+        assert "agent:start" in reg._handlers
+        assert reg._handlers["agent:start"] == [handler]
+
+    def test_records_metadata_in_loaded_hooks(self):
+        reg = HookRegistry()
+
+        def my_handler(_e, _c):
+            return None
+
+        reg.register("tui:tool.start", my_handler)
+
+        assert len(reg.loaded_hooks) == 1
+        meta = reg.loaded_hooks[0]
+        assert meta["name"] == "my_handler"
+        assert meta["events"] == ["tui:tool.start"]
+        assert meta["path"] == "<programmatic>"
+
+    def test_custom_name_override(self):
+        reg = HookRegistry()
+
+        reg.register("agent:end", lambda _e, _c: None, name="orb-collector")
+
+        assert reg.loaded_hooks[0]["name"] == "orb-collector"
+
+    def test_returns_working_unregister(self):
+        reg = HookRegistry()
+
+        def handler(_e, _c):
+            return None
+
+        unregister = reg.register("agent:start", handler)
+
+        assert handler in reg._handlers["agent:start"]
+        assert len(reg.loaded_hooks) == 1
+
+        unregister()
+
+        assert handler not in reg._handlers["agent:start"]
+        assert len(reg.loaded_hooks) == 0
+
+    def test_unregister_is_idempotent(self):
+        reg = HookRegistry()
+        unregister = reg.register("agent:start", lambda _e, _c: None)
+        unregister()
+        # Second call should not raise.
+        unregister()
+
+    def test_multiple_handlers_same_event(self):
+        reg = HookRegistry()
+        calls: list = []
+
+        def h1(_e, _c):
+            calls.append("h1")
+
+        def h2(_e, _c):
+            calls.append("h2")
+
+        reg.register("agent:start", h1)
+        reg.register("agent:start", h2)
+
+        assert reg._handlers["agent:start"] == [h1, h2]
+        assert len(reg.loaded_hooks) == 2
+
+    def test_unregister_does_not_affect_other_handlers(self):
+        reg = HookRegistry()
+
+        def h1(_e, _c):
+            return None
+
+        def h2(_e, _c):
+            return None
+
+        unreg1 = reg.register("agent:start", h1)
+        reg.register("agent:start", h2)
+
+        unreg1()
+
+        assert h1 not in reg._handlers["agent:start"]
+        assert h2 in reg._handlers["agent:start"]
+
+
+class TestEmitSync:
+    """Tests for the synchronous emit path used from hot non-async callers."""
+
+    def test_fires_sync_handler(self):
+        reg = HookRegistry()
+        calls: list = []
+
+        reg.register(
+            "tui:tool.start",
+            lambda e, c: calls.append((e, c)),
+        )
+
+        reg.emit_sync("tui:tool.start", {"session_id": "s1", "payload": {"name": "foo"}})
+
+        assert calls == [("tui:tool.start", {"session_id": "s1", "payload": {"name": "foo"}})]
+
+    def test_default_context_when_none(self):
+        reg = HookRegistry()
+        seen: list = []
+        reg.register("evt:x", lambda _e, c: seen.append(c))
+
+        reg.emit_sync("evt:x")  # no context arg
+
+        assert seen == [{}]
+
+    def test_sync_handler_exception_isolated(self):
+        reg = HookRegistry()
+        calls: list = []
+
+        def bad(_e, _c):
+            raise RuntimeError("boom")
+
+        def good(_e, _c):
+            calls.append("good")
+
+        reg.register("evt:x", bad)
+        reg.register("evt:x", good)
+
+        # Must not raise; second handler still fires.
+        reg.emit_sync("evt:x", {})
+
+        assert calls == ["good"]
+
+    def test_wildcard_matching(self):
+        reg = HookRegistry()
+        calls: list = []
+
+        reg.register("tui:*", lambda e, _c: calls.append(e))
+        reg.register("tui:tool.start", lambda e, _c: calls.append(f"exact:{e}"))
+
+        reg.emit_sync("tui:tool.start", {})
+
+        # Exact match first, then wildcard.
+        assert calls == ["exact:tui:tool.start", "tui:tool.start"]
+
+    def test_no_handlers_does_not_raise(self):
+        reg = HookRegistry()
+        # Just shouldn't blow up.
+        reg.emit_sync("nobody:listening", {"foo": "bar"})
+
+    def test_async_handler_skipped_with_no_loop(self, capsys):
+        from gateway.hooks import _reset_default_registry_for_tests
+
+        _reset_default_registry_for_tests()
+        reg = HookRegistry()
+        marker: list = []
+
+        async def async_handler(_e, _c):
+            marker.append("ran")
+
+        reg.register("evt:x", async_handler, name="async_handler_unique")
+
+        # First emit logs a warning and skips.
+        reg.emit_sync("evt:x", {})
+        captured = capsys.readouterr()
+        # The warning uses the handler's __name__ for diagnostic clarity.
+        assert "async_handler" in captured.out
+        assert "Skipping async handler" in captured.out
+        assert marker == []  # async handler never ran
+
+        # Second emit is silent (warning suppressed).
+        reg.emit_sync("evt:x", {})
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert marker == []
+
+    def test_async_handler_scheduled_when_loop_running(self):
+        import asyncio as _asyncio
+
+        reg = HookRegistry()
+        marker: list = []
+
+        async def async_handler(_e, _c):
+            marker.append("ran")
+
+        reg.register("evt:x", async_handler)
+
+        async def driver():
+            reg.emit_sync("evt:x", {})
+            # Yield to the loop so the scheduled task can run.
+            await _asyncio.sleep(0)
+            await _asyncio.sleep(0)
+
+        _asyncio.run(driver())
+
+        assert marker == ["ran"]
+
+
+class TestDefaultRegistry:
+    """Tests for the module-level default-registry singleton."""
+
+    def test_get_default_returns_same_instance(self):
+        from gateway.hooks import (
+            _reset_default_registry_for_tests,
+            get_default_registry,
+        )
+
+        _reset_default_registry_for_tests()
+
+        first = get_default_registry()
+        second = get_default_registry()
+
+        assert first is second
+
+    def test_install_as_default_replaces(self):
+        from gateway.hooks import (
+            _reset_default_registry_for_tests,
+            get_default_registry,
+            install_as_default,
+        )
+
+        _reset_default_registry_for_tests()
+
+        custom = HookRegistry()
+        install_as_default(custom)
+
+        assert get_default_registry() is custom
+
+    def test_install_then_get_picks_up_handlers(self):
+        from gateway.hooks import (
+            _reset_default_registry_for_tests,
+            get_default_registry,
+            install_as_default,
+        )
+
+        _reset_default_registry_for_tests()
+
+        custom = HookRegistry()
+        install_as_default(custom)
+
+        calls: list = []
+        get_default_registry().register("agent:x", lambda _e, _c: calls.append("hit"))
+
+        # Same handler is visible on the installed instance.
+        custom.emit_sync("agent:x", {})
+
+        assert calls == ["hit"]
+

@@ -1864,8 +1864,12 @@ class GatewayRunner:
         self.pairing_store = PairingStore()
         
         # Event hook system
-        from gateway.hooks import HookRegistry
+        from gateway.hooks import HookRegistry, install_as_default
         self.hooks = HookRegistry()
+        # Expose this registry as the process-wide default so in-process
+        # plugins (and any other component that uses ``get_default_registry()``)
+        # share state with file-system-discovered hooks loaded into ``self.hooks``.
+        install_as_default(self.hooks)
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
