@@ -1224,11 +1224,11 @@ DEFAULT_CONFIG = {
         "platforms": {},  # Per-platform display overrides: {"telegram": {"tool_progress": "all"}, "slack": {"tool_progress": "off"}}
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
-        # e.g. `model · 68% · ~/projects/hermes`. Per-platform overrides go under
+        # e.g. `model · medium · 68% · ~/projects/hermes`. Per-platform overrides go under
         # display.platforms.<platform>.runtime_footer.
         "runtime_footer": {
             "enabled": False,
-            "fields": ["model", "context_pct", "cwd"],  # Order shown; drop any to hide
+            "fields": ["model", "context_pct", "cwd"],  # Optional: add "reasoning" (effort level)
         },
         "copy_shortcut": "auto",  # "auto" (platform default) | "ctrl_c" | "ctrl_shift_c" | "disabled"
     },

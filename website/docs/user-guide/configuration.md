@@ -1211,7 +1211,7 @@ display:
   tool_preview_length: 0  # Max chars for tool call previews (0 = no limit, show full paths/commands)
   runtime_footer:         # Gateway: append a runtime-context footer to final replies
     enabled: false
-    fields: ["model", "context_pct", "cwd"]
+    fields: ["model", "context_pct", "cwd"]  # add "reasoning" to show effort level
   file_mutation_verifier: true    # Append an advisory footer when write_file/patch calls failed this turn
   language: en            # UI language for static messages (approval prompts, some gateway replies). en | zh | zh-hant | ja | de | es | fr | tr | uk | af | ko | it | ga | pt | ru | hu
 ```
@@ -1261,15 +1261,17 @@ When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-cont
 display:
   runtime_footer:
     enabled: true
-    fields: ["model", "context_pct", "cwd"]   # any of: model, context_pct, cwd, duration, tokens, cost
+    fields: ["model", "reasoning", "context_pct", "cwd"]   # any of: model, reasoning, context_pct, cwd
 ```
+
+This renders compactly, for example: `gpt-5.4 · medium · 42% · ~/proj`.
 
 The `/footer` slash command toggles this at runtime in any session.
 
 Example footer appended to a Telegram/Discord/Slack reply:
 
 ```
-— claude-opus-4.7 · 12 tool calls · 2m 14s · $0.042
+claude-opus-4.7 · high · 42% · ~/projects/hermes
 ```
 
 Only the **final** message of a turn gets the footer; interim updates stay clean.

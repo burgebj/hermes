@@ -9024,12 +9024,20 @@ class GatewayRunner:
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                _reasoning_cfg = self._resolve_session_reasoning_config(source=source)
+                if _reasoning_cfg is None:
+                    _reasoning_effort = "medium"
+                elif _reasoning_cfg.get("enabled") is False:
+                    _reasoning_effort = "none"
+                else:
+                    _reasoning_effort = str(_reasoning_cfg.get("effort") or "medium")
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
                     model=agent_result.get("model"),
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
+                    reasoning_effort=_reasoning_effort,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
                 )
             except Exception as _footer_err:

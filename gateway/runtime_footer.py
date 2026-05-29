@@ -8,8 +8,8 @@ Config (``~/.hermes/config.yaml``)::
 
     display:
       runtime_footer:
-        enabled: true                       # off by default
-        fields: [model, context_pct, cwd]   # order shown; drop any to hide
+        enabled: true                                  # off by default
+        fields: [model, reasoning, context_pct, cwd]   # order shown; drop any to hide
 
 Per-platform overrides live under ``display.platforms.<platform>.runtime_footer``.
 Users can toggle the global setting with ``/footer on|off`` from both the CLI
@@ -53,6 +53,13 @@ def _model_short(model: Optional[str]) -> str:
     return model.rsplit("/", 1)[-1]
 
 
+def _reasoning_effort_label(reasoning_effort: Optional[str]) -> str:
+    """Return a compact reasoning-effort label for the footer."""
+    if not reasoning_effort:
+        return ""
+    return str(reasoning_effort).strip().lower()
+
+
 def resolve_footer_config(
     user_config: dict[str, Any] | None,
     platform_key: str | None = None,
@@ -93,6 +100,7 @@ def format_runtime_footer(
     model: Optional[str],
     context_tokens: int,
     context_length: Optional[int],
+    reasoning_effort: Optional[str] = None,
     cwd: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
@@ -107,6 +115,10 @@ def format_runtime_footer(
             m = _model_short(model)
             if m:
                 parts.append(m)
+        elif field == "reasoning":
+            r = _reasoning_effort_label(reasoning_effort)
+            if r:
+                parts.append(r)
         elif field == "context_pct":
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
@@ -129,6 +141,7 @@ def build_footer_line(
     model: Optional[str],
     context_tokens: int,
     context_length: Optional[int],
+    reasoning_effort: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
@@ -142,6 +155,7 @@ def build_footer_line(
         return ""
     return format_runtime_footer(
         model=model,
+        reasoning_effort=reasoning_effort,
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,

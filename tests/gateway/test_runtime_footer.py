@@ -62,12 +62,25 @@ def test_format_footer_all_fields(monkeypatch, tmp_path):
     (tmp_path / "projects" / "hermes").mkdir(parents=True)
     out = format_runtime_footer(
         model="openrouter/openai/gpt-5.4",
+        reasoning_effort="medium",
         context_tokens=68000,
         context_length=100000,
         cwd=None,  # falls back to TERMINAL_CWD env var
-        fields=("model", "context_pct", "cwd"),
+        fields=("model", "reasoning", "context_pct", "cwd"),
     )
-    assert out == "gpt-5.4 · 68% · ~/projects/hermes"
+    assert out == "gpt-5.4 · medium · 68% · ~/projects/hermes"
+
+
+def test_format_footer_skips_missing_reasoning_effort():
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        reasoning_effort=None,
+        context_tokens=42,
+        context_length=100,
+        cwd="",
+        fields=("model", "reasoning", "context_pct"),
+    )
+    assert out == "gpt-5.4 · 42%"
 
 
 def test_format_footer_skips_missing_context_length():
@@ -223,12 +236,39 @@ def test_build_footer_returns_rendered_when_enabled(monkeypatch, tmp_path):
         user_config={"display": {"runtime_footer": {"enabled": True}}},
         platform_key="telegram",
         model="openai/gpt-5.4",
+        reasoning_effort="medium",
         context_tokens=25, context_length=100,
         cwd=str(tmp_path / "proj"),
     )
     (tmp_path / "proj").mkdir(exist_ok=True)
     assert "gpt-5.4" in out
     assert "25%" in out
+
+
+def test_build_footer_can_render_platform_reasoning_field(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "proj").mkdir(exist_ok=True)
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {"enabled": True},
+                "platforms": {
+                    "telegram": {
+                        "runtime_footer": {
+                            "fields": ["model", "reasoning", "context_pct", "cwd"],
+                        }
+                    },
+                },
+            },
+        },
+        platform_key="telegram",
+        model="openai/gpt-5.4",
+        reasoning_effort="medium",
+        context_tokens=42,
+        context_length=100,
+        cwd=str(tmp_path / "proj"),
+    )
+    assert out == "gpt-5.4 · medium · 42% · ~/proj"
 
 
 def test_build_footer_per_platform_off_suppresses():
