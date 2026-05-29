@@ -2364,16 +2364,32 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 f"context: ~{_est_ctx:,} tokens). "
                 f"Reconnecting..."
             )
+            # Abort the hung connection so the inner retry loop can open a
+            # fresh one.  This MUST branch on api_mode: in anthropic_messages
+            # mode the live request is owned by ``agent._anthropic_client``
+            # (via messages.stream()), NOT the OpenAI request-client holder.
+            # Calling only the OpenAI cleanup here (the historical behaviour)
+            # was a no-op for Anthropic, so a wedged Anthropic stream was
+            # never killed — the worker thread stayed blocked in recv()
+            # indefinitely, the poll loop spun resetting its own timer, and
+            # the turn never ended (queued inbound messages were never read).
+            # Mirror the interrupt handler below, which already branches.
             try:
-                _close_request_client_once("stale_stream_kill")
+                if agent.api_mode == "anthropic_messages":
+                    agent._anthropic_client.close()
+                    agent._rebuild_anthropic_client()
+                else:
+                    _close_request_client_once("stale_stream_kill")
             except Exception:
                 pass
             # Rebuild the primary client too — its connection pool
             # may hold dead sockets from the same provider outage.
-            try:
-                agent._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
-            except Exception:
-                pass
+            # (OpenAI-wire only; Anthropic was rebuilt above.)
+            if agent.api_mode != "anthropic_messages":
+                try:
+                    agent._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
+                except Exception:
+                    pass
             # Reset the timer so we don't kill repeatedly while
             # the inner thread processes the closure.
             last_chunk_time["t"] = time.time()
