@@ -816,6 +816,17 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         _host_block = (_raw.get("hosts") or {}).get(config.host, {})
         _host_has_key = bool(_host_block.get("apiKey"))
         effective_api_key = config.api_key if _host_has_key else "local"
+
+        # The Honcho SDK's route builders (e.g. routes.workspaces()) already
+        # include the version prefix (e.g. "/v3/workspaces").  When the user
+        # configures base_url as "http://localhost:38000/v3", concatenating the
+        # two produces "/v3/v3/workspaces" → 404 on every call.
+        # Strip any trailing API-version path segment from the base_url so the
+        # SDK can append its own versioned paths correctly.  Cloud base_urls do
+        # not end with a version path and are left unchanged.
+        if resolved_base_url:
+            import re as _re
+            resolved_base_url = _re.sub(r"/v\d+/*$", "", resolved_base_url).rstrip("/")
     else:
         effective_api_key = config.api_key
 
