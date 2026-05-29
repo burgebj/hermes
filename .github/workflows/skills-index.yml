@@ -53,4 +53,21 @@ jobs:
       - name: Trigger Deploy Site workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run deploy-site.yml --repo ${{ github.repository }}
+        # The installation GITHUB_TOKEN intermittently returns HTTP 403
+        # "API rate limit exceeded" (secondary limit). A bare single call
+        # fails the whole job, leaving the freshly built index undeployed
+        # and the Skills Hub stale until the next cron — which trips the
+        # freshness watchdog. Retry with backoff so a transient blip no
+        # longer blocks the deploy.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh workflow run deploy-site.yml --repo "${{ github.repository }}"; then
+              echo "Triggered deploy-site.yml on attempt ${attempt}."
+              exit 0
+            fi
+            wait=$((attempt * 15))
+            echo "Attempt ${attempt} failed; retrying in ${wait}s..." >&2
+            sleep "${wait}"
+          done
+          echo "Failed to trigger deploy-site.yml after 5 attempts." >&2
+          exit 1
