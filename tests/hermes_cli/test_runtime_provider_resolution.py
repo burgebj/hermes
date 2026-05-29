@@ -2657,3 +2657,77 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+def test_resolve_runtime_provider_codex_acp(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "codex-acp")
+    monkeypatch.setattr(
+        rp,
+        "resolve_external_process_provider_credentials",
+        lambda provider: {
+            "provider": provider,
+            "api_key": "codex-acp",
+            "base_url": "acp://codex",
+            "command": "/usr/local/bin/codex-acp",
+            "args": [],
+            "source": "process",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="codex-acp")
+
+    assert resolved["provider"] == "codex-acp"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "acp://codex"
+    assert resolved["api_key"] == "codex-acp"
+    assert resolved["command"] == "/usr/local/bin/codex-acp"
+    assert resolved["args"] == []
+
+
+def test_resolve_codex_acp_args_include_fast_mode_and_reasoning(monkeypatch):
+    from hermes_cli import auth as auth_mod
+
+    monkeypatch.delenv("HERMES_CODEX_ACP_ARGS", raising=False)
+    monkeypatch.setattr(auth_mod, "_repo_local_node_bin", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr(auth_mod.shutil, "which", lambda command: command)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"agent": {"reasoning_effort": "xhigh"}},
+    )
+
+    creds = auth_mod.resolve_external_process_provider_credentials("codex-acp")
+
+    assert creds["args"] == [
+        "-c",
+        "features.fast_mode=true",
+        "-c",
+        'model_reasoning_effort="xhigh"',
+    ]
+
+
+def test_resolve_codex_acp_args_ignore_invalid_reasoning(monkeypatch):
+    from hermes_cli import auth as auth_mod
+
+    monkeypatch.delenv("HERMES_CODEX_ACP_ARGS", raising=False)
+    monkeypatch.setattr(auth_mod, "_repo_local_node_bin", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr(auth_mod.shutil, "which", lambda command: command)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"agent": {"reasoning_effort": "none"}},
+    )
+
+    creds = auth_mod.resolve_external_process_provider_credentials("codex-acp")
+
+    assert creds["args"] == ["-c", "features.fast_mode=true"]
+
+
+def test_resolve_codex_acp_args_env_override_wins(monkeypatch):
+    from hermes_cli import auth as auth_mod
+
+    monkeypatch.setenv("HERMES_CODEX_ACP_ARGS", '-c model="gpt-5.5"')
+    monkeypatch.setattr(auth_mod, "_repo_local_node_bin", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr(auth_mod.shutil, "which", lambda command: command)
+
+    creds = auth_mod.resolve_external_process_provider_credentials("codex-acp")
+
+    assert creds["args"] == ["-c", "model=gpt-5.5"]

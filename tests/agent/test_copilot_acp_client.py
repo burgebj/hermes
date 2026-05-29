@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.copilot_acp_client import CopilotACPClient
+from agent.copilot_acp_client import CodexACPClient, CopilotACPClient
 
 
 class _FakeProcess:
@@ -205,3 +205,24 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+class CodexACPClientArgsTests(unittest.TestCase):
+    def test_codex_client_default_args_include_fast_mode_and_reasoning(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("hermes_cli.config.load_config", return_value={"agent": {"reasoning_effort": "high"}}),
+        ):
+            os.environ.pop("HERMES_CODEX_ACP_ARGS", None)
+            client = CodexACPClient(base_url="acp://codex", command="/tmp/codex-acp")
+
+        self.assertEqual(
+            client._acp_args,
+            ["-c", "features.fast_mode=true", "-c", 'model_reasoning_effort="high"'],
+        )
+
+    def test_codex_client_env_args_override_config_args(self) -> None:
+        with patch.dict(os.environ, {"HERMES_CODEX_ACP_ARGS": '-c model="gpt-5.5"'}, clear=False):
+            client = CodexACPClient(base_url="acp://codex", command="/tmp/codex-acp")
+
+        self.assertEqual(client._acp_args, ["-c", "model=gpt-5.5"])

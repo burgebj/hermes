@@ -90,6 +90,7 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CODEX_ACP_BASE_URL = "acp://codex"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
@@ -228,6 +229,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "codex-acp": ProviderConfig(
+        id="codex-acp",
+        name="OpenAI Codex ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CODEX_ACP_BASE_URL,
+        base_url_env_var="CODEX_ACP_BASE_URL",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -1499,6 +1507,7 @@ def resolve_provider(
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
+        "openai-codex-acp": "codex-acp", "acp-codex": "codex-acp",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
@@ -5859,6 +5868,31 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def _repo_local_node_bin(binary_name: str) -> str:
+    suffix = ".cmd" if os.name == "nt" else ""
+    return str(Path(__file__).resolve().parent.parent / "node_modules" / ".bin" / f"{binary_name}{suffix}")
+
+
+_CODEX_ACP_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+
+
+def _codex_acp_config_args() -> list[str]:
+    args = ["-c", "features.fast_mode=true"]
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+        effort = ""
+        if isinstance(agent_cfg, dict):
+            effort = str(agent_cfg.get("reasoning_effort") or "").strip().lower()
+        if effort in _CODEX_ACP_REASONING_EFFORTS:
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+    except Exception:
+        pass
+    return args
+
+
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve runtime details for local subprocess-backed providers."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
@@ -5873,25 +5907,42 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    if provider_id == "codex-acp":
+        command = _repo_local_node_bin("codex-acp")
+        raw_args = os.getenv("HERMES_CODEX_ACP_ARGS", "").strip()
+        args = shlex.split(raw_args) if raw_args else _codex_acp_config_args()
+        api_key = "codex-acp"
+        missing_code = "missing_codex_acp_cli"
+        missing_message = (
+            f"Could not find the bundled Codex ACP command '{command}'. "
+            "Run `npm install` from the Hermes repo so @zed-industries/codex-acp is available."
+        )
+    else:
+        command = (
+            os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
+            or os.getenv("COPILOT_CLI_PATH", "").strip()
+            or "copilot"
+        )
+        raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+        args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+        api_key = "copilot-acp"
+        missing_code = "missing_copilot_cli"
+        missing_message = (
+            f"Could not find the Copilot CLI command '{command}'. "
+            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+        )
+
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            missing_message,
             provider=provider_id,
-            code="missing_copilot_cli",
+            code=missing_code,
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": api_key,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

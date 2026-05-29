@@ -1367,7 +1367,11 @@ def resolve_runtime_provider(
             creds = resolve_codex_runtime_credentials()
             return {
                 "provider": "openai-codex",
-                "api_mode": "codex_responses",
+                "api_mode": _maybe_apply_codex_app_server_runtime(
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    model_cfg=model_cfg,
+                ),
                 "base_url": creds.get("base_url", "").rstrip("/"),
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "hermes-auth-store"),
@@ -1452,10 +1456,10 @@ def resolve_runtime_provider(
             logger.info("Google Gemini OAuth credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "copilot-acp":
+    if provider in {"copilot-acp", "codex-acp"}:
         creds = resolve_external_process_provider_credentials(provider)
         return {
-            "provider": "copilot-acp",
+            "provider": provider,
             "api_mode": "chat_completions",
             "base_url": creds.get("base_url", "").rstrip("/"),
             "api_key": creds.get("api_key", ""),

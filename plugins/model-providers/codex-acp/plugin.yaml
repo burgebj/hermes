@@ -1,0 +1,4 @@
+name: codex-acp-provider
+kind: model-provider
+version: 0.1.0
+description: OpenAI Codex via ACP subprocess
