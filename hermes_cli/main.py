@@ -12566,6 +12566,13 @@ Examples:
         "key", nargs="?", help="Configuration key (e.g., model, terminal.backend)"
     )
     config_set.add_argument("value", nargs="?", help="Value to set")
+    config_set.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass schema validation (write unknown keys without warning). "
+        "Use this when setting a key that a newer Hermes version supports "
+        "but the running version doesn't recognize yet.",
+    )
 
     # config path
     config_subparsers.add_parser("path", help="Print config file path")
