@@ -83,6 +83,16 @@ _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
 _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
                       "PASSWD", "PASSPHRASE", "AUTH")
 
+# Names that must NEVER reach the execute_code child, regardless of the
+# passthrough allowlist (skill required_environment_variables or operator
+# terminal.env_passthrough). Sourced from the single canonical definition in
+# tools.environments.local so the terminal and execute_code env filters cannot
+# drift apart; falls back to a local literal if that import is unavailable.
+try:
+    from tools.environments.local import _ALWAYS_STRIP_ENV
+except Exception:  # pragma: no cover - defensive import fallback
+    _ALWAYS_STRIP_ENV = frozenset({"HERMES_ENCRYPTION_PASSPHRASE"})
+
 # Windows-only: a handful of variables are required by the OS/CRT itself.
 # Without them, even stdlib calls like ``socket.socket()`` fail with
 # WinError 10106 (Winsock can't locate mswsock.dll) and ``subprocess``
@@ -119,6 +129,8 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     """Produce the scrubbed child-process env for execute_code.
 
     Rules (order matters):
+      0. Names in _ALWAYS_STRIP_ENV (the encryption passphrase) are dropped
+         unconditionally — passthrough cannot resurrect them.
       1. Passthrough vars (skill- or config-declared) always pass.
       2. Secret-substring names (KEY/TOKEN/etc.) are blocked.
       3. Names matching a safe prefix pass.
@@ -140,6 +152,8 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
 
     scrubbed = {}
     for k, v in source_env.items():
+        if k.upper() in _ALWAYS_STRIP_ENV:
+            continue  # unconditional — not overridable by passthrough
         if is_passthrough(k):
             scrubbed[k] = v
             continue
@@ -1374,7 +1388,7 @@ def execute_code(
         stderr_text = strip_ansi(stderr_text)
 
         # Redact secrets (API keys, tokens, etc.) from sandbox output.
-        # The sandbox env-var filter (lines 434-454) blocks os.environ access,
+        # The sandbox env-var filter (_scrub_child_env) blocks os.environ access,
         # but scripts can still read secrets from disk (e.g. open('~/.hermes/.env')).
         # This ensures leaked secrets never enter the model context.
         from agent.redact import redact_sensitive_text
