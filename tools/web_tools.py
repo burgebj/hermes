@@ -109,10 +109,6 @@ logger = logging.getLogger(__name__)
 
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
-def _has_env(name: str) -> bool:
-    val = os.getenv(name)
-    return bool(val and val.strip())
-
 def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.hermes/config.yaml."""
     try:
@@ -121,118 +117,94 @@ def _load_web_config() -> dict:
     except (ImportError, Exception):
         return {}
 
-def _get_backend() -> str:
-    """Determine which web backend to use (shared fallback).
+def _ensure_web_provider_plugins_discovered(force: bool = False) -> None:
+    """Best-effort plugin discovery before reading the web-provider registry.
 
-    Reads ``web.backend`` from config.yaml (set by ``hermes tools``).
-    Falls back to whichever API key is present for users who configured
-    keys manually without running setup.
+    Web providers are plugin-registered, including bundled providers.  Tool
+    wrappers can be imported directly in tests, scripts, and REPL sessions
+    before ``model_tools`` or the CLI has performed global plugin discovery;
+    in that cold path the registry would otherwise look empty and configured
+    plugin providers (for example ``web.backend: camofox``) would be treated as
+    unavailable. Mirror other plugin-backed tools by forcing discovery at the
+    web dispatch boundary.
     """
-    configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
-        return configured
+    try:
+        if not force and "_ensure_web_plugins_loaded" in globals():
+            _ensure_web_plugins_loaded()
+            return
 
-    # Fallback for manual / legacy config — pick the highest-priority
-    # available backend. Firecrawl also counts as available when the managed
-    # tool gateway is configured for Nous subscribers.
-    # Free-tier backends (searxng / brave-free / ddgs) trail the paid ones so
-    # existing paid setups are unaffected.
-    backend_candidates = (
-        ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
-        ("parallel", _has_env("PARALLEL_API_KEY")),
-        ("tavily", _has_env("TAVILY_API_KEY")),
-        ("exa", _has_env("EXA_API_KEY")),
-        ("searxng", _has_env("SEARXNG_URL")),
-        ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
-        ("ddgs", _ddgs_package_importable()),
-    )
-    for backend, available in backend_candidates:
-        if available:
-            return backend
+        from hermes_cli.plugins import _ensure_plugins_discovered
 
-    return "firecrawl"  # default (backward compat)
+        _ensure_plugins_discovered(force=force)
+    except Exception as exc:  # noqa: BLE001 — discovery failure leaves registry unchanged
+        logger.debug("web provider plugin discovery failed: %s", exc)
+
+
+def _resolve_web_provider(capability: str):
+    """Resolve a web provider through the registry, after plugin discovery."""
+    try:
+        from agent.web_search_registry import resolve_provider_from_web_config
+
+        _ensure_web_provider_plugins_discovered()
+        provider = resolve_provider_from_web_config(_load_web_config(), capability=capability)
+        if provider is None:
+            # A long-lived process may have installed/enabled a plugin after
+            # the idempotent discovery pass. Rescan once before declaring that
+            # no registry provider can satisfy the configured capability.
+            _ensure_web_provider_plugins_discovered(force=True)
+            provider = resolve_provider_from_web_config(_load_web_config(), capability=capability)
+        return provider
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("web provider resolution failed for %s: %s", capability, exc)
+        return None
+
+
+def _get_configured_web_provider(capability: str):
+    """Return the explicitly configured provider, ignoring capability support."""
+    try:
+        from agent.web_search_registry import get_configured_provider_from_web_config
+
+        _ensure_web_provider_plugins_discovered()
+        return get_configured_provider_from_web_config(_load_web_config(), capability=capability)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("configured web provider lookup failed for %s: %s", capability, exc)
+        return None
+
+
+def _get_backend() -> str:
+    """Return the active shared web backend name via the provider registry."""
+    provider = _resolve_web_provider("search") or _resolve_web_provider("extract")
+    return provider.name if provider is not None else ""
 
 
 def _get_search_backend() -> str:
-    """Determine which backend to use for web_search specifically.
-
-    Selection priority:
-    1. ``web.search_backend`` (per-capability override)
-    2. ``web.backend`` (shared fallback — existing behavior)
-    3. Auto-detect from env vars
-
-    This enables using different providers for search vs extract
-    (e.g. SearXNG for search + Firecrawl for extract).
-    """
-    return _get_capability_backend("search")
+    """Return the active web_search backend name via the provider registry."""
+    provider = _resolve_web_provider("search")
+    return provider.name if provider is not None else ""
 
 
 def _get_extract_backend() -> str:
-    """Determine which backend to use for web_extract specifically.
-
-    Selection priority:
-    1. ``web.extract_backend`` (per-capability override)
-    2. ``web.backend`` (shared fallback — existing behavior)
-    3. Auto-detect from env vars
-    """
-    return _get_capability_backend("extract")
-
-
-def _get_capability_backend(capability: str) -> str:
-    """Shared helper for per-capability backend selection.
-
-    Reads ``web.{capability}_backend`` from config; if set and available,
-    uses it. Otherwise falls through to the shared ``_get_backend()``.
-    """
-    cfg = _load_web_config()
-    specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
-    if specific and _is_backend_available(specific):
-        return specific
-    return _get_backend()
+    """Return the active web_extract backend name via the provider registry."""
+    provider = _resolve_web_provider("extract")
+    return provider.name if provider is not None else ""
 
 
 def _is_backend_available(backend: str) -> bool:
-    """Return True when the selected backend is currently usable."""
-    if backend == "exa":
-        return _has_env("EXA_API_KEY")
-    if backend == "parallel":
-        return _has_env("PARALLEL_API_KEY")
-    if backend == "firecrawl":
-        return check_firecrawl_api_key()
-    if backend == "tavily":
-        return _has_env("TAVILY_API_KEY")
-    if backend == "searxng":
-        return _has_env("SEARXNG_URL")
-    if backend == "brave-free":
-        return _has_env("BRAVE_SEARCH_API_KEY")
-    if backend == "ddgs":
-        return _ddgs_package_importable()
-    if backend == "xai":
-        # Cheap probe — env var OR auth.json has OAuth tokens. Must not
-        # call resolve_xai_http_credentials() here because the OAuth path
-        # can trigger a network token refresh, and _is_backend_available
-        # runs on every web_search dispatch + every `hermes tools` repaint.
-        try:
-            from tools.xai_http import has_xai_credentials
-            return has_xai_credentials()
-        except Exception:
-            return False
-    return False
-
-
-def _ddgs_package_importable() -> bool:
-    """Return True when the ``ddgs`` Python package can be imported.
-
-    ddgs is the only backend whose availability is driven by a package
-    presence rather than an env var / config entry.  Wrapped in a helper
-    so auto-detect and ``_is_backend_available`` share the same check
-    (and tests can monkeypatch a single symbol).
-    """
-    try:
-        import ddgs  # noqa: F401
-        return True
-    except ImportError:
+    """Return True when a registry provider is currently usable."""
+    if not backend:
         return False
+    try:
+        from agent.web_search_registry import get_provider
+
+        _ensure_web_provider_plugins_discovered()
+        provider = get_provider(backend.strip().lower())
+        if provider is None:
+            _ensure_web_provider_plugins_discovered(force=True)
+            provider = get_provider(backend.strip().lower())
+        return bool(provider and provider.is_available())
+    except Exception:
+        return False
+
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
@@ -266,6 +238,7 @@ def _web_requires_env() -> list[str]:
         "TOOL_GATEWAY_DOMAIN",
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
+        "CAMOFOX_URL",
     ]
 
 
@@ -817,23 +790,10 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        # Dispatch through the web search registry. All 7 providers
-        # (brave-free, ddgs, searxng, exa, parallel, tavily, firecrawl)
-        # now live as plugins; the dispatcher is just a registry lookup +
-        # delegation. Sync only — every provider's search() is sync.
-        _ensure_web_plugins_loaded()
-        from agent.web_search_registry import (
-            get_active_search_provider,
-            get_provider as _wsp_get_provider,
-        )
-
-        backend = _get_search_backend()
-        provider = _wsp_get_provider(backend) if backend else None
-        if provider is None or not provider.supports_search():
-            # Fall back to availability-walked active provider when the
-            # configured backend isn't a registered search provider (typo,
-            # uninstalled plugin, or capability mismatch).
-            provider = get_active_search_provider()
+        # Dispatch through the web search registry. Web providers are
+        # plugin-registered; selection and fallback order live in
+        # agent.web_search_registry, not in this wrapper.
+        provider = _resolve_web_provider("search")
 
         if provider is None:
             response_data = {
@@ -945,62 +905,43 @@ async def web_extract_tool(
         if not safe_urls:
             results = []
         else:
-            backend = _get_extract_backend()
+            # Dispatch through the web search registry. Web providers are
+            # plugin-registered; selection and fallback order live in
+            # agent.web_search_registry, not in this wrapper.
+            configured_provider = _get_configured_web_provider("extract")
+            if configured_provider is not None and not configured_provider.supports_extract():
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"{configured_provider.display_name} is a search-only "
+                            "backend and cannot extract URL content. "
+                            "Set web.extract_backend to firecrawl, "
+                            "tavily, exa, parallel, or camofox."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
 
-            # All seven providers (brave-free, ddgs, searxng, exa, parallel,
-            # tavily, firecrawl) now live as plugins. The dispatcher is a
-            # registry lookup + delegation. Some providers' extract() is
-            # async (parallel, firecrawl), others sync (exa, tavily) — we
-            # detect coroutine functions and await; sync functions run
-            # inline (the policy gate, SSRF re-check, etc. live inside the
-            # provider itself for the firecrawl per-URL loop).
-            _ensure_web_plugins_loaded()
-            from agent.web_search_registry import (
-                get_active_extract_provider,
-                get_provider as _wsp_get_provider,
-            )
-
-            provider = _wsp_get_provider(backend) if backend else None
-            if provider is None or not provider.supports_extract():
-                # When the configured name IS registered but doesn't support
-                # extract (search-only providers like brave-free / ddgs /
-                # searxng), surface that as a typed "search-only" error
-                # rather than silently switching backends. When the name
-                # isn't registered at all (typo / uninstalled plugin), fall
-                # through to the active-provider walk.
-                if provider is not None and not provider.supports_extract():
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                f"{provider.display_name} is a search-only "
-                                "backend and cannot extract URL content. "
-                                "Set web.extract_backend to firecrawl, "
-                                "tavily, exa, or parallel."
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
-                provider = get_active_extract_provider()
-                if provider is None:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": (
-                                "No web extract provider configured. "
-                                "Set web.extract_backend to firecrawl, "
-                                "tavily, exa, or parallel."
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
+            provider = _resolve_web_provider("extract")
+            if provider is None:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "No web extract provider configured. "
+                            "Set web.extract_backend to firecrawl, "
+                            "tavily, exa, parallel, or camofox."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
 
             logger.info(
                 "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
             )
 
-            # Async-or-sync dispatch: parallel + firecrawl have async
-            # extract(); exa + tavily are sync.
+            # Providers may implement extract() as either async or sync.
             import inspect
             if inspect.iscoroutinefunction(provider.extract):
                 results = await provider.extract(safe_urls, format=format)
@@ -1153,13 +1094,26 @@ async def web_extract_tool(
 # Convenience function to check Firecrawl credentials
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
-    configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs"}:
-        return _is_backend_available(configured)
-    return any(
-        _is_backend_available(backend)
-        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs")
-    )
+    _ensure_web_provider_plugins_discovered()
+    cfg = _load_web_config()
+    configured_names = [
+        str(cfg.get(key) or "").lower().strip()
+        for key in ("backend", "search_backend", "extract_backend")
+    ]
+    configured_names = [name for name in configured_names if name]
+    if configured_names:
+        return any(_is_backend_available(name) for name in configured_names)
+
+    try:
+        from agent.web_search_registry import list_providers
+
+        return any(
+            bool(provider.is_available())
+            for provider in list_providers()
+            if provider.supports_search() or provider.supports_extract()
+        )
+    except Exception:
+        return False
 
 
 def check_auxiliary_model() -> bool:
@@ -1200,8 +1154,10 @@ if __name__ == "__main__":
             print("   Using Brave Search free tier (search only)")
         elif backend == "ddgs":
             print("   Using DuckDuckGo via ddgs package (search only)")
+        elif backend == "camofox":
+            print(f"   Using Camofox browser backend: {os.getenv('CAMOFOX_URL', '').strip()}")
         elif firecrawl_url_available:
-            print(f"   Using self-hosted Firecrawl: {os.getenv('FIRECRAWL_API_URL').strip().rstrip('/')}")
+            print(f"   Using self-hosted Firecrawl: {os.getenv('FIRECRAWL_API_URL', '').strip().rstrip('/')}")
         elif firecrawl_key_available:
             print("   Using direct Firecrawl cloud API")
         elif tool_gateway_available:
@@ -1211,7 +1167,7 @@ if __name__ == "__main__":
     else:
         print("❌ No web search backend configured")
         print(
-            "Set EXA_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, FIRECRAWL_API_URL"
+            "Set EXA_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, FIRECRAWL_API_URL, or CAMOFOX_URL"
             f"{_firecrawl_backend_help_suffix()}"
         )
 

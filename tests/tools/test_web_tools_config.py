@@ -259,6 +259,7 @@ class TestBackendSelection:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "CAMOFOX_URL",
     )
 
     def setup_method(self):
@@ -383,11 +384,13 @@ class TestBackendSelection:
              patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
             assert _get_backend() == "firecrawl"
 
-    def test_fallback_no_keys_defaults_to_firecrawl(self):
-        """No keys, no config → 'firecrawl' (will fail at client init)."""
+    def test_fallback_no_keys_returns_empty_backend(self):
+        """No config and no available providers → no active backend."""
         from tools.web_tools import _get_backend
-        with patch("tools.web_tools._load_web_config", return_value={}):
-            assert _get_backend() == "firecrawl"
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch("plugins.web.ddgs.provider.DDGSWebSearchProvider.is_available", return_value=False), \
+             patch("plugins.web.xai.provider.XAIWebSearchProvider.is_available", return_value=False):
+            assert _get_backend() == ""
 
     def test_invalid_config_falls_through_to_fallback(self):
         """web.backend=invalid → ignored, uses key-based fallback."""
@@ -485,11 +488,9 @@ class TestWebSearchSchema:
     def test_web_search_clamps_limit_before_backend_call(self):
         import tools.web_tools
 
-        # After the web-provider plugin migration, _parallel_search lives in
-        # plugins.web.parallel.provider.ParallelWebSearchProvider.search; the
-        # tool dispatcher resolves a provider from the registry and calls
-        # provider.search(query, limit). Mock the provider lookup so we can
-        # assert the limit is clamped before reaching the backend.
+        # The dispatcher resolves a provider through tools.web_tools and calls
+        # provider.search(query, limit). Mock the resolver so we can assert the
+        # limit is clamped before reaching the backend.
         fake_search = MagicMock(return_value={"success": True, "data": {"web": []}})
         fake_provider = MagicMock(
             name="ParallelWebSearchProvider",
@@ -498,8 +499,7 @@ class TestWebSearchSchema:
         fake_provider.search = fake_search
         fake_provider.name = "parallel"
 
-        with patch("tools.web_tools._get_search_backend", return_value="parallel"), \
-             patch("agent.web_search_registry.get_provider", return_value=fake_provider), \
+        with patch("tools.web_tools._resolve_web_provider", return_value=fake_provider), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch.object(tools.web_tools._debug, "log_call"), \
              patch.object(tools.web_tools._debug, "save"):
@@ -515,9 +515,7 @@ class TestWebSearchErrorHandling:
     def test_search_error_response_does_not_expose_diagnostics(self):
         import tools.web_tools
 
-        # After the web-provider plugin migration, the firecrawl client lives
-        # at plugins.web.firecrawl.provider._get_firecrawl_client. We mock the
-        # registry's get_provider to return a fake provider whose .search()
+        # Mock the wrapper resolver to return a fake provider whose .search()
         # raises so we can verify error sanitization.
         fake_provider = MagicMock(
             name="FirecrawlWebSearchProvider",
@@ -526,8 +524,7 @@ class TestWebSearchErrorHandling:
         fake_provider.search.side_effect = RuntimeError("boom")
         fake_provider.name = "firecrawl"
 
-        with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
-             patch("agent.web_search_registry.get_provider", return_value=fake_provider), \
+        with patch("tools.web_tools._resolve_web_provider", return_value=fake_provider), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch.object(tools.web_tools._debug, "log_call") as mock_log_call, \
              patch.object(tools.web_tools._debug, "save"):
@@ -558,6 +555,7 @@ class TestCheckWebApiKey:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "CAMOFOX_URL",
     )
 
     def setup_method(self):
@@ -602,8 +600,10 @@ class TestCheckWebApiKey:
             assert check_web_api_key() is True
 
     def test_no_keys_returns_false(self):
-        from tools.web_tools import check_web_api_key
-        assert check_web_api_key() is False
+        with patch("plugins.web.ddgs.provider.DDGSWebSearchProvider.is_available", return_value=False), \
+             patch("plugins.web.xai.provider.has_xai_credentials", return_value=False):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is False
 
     def test_both_keys_returns_true(self):
         with patch.dict(os.environ, {
