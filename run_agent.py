@@ -490,7 +490,8 @@ class AIAgent:
         except Exception as e:
             # Transient failure (e.g. SQLite lock). Keep _session_db alive —
             # _session_db_created stays False so next run_conversation() retries.
-            logger.warning(
+            self._session_db_failed = True
+            logger.error(
                 "Session DB creation failed (will retry next turn): %s", e
             )
 
@@ -1419,6 +1420,26 @@ class AIAgent:
         self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
 
+        # If DB persistence is degraded, immediately write JSONL fallback
+        # for unflushed messages only — avoid duplicating already-persisted rows.
+        if self._session_db_failed and messages:
+            try:
+                from hermes_constants import get_hermes_home
+                sid = getattr(self, 'session_id', 'unknown')
+                base = Path(get_hermes_home())
+                profile = os.environ.get("HERMES_PROFILE")
+                if profile:
+                    base = base / "profiles" / profile
+                fb_dir = base / "sessions"
+                fb_dir.mkdir(parents=True, exist_ok=True)
+                fb_path = fb_dir / f"{sid}.pending.jsonl"
+                unflushed = messages[self._last_flushed_db_idx:]
+                with open(fb_path, "a") as f:
+                    for msg in unflushed:
+                        f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            except Exception:
+                pass  # Last-resort fallback — if even this fails, nothing more we can do
+
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
 
@@ -1496,13 +1517,9 @@ class AIAgent:
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
-                # Persist multimodal tool results as their text summary only —
-                # base64 images would bloat the session DB and aren't useful
-                # for cross-session replay.
                 if _is_multimodal_tool_result(content):
                     content = _multimodal_text_summary(content)
                 elif isinstance(content, list):
-                    # List of OpenAI-style content parts: strip images, keep text.
                     _txt = []
                     for p in content:
                         if isinstance(p, dict) and p.get("type") == "text":
@@ -1518,23 +1535,28 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
-                self._session_db.append_message(
-                    session_id=self.session_id,
-                    role=role,
-                    content=content,
-                    tool_name=msg.get("tool_name"),
-                    tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
-                )
-            self._last_flushed_db_idx = len(messages)
+                try:
+                    self._session_db.append_message(
+                        session_id=self.session_id,
+                        role=role,
+                        content=content,
+                        tool_name=msg.get("tool_name"),
+                        tool_calls=tool_calls_data,
+                        tool_call_id=msg.get("tool_call_id"),
+                        finish_reason=msg.get("finish_reason"),
+                        reasoning=msg.get("reasoning") if role == "assistant" else None,
+                        reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
+                        reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
+                        codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                        codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    )
+                    self._last_flushed_db_idx += 1
+                except Exception:
+                    self._session_db_failed = True
+                    break
         except Exception as e:
-            logger.warning("Session DB append_message failed: %s", e)
+            self._session_db_failed = True
+            logger.error("Session DB flush failed: %s", e)
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
