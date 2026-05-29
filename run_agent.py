@@ -1430,13 +1430,13 @@ class AIAgent:
 
         # If DB persistence is degraded, immediately write JSONL fallback
         # for unflushed messages only — avoid duplicating already-persisted rows.
-        if self._session_db_failed and messages:
+        if (self._session_db_failed or not self._session_db) and messages:
             try:
                 from hermes_constants import get_hermes_home
                 sid = getattr(self, 'session_id', 'unknown')
                 base = Path(get_hermes_home())
                 profile = os.environ.get("HERMES_PROFILE")
-                if profile:
+                if profile and profile != "default":
                     base = base / "profiles" / profile
                 fb_dir = base / "sessions"
                 fb_dir.mkdir(parents=True, exist_ok=True)
