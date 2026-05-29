@@ -80,6 +80,42 @@ class TestAuxiliaryMaxTokensParam:
              patch("agent.auxiliary_client._read_nous_auth", return_value=None):
             assert auxiliary_max_tokens_param(2048) == {"max_completion_tokens": 2048}
 
+    def test_build_kwargs_uses_openai_completion_tokens_for_auto_endpoint(self):
+        kwargs = _build_call_kwargs(
+            provider="auto",
+            model="gpt-5-nano",
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=512,
+            base_url="https://api.openai.com/v1/",
+        )
+
+        assert kwargs["max_completion_tokens"] == 512
+        assert "max_tokens" not in kwargs
+
+    def test_build_kwargs_keeps_max_tokens_for_auto_non_openai_endpoint(self):
+        kwargs = _build_call_kwargs(
+            provider="auto",
+            model="gpt-5-nano",
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=512,
+            base_url="https://example.test/v1/",
+        )
+
+        assert kwargs["max_tokens"] == 512
+        assert "max_completion_tokens" not in kwargs
+
+    def test_build_kwargs_preserves_custom_runtime_base_fallback(self):
+        with patch("agent.auxiliary_client._current_custom_base_url", return_value="https://api.openai.com/v1"):
+            kwargs = _build_call_kwargs(
+                provider="custom",
+                model="gpt-5-nano",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=512,
+            )
+
+        assert kwargs["max_completion_tokens"] == 512
+        assert "max_tokens" not in kwargs
+
 
 class TestNormalizeAuxProvider:
     def test_maps_github_copilot_aliases(self):

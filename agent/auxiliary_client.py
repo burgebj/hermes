@@ -4700,14 +4700,13 @@ def _build_call_kwargs(
             provider == "zai"
             and ("4v" in _model_lower or "5v" in _model_lower or "-v" in _model_lower)
         )
+        endpoint_base = base_url
+        if not endpoint_base and provider == "custom":
+            endpoint_base = _current_custom_base_url()
         if _skip_max_tokens:
             pass  # ZAI vision models do not accept max_tokens
-        elif provider == "custom":
-            custom_base = base_url or _current_custom_base_url()
-            if base_url_hostname(custom_base) == "api.openai.com":
-                kwargs["max_completion_tokens"] = max_tokens
-            else:
-                kwargs["max_tokens"] = max_tokens
+        elif base_url_hostname(endpoint_base or "") == "api.openai.com":
+            kwargs["max_completion_tokens"] = max_tokens
         else:
             kwargs["max_tokens"] = max_tokens
 
