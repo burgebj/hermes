@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -23,9 +24,87 @@ import type {
 } from "./types";
 import { api } from "@/lib/api";
 
-/** LocalStorage key — pre-applied before the React tree mounts to avoid
- *  a visible flash of the default palette on theme-overridden installs. */
+/** LocalStorage key holding the active theme NAME (built-in id or user YAML
+ *  name). Pre-applied at module load (see `bootstrapThemeFromCache`) before the
+ *  React tree mounts to avoid a visible flash of the default palette on
+ *  theme-overridden installs. */
 const STORAGE_KEY = "hermes-dashboard-theme";
+
+/** LocalStorage key holding the full user-theme DEFINITIONS map
+ *  (name → DashboardTheme) cached from `/api/dashboard/themes`. The name alone
+ *  isn't enough to repaint a custom theme on reload: built-ins ship in the
+ *  bundle, but user YAMLs only exist server-side, so without this cache
+ *  `resolveTheme(name)` falls back to `defaultTheme` until the API responds —
+ *  the GUNNY-COMMAND-style first-load flash. Seeding from this cache makes the
+ *  first render resolve the real definition. */
+const THEME_DEFS_STORAGE_KEY = "hermes-dashboard-theme-defs";
+
+function readStoredThemeName(): string {
+  if (typeof window === "undefined") return "default";
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) ?? "default";
+  } catch {
+    return "default";
+  }
+}
+
+function readCachedThemeDefs(): Record<string, DashboardTheme> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(THEME_DEFS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, DashboardTheme>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCachedThemeDefs(defs: Record<string, DashboardTheme>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(THEME_DEFS_STORAGE_KEY, JSON.stringify(defs));
+  } catch {
+    // Quota exceeded / private mode — the cache is best-effort; without it we
+    // simply fall back to the (slower) API-resolved path on next load.
+  }
+}
+
+/** Server-injected active-theme bootstrap. The web server writes
+ *  `window.__HERMES_THEME_BOOTSTRAP__ = {name, definition}` into index.html
+ *  (an inline classic <script>, so it runs before the deferred module bundle).
+ *  This is the ONLY source available on a first-ever load with an empty
+ *  localStorage cache, so it's consulted first — it kills the default-palette
+ *  flash even before the API responds and before any cache exists. `definition`
+ *  is null for built-in active themes (they ship in the bundle) and the full
+ *  normalised theme object for user YAMLs. */
+interface ThemeBootstrap {
+  name: string;
+  definition: DashboardTheme | null;
+}
+
+function readServerThemeBootstrap(): ThemeBootstrap | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = (window as unknown as {
+      __HERMES_THEME_BOOTSTRAP__?: unknown;
+    }).__HERMES_THEME_BOOTSTRAP__;
+    if (!raw || typeof raw !== "object") return null;
+    const obj = raw as { name?: unknown; definition?: unknown };
+    if (typeof obj.name !== "string" || !obj.name) return null;
+    return {
+      name: obj.name,
+      definition:
+        obj.definition && typeof obj.definition === "object"
+          ? (obj.definition as DashboardTheme)
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** Tracks fontUrls we've already injected so multiple theme switches don't
  *  pile up <link> tags. Keyed by URL. */
@@ -299,13 +378,47 @@ function applyTheme(theme: DashboardTheme) {
   applyLayoutVariant(theme.layoutVariant);
 }
 
+/** Pre-apply the active theme's CSS vars synchronously at module load — before
+ *  React mounts and the browser paints. Resolution order:
+ *    1. Server bootstrap (`window.__HERMES_THEME_BOOTSTRAP__`) — authoritative
+ *       and present even on a first-ever load with no localStorage cache.
+ *    2. localStorage stored name → bundled built-in, or cached user-theme def.
+ *  The server bootstrap wins so a custom active theme (e.g. GUNNY-COMMAND)
+ *  paints correctly on the very first visit, and so a stale localStorage name
+ *  can't override an active theme the server has since changed. When nothing
+ *  resolves we apply nothing and let the normal React flow paint default, so we
+ *  never paint default twice. */
+function bootstrapThemeFromCache(): void {
+  if (typeof document === "undefined") return;
+
+  const server = readServerThemeBootstrap();
+  if (server) {
+    const serverTheme =
+      BUILTIN_THEMES[server.name] ?? server.definition ?? undefined;
+    if (serverTheme) {
+      applyTheme(serverTheme);
+      return;
+    }
+  }
+
+  const name = readStoredThemeName();
+  const theme = BUILTIN_THEMES[name] ?? readCachedThemeDefs()[name];
+  if (theme) applyTheme(theme);
+}
+
+bootstrapThemeFromCache();
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  /** Name of the currently active theme (built-in id or user YAML name). */
+  /** Name of the currently active theme (built-in id or user YAML name).
+   *  Server bootstrap wins over localStorage so a first-ever load (no stored
+   *  name) and a stale stored name both resolve to the server's active theme. */
   const [themeName, setThemeName] = useState<string>(() => {
+    const server = readServerThemeBootstrap();
+    if (server) return server.name;
     if (typeof window === "undefined") return "default";
     return window.localStorage.getItem(STORAGE_KEY) ?? "default";
   });
@@ -321,10 +434,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 
   /** Full definitions for user themes keyed by name — the API provides
-   *  these so custom YAMLs apply without a client-side stub. */
+   *  these so custom YAMLs apply without a client-side stub. Seeded from the
+   *  localStorage cache so a custom active theme resolves on the FIRST render
+   *  (no default-palette flash) instead of only after the API responds. */
   const [userThemeDefs, setUserThemeDefs] = useState<
     Record<string, DashboardTheme>
-  >({});
+  >(() => {
+    const cached = readCachedThemeDefs();
+    // Fold in the server-bootstrapped definition so the active user theme
+    // resolves on the first render even when localStorage has no cache yet.
+    const server = readServerThemeBootstrap();
+    if (server?.definition) {
+      return { ...cached, [server.name]: server.definition };
+    }
+    return cached;
+  });
 
   // Resolve a theme name to a full DashboardTheme, falling back to default
   // only when neither a built-in nor a user theme is found.
@@ -341,8 +465,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   // Re-apply on every themeName change, or when user themes arrive from
   // the API (since the active theme might be a user theme whose definition
-  // hadn't loaded yet on first render).
-  useEffect(() => {
+  // hadn't loaded yet on first render). useLayoutEffect (not useEffect) so the
+  // CSS vars are committed before the browser paints — the module-load
+  // bootstrap covers the very first paint, and this keeps later theme switches
+  // flash-free too.
+  useLayoutEffect(() => {
     applyTheme(resolveTheme(themeName));
   }, [themeName, resolveTheme]);
 
@@ -369,7 +496,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
               defs[entry.name] = entry.definition;
             }
           }
-          if (Object.keys(defs).length > 0) setUserThemeDefs(defs);
+          if (Object.keys(defs).length > 0) {
+            setUserThemeDefs(defs);
+            // Cache the freshest defs so the next reload can pre-apply a custom
+            // active theme before first paint instead of flashing default.
+            writeCachedThemeDefs(defs);
+          }
         }
         if (resp.active && resp.active !== themeName) {
           setThemeName(resp.active);

@@ -2231,6 +2231,53 @@ class TestPtyWebSocket:
                     break
             assert b"99" in buf and b"41" in buf
 
+    def test_startup_resize_burst_boots_child_at_final_size(self, monkeypatch):
+        # Regression: the embedded TUI is a full-screen app that clears+repaints
+        # on every resize. The browser sends a burst of RESIZE escapes during
+        # startup (onopen, post-layout refit, ResizeObserver). The child must be
+        # spawned once at the *final* size — not the 80x24 default, and not an
+        # intermediate value — so the user never sees the repaint "flashing".
+        import hermes_cli.web_server as ws_mod
+
+        captured: dict = {}
+        original = ws_mod.PtyBridge.spawn.__func__
+
+        def capturing_spawn(cls, argv, *, cwd=None, env=None, cols=80, rows=24):
+            captured["cols"], captured["rows"] = cols, rows
+            return original(cls, argv, cwd=cwd, env=env, cols=cols, rows=rows)
+
+        monkeypatch.setattr(
+            ws_mod.PtyBridge, "spawn", classmethod(capturing_spawn)
+        )
+        monkeypatch.setattr(
+            self.ws_module,
+            "_resolve_chat_argv",
+            lambda resume=None, sidecar_url=None: (["/bin/cat"], None, None),
+        )
+
+        with self.client.websocket_connect(self._url()) as conn:
+            # Initial onopen size, then the authoritative refit — sent back to
+            # back so both land inside the server's settle window.
+            conn.send_text("\x1b[RESIZE:80;24]")
+            conn.send_text("\x1b[RESIZE:120;40]")
+            # A keystroke closes the settle window and proves buffered input is
+            # replayed to the child after spawn (cat echoes it back).
+            conn.send_bytes(b"ping\n")
+
+            buf = b""
+            import time
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                frame = conn.receive_bytes()
+                if frame:
+                    buf += frame
+                if b"ping" in buf:
+                    break
+            assert b"ping" in buf
+
+        assert captured == {"cols": 120, "rows": 40}
+
     def test_unavailable_platform_closes_with_message(self, monkeypatch):
         from hermes_cli.pty_bridge import PtyUnavailableError
 
