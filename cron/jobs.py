@@ -546,6 +546,7 @@ def create_job(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: bool = False,
+    delivery_retry: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -595,6 +596,13 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        delivery_retry: Optional dict with ``max_attempts`` (1-10, default 3)
+                and ``delay_seconds`` (>=5, default 300). When set, the
+                scheduler retries delivery on transient failures (rate
+                limits, timeouts, connection errors). Non-retryable errors
+                (invalid credentials, misconfigured platforms) fail
+                immediately. Without this field, delivery is one-shot
+                (backward-compatible).
 
     Returns:
         The created job dict
@@ -630,6 +638,17 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
+
+    # Normalize delivery_retry: accept None, dict, or falsy values.
+    # Valid keys: max_attempts (1-10), delay_seconds (>=5).
+    normalized_delivery_retry: Optional[Dict[str, Any]] = None
+    if isinstance(delivery_retry, dict) and delivery_retry:
+        max_a = delivery_retry.get("max_attempts", 3)
+        delay_s = delivery_retry.get("delay_seconds", 300)
+        normalized_delivery_retry = {
+            "max_attempts": min(max(int(max_a), 1), 10),
+            "delay_seconds": max(int(delay_s), 5),
+        }
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -684,6 +703,7 @@ def create_job(
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
         "profile": normalized_profile,
+        "delivery_retry": normalized_delivery_retry,
     }
 
     jobs = load_jobs()
@@ -781,6 +801,17 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["profile"] = None
             else:
                 updates["profile"] = _normalize_profile(_profile)
+
+        # Validate / normalize delivery_retry if present in updates.
+        if "delivery_retry" in updates:
+            _dr = updates["delivery_retry"]
+            if _dr in {None, False} or (_dr == {}):
+                updates["delivery_retry"] = None
+            elif isinstance(_dr, dict):
+                updates["delivery_retry"] = {
+                    "max_attempts": min(max(int(_dr.get("max_attempts", 3)), 1), 10),
+                    "delay_seconds": max(int(_dr.get("delay_seconds", 300)), 5),
+                }
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates

@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -808,6 +809,94 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     if delivery_errors:
         return "; ".join(delivery_errors)
     return None
+
+
+# ── Delivery retry helpers ──────────────────────────────────────────────
+
+# Error substrings that indicate a transient failure worth retrying.
+# Permanent errors (invalid credentials, blocked, misconfigured) are NOT
+# listed — retrying those just wastes time.
+_RETRYABLE_ERRORS = [
+    "rate limit", "rate limited", "too many requests",
+    "timeout", "timed out",
+    "connection", "refused", "reset", "unreachable",
+    "dns", "name resolution",
+    "temporary", "try again", "retry",
+    "broken pipe",
+]
+
+
+def _is_retryable(error: str) -> bool:
+    """Return True if *error* looks like a transient delivery failure."""
+    if not error:
+        return False
+    error_lower = error.lower()
+    return any(pattern in error_lower for pattern in _RETRYABLE_ERRORS)
+
+
+def _deliver_with_retry(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+    """Deliver job output, retrying on transient failures when the job
+    has a ``delivery_retry`` config.
+
+    Without ``delivery_retry`` the behaviour is identical to the old
+    one-shot ``_deliver_result`` call — fully backward-compatible.
+
+    Returns ``None`` on success, or the last error string on failure.
+    """
+    retry_config = job.get("delivery_retry")
+    if not isinstance(retry_config, dict) or not retry_config:
+        # No retry configured — one-shot (backward compatible path)
+        try:
+            return _deliver_result(job, content, adapters=adapters, loop=loop)
+        except Exception as exc:
+            logger.error("Delivery failed for job %s: %s", job["id"], exc)
+            return str(exc)
+
+    max_attempts = min(max(int(retry_config.get("max_attempts", 3)), 1), 10)
+    delay = max(int(retry_config.get("delay_seconds", 300)), 5)
+
+    last_error: Optional[str] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            error = _deliver_result(job, content, adapters=adapters, loop=loop)
+        except Exception as exc:
+            error = str(exc)
+            logger.error("Delivery exception for job %s (attempt %d/%d): %s",
+                         job["id"], attempt, max_attempts, exc)
+
+        if not error:
+            if attempt > 1:
+                logger.info("Job '%s': delivery succeeded on attempt %d/%d",
+                            job["id"], attempt, max_attempts)
+            return None
+
+        last_error = error
+
+        if not _is_retryable(error):
+            logger.warning("Job '%s': delivery failed with non-retryable error "
+                           "(attempt %d/%d): %s",
+                           job["id"], attempt, max_attempts, _truncate_err(error))
+            return error
+
+        if attempt < max_attempts:
+            logger.warning(
+                "Job '%s': delivery failed (retryable), "
+                "retrying in %ds (attempt %d/%d): %s",
+                job["id"], delay, attempt, max_attempts, _truncate_err(error),
+            )
+            time.sleep(delay)
+        else:
+            logger.error("Job '%s': delivery failed after %d attempts: %s",
+                         job["id"], max_attempts, _truncate_err(error))
+
+    return last_error
+
+
+def _truncate_err(error: str, max_len: int = 200) -> str:
+    """Truncate error for log lines."""
+    if len(error) <= max_len:
+        return error
+    return error[:max_len] + "…"
 
 
 _DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
@@ -1951,11 +2040,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
                 delivery_error = None
                 if should_deliver:
-                    try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
-                    except Exception as de:
-                        delivery_error = str(de)
-                        logger.error("Delivery failed for job %s: %s", job["id"], de)
+                    delivery_error = _deliver_with_retry(job, deliver_content, adapters=adapters, loop=loop)
 
                 # Treat empty final_response as a soft failure so last_status
                 # is not "ok" — the agent ran but produced nothing useful.

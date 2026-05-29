@@ -439,6 +439,7 @@ def cronjob(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    delivery_retry: Optional[Dict[str, Any]] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -506,6 +507,7 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 profile=_normalize_optional_job_value(profile),
                 no_agent=_no_agent,
+                delivery_retry=delivery_retry,
             )
             return json.dumps(
                 {
@@ -657,6 +659,9 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if delivery_retry is not None:
+                # Pass through — update_job() validates/normalizes
+                updates["delivery_retry"] = delivery_retry
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -774,6 +779,30 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                     "WHEN TO USE False (default): anything that needs reasoning — summarize a feed, draft a daily briefing, pick interesting items, rephrase data for a human, follow conditional logic based on content."
                 ),
             },
+            "delivery_retry": {
+                "type": "object",
+                "description": (
+                    "Optional retry config for job delivery. When set, the scheduler "
+                    "retries delivery on transient failures (rate limits, timeouts, "
+                    "connection errors). Non-retryable errors (invalid credentials, "
+                    "misconfigured platforms) fail immediately. Without this field, "
+                    "delivery is one-shot (backward-compatible). On update, pass an "
+                    "empty object ``{}`` to clear.\n\n"
+                    "Keys:\n"
+                    "- ``max_attempts`` (int, 1-10, default 3): total delivery attempts.\n"
+                    "- ``delay_seconds`` (int, >=5, default 300): seconds between retries."
+                ),
+                "properties": {
+                    "max_attempts": {
+                        "type": "integer", "minimum": 1, "maximum": 10,
+                        "default": 3,
+                    },
+                    "delay_seconds": {
+                        "type": "integer", "minimum": 5,
+                        "default": 300,
+                    },
+                },
+            },
             "context_from": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -856,6 +885,7 @@ registry.register(
         workdir=args.get("workdir"),
         profile=args.get("profile"),
         no_agent=args.get("no_agent"),
+        delivery_retry=args.get("delivery_retry"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,
