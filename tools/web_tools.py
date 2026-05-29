@@ -121,6 +121,14 @@ def _load_web_config() -> dict:
     except (ImportError, Exception):
         return {}
 
+# Recognized web backend names (config values accepted in ``web.backend`` /
+# ``web.search_backend`` / ``web.extract_backend``). Kept as a single source of
+# truth for config validation across the selection helpers.
+_KNOWN_WEB_BACKENDS = frozenset(
+    {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}
+)
+
+
 def _get_backend() -> str:
     """Determine which web backend to use (shared fallback).
 
@@ -129,14 +137,14 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in _KNOWN_WEB_BACKENDS:
         return configured
 
-    # Fallback for manual / legacy config — pick the highest-priority
-    # available backend. Firecrawl also counts as available when the managed
-    # tool gateway is configured for Nous subscribers.
-    # Free-tier backends (searxng / brave-free / ddgs) trail the paid ones so
-    # existing paid setups are unaffected.
+    # Fallback for manual / legacy config — pick the highest-priority available
+    # backend. Selection is purely credential-based: a backend is a candidate
+    # when its key/URL is present (Firecrawl also counts when the managed Nous
+    # gateway is ready — that's a credential too). Free-tier backends
+    # (searxng / brave-free / ddgs) trail the keyed ones.
     backend_candidates = (
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
         ("parallel", _has_env("PARALLEL_API_KEY")),
@@ -144,13 +152,19 @@ def _get_backend() -> str:
         ("exa", _has_env("EXA_API_KEY")),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
+        # Keyless Parallel free MCP — always available, the intended no-key
+        # default for both search and extract. Ahead of ddgs (search-only, so it
+        # can't service web_extract); ddgs stays reachable via web.backend=ddgs.
+        ("parallel", True),
         ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
         if available:
             return backend
 
-    return "firecrawl"  # default (backward compat)
+    # Defensive terminal (the keyless ``parallel`` candidate above is always
+    # available, so this is effectively unreachable).
+    return "parallel"
 
 
 def _get_search_backend() -> str:
@@ -181,12 +195,17 @@ def _get_extract_backend() -> str:
 def _get_capability_backend(capability: str) -> str:
     """Shared helper for per-capability backend selection.
 
-    Reads ``web.{capability}_backend`` from config; if set and available,
-    uses it. Otherwise falls through to the shared ``_get_backend()``.
+    Reads ``web.{capability}_backend`` from config. Any explicit value is
+    honored **regardless of availability** — including unrecognized typos like
+    ``parrallel`` — so the dispatcher surfaces that backend's own setup/config
+    error rather than silently rerouting to the keyless Parallel default (which
+    would send user queries to a different provider and hide the
+    misconfiguration). This matches ``web_search_registry``'s "explicit config
+    wins" rule. Only an *unset* value falls through to ``_get_backend()``.
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
-    if specific and _is_backend_available(specific):
+    if specific:
         return specific
     return _get_backend()
 
@@ -196,6 +215,8 @@ def _is_backend_available(backend: str) -> bool:
     if backend == "exa":
         return _has_env("EXA_API_KEY")
     if backend == "parallel":
+        # Credential probe: True only with a real key. The keyless free-MCP
+        # fallback is handled by _get_backend()'s terminal default, not here.
         return _has_env("PARALLEL_API_KEY")
     if backend == "firecrawl":
         return check_firecrawl_api_key()
@@ -941,11 +962,19 @@ async def web_extract_tool(
             else:
                 safe_urls.append(url)
 
+        # Tracks the free-tier Parallel extract path (no key → web_fetch via the
+        # hosted Search MCP) so we can credit Parallel in the output/UI. Bound
+        # here so empty/all-blocked inputs (which skip dispatch) stay defined.
+        _free_parallel_extract = False
+
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
             results = []
         else:
             backend = _get_extract_backend()
+            _free_parallel_extract = (
+                backend == "parallel" and not _has_env("PARALLEL_API_KEY")
+            )
 
             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
             # tavily, firecrawl) now live as plugins. The dispatcher is a
@@ -1119,6 +1148,14 @@ async def web_extract_tool(
             for r in response.get("results", [])
         ]
         trimmed_response = {"results": trimmed_results}
+        if _free_parallel_extract:
+            # Credit Parallel's free Search MCP (drives the "[Parallel]" UI tag
+            # + lets the model cite the source). Free tier only.
+            trimmed_response["provider"] = "parallel"
+            trimmed_response["attribution"] = (
+                "Extraction powered by the free Parallel Web Search MCP "
+                "(https://parallel.ai)."
+            )
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
@@ -1150,16 +1187,42 @@ async def web_extract_tool(
         return tool_error(error_msg)
 
 
-# Convenience function to check Firecrawl credentials
+def web_tools_registered() -> bool:
+    """Whether the web tools should be registered. Always True.
+
+    Registration is decoupled from credential readiness: with no credentials,
+    search/extract fall back to Parallel's free hosted Search MCP, and an
+    explicitly configured-but-unavailable backend must stay registered so
+    dispatch surfaces that backend's own setup error rather than the tool
+    silently vanishing. For "is web actually configured?" use
+    :func:`check_web_api_key`.
+    """
+    return True
+
+
+def _backend_usable(backend: str) -> bool:
+    """True when *backend* can service calls. Keyless Parallel counts (free MCP).
+
+    Unknown/typo'd backend names are not usable (so an explicit typo is reported
+    as a config problem rather than masked by the keyless fallback).
+    """
+    if backend == "parallel" and not _has_env("PARALLEL_API_KEY"):
+        return True
+    return _is_backend_available(backend)
+
+
 def check_web_api_key() -> bool:
-    """Check whether the configured web backend is available."""
-    configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs"}:
-        return _is_backend_available(configured)
-    return any(
-        _is_backend_available(backend)
-        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs")
-    )
+    """Usability probe: True when the selected web backends can service calls.
+
+    Probes the backends that :func:`_get_search_backend` /
+    :func:`_get_extract_backend` actually select (not just shared
+    ``web.backend``), so an explicit per-capability backend with missing
+    credentials — or a typo'd name — reports unusable instead of being masked by
+    the keyless Parallel fallback. Keyless Parallel itself genuinely services
+    calls, so a zero-setup install reports usable. Distinct from
+    :func:`web_tools_registered` (always True — whether the tool is offered).
+    """
+    return _backend_usable(_get_search_backend()) and _backend_usable(_get_extract_backend())
 
 
 def check_auxiliary_model() -> bool:
@@ -1327,7 +1390,7 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
-    check_fn=check_web_api_key,
+    check_fn=web_tools_registered,
     requires_env=_web_requires_env(),
     emoji="🔍",
     max_result_size_chars=100_000,
@@ -1338,7 +1401,7 @@ registry.register(
     schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown"),
-    check_fn=check_web_api_key,
+    check_fn=web_tools_registered,
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
