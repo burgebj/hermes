@@ -3862,6 +3862,11 @@ def run_conversation(
                     # inflate completion_tokens with reasoning,
                     # causing premature compression.  (#12026)
                     _real_tokens = _compressor.last_prompt_tokens
+                elif _compressor.last_prompt_tokens == -1:
+                    # Sentinel: compression just ran but no API-reported
+                    # real token count yet.  Skip compression to avoid the
+                    # rough-estimate inflation loop.  (#27566)
+                    _real_tokens = 0
                 else:
                     # Include tool schemas — with 50+ tools enabled
                     # these add 20-30K tokens the messages-only

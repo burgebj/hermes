@@ -577,16 +577,14 @@ def compress_context(
 
     # Update token estimate after compaction so pressure calculations
     # use the post-compression count, not the stale pre-compression one.
-    # Use estimate_request_tokens_rough() so tool schemas are included —
-    # with 50+ tools enabled, schemas alone can add 20-30K tokens, and
-    # omitting them delays the next compression cycle far past the
-    # configured threshold (issue #14695).
-    _compressed_est = estimate_request_tokens_rough(
-        compressed,
-        system_prompt=new_system_prompt or "",
-        tools=agent.tools or None,
-    )
-    agent.context_compressor.last_prompt_tokens = _compressed_est
+    # Use a sentinel (-1) instead of estimate_request_tokens_rough() to
+    # prevent the rough estimate (which overcounts tool schemas by 30-50%)
+    # from triggering a compression loop.  The next API response will
+    # overwrite this with the real prompt_tokens via update_from_response().
+    # If the API does not return usage, preflight falls back to a fresh
+    # rough estimate — which is still better than reusing the post-compress
+    # rough value that inflates thresholds.  (#27566)
+    agent.context_compressor.last_prompt_tokens = -1
     agent.context_compressor.last_completion_tokens = 0
 
     # Clear the file-read dedup cache.  After compression the original
@@ -599,9 +597,8 @@ def compress_context(
         pass
 
     logger.info(
-        "context compression done: session=%s messages=%d->%d tokens=~%s",
+        "context compression done: session=%s messages=%d->%d (awaiting real token count)",
         agent.session_id or "none", _pre_msg_count, len(compressed),
-        f"{_compressed_est:,}",
     )
     # Release the lock on the OLD session_id only AFTER rotation completed
     # and all post-rotation bookkeeping (memory manager, context engine,
