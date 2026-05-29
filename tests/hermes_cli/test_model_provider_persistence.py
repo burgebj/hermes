@@ -327,25 +327,25 @@ class TestBaseUrlValidation:
         """Typing a non-URL string should not be saved as the base URL."""
         from hermes_cli.auth import PROVIDER_REGISTRY
 
-        pconfig = PROVIDER_REGISTRY.get("zai")
+        pconfig = PROVIDER_REGISTRY.get("minimax")
         if not pconfig:
-            pytest.skip("zai not in PROVIDER_REGISTRY")
+            pytest.skip("minimax not in PROVIDER_REGISTRY")
 
-        monkeypatch.setenv("GLM_API_KEY", "test-key")
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
 
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config, get_env_value
 
         # User types a shell command instead of a URL at the base URL prompt
-        with patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
              patch("hermes_cli.auth.deactivate_provider"), \
              patch("builtins.input", return_value="nano ~/.hermes/.env"):
-            _model_flow_api_key_provider(load_config(), "zai", "old-model")
+            _model_flow_api_key_provider(load_config(), "minimax", "old-model")
 
         # The garbage value should NOT have been saved
-        saved = get_env_value("GLM_BASE_URL") or ""
+        saved = get_env_value("MINIMAX_BASE_URL") or ""
         assert not saved or saved.startswith(("http://", "https://")), \
-            f"Non-URL value was saved as GLM_BASE_URL: {saved}"
+            f"Non-URL value was saved as MINIMAX_BASE_URL: {saved}"
         captured = capsys.readouterr()
         assert "Invalid URL" in captured.out
 
@@ -353,42 +353,95 @@ class TestBaseUrlValidation:
         """A proper URL should be saved normally."""
         from hermes_cli.auth import PROVIDER_REGISTRY
 
-        pconfig = PROVIDER_REGISTRY.get("zai")
+        pconfig = PROVIDER_REGISTRY.get("minimax")
         if not pconfig:
-            pytest.skip("zai not in PROVIDER_REGISTRY")
+            pytest.skip("minimax not in PROVIDER_REGISTRY")
 
-        monkeypatch.setenv("GLM_API_KEY", "test-key")
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
 
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config, get_env_value
 
-        with patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
              patch("hermes_cli.auth.deactivate_provider"), \
-             patch("builtins.input", return_value="https://custom.z.ai/api/paas/v4"):
-            _model_flow_api_key_provider(load_config(), "zai", "old-model")
+             patch("builtins.input", return_value="https://custom.minimax.example/v1"):
+            _model_flow_api_key_provider(load_config(), "minimax", "old-model")
 
-        saved = get_env_value("GLM_BASE_URL") or ""
-        assert saved == "https://custom.z.ai/api/paas/v4"
+        saved = get_env_value("MINIMAX_BASE_URL") or ""
+        assert saved == "https://custom.minimax.example/v1"
 
     def test_empty_base_url_keeps_default(self, config_home, monkeypatch):
         """Pressing Enter (empty) should not change the base URL."""
         from hermes_cli.auth import PROVIDER_REGISTRY
 
-        pconfig = PROVIDER_REGISTRY.get("zai")
+        pconfig = PROVIDER_REGISTRY.get("minimax")
         if not pconfig:
-            pytest.skip("zai not in PROVIDER_REGISTRY")
+            pytest.skip("minimax not in PROVIDER_REGISTRY")
 
-        monkeypatch.setenv("GLM_API_KEY", "test-key")
-        monkeypatch.delenv("GLM_BASE_URL", raising=False)
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+        monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
 
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config, get_env_value
 
-        with patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="MiniMax-M2"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", return_value=""):
+            _model_flow_api_key_provider(load_config(), "minimax", "old-model")
+
+        saved = get_env_value("MINIMAX_BASE_URL") or ""
+        assert saved == "", "Empty input should not save a base URL"
+
+
+class TestZaiEndpointSelection:
+    """Z.AI setup should choose explicit billing-path endpoints."""
+
+    def test_direct_provider_china_endpoint_saved_to_model_config(self, config_home, monkeypatch):
+        monkeypatch.setenv("GLM_API_KEY", "test-key")
+
+        from hermes_cli.auth import ZAI_DIRECT_CN_BASE_URL
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config
+
+        with patch("hermes_cli.main._prompt_numbered_choice", return_value=1), \
+             patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
              patch("hermes_cli.auth.deactivate_provider"), \
              patch("builtins.input", return_value=""):
             _model_flow_api_key_provider(load_config(), "zai", "old-model")
 
-        saved = get_env_value("GLM_BASE_URL") or ""
-        assert saved == "", "Empty input should not save a base URL"
+        model = load_config()["model"]
+        assert model["provider"] == "zai"
+        assert model["base_url"] == ZAI_DIRECT_CN_BASE_URL
 
+    def test_coding_provider_china_endpoint_saved_to_model_config(self, config_home, monkeypatch):
+        monkeypatch.setenv("GLM_API_KEY", "test-key")
+
+        from hermes_cli.auth import ZAI_CODING_CN_BASE_URL
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config
+
+        with patch("hermes_cli.main._prompt_numbered_choice", return_value=1), \
+             patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5-turbo"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", return_value=""):
+            _model_flow_api_key_provider(load_config(), "zai-coding", "old-model")
+
+        model = load_config()["model"]
+        assert model["provider"] == "zai-coding"
+        assert model["base_url"] == ZAI_CODING_CN_BASE_URL
+
+    def test_direct_provider_custom_proxy_endpoint_saved_to_model_config(self, config_home, monkeypatch):
+        monkeypatch.setenv("GLM_API_KEY", "test-key")
+
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config
+
+        with patch("hermes_cli.main._prompt_numbered_choice", return_value=2), \
+             patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", return_value="https://proxy.example.com/glm/v4"):
+            _model_flow_api_key_provider(load_config(), "zai", "old-model")
+
+        model = load_config()["model"]
+        assert model["provider"] == "zai"
+        assert model["base_url"] == "https://proxy.example.com/glm/v4"

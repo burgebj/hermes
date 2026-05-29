@@ -2462,6 +2462,7 @@ def select_provider_and_model(args=None):
         "deepseek",
         "xai",
         "zai",
+        "zai-coding",
         "kimi-coding-cn",
         "minimax",
         "minimax-cn",
@@ -2922,6 +2923,39 @@ def _prompt_provider_choice(choices, *, default=0):
     for i, c in enumerate(choices, 1):
         marker = "→" if i - 1 == default else " "
         print(f"  {marker} {i}. {c}")
+    print()
+    while True:
+        try:
+            val = input(f"Choice [1-{len(choices)}] ({default + 1}): ").strip()
+            if not val:
+                return default
+            idx = int(val) - 1
+            if 0 <= idx < len(choices):
+                return idx
+            print(f"Please enter 1-{len(choices)}")
+        except ValueError:
+            print("Please enter a number")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return None
+
+
+def _prompt_numbered_choice(question: str, choices: list[str], *, default: int = 0):
+    """Prompt for a numbered choice, using curses when available."""
+    try:
+        from hermes_cli.setup import _curses_prompt_choice
+
+        idx = _curses_prompt_choice(question, choices, default)
+        if idx >= 0:
+            print()
+            return idx
+    except Exception:
+        pass
+
+    print(question)
+    for i, choice in enumerate(choices, 1):
+        marker = "→" if i - 1 == default else " "
+        print(f"  {marker} {i}. {choice}")
     print()
     while True:
         try:
@@ -5588,6 +5622,75 @@ def _model_flow_bedrock(config, current_model=""):
         print("  No change.")
 
 
+def _zai_endpoint_options(provider_id: str) -> list[tuple[str, str]]:
+    from hermes_cli.auth import (
+        ZAI_CODING_CN_BASE_URL,
+        ZAI_CODING_GLOBAL_BASE_URL,
+        ZAI_DIRECT_CN_BASE_URL,
+        ZAI_DIRECT_GLOBAL_BASE_URL,
+    )
+
+    if provider_id == "zai-coding":
+        return [
+            ("Global users", ZAI_CODING_GLOBAL_BASE_URL),
+            ("China users", ZAI_CODING_CN_BASE_URL),
+        ]
+    if provider_id == "zai":
+        return [
+            ("Global users", ZAI_DIRECT_GLOBAL_BASE_URL),
+            ("China users", ZAI_DIRECT_CN_BASE_URL),
+        ]
+    return []
+
+
+def _select_zai_endpoint(provider_id: str, current_base: str) -> str:
+    options = _zai_endpoint_options(provider_id)
+    if not options:
+        return current_base
+
+    normalized_current = str(current_base or "").strip().rstrip("/")
+    default_idx = 0
+    for idx, (_, url) in enumerate(options):
+        if normalized_current == url.rstrip("/"):
+            default_idx = idx
+            break
+    else:
+        if normalized_current:
+            default_idx = len(options)
+
+    choices = [f"{label} ({url})" for label, url in options]
+    choices.append("Custom proxy URL")
+    selected = _prompt_numbered_choice("Select Z.AI endpoint:", choices, default=default_idx)
+    if selected is None:
+        return current_base
+    if selected == len(options):
+        try:
+            override = input(f"Custom Z.AI base URL [{current_base}]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return current_base
+        if not override:
+            return current_base
+        if not override.startswith(("http://", "https://")):
+            print("  Invalid URL — must start with http:// or https://. Keeping current value.")
+            return current_base
+        try:
+            from hermes_cli.auth import (
+                ZAI_CODING_ENDPOINTS,
+                ZAI_DIRECT_ENDPOINTS,
+                _zai_base_url_matches_endpoint_family,
+            )
+
+            endpoints = ZAI_CODING_ENDPOINTS if provider_id == "zai-coding" else ZAI_DIRECT_ENDPOINTS
+            if not _zai_base_url_matches_endpoint_family(override, endpoints):
+                print("  Official Z.AI URL does not match this provider. Keeping current value.")
+                return current_base
+        except Exception:
+            pass
+        return override.rstrip("/")
+    return options[selected][1]
+
+
 def _model_flow_api_key_provider(config, provider_id, current_model=""):
     """Generic flow for API-key providers (z.ai, MiniMax, OpenCode, etc.)."""
     from hermes_cli.auth import (
@@ -5701,19 +5804,22 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             pass
     effective_base = current_base or pconfig.inference_base_url
 
-    try:
-        override = input(f"Base URL [{effective_base}]: ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        override = ""
-    if override and base_url_env:
-        if not override.startswith(("http://", "https://")):
-            print(
-                "  Invalid URL — must start with http:// or https://. Keeping current value."
-            )
-        else:
-            save_env_value(base_url_env, override)
-            effective_base = override
+    if provider_id in {"zai", "zai-coding"}:
+        effective_base = _select_zai_endpoint(provider_id, effective_base)
+    else:
+        try:
+            override = input(f"Base URL [{effective_base}]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            override = ""
+        if override and base_url_env:
+            if not override.startswith(("http://", "https://")):
+                print(
+                    "  Invalid URL — must start with http:// or https://. Keeping current value."
+                )
+            else:
+                save_env_value(base_url_env, override)
+                effective_base = override
 
     # Model selection — resolution order:
     #   1. models.dev registry (cached, filtered for agentic/tool-capable models)

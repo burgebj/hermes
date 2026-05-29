@@ -1214,6 +1214,76 @@ def test_minimax_config_base_url_ignored_for_different_provider(monkeypatch):
     assert resolved["base_url"] == "https://api.minimax.io/anthropic"
 
 
+def test_zai_direct_ignores_persisted_coding_base_url(monkeypatch):
+    """Direct Z.AI must not use a stale official coding-plan config URL."""
+    from hermes_cli.auth import ZAI_CODING_GLOBAL_BASE_URL, ZAI_DIRECT_GLOBAL_BASE_URL
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {
+        "provider": "zai",
+        "base_url": ZAI_CODING_GLOBAL_BASE_URL,
+    })
+    monkeypatch.setenv("GLM_API_KEY", "test-zai-key")
+    monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
+
+    resolved = rp.resolve_runtime_provider(requested="zai")
+
+    assert resolved["provider"] == "zai"
+    assert resolved["base_url"] == ZAI_DIRECT_GLOBAL_BASE_URL
+
+
+def test_zai_coding_ignores_persisted_direct_base_url(monkeypatch):
+    """Coding-plan Z.AI must not use a stale official direct API config URL."""
+    from hermes_cli.auth import ZAI_CODING_GLOBAL_BASE_URL, ZAI_DIRECT_GLOBAL_BASE_URL
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai-coding")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {
+        "provider": "zai-coding",
+        "base_url": ZAI_DIRECT_GLOBAL_BASE_URL,
+    })
+    monkeypatch.setenv("GLM_API_KEY", "test-zai-key")
+    monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
+
+    resolved = rp.resolve_runtime_provider(requested="zai-coding")
+
+    assert resolved["provider"] == "zai-coding"
+    assert resolved["base_url"] == ZAI_CODING_GLOBAL_BASE_URL
+
+
+def test_zai_custom_proxy_config_base_url_still_allowed(monkeypatch):
+    """Manual custom proxy URLs remain allowed for Z.AI config overrides."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "zai")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {
+        "provider": "zai",
+        "base_url": "https://proxy.example.com/glm/v4",
+    })
+    monkeypatch.setenv("GLM_API_KEY", "test-zai-key")
+    monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
+
+    resolved = rp.resolve_runtime_provider(requested="zai")
+
+    assert resolved["base_url"] == "https://proxy.example.com/glm/v4"
+
+
+def test_zai_pool_ignores_persisted_coding_base_url(monkeypatch):
+    """Credential-pool Z.AI runtime must also reject official family mismatch."""
+    from hermes_cli.auth import ZAI_CODING_GLOBAL_BASE_URL, ZAI_DIRECT_GLOBAL_BASE_URL
+
+    class _Entry:
+        access_token = "pool-zai-key"
+        source = "manual"
+        base_url = ZAI_DIRECT_GLOBAL_BASE_URL
+
+    resolved = rp._resolve_runtime_from_pool_entry(
+        provider="zai",
+        entry=_Entry(),
+        requested_provider="zai",
+        model_cfg={"provider": "zai", "base_url": ZAI_CODING_GLOBAL_BASE_URL},
+    )
+
+    assert resolved["base_url"] == ZAI_DIRECT_GLOBAL_BASE_URL
+
+
 def test_alibaba_default_coding_intl_endpoint_uses_chat_completions(monkeypatch):
     """Alibaba default coding-intl /v1 URL should use chat_completions mode."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "alibaba")

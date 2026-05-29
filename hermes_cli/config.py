@@ -2241,8 +2241,8 @@ OPTIONAL_ENV_VARS = {
         "advanced": True,
     },
     "GLM_BASE_URL": {
-        "description": "Z.AI / GLM base URL override",
-        "prompt": "Z.AI / GLM base URL (leave empty for default)",
+        "description": "Z.AI / GLM direct API base URL override",
+        "prompt": "Z.AI / GLM direct API base URL (leave empty for default)",
         "url": None,
         "password": False,
         "category": "provider",

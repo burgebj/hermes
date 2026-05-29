@@ -6,6 +6,7 @@ from agent.models_dev import (
     _extract_context,
     fetch_models_dev,
     get_model_capabilities,
+    list_agentic_models,
     lookup_models_dev_context,
 )
 
@@ -69,6 +70,24 @@ SAMPLE_REGISTRY = {
             },
         },
     },
+    "zai": {
+        "id": "zai",
+        "name": "Z.AI",
+        "models": {
+            "glm-4.5-air": {
+                "id": "glm-4.5-air",
+                "tool_call": True,
+                "limit": {"context": 131072, "output": 8192},
+            },
+            "glm-5v-turbo": {
+                "id": "glm-5v-turbo",
+                "attachment": True,
+                "tool_call": True,
+                "modalities": {"input": ["text", "image"]},
+                "limit": {"context": 65536, "output": 8192},
+            },
+        },
+    },
     "audio-only": {
         "id": "audio-only",
         "models": {
@@ -103,6 +122,10 @@ class TestProviderMapping:
     def test_openai_codex_mapped_to_openai(self):
         assert PROVIDER_TO_MODELS_DEV["openai"] == "openai"
         assert PROVIDER_TO_MODELS_DEV["openai-codex"] == "openai"
+
+    def test_zai_coding_uses_zai_catalog(self):
+        assert PROVIDER_TO_MODELS_DEV["zai"] == "zai"
+        assert PROVIDER_TO_MODELS_DEV["zai-coding"] == "zai"
 
 
 class TestExtractContext:
@@ -160,6 +183,26 @@ class TestLookupModelsDevContext:
         """xAI OAuth is an auth path, not a separate model catalog."""
         mock_fetch.return_value = SAMPLE_REGISTRY
         assert lookup_models_dev_context("xai-oauth", "grok-build-0.1") == 256000
+
+    @patch("agent.models_dev.fetch_models_dev")
+    def test_zai_coding_resolves_zai_context(self, mock_fetch):
+        """Z.AI Coding Plan shares the Z.AI model metadata catalog."""
+        mock_fetch.return_value = SAMPLE_REGISTRY
+        assert lookup_models_dev_context("zai-coding", "glm-4.5-air") == 131072
+
+    @patch("agent.models_dev.fetch_models_dev")
+    def test_zai_coding_lists_zai_agentic_models(self, mock_fetch):
+        mock_fetch.return_value = SAMPLE_REGISTRY
+        models = list_agentic_models("zai-coding")
+        assert "glm-4.5-air" in models
+        assert "glm-5v-turbo" in models
+
+    @patch("agent.models_dev.fetch_models_dev")
+    def test_zai_coding_uses_zai_capabilities(self, mock_fetch):
+        mock_fetch.return_value = SAMPLE_REGISTRY
+        caps = get_model_capabilities("zai-coding", "glm-5v-turbo")
+        assert caps is not None
+        assert caps.supports_vision is True
 
     @patch("agent.models_dev.fetch_models_dev")
     def test_zero_context_filtered(self, mock_fetch):

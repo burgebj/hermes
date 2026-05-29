@@ -142,6 +142,11 @@ GEMINI_OAUTH_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60  # refresh 60s before expiry
 # any remote service.
 LMSTUDIO_NOAUTH_PLACEHOLDER = "dummy-lm-api-key"
 
+ZAI_DIRECT_GLOBAL_BASE_URL = "https://api.z.ai/api/paas/v4"
+ZAI_DIRECT_CN_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+ZAI_CODING_GLOBAL_BASE_URL = "https://api.z.ai/api/coding/paas/v4"
+ZAI_CODING_CN_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+
 
 # =============================================================================
 # Provider Registry
@@ -241,9 +246,16 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         id="zai",
         name="Z.AI / GLM",
         auth_type="api_key",
-        inference_base_url="https://api.z.ai/api/paas/v4",
+        inference_base_url=ZAI_DIRECT_GLOBAL_BASE_URL,
         api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         base_url_env_var="GLM_BASE_URL",
+    ),
+    "zai-coding": ProviderConfig(
+        id="zai-coding",
+        name="Z.AI / GLM Coding Plan",
+        auth_type="api_key",
+        inference_base_url=ZAI_CODING_GLOBAL_BASE_URL,
+        api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
     ),
     "kimi-coding": ProviderConfig(
         id="kimi-coding",
@@ -605,30 +617,76 @@ def _resolve_api_key_provider_secret(
 # Z.AI Endpoint Detection
 # =============================================================================
 
-# Z.AI has separate billing for general vs coding plans, and global vs China
-# endpoints.  A key that works on one may return "Insufficient balance" on
-# another.  We probe at setup time and store the working endpoint.
+# Z.AI has separate billing for direct API vs coding-plan paths, and global vs
+# China endpoints. Keep the two billing paths separate: the direct provider may
+# only probe direct endpoints, and the coding-plan provider may only probe
+# coding endpoints.
 # Each entry lists candidate models to try in order — newer coding plan accounts
 # may only have access to recent models (glm-5.1, glm-5v-turbo) while older
 # ones still use glm-4.7.
 
-ZAI_ENDPOINTS = [
+ZAI_DIRECT_ENDPOINTS = [
     # (id, base_url, probe_models, label)
-    ("global",        "https://api.z.ai/api/paas/v4",        ["glm-5"],   "Global"),
-    ("cn",            "https://open.bigmodel.cn/api/paas/v4", ["glm-5"],   "China"),
-    ("coding-global", "https://api.z.ai/api/coding/paas/v4",  ["glm-5.1", "glm-5v-turbo", "glm-4.7"], "Global (Coding Plan)"),
-    ("coding-cn",     "https://open.bigmodel.cn/api/coding/paas/v4", ["glm-5.1", "glm-5v-turbo", "glm-4.7"], "China (Coding Plan)"),
+    ("global", ZAI_DIRECT_GLOBAL_BASE_URL, ["glm-5"], "Global"),
+    ("cn", ZAI_DIRECT_CN_BASE_URL, ["glm-5"], "China"),
 ]
 
+ZAI_CODING_ENDPOINTS = [
+    (
+        "coding-global",
+        ZAI_CODING_GLOBAL_BASE_URL,
+        ["glm-5-turbo", "glm-5.1", "glm-4.7"],
+        "Global (Coding Plan)",
+    ),
+    (
+        "coding-cn",
+        ZAI_CODING_CN_BASE_URL,
+        ["glm-5-turbo", "glm-5.1", "glm-4.7"],
+        "China (Coding Plan)",
+    ),
+]
 
-def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str, str]]:
+def _normalize_zai_base_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def _zai_base_url_matches_endpoint_family(
+    base_url: str,
+    endpoints: Optional[list[tuple[str, str, list[str], str]]] = None,
+) -> bool:
+    """Return whether a Z.AI base URL is compatible with the endpoint family.
+
+    Custom proxy URLs remain allowed. Official Z.AI hosts must match one of the
+    direct or coding-plan URLs for the selected provider to avoid billing-path
+    bleed from old caches or legacy GLM_BASE_URL values.
+    """
+    if not endpoints:
+        return True
+    normalized = _normalize_zai_base_url(base_url)
+    if not normalized:
+        return False
+    allowed = {_normalize_zai_base_url(ep_url) for _, ep_url, _, _ in endpoints}
+    if normalized in allowed:
+        return True
+    parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
+    host = (parsed.netloc or parsed.path).split("/")[0].lower()
+    if host in {"api.z.ai", "open.bigmodel.cn"}:
+        return False
+    return True
+
+
+def detect_zai_endpoint(
+    api_key: str,
+    timeout: float = 8.0,
+    endpoints: Optional[list[tuple[str, str, list[str], str]]] = None,
+) -> Optional[Dict[str, str]]:
     """Probe z.ai endpoints to find one that accepts this API key.
 
     Returns {"id": ..., "base_url": ..., "model": ..., "label": ...} for the
     first working endpoint, or None if all fail.  For endpoints with multiple
     candidate models, tries each in order and returns the first that succeeds.
     """
-    for ep_id, base_url, probe_models, label in ZAI_ENDPOINTS:
+    for ep_id, base_url, probe_models, label in (endpoints or ZAI_DIRECT_ENDPOINTS):
         for model in probe_models:
             try:
                 resp = httpx.post(
@@ -659,16 +717,31 @@ def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str
     return None
 
 
-def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> str:
+def _resolve_zai_base_url(
+    api_key: str,
+    default_url: str,
+    env_override: str,
+    *,
+    provider_id: str = "zai",
+    endpoints: Optional[list[tuple[str, str, list[str], str]]] = None,
+) -> str:
     """Return the correct Z.AI base URL by probing endpoints.
 
-    If the user has explicitly set GLM_BASE_URL, that always wins.
-    Otherwise, probe the candidate endpoints to find one that accepts the
-    key.  The detected endpoint is cached in provider state (auth.json) keyed
-    on a hash of the API key so subsequent starts skip the probe.
+    If the user has explicitly set a custom GLM_BASE_URL, that wins. Official
+    Z.AI URLs must match the selected provider's direct-vs-coding endpoint
+    family. Otherwise, probe the candidate endpoints to find one that accepts
+    the key. The detected endpoint is cached in provider state (auth.json)
+    keyed on a hash of the API key so subsequent starts skip the probe.
     """
     if env_override:
-        return env_override
+        if _zai_base_url_matches_endpoint_family(env_override, endpoints):
+            return env_override
+        logger.warning(
+            "Ignoring official Z.AI base URL %s for provider %s because it "
+            "does not match the selected endpoint family",
+            env_override,
+            provider_id,
+        )
 
     # No API key set → don't probe (would fire N×M HTTPS requests with an
     # empty Bearer token, all returning 401).  This path is hit during
@@ -680,16 +753,19 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
 
     # Check provider-state cache for a previously-detected endpoint.
     auth_store = _load_auth_store()
-    state = _load_provider_state(auth_store, "zai") or {}
+    state = _load_provider_state(auth_store, provider_id) or {}
     cached = state.get("detected_endpoint")
     if isinstance(cached, dict) and cached.get("base_url"):
         key_hash = cached.get("key_hash", "")
-        if key_hash == hashlib.sha256(api_key.encode()).hexdigest()[:16]:
+        if (
+            key_hash == hashlib.sha256(api_key.encode()).hexdigest()[:16]
+            and _zai_base_url_matches_endpoint_family(cached["base_url"], endpoints)
+        ):
             logger.debug("Z.AI: using cached endpoint %s", cached["base_url"])
             return cached["base_url"]
 
     # Probe — may take up to ~8s per endpoint.
-    detected = detect_zai_endpoint(api_key)
+    detected = detect_zai_endpoint(api_key, endpoints=endpoints)
     if detected and detected.get("base_url"):
         # Persist the detection result keyed on the API key hash.
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
@@ -700,8 +776,8 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
             "label": detected.get("label", ""),
             "key_hash": key_hash,
         }
-        _save_provider_state(auth_store, "zai", state)
-        logger.info("Z.AI: auto-detected endpoint %s (%s)", detected["label"], detected["base_url"])
+        _save_provider_state(auth_store, provider_id, state)
+        logger.info("Z.AI %s: auto-detected endpoint %s (%s)", provider_id, detected["label"], detected["base_url"])
         return detected["base_url"]
 
     logger.debug("Z.AI: probe failed, falling back to default %s", default_url)
@@ -1482,6 +1558,9 @@ def resolve_provider(
     # Normalize provider aliases
     _PROVIDER_ALIASES = {
         "glm": "zai", "z-ai": "zai", "z.ai": "zai", "zhipu": "zai",
+        "zai-coding-plan": "zai-coding", "z-ai-coding": "zai-coding",
+        "glm-coding": "zai-coding", "glm-coding-plan": "zai-coding",
+        "zhipu-coding": "zai-coding", "zhipu-coding-plan": "zai-coding",
         "google": "gemini", "google-gemini": "gemini", "google-ai-studio": "gemini",
         "x-ai": "xai", "x.ai": "xai", "grok": "xai",
         "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth",
@@ -5845,7 +5924,21 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
     elif provider_id == "zai":
-        base_url = _resolve_zai_base_url(api_key, pconfig.inference_base_url, env_url)
+        base_url = _resolve_zai_base_url(
+            api_key,
+            pconfig.inference_base_url,
+            env_url,
+            provider_id="zai",
+            endpoints=ZAI_DIRECT_ENDPOINTS,
+        )
+    elif provider_id == "zai-coding":
+        base_url = _resolve_zai_base_url(
+            api_key,
+            pconfig.inference_base_url,
+            env_url,
+            provider_id="zai-coding",
+            endpoints=ZAI_CODING_ENDPOINTS,
+        )
     elif env_url:
         base_url = env_url.rstrip("/")
     else:

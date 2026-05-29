@@ -91,6 +91,26 @@ class TestKimiProfile:
         assert tl["reasoning_effort"] == "medium"
 
 
+class TestZaiCodingProfile:
+    def test_coding_plan_profile_is_distinct_from_direct_api(self):
+        direct = get_provider_profile("zai")
+        coding = get_provider_profile("zai-coding")
+
+        assert coding.name == "zai-coding"
+        assert coding.env_vars == direct.env_vars
+        assert direct.base_url == "https://api.z.ai/api/paas/v4"
+        assert coding.base_url == "https://api.z.ai/api/coding/paas/v4"
+        assert coding.fallback_models[:4] == (
+            "glm-5-turbo",
+            "glm-5.1",
+            "glm-4.7",
+            "glm-4.5-air",
+        )
+
+    def test_coding_plan_alias(self):
+        assert get_provider_profile("glm-coding").name == "zai-coding"
+
+
 class TestOpenRouterProfile:
     def test_extra_body_with_prefs(self):
         p = get_provider_profile("openrouter")

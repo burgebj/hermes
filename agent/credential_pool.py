@@ -2043,7 +2043,25 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
         if provider == "kimi-coding":
             base_url = _resolve_kimi_base_url(token, pconfig.inference_base_url, env_url)
         elif provider == "zai":
-            base_url = _resolve_zai_base_url(token, pconfig.inference_base_url, env_url)
+            from hermes_cli.auth import ZAI_DIRECT_ENDPOINTS
+
+            base_url = _resolve_zai_base_url(
+                token,
+                pconfig.inference_base_url,
+                env_url,
+                provider_id="zai",
+                endpoints=ZAI_DIRECT_ENDPOINTS,
+            )
+        elif provider == "zai-coding":
+            from hermes_cli.auth import ZAI_CODING_ENDPOINTS
+
+            base_url = _resolve_zai_base_url(
+                token,
+                pconfig.inference_base_url,
+                env_url,
+                provider_id="zai-coding",
+                endpoints=ZAI_CODING_ENDPOINTS,
+            )
         changed |= _upsert_entry(
             entries,
             provider,

@@ -231,6 +231,27 @@ class TestDefaultContextLengths:
                 api_key="oauth-token",
             ) == 256000
 
+    def test_zai_coding_uses_zai_models_dev_context(self):
+        """Z.AI Coding Plan should use Z.AI metadata before GLM fuzzy defaults."""
+        registry = {
+            "zai": {
+                "models": {
+                    "glm-4.5-air": {
+                        "limit": {"context": 131072, "output": 8192},
+                    },
+                },
+            },
+        }
+        with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata._query_ollama_api_show", return_value=None), \
+             patch("agent.models_dev.fetch_models_dev", return_value=registry):
+            assert get_model_context_length(
+                "glm-4.5-air",
+                provider="zai-coding",
+                base_url="https://api.z.ai/api/coding/paas/v4",
+                api_key="glm-key",
+            ) == 131072
+
     def test_deepseek_v4_models_1m_context(self):
         from agent.model_metadata import get_model_context_length
         from unittest.mock import patch as mock_patch

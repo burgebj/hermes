@@ -202,6 +202,14 @@ class TestProviderModelIds:
     def test_zai_returns_glm_models(self):
         assert "glm-5" in provider_model_ids("zai")
 
+    def test_zai_coding_returns_coding_plan_models(self):
+        assert provider_model_ids("zai-coding")[:4] == [
+            "glm-5-turbo",
+            "glm-5.1",
+            "glm-4.7",
+            "glm-4.5-air",
+        ]
+
     def test_stepfun_prefers_live_catalog(self):
         with patch(
             "hermes_cli.auth.resolve_api_key_provider_credentials",
