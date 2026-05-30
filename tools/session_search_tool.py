@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Union
 _HIDDEN_SESSION_SOURCES = ("tool",)
 
 
-def _format_timestamp(ts: Union[int, float, str, None]) -> str:
+def _format_timestamp(ts: int | float | str | None) -> str:
     """Convert a Unix timestamp (float/int) or ISO string to a human-readable date.
 
     Returns "unknown" for None, str(ts) if conversion fails.

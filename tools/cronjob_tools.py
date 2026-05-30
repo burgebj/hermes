@@ -432,7 +432,7 @@ def cronjob(
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
     script: Optional[str] = None,
-    context_from: Optional[Union[str, List[str]]] = None,
+    context_from: Optional[str | List[str]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     profile: Optional[str] = None,

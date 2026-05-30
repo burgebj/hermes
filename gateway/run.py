@@ -9542,7 +9542,7 @@ class GatewayRunner:
 
         return "\n".join(lines)
 
-    async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+    async def _handle_reset_command(self, event: MessageEvent) -> str | EphemeralReply:
         """Handle /new or /reset command."""
         source = event.source
         
@@ -10070,7 +10070,7 @@ class GatewayRunner:
 
         return "\n".join(lines)
 
-    async def _handle_stop_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+    async def _handle_stop_command(self, event: MessageEvent) -> str | EphemeralReply:
         """Handle /stop command - interrupt a running agent.
 
         When an agent is truly hung (blocked thread that never checks
@@ -10202,7 +10202,7 @@ class GatewayRunner:
             "  /platform resume <name> — re-queue a paused platform"
         )
 
-    async def _handle_restart_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+    async def _handle_restart_command(self, event: MessageEvent) -> str | EphemeralReply:
         """Handle /restart command - drain active work, then restart the gateway."""
         # Defensive idempotency check: if the previous gateway process
         # recorded this same /restart (same platform + update_id) and the new
@@ -12309,7 +12309,7 @@ class GatewayRunner:
             return t("gateway.fast.saved", label=label)
         return t("gateway.fast.session_only", label=label)
 
-    async def _handle_yolo_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+    async def _handle_yolo_command(self, event: MessageEvent) -> str | EphemeralReply:
         """Handle /yolo — toggle dangerous command approval bypass for this session only."""
         from tools.approval import (
             disable_session_yolo,

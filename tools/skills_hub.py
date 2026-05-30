@@ -84,7 +84,7 @@ class SkillMeta:
 class SkillBundle:
     """A downloaded skill ready for quarantine/scanning/installation."""
     name: str
-    files: Dict[str, Union[str, bytes]]   # relative_path -> file content
+    files: Dict[str, str | bytes]   # relative_path -> file content
     source: str
     identifier: str
     trust_level: str
@@ -2854,7 +2854,7 @@ class OptionalSkillSource(SkillSource):
         else:
             skill_dir = resolved
 
-        files: Dict[str, Union[str, bytes]] = {}
+        files: Dict[str, str | bytes] = {}
         for f in skill_dir.rglob("*"):
             if (
                 f.is_file()
@@ -3172,7 +3172,7 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
     """Write a skill bundle to the quarantine directory for scanning."""
     ensure_hub_dirs()
     skill_name = _validate_skill_name(bundle.name)
-    validated_files: List[Tuple[str, Union[str, bytes]]] = []
+    validated_files: List[Tuple[str, str | bytes]] = []
     for rel_path, file_content in bundle.files.items():
         safe_rel_path = _validate_bundle_rel_path(rel_path)
         validated_files.append((safe_rel_path, file_content))

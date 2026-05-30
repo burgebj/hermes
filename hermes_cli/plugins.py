@@ -237,7 +237,7 @@ class PluginManifest:
     version: str = ""
     description: str = ""
     author: str = ""
-    requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
+    requires_env: List[str | Dict[str, Any]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
     source: str = ""        # "user", "project", or "entrypoint"
