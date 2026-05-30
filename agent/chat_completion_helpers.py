@@ -1271,7 +1271,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         "Please provide a final response summarizing what you've found and accomplished so far, "
         "without calling any more tools."
     )
-    messages.append({"role": "user", "content": summary_request})
+    # Inject current time so the agent knows when it's summarizing
+    from hermes_time import now as _mi_now, get_timezone_name as _mi_tz
+    _mi_t = _mi_now()
+    _mi_tz_name = _mi_tz()
+    _mi_time_ctx = "\u23f0 Current time: " + _mi_t.strftime('%A, %B %d, %Y %I:%M %p') + " " + _mi_tz_name
+    messages.append({"role": "user", "content": _mi_time_ctx + "\n\n" + summary_request})
 
     try:
         # Build API messages, stripping internal-only fields
