@@ -2226,25 +2226,46 @@ _orphan_stdio_pids: set = set()
 
 
 def _snapshot_child_pids() -> set:
-    """Return a set of current child process PIDs.
+    """Return a set of current child AND grandchild process PIDs.
 
     Uses /proc on Linux, falls back to psutil, then empty set.
+    Recursively discovers descendants so that MCP servers spawned via
+    shell wrappers (e.g. ``/bin/bash run-mcp.sh → node server.js``)
+    are tracked even when the wrapper exits and the real server becomes
+    a grandchild of the Hermes process.
+
     Used by _run_stdio to identify the subprocess spawned by stdio_client.
     """
     my_pid = os.getpid()
 
-    # Linux: read from /proc
+    # Linux: read from /proc recursively
     try:
-        children_path = f"/proc/{my_pid}/task/{my_pid}/children"
-        with open(children_path, encoding="utf-8") as f:
-            return {int(p) for p in f.read().split() if p.strip()}
-    except (FileNotFoundError, OSError, ValueError):
+        all_pids: set = set()
+        frontier = [my_pid]
+        visited: set = set()
+        while frontier:
+            pid = frontier.pop()
+            if pid in visited:
+                continue
+            visited.add(pid)
+            try:
+                children_path = f"/proc/{pid}/task/{pid}/children"
+                with open(children_path, encoding="utf-8") as f:
+                    child_pids = {int(p) for p in f.read().split() if p.strip()}
+                all_pids |= child_pids
+                frontier.extend(child_pids)
+            except (FileNotFoundError, OSError, ValueError):
+                pass
+        # Exclude the Hermes process itself
+        all_pids.discard(my_pid)
+        return all_pids
+    except Exception:
         pass
 
-    # Fallback: psutil
+    # Fallback: psutil (recursive children)
     try:
         import psutil
-        return {c.pid for c in psutil.Process(my_pid).children()}
+        return {c.pid for c in psutil.Process(my_pid).children(recursive=True)}
     except Exception:
         pass
 
@@ -3661,12 +3682,34 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
         return
 
     # Phase 1: SIGTERM (graceful)
+    # For each PID, also attempt to SIGTERM its direct children — handles
+    # cases where the tracked PID is a wrapper that spawned the real server.
+    _children_of_tracked = set()
     for pid, server_name in pids.items():
         try:
             os.kill(pid, _signal.SIGTERM)
             logger.debug("Sent SIGTERM to orphaned MCP process %d (%s)", pid, server_name)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        # Discover and terminate direct children of this PID
+        try:
+            children_path = f"/proc/{pid}/task/{pid}/children"
+            with open(children_path, encoding="utf-8") as f:
+                for child_str in f.read().split():
+                    if child_str.strip():
+                        child_pid = int(child_str)
+                        _children_of_tracked.add(child_pid)
+                        try:
+                            os.kill(child_pid, _signal.SIGTERM)
+                            logger.debug(
+                                "Sent SIGTERM to child %d of orphaned MCP process %d (%s)",
+                                child_pid, pid, server_name,
+                            )
+                        except (ProcessLookupError, PermissionError, OSError):
+                            pass
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+    pids.update({cp: "orphan-child" for cp in _children_of_tracked})
 
     # Phase 2: Wait for graceful exit
     time.sleep(2)
