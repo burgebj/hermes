@@ -129,6 +129,13 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: Dict[str, str] = {}
+        # Inbound message guid dedup: BlueBubbles can fire multiple webhook events
+        # for a single iMessage (e.g. a new-message + ~1s-later updated-message for
+        # delivery receipt/edit). Tracking recently-seen guids prevents duplicate
+        # inbound processing. 60s TTL is generous; iMessage guid collisions are
+        # impossible in that window.
+        self._recent_message_guids: Dict[str, float] = {}
+        self._dedup_ttl_seconds: float = 60.0
 
     # ------------------------------------------------------------------
     # API helpers
@@ -500,6 +507,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 }
                 if is_audio_message:
                     data["isAudioMessage"] = "true"
+                    data["method"] = "private-api"
                 res = await self.client.post(
                     self._api_url("/api/v1/message/attachment"),
                     files=files,
@@ -559,6 +567,26 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
+        # iMessage voice bubbles require Opus-in-CAF. BlueBubbles' own MP3->CAF
+        # converter currently produces PCM-in-CAF (see BlueBubblesApp/bluebubbles-server#793),
+        # so transcode here via macOS's native afconvert before handing off.
+        import shutil, subprocess
+        afconvert = shutil.which("afconvert") or "/usr/bin/afconvert"
+        if os.path.isfile(afconvert) and not audio_path.lower().endswith(".caf"):
+            caf_path = os.path.splitext(audio_path)[0] + ".caf"
+            try:
+                r = subprocess.run(
+                    [afconvert, "-f", "caff", "-d", "opus@24000", "-c", "1",
+                     audio_path, caf_path],
+                    capture_output=True, timeout=30,
+                )
+                if r.returncode == 0 and os.path.exists(caf_path) and os.path.getsize(caf_path) > 0:
+                    audio_path = caf_path
+                else:
+                    logger.warning("afconvert -> Opus/CAF failed: %s",
+                                   r.stderr.decode("utf-8", errors="ignore")[:200])
+            except Exception as exc:
+                logger.warning("afconvert -> Opus/CAF error: %s", exc)
         return await self._send_attachment(
             chat_id, audio_path, caption=caption, is_audio_message=True
         )
@@ -816,6 +844,35 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             return web.Response(text="ok")
 
         record = self._extract_payload_record(payload) or {}
+
+        # Dedup duplicate webhook events for the same iMessage guid. BlueBubbles
+        # emits more than one webhook per message in some conditions (the classic
+        # case is a new-message event followed ~1s later by an updated-message
+        # event for the same guid, which without this guard would be processed as
+        # two separate inbound turns).
+        msg_guid = self._value(
+            record.get("guid"), payload.get("guid"), record.get("originalGuid")
+        )
+        if msg_guid:
+            import time as _time
+            now = _time.monotonic()
+            # Evict expired entries opportunistically.
+            if self._recent_message_guids:
+                expired = [
+                    g for g, t in self._recent_message_guids.items()
+                    if now - t > self._dedup_ttl_seconds
+                ]
+                for g in expired:
+                    self._recent_message_guids.pop(g, None)
+            if msg_guid in self._recent_message_guids:
+                logger.debug(
+                    "[bluebubbles] dropping duplicate webhook for guid %s (event=%s)",
+                    msg_guid, event_type or "<none>",
+                )
+                from aiohttp import web as _web
+                return _web.Response(text="ok")
+            self._recent_message_guids[msg_guid] = now
+
         is_from_me = bool(
             record.get("isFromMe")
             or record.get("fromMe")
