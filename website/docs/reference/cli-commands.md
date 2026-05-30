@@ -479,9 +479,16 @@ hermes egress stop                     # SIGTERM (then SIGKILL after 5s grace)
 hermes egress status                   # binary + config + pid + listening + mappings
 hermes egress status --show-tokens     # print proxy tokens in full (default: redacted)
 
+hermes egress harden                   # host-hardening survey: firewall/SSH/fail2ban/mesh-VPN/seccomp + iron-proxy runtime
+hermes egress harden --baseline catalin   # evaluate against minimal|catalin|paranoid (default minimal)
+hermes egress harden --all             # show passing signals too (default: gaps only)
+hermes egress harden --json            # {signals[], baseline, satisfied, missing[]}; always exits 0
+
 hermes egress disable                  # flip proxy.enabled = false (does not stop a running proxy)
 hermes egress config                   # print the path to proxy.yaml for inspection
 ```
+
+`harden` is informational and always exits `0` (it never gates); its `--baseline` values are `minimal`, `catalin`, `paranoid`, and it surveys these signals: `tailscale`, `ufw`, `firewalld`, `nftables`, `fail2ban`, `ssh-password-auth`, `ssh-root-login`, `iron-proxy-enabled`, `iron-proxy-running`, `docker-seccomp`. See [Host hardening baselines](../user-guide/egress/hardening-baselines.md).
 
 ### Common flows
 

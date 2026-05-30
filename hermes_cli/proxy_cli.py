@@ -26,6 +26,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from agent.proxy_sources import iron_proxy as ip
+from agent.proxy_sources import host_hardening as hh
 from hermes_cli.config import load_config, save_config
 
 
@@ -98,6 +99,27 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
              "Beware: tokens may persist in your shell history.",
     )
     status.set_defaults(func=cmd_status)
+
+    harden = sub.add_parser(
+        "harden",
+        help="Host-hardening survey: firewall, SSH, fail2ban, mesh-VPN, "
+             "Docker seccomp, + iron-proxy runtime (complements `doctor`).",
+    )
+    harden.add_argument(
+        "--baseline", choices=hh.BASELINE_NAMES, default="minimal",
+        help="Baseline to evaluate against (default: minimal). Colors the "
+             "summary line only — never gates the exit code.",
+    )
+    harden.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="Emit {signals[], baseline, satisfied, missing[]} as JSON.",
+    )
+    harden.add_argument(
+        "--all", action="store_true", dest="show_all",
+        help="Show ALL signals including passing ones (default: hide "
+             "passing signals to focus on gaps).",
+    )
+    harden.set_defaults(func=cmd_harden)
 
     disable = sub.add_parser("disable", help="Turn off the proxy integration")
     disable.set_defaults(func=cmd_disable)
@@ -602,6 +624,147 @@ def cmd_status(args: argparse.Namespace) -> int:
             console.print(f"  - {name}")
 
     return 0
+
+
+def cmd_harden(args: argparse.Namespace) -> int:
+    """Survey host-perimeter hardening and show how it layers with the
+    sandbox-egress proxy.  Always exits 0 — informational, never gates."""
+    console = Console()
+    baseline = getattr(args, "baseline", "minimal")
+    show_all = bool(getattr(args, "show_all", False))
+
+    signals = hh.survey_host(baseline=baseline)
+    satisfied, missing = hh.baseline_status(signals, baseline)
+
+    if getattr(args, "as_json", False):
+        import json as _json
+        # Plain stdout (not rich) so the JSON is machine-parseable.
+        print(_json.dumps({
+            "signals": [s.to_dict() for s in signals],
+            "baseline": baseline,
+            "satisfied": satisfied,
+            "missing": missing,
+        }, indent=2))
+        # Informational command: always exit 0.
+        return 0
+
+    _glyph = {
+        hh.PASS: "[green]\u2713[/green]",
+        hh.WARN: "[yellow]\u26a0[/yellow]",
+        hh.FAIL: "[red]\u2717[/red]",
+        hh.SKIP: "[dim]\u2013[/dim]",
+    }
+
+    # Default view hides passing signals to focus the operator on gaps.
+    shown = signals if show_all else [
+        s for s in signals if s.status != hh.PASS
+    ]
+
+    # Columns: glyph (pass/fail/warn/skip), signal name, human detail, fix.
+    # The detail column shows the actually-useful explanation ("ufw installed
+    # but inactive", "BackendState=Running") rather than re-stating the
+    # status text, which is already encoded in the glyph. Mirrors cmd_doctor.
+    # Caught by Cursor Bugbot review (medium severity).
+    table = Table(show_header=True, header_style="bold", box=None,
+                  padding=(0, 1))
+    table.add_column("", width=2)
+    table.add_column("Signal", style="cyan", no_wrap=True)
+    table.add_column("Detail")
+    table.add_column("Action")
+    for s in shown:
+        table.add_row(
+            _glyph.get(s.status, "?"),
+            s.name,
+            s.detail or "\u2014",
+            s.fix or "\u2014",
+        )
+    if shown:
+        console.print(table)
+    elif not show_all:
+        console.print(
+            "[green]\u2713 all signals pass[/green] "
+            "[dim](pass --all to list them)[/dim]"
+        )
+
+    # Counts across the full set (not just the shown subset).
+    n_pass = sum(1 for s in signals if s.status == hh.PASS)
+    n_warn = sum(1 for s in signals if s.status == hh.WARN)
+    n_fail = sum(1 for s in signals if s.status == hh.FAIL)
+    n_skip = sum(1 for s in signals if s.status == hh.SKIP)
+    console.print()
+    console.print(
+        f"[bold]Signals[/bold]  "
+        f"[green]{n_pass} pass[/green]  "
+        f"[yellow]{n_warn} warn[/yellow]  "
+        f"[red]{n_fail} fail[/red]  "
+        f"[dim]{n_skip} skip[/dim]"
+    )
+
+    if satisfied:
+        console.print(
+            f"[green]\u2713 {baseline} baseline satisfied[/green]"
+        )
+    else:
+        # De-dupe while preserving order for the summary line.
+        seen = []
+        for n in missing:
+            if n not in seen:
+                seen.append(n)
+        console.print(
+            f"[red]\u2717 {baseline} baseline incomplete[/red] "
+            f"(missing: {', '.join(seen)})"
+        )
+
+    # Informational only — never gate the exit code on hardening gaps.
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Audit log handlers
+# ---------------------------------------------------------------------------
+
+
+_AUDIT_TABLE_FIELDS = ("ts", "method", "upstream_host", "path", "status",
+                       "sandbox_id")
+
+
+def _resolve_since(console: Console, spec):
+    """Parse --since, printing a clear error and returning the sentinel
+    ``False`` on failure (None means 'no window')."""
+    if spec is None:
+        return None
+    try:
+        return ip.parse_since(spec)
+    except ValueError as exc:
+        console.print(f"[red]✗ invalid --since: {exc}[/red]")
+        return False
+
+
+def _audit_row(ev: dict):
+    if ev.get("_unparsed"):
+        return None
+    return [str(ev.get(f, "")) for f in _AUDIT_TABLE_FIELDS]
+
+
+def _print_audit_table(console: Console, events):
+    table = Table(show_header=True, header_style="bold", box=None,
+                  padding=(0, 1))
+    for f in _AUDIT_TABLE_FIELDS:
+        table.add_column(f, overflow="fold")
+    any_row = False
+    for ev in events:
+        row = _audit_row(ev)
+        if row is None:
+            # Show unparsed lines dimmed in the first column.
+            table.add_row(f"[dim]{ev.get('_raw','')[:80]}[/dim]",
+                          *([""] * (len(_AUDIT_TABLE_FIELDS) - 1)))
+        else:
+            table.add_row(*row)
+        any_row = True
+    if any_row:
+        console.print(table)
+    else:
+        console.print("[dim](no audit events)[/dim]")
 
 
 def cmd_disable(args: argparse.Namespace) -> int:
