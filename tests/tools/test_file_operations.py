@@ -8,8 +8,6 @@ from unittest.mock import MagicMock
 
 from tools.file_operations import (
     _is_write_denied,
-    WRITE_DENIED_PATHS,
-    WRITE_DENIED_PREFIXES,
     ReadResult,
     WriteResult,
     PatchResult,
@@ -17,8 +15,6 @@ from tools.file_operations import (
     SearchMatch,
     LintResult,
     ShellFileOperations,
-    BINARY_EXTENSIONS,
-    IMAGE_EXTENSIONS,
     MAX_LINE_LENGTH,
     normalize_read_pagination,
     normalize_search_pagination,
@@ -642,12 +638,14 @@ class TestPatchReplacePostWriteVerification:
         state = {"content": "hello world\n"}
 
         def side_effect(command, stdin_data=None, **kwargs):
-            # Write is `cat > path` — detect by the `>` redirect, NOT just `cat `
-            if command.startswith("cat >"):
-                if stdin_data is not None:
-                    state["content"] = stdin_data
+            # A write is the only call that pipes content over stdin — key
+            # on that behavioral signal rather than the exact write command,
+            # which is an atomic temp-file + mv script (`set -e; ... mv ...`),
+            # not a bare `cat > path`.
+            if stdin_data is not None:
+                state["content"] = stdin_data
                 return {"output": "", "returncode": 0}
-            if command.startswith("cat "):  # read
+            if command.startswith("cat "):  # read / verify
                 return {"output": state["content"], "returncode": 0}
             if command.startswith("mkdir "):
                 return {"output": "", "returncode": 0}
@@ -668,9 +666,8 @@ class TestPatchReplacePostWriteVerification:
         state = {"content": "hello world\n"}
 
         def side_effect(command, stdin_data=None, **kwargs):
-            if command.startswith("cat >"):  # write
-                if stdin_data is not None:
-                    state["content"] = stdin_data
+            if stdin_data is not None:  # write (atomic temp-file + mv script)
+                state["content"] = stdin_data
                 return {"output": "", "returncode": 0}
             if command.startswith("cat "):  # read
                 call_count["cat"] += 1
