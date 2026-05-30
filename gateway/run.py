@@ -9576,10 +9576,12 @@ class GatewayRunner:
                     # _flush_messages_to_session_db(), so skip the DB write here
                     # to prevent the duplicate-write bug (#860).  We still write
                     # to JSONL for backward compatibility and as a backup.
+                    _running_agent = self._running_agents.get(_quick_key)
                     agent_persisted = (
                         self._session_db is not None
-                        and getattr(agent, '_session_db_created', False)
-                        and not getattr(agent, '_session_db_failed', False)
+                        and _running_agent is not None
+                        and getattr(_running_agent, '_session_db_created', False)
+                        and not getattr(_running_agent, '_session_db_failed', False)
                     )
                     # Attach the inbound platform message_id to the first user
                     # entry written this turn so platform-level quote-resolution
