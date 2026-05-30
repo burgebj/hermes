@@ -26,23 +26,28 @@ Hermes supports multiple AI inference providers out of the box. Use `hermes mode
 
 ## Web Search Backends
 
-The `web_search` and `web_extract` tools support four backend providers, configured via `config.yaml` or `hermes tools`:
+The `web_search` and `web_extract` tools support multiple backend providers, configured via `config.yaml` or `hermes tools`:
 
 | Backend | Env Var | Search | Extract | Crawl |
 |---------|---------|--------|---------|-------|
 | **Firecrawl** (default) | `FIRECRAWL_API_KEY` | ✔ | ✔ | ✔ |
+| **Camofox** | `CAMOFOX_URL` | ✔ | ✔ | — |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | — |
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | ✔ |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | — |
+| **SearXNG** | `SEARXNG_URL` | ✔ | — | — |
+| **Brave Free** | `BRAVE_SEARCH_API_KEY` | ✔ | — | — |
+| **DDGS** | none | ✔ | — | — |
+| **xAI** | `XAI_API_KEY` or xAI OAuth | ✔ | — | — |
 
 Quick setup example:
 
 ```yaml
 web:
-  backend: firecrawl    # firecrawl | parallel | tavily | exa
+  backend: firecrawl    # firecrawl | camofox | parallel | tavily | exa | searxng | brave-free | ddgs | xai
 ```
 
-If `web.backend` is not set, the backend is auto-detected from whichever API key is available. Self-hosted Firecrawl is also supported via `FIRECRAWL_API_URL`.
+If `web.backend` is not set, the backend is auto-detected from available API keys/URLs for the legacy providers. Self-hosted Firecrawl is also supported via `FIRECRAWL_API_URL`.
 
 ## Browser Automation
 

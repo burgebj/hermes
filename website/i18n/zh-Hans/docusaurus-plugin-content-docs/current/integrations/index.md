@@ -22,23 +22,28 @@ Hermes 开箱即支持多个 AI 推理提供商。使用 `hermes model` 进行�
 
 ## 网页搜索后端
 
-`web_search` 和 `web_extract` 工具支持四个后端提供商，通过 `config.yaml` 或 `hermes tools` 配置：
+`web_search` 和 `web_extract` 工具支持多个后端提供商，通过 `config.yaml` 或 `hermes tools` 配置：
 
 | 后端 | 环境变量 | 搜索 | 提取 | 爬取 |
 |---------|---------|--------|---------|-------|
 | **Firecrawl**（默认） | `FIRECRAWL_API_KEY` | ✔ | ✔ | ✔ |
+| **Camofox** | `CAMOFOX_URL` | ✔ | ✔ | — |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | — |
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | ✔ |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | — |
+| **SearXNG** | `SEARXNG_URL` | ✔ | — | — |
+| **Brave Free** | `BRAVE_SEARCH_API_KEY` | ✔ | — | — |
+| **DDGS** | 无 | ✔ | — | — |
+| **xAI** | `XAI_API_KEY` 或 xAI OAuth | ✔ | — | — |
 
 快速配置示例：
 
 ```yaml
 web:
-  backend: firecrawl    # firecrawl | parallel | tavily | exa
+  backend: firecrawl    # firecrawl | camofox | parallel | tavily | exa | searxng | brave-free | ddgs | xai
 ```
 
-若未设置 `web.backend`，后端将根据可用的 API key 自动检测。也支持通过 `FIRECRAWL_API_URL` 使用自托管的 Firecrawl。
+若未设置 `web.backend`，后端将根据传统 provider 的可用 API key/URL 自动检测。也支持通过 `FIRECRAWL_API_URL` 使用自托管的 Firecrawl。
 
 ## 浏览器自动化
 
