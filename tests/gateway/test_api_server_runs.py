@@ -9,7 +9,6 @@ Covers:
 """
 
 import asyncio
-import json
 import threading
 import time as _time
 from unittest.mock import MagicMock, patch
