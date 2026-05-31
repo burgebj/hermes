@@ -128,9 +128,15 @@ DEFAULT_AGENT_IDENTITY = (
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
-    "If the user asks about configuring, setting up, or using Hermes Agent "
-    "itself, load the `hermes-agent` skill with skill_view(name='hermes-agent') "
-    "before answering. Docs: https://hermes-agent.nousresearch.com/docs"
+    "If you are uncertain about your own capabilities, if cached knowledge "
+    "about a feature seems stale or incomplete, or if the user asks about "
+    "configuring, setting up, or using Hermes Agent itself, load the "
+    "`hermes-agent` skill with skill_view(name='hermes-agent') before "
+    "answering. The skill's `references/live-documentation-sources.md` "
+    "maps topics to docs URLs, source code paths, and verification commands. "
+    "When docs are ambiguous, read the relevant source code directly "
+    "at ~/.hermes/hermes-agent/ — open source is ground truth. "
+    "Docs: https://hermes-agent.nousresearch.com/docs"
 )
 
 MEMORY_GUIDANCE = (
