@@ -1167,6 +1167,31 @@ def test_chat_messages_to_responses_input_accepts_call_pipe_fc_ids(monkeypatch):
     assert function_output["call_id"] == "call_pair123"
 
 
+def test_codex_transport_sanitizes_array_tool_schema(monkeypatch):
+    _build_agent(monkeypatch)
+    from agent.transports.codex import ResponsesApiTransport
+
+    transport = ResponsesApiTransport()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "broken_tool",
+                "description": "broken",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "bag": {"type": "array"},
+                    },
+                },
+            },
+        }
+    ]
+
+    converted = transport.convert_tools(tools)
+    assert converted[0]["parameters"]["properties"]["bag"]["items"] == {}
+
+
 def test_preflight_codex_api_kwargs_strips_optional_function_call_id(monkeypatch):
     agent = _build_agent(monkeypatch)
     from agent.codex_responses_adapter import _preflight_codex_api_kwargs

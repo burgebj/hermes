@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
+from tools.schema_sanitizer import sanitize_tool_schemas
 
 
 class ResponsesApiTransport(ProviderTransport):
@@ -55,7 +56,8 @@ class ResponsesApiTransport(ProviderTransport):
     def convert_tools(self, tools: List[Dict[str, Any]]) -> Any:
         """Convert OpenAI tool schemas to Responses API function definitions."""
         from agent.codex_responses_adapter import _responses_tools
-        return _responses_tools(tools)
+        sanitized_tools = sanitize_tool_schemas(tools)
+        return _responses_tools(sanitized_tools)
 
     def build_kwargs(
         self,

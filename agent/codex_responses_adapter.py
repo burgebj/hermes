@@ -18,6 +18,8 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+from tools.schema_sanitizer import sanitize_tool_schemas
+
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 logger = logging.getLogger(__name__)
@@ -239,8 +241,9 @@ def _responses_tools(tools: Optional[List[Dict[str, Any]]] = None) -> Optional[L
     if not tools:
         return None
 
+    sanitized_tools = sanitize_tool_schemas(tools)
     converted: List[Dict[str, Any]] = []
-    for item in tools:
+    for item in sanitized_tools:
         fn = item.get("function", {}) if isinstance(item, dict) else {}
         name = fn.get("name")
         if not isinstance(name, str) or not name.strip():
