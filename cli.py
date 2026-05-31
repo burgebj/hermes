@@ -4710,6 +4710,7 @@ class HermesCLI:
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
         resolved_credential_pool = runtime.get("credential_pool")
+        resolved_credential_pool_entry_id = runtime.get("credential_pool_entry_id")
         # A callable api_key is a bearer-token provider (Azure Foundry
         # Entra ID — ``azure_identity_adapter.build_token_provider``).
         # The OpenAI SDK accepts ``Callable[[], str]`` for ``api_key`` and
@@ -4751,6 +4752,7 @@ class HermesCLI:
         self.acp_command = resolved_acp_command
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
+        self._credential_pool_entry_id = resolved_credential_pool_entry_id
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
@@ -4817,6 +4819,7 @@ class HermesCLI:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "credential_pool_entry_id": getattr(self, "_credential_pool_entry_id", None),
         }
         route = {
             "model": self.model,
@@ -4999,6 +5002,7 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "credential_pool_entry_id": getattr(self, "_credential_pool_entry_id", None),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -5010,6 +5014,7 @@ class HermesCLI:
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
+                credential_pool_entry_id=runtime.get("credential_pool_entry_id"),
                 max_iterations=self.max_turns,
                 enabled_toolsets=self.enabled_toolsets,
                 disabled_toolsets=self.disabled_toolsets,

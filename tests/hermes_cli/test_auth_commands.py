@@ -772,6 +772,40 @@ def test_auth_list_shows_auth_failure_when_exhausted_entry_is_unauthorized(monke
     assert "left" not in out
 
 
+def test_auth_list_shows_dead_auth_failure(monkeypatch, capsys):
+    from hermes_cli.auth_commands import auth_list_command
+
+    class _Entry:
+        id = "cred-1"
+        label = "codex-old"
+        auth_type = "oauth"
+        source = "manual:device_code"
+        last_status = "dead"
+        last_error_code = 401
+        last_error_reason = "token_invalidated"
+        last_error_message = "Your authentication token has been invalidated."
+        last_status_at = 1000.0
+
+    class _Pool:
+        def entries(self):
+            return [_Entry()]
+
+        def peek(self):
+            return None
+
+    monkeypatch.setattr("hermes_cli.auth_commands.load_pool", lambda provider: _Pool())
+
+    class _Args:
+        provider = "openai-codex"
+
+    auth_list_command(_Args())
+
+    out = capsys.readouterr().out
+    assert "codex-old" in out
+    assert "auth failed token_invalidated (401)" in out
+    assert "re-auth may be required" in out
+
+
 def test_auth_list_prefers_explicit_reset_time(monkeypatch, capsys):
     from hermes_cli.auth_commands import auth_list_command
 

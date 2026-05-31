@@ -13,6 +13,7 @@ from agent.credential_pool import (
     AUTH_TYPE_OAUTH,
     CUSTOM_POOL_PREFIX,
     SOURCE_MANUAL,
+    STATUS_DEAD,
     STATUS_EXHAUSTED,
     STRATEGY_FILL_FIRST,
     STRATEGY_ROUND_ROBIN,
@@ -122,8 +123,8 @@ def _classify_exhausted_status(entry) -> tuple[str, bool]:
     ):
         return "rate-limited", True
 
-    if code in {401, 403} or any(token in reason for token in ("invalid_token", "invalid_grant", "unauthorized", "forbidden", "auth")) or any(
-        token in message for token in ("unauthorized", "forbidden", "expired", "revoked", "invalid token", "authentication")
+    if code in {401, 403} or any(token in reason for token in ("invalid_token", "token_invalidated", "invalid_grant", "unauthorized", "forbidden", "auth")) or any(
+        token in message for token in ("unauthorized", "forbidden", "expired", "revoked", "invalid token", "invalidated", "authentication")
     ):
         return "auth failed", False
 
@@ -132,9 +133,13 @@ def _classify_exhausted_status(entry) -> tuple[str, bool]:
 
 
 def _format_exhausted_status(entry) -> str:
-    if entry.last_status != STATUS_EXHAUSTED:
+    if entry.last_status not in {STATUS_EXHAUSTED, STATUS_DEAD}:
         return ""
     label, show_retry_window = _classify_exhausted_status(entry)
+    if entry.last_status == STATUS_DEAD:
+        show_retry_window = False
+        if label == "exhausted":
+            label = "dead"
     reason = getattr(entry, "last_error_reason", None)
     reason_text = f" {reason}" if isinstance(reason, str) and reason.strip() else ""
     code = f" ({entry.last_error_code})" if entry.last_error_code else ""
@@ -437,6 +442,11 @@ def auth_list_command(args) -> None:
         })
     for provider in providers:
         pool = load_pool(provider)
+        if provider == "openai-codex":
+            try:
+                pool.reconcile_live_usage()
+            except Exception:
+                pass
         entries = pool.entries()
         if not entries:
             continue

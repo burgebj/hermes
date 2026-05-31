@@ -5,12 +5,19 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
-from agent.credential_pool import CredentialPool, PooledCredential, get_custom_provider_pool_key, load_pool
+from agent.credential_pool import (
+    CredentialPool,
+    PooledCredential,
+    codex_quota_identity_for_entry,
+    get_custom_provider_pool_key,
+    load_pool,
+)
 from hermes_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
@@ -155,6 +162,116 @@ def _host_derived_api_key(base_url: str) -> str:
         return ""
     env_name = f"{sanitized}_API_KEY"
     return (os.getenv(env_name, "") or "").strip()
+
+
+def _epoch_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        try:
+            normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _format_epoch_utc(value: float) -> str:
+    return (
+        datetime.fromtimestamp(value, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _pool_entry_retry_at(entry: Any) -> Optional[float]:
+    reset_at = _epoch_seconds(getattr(entry, "last_error_reset_at", None))
+    if reset_at is not None:
+        return reset_at
+
+    status_at = _epoch_seconds(getattr(entry, "last_status_at", None))
+    if status_at is None:
+        return None
+
+    try:
+        status_code = int(getattr(entry, "last_error_code", 0) or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+
+    ttl = 5 * 60 if status_code == 401 else 60 * 60
+    return status_at + ttl
+
+
+def _credential_pool_exhausted_error(provider: str, pool: CredentialPool) -> AuthError:
+    entries = []
+    try:
+        entries = list(pool.entries())
+    except Exception:
+        entries = []
+
+    count = len(entries)
+    plural = "entry" if count == 1 else "entries"
+    retry_candidates: list[tuple[float, str]] = []
+    reasons: list[str] = []
+
+    for idx, entry in enumerate(entries, start=1):
+        label = (
+            str(getattr(entry, "label", "") or "").strip()
+            or str(getattr(entry, "id", "") or "").strip()
+            or f"#{idx}"
+        )
+        retry_at = _pool_entry_retry_at(entry)
+        if retry_at is not None:
+            retry_candidates.append((retry_at, label))
+        reason = (
+            str(getattr(entry, "last_error_reason", "") or "").strip()
+            or str(getattr(entry, "last_error_message", "") or "").strip()
+        )
+        if reason and len(reasons) < 2:
+            reasons.append(f"{label}: {reason}")
+
+    message = (
+        f"All {count or 'configured'} {provider} credential pool {plural} "
+        "are unavailable; same-provider rotation has no usable credential left."
+    )
+    if provider == "openai-codex" and count > 1:
+        quota_identities = {
+            identity for identity in (
+                codex_quota_identity_for_entry(entry) for entry in entries
+            )
+            if identity
+        }
+        if quota_identities and len(quota_identities) < count:
+            message += (
+                f" Pool contains {len(quota_identities)} unique Codex quota "
+                f"{'identity' if len(quota_identities) == 1 else 'identities'} "
+                f"across {count} entries; duplicate entries share quota."
+            )
+    if retry_candidates:
+        retry_at, label = min(retry_candidates, key=lambda item: item[0])
+        message += f" Next retry window: {label} at {_format_epoch_utc(retry_at)}."
+    if reasons:
+        message += " Last pool errors: " + "; ".join(reasons) + "."
+    message += (
+        f" Run `hermes auth list {provider}` to inspect the pool, "
+        f"`hermes auth reset {provider}` after quotas reset or re-authentication, "
+        "or configure `fallback_providers` for cross-provider fallback."
+    )
+    return AuthError(
+        message,
+        provider=provider,
+        code="credential_pool_exhausted",
+    )
 
 
 def _auto_detect_local_model(base_url: str) -> str:
@@ -419,6 +536,7 @@ def _resolve_runtime_from_pool_entry(
         "api_key": api_key,
         "source": getattr(entry, "source", "pool"),
         "credential_pool": pool,
+        "credential_pool_entry_id": getattr(entry, "id", None),
         "requested_provider": requested_provider,
     }
 
@@ -469,6 +587,7 @@ def _try_resolve_from_custom_pool(
             "api_key": pool_api_key,
             "source": f"pool:{pool_key}",
             "credential_pool": pool,
+            "credential_pool_entry_id": getattr(entry, "id", None),
         }
     except Exception:
         return None
@@ -1302,45 +1421,55 @@ def resolve_runtime_provider(
             and not has_runtime_override
         )
 
+    pool_unavailable = False
     try:
         pool = load_pool(provider) if should_use_pool else None
     except Exception:
         pool = None
     if pool and pool.has_credentials():
         entry = pool.select()
-        pool_api_key = ""
-        if entry is not None:
+        if entry is None:
+            pool_error = _credential_pool_exhausted_error(provider, pool)
+            if requested_provider != "auto":
+                raise pool_error
+            logger.info(
+                "Auto-detected %s credential pool is exhausted; "
+                "falling through to environment/default providers.",
+                provider,
+            )
+            pool_unavailable = True
+        else:
             pool_api_key = (
                 getattr(entry, "runtime_api_key", None)
                 or getattr(entry, "access_token", "")
             )
-        # For Nous, the pool entry's runtime_api_key is the agent_key
-        # compatibility field. It must be an invoke JWT. The pool doesn't
-        # refresh it during selection (that would trigger network calls in
-        # non-runtime contexts like `hermes auth list`).  If the key is
-        # expired, clear pool_api_key so we fall through to
-        # resolve_nous_runtime_credentials() which handles refresh.
-        if provider == "nous" and entry is not None and pool_api_key:
-            min_ttl = max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800")))
-            nous_state = {
-                "agent_key": getattr(entry, "agent_key", None),
-                "agent_key_expires_at": getattr(entry, "agent_key_expires_at", None),
-                "scope": getattr(entry, "scope", None),
-            }
-            if not _agent_key_is_usable(nous_state, min_ttl):
-                logger.debug("Nous pool entry agent_key expired/missing, falling through to runtime resolution")
-                pool_api_key = ""
-        if entry is not None and pool_api_key:
-            return _resolve_runtime_from_pool_entry(
-                provider=provider,
-                entry=entry,
-                requested_provider=requested_provider,
-                model_cfg=model_cfg,
-                pool=pool,
-                target_model=target_model,
-            )
+            # For Nous, the pool entry's runtime_api_key is the agent_key — a
+            # short-lived inference credential (~30 min TTL).  The pool doesn't
+            # refresh it during selection (that would trigger network calls in
+            # non-runtime contexts like `hermes auth list`).  If the key is
+            # expired, clear pool_api_key so we fall through to
+            # resolve_nous_runtime_credentials() which handles refresh + fallback.
+            if provider == "nous" and pool_api_key:
+                min_ttl = max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800")))
+                nous_state = {
+                    "agent_key": getattr(entry, "agent_key", None),
+                    "agent_key_expires_at": getattr(entry, "agent_key_expires_at", None),
+                    "scope": getattr(entry, "scope", None),
+                }
+                if not _agent_key_is_usable(nous_state, min_ttl):
+                    logger.debug("Nous pool entry agent_key expired/missing, falling through to runtime resolution")
+                    pool_api_key = ""
+            if pool_api_key:
+                return _resolve_runtime_from_pool_entry(
+                    provider=provider,
+                    entry=entry,
+                    requested_provider=requested_provider,
+                    model_cfg=model_cfg,
+                    pool=pool,
+                    target_model=target_model,
+                )
 
-    if provider == "nous":
+    if provider == "nous" and not pool_unavailable:
         try:
             creds = resolve_nous_runtime_credentials(
                 timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
@@ -1362,7 +1491,7 @@ def resolve_runtime_provider(
             logger.info("Auto-detected Nous provider but credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "openai-codex":
+    if provider == "openai-codex" and not pool_unavailable:
         try:
             creds = resolve_codex_runtime_credentials()
             return {
@@ -1382,7 +1511,7 @@ def resolve_runtime_provider(
             logger.info("Auto-detected Codex provider but credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "xai-oauth":
+    if provider == "xai-oauth" and not pool_unavailable:
         try:
             creds = resolve_xai_oauth_runtime_credentials()
             return {
@@ -1400,7 +1529,7 @@ def resolve_runtime_provider(
             logger.info("Auto-detected xAI OAuth provider but credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "qwen-oauth":
+    if provider == "qwen-oauth" and not pool_unavailable:
         try:
             creds = resolve_qwen_runtime_credentials()
             return {
@@ -1418,7 +1547,7 @@ def resolve_runtime_provider(
             logger.info("Qwen OAuth credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "minimax-oauth":
+    if provider == "minimax-oauth" and not pool_unavailable:
         pconfig = PROVIDER_REGISTRY.get(provider)
         if pconfig and pconfig.auth_type == "oauth_minimax":
             from hermes_cli.auth import resolve_minimax_oauth_runtime_credentials
@@ -1432,7 +1561,7 @@ def resolve_runtime_provider(
                 "requested_provider": requested_provider,
             }
 
-    if provider == "google-gemini-cli":
+    if provider == "google-gemini-cli" and not pool_unavailable:
         try:
             creds = resolve_gemini_oauth_runtime_credentials()
             return {

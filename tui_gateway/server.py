@@ -2050,6 +2050,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         acp_command=runtime.get("command"),
         acp_args=runtime.get("args"),
         credential_pool=runtime.get("credential_pool"),
+        credential_pool_entry_id=runtime.get("credential_pool_entry_id"),
         quiet_mode=True,
         # verbose_logging controls DEBUG-level agent logging; it is intentionally
         # independent of tool_progress_mode (which only controls per-tool
