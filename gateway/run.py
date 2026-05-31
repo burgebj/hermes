@@ -4452,18 +4452,16 @@ class GatewayRunner:
         restart_notification_pending = _restart_notification_pending()
         delivered_restart_target = await self._send_restart_notification()
 
-        # Broadcast a lightweight "gateway is back" message to configured
-        # home channels only when this startup is resuming from /restart. If a
-        # /restart requester already received a direct completion notice in the
-        # same chat, skip the generic broadcast there to avoid duplicates while
-        # still allowing a home-channel fallback when the direct send fails.
-        if restart_notification_pending or delivered_restart_target is not None:
-            skip_home_targets = (
-                {delivered_restart_target} if delivered_restart_target else None
-            )
-            await self._send_home_channel_startup_notifications(
-                skip_targets=skip_home_targets,
-            )
+        # Broadcast a lightweight "gateway is back" message to all configured
+        # home channels.  If a /restart requester already received a direct
+        # completion notice in the same chat, skip the generic broadcast there
+        # to avoid duplicates while still delivering to any other home channels.
+        skip_home_targets = (
+            {delivered_restart_target} if delivered_restart_target else None
+        )
+        await self._send_home_channel_startup_notifications(
+            skip_targets=skip_home_targets,
+        )
 
         # Automatically continue fresh sessions that were interrupted by the
         # previous gateway restart/shutdown.  The resume_pending flag is cleared
