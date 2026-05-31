@@ -183,6 +183,7 @@ LATEST_PROTOCOL_VERSION = "2025-03-26"
 try:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+    from mcp.shared.exceptions import McpError
     _MCP_AVAILABLE = True
     try:
         from mcp.client.streamable_http import streamablehttp_client
@@ -2650,6 +2651,11 @@ def _make_list_resources_handler(server_name: str, tool_timeout: float):
         except InterruptedError:
             return _interrupted_call_result()
         except Exception as exc:
+            # -32601 (Method not found) means the server doesn't implement the
+            # optional resources capability — expected, not an error.
+            if isinstance(exc, McpError) and getattr(exc, "error", None) and exc.error.code == -32601:
+                logger.debug("MCP %s/list_resources: server does not support resources (Method not found)", server_name)
+                return json.dumps({"resources": []})
             recovered = _handle_auth_error_and_retry(
                 server_name, exc, _call_once, "resources/list",
             )
@@ -2773,6 +2779,11 @@ def _make_list_prompts_handler(server_name: str, tool_timeout: float):
         except InterruptedError:
             return _interrupted_call_result()
         except Exception as exc:
+            # -32601 (Method not found) means the server doesn't implement the
+            # optional prompts capability — expected, not an error.
+            if isinstance(exc, McpError) and getattr(exc, "error", None) and exc.error.code == -32601:
+                logger.debug("MCP %s/list_prompts: server does not support prompts (Method not found)", server_name)
+                return json.dumps({"prompts": []})
             recovered = _handle_auth_error_and_retry(
                 server_name, exc, _call_once, "prompts/list",
             )

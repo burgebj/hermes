@@ -2906,16 +2906,19 @@ def generate_launchd_plist() -> str:
     
     <key>RunAtLoad</key>
     <true/>
-    
+
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
         <false/>
     </dict>
-    
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
     <key>StandardOutPath</key>
     <string>{log_dir}/gateway.log</string>
-    
+
     <key>StandardErrorPath</key>
     <string>{log_dir}/gateway.error.log</string>
 </dict>
@@ -3091,6 +3094,8 @@ def launchd_restart():
     try:
         pid = get_running_pid()
         if pid is not None and _request_gateway_self_restart(pid):
+            # SIGUSR1 sent — the gateway will drain and exit with the service-restart
+            # exit code (75).  launchd's KeepAlive picks it up; no kickstart needed.
             print("✓ Service restart requested")
             return
         if pid is not None:
@@ -3100,8 +3105,14 @@ def launchd_restart():
                 pid = None
             if pid is not None:
                 exited = _wait_for_gateway_exit(timeout=drain_timeout, force_after=None)
-                if not exited:
-                    print(f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart")
+                if exited:
+                    # Gateway exited cleanly — launchd's KeepAlive (SuccessfulExit=false)
+                    # will already restart it because the exit code was non-zero (1).
+                    # Calling kickstart -k on top would kill the freshly-started instance,
+                    # triggering launchd's ThrottleInterval and delaying the restart.
+                    print("✓ Service restart triggered (launchd KeepAlive)")
+                    return
+                print(f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart")
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
         print("✓ Service restarted")
     except subprocess.CalledProcessError as e:

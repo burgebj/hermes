@@ -109,12 +109,39 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return the kernel start time for a process when available."""
+    """Return the kernel start time for a process when available.
+
+    Uses /proc on Linux and ``ps -p`` on macOS/BSD (since /proc does not exist
+    on those platforms).  Returns None on any failure so callers degrade
+    gracefully rather than crashing.
+    """
+    # Linux: read field 22 from /proc/<pid>/stat (clock ticks since boot).
     stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        try:
+            return int(stat_path.read_text().split()[21])
+        except (IndexError, PermissionError, ValueError, OSError):
+            return None
+
+    # macOS / BSD: use `ps` to get the epoch start time.
+    import subprocess
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        return int(stat_path.read_text(encoding="utf-8").split()[21])
-    except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        # Parse the human-readable date string from `ps -o lstart=`.
+        from email.utils import parsedate
+        import calendar
+        parsed = parsedate(result.stdout.strip())
+        if parsed is None:
+            return None
+        return calendar.timegm(parsed)
+    except Exception:
+
         return None
 
 
