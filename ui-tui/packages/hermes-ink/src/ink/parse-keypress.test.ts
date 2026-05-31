@@ -165,3 +165,63 @@ describe('fragmented SGR mouse recovery', () => {
     expect(events).toEqual([])
   })
 })
+
+describe('mouse report split across the App watchdog flush', () => {
+  // A heavy render on a long session blocks Node's event loop past App's 50ms
+  // flush timer, splitting a mouse report: the leading ESC is flushed alone and
+  // the remainder arrives as a text token on the next readable event. Without
+  // recovery, the tail leaks into the prompt as the cursor moves.
+
+  // X10 (legacy 1000/1002/1003) payload byte = value + 32. No-button motion
+  // under mode 1003 is Cb=35 -> byte 'C' (0x43). tmux and other terminals that
+  // honor 1000/1002 but ignore SGR 1006 emit this on every cursor move.
+  const x10 = (cb: number, col: number, row: number) =>
+    `[M${String.fromCharCode(cb + 32, col + 32, row + 32)}`
+
+  it('recovers a split X10 hover report instead of leaking [MC.. into the prompt', () => {
+    // Lone ESC buffered (could begin a longer sequence), then the [M tail
+    // arrives as text on the next readable event. Pre-fix this leaked the full
+    // "[MCxy" payload into the prompt.
+    const [escKeys, afterEsc] = parseMultipleKeypresses(INITIAL_STATE, '\x1b')
+    expect(escKeys).toEqual([]) // ESC is held until the next chunk resolves it
+
+    const [tailKeys] = parseMultipleKeypresses(afterEsc, x10(35, 80, 24))
+    expect(tailKeys).toHaveLength(1)
+    expect(tailKeys[0]).toMatchObject({ kind: 'key', name: 'mouse' })
+  })
+
+  it('still recovers a split X10 wheel report (scroll keeps working)', () => {
+    const [, afterEsc] = parseMultipleKeypresses(INITIAL_STATE, '\x1b')
+    const [tailKeys] = parseMultipleKeypresses(afterEsc, x10(64, 80, 24))
+
+    expect(tailKeys).toHaveLength(1)
+    expect(tailKeys[0]).toMatchObject({ kind: 'key', name: 'wheelup' })
+  })
+
+  it('suppresses a dangling SGR mouse prefix on flush instead of leaking "["', () => {
+    // ESC[ flushed by the watchdog (incomplete CSI), then the <...M tail
+    // arrives as text. Pre-fix the flushed "\x1b[" leaked a bare "[".
+    const [feedKeys, pending] = parseMultipleKeypresses(INITIAL_STATE, '\x1b[')
+    expect(feedKeys).toEqual([])
+
+    const [flushKeys, flushed] = parseMultipleKeypresses(pending, null)
+    expect(flushKeys).toEqual([]) // the dangling "\x1b[" is dropped, not leaked
+
+    const [tailKeys] = parseMultipleKeypresses(flushed, '<35;80;24M')
+    expect(tailKeys).toEqual([expect.objectContaining({ kind: 'mouse', button: 35, col: 80, row: 24 })])
+  })
+
+  it('drops a dangling "\\x1b[<" prefix flushed by the watchdog', () => {
+    const [, pending] = parseMultipleKeypresses(INITIAL_STATE, '\x1b[<')
+    const [flushKeys] = parseMultipleKeypresses(pending, null)
+
+    expect(flushKeys).toEqual([])
+  })
+
+  it('still flushes a lone ESC as the Escape key (not suppressed)', () => {
+    const [, pending] = parseMultipleKeypresses(INITIAL_STATE, '\x1b')
+    const [flushKeys] = parseMultipleKeypresses(pending, null)
+
+    expect(flushKeys).toEqual([expect.objectContaining({ kind: 'key', name: 'escape' })])
+  })
+})

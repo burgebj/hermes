@@ -64,6 +64,12 @@ const XTVERSION_RE = /^\x1bP>\|(.*?)(?:\x07|\x1b\\)$/s
 // eslint-disable-next-line no-control-regex
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/
 const SGR_MOUSE_FRAGMENT_RE = /(?<!\d)(?:\[<|<)?(?:[0-9]|[1-9][0-9]|1\d{2}|2[0-4]\d|25[0-5]);\d+;\d+[Mm]/g
+// A truncated mouse-report prefix with no final byte yet. Matches partial SGR
+// (`\x1b[`, `\x1b[<`, `\x1b[<35;80`) and partial X10 (`\x1b[M`, `\x1b[M`+1-2
+// payload bytes). Used to suppress these on flush so the watchdog doesn't leak
+// `[`, `[<`, etc. into the prompt when a heavy render splits a mouse report.
+// eslint-disable-next-line no-control-regex
+const DANGLING_MOUSE_PREFIX_RE = /^\x1b\[(?:<[\d;]*|M[\x20-\uffff]{0,2})?$/
 
 // Whole-text mouse-burst noise fast path. When a heavy render blocks the event
 // loop past App's 50ms flush watchdog, a long burst of SGR mouse reports (mode
@@ -278,6 +284,15 @@ export function parseMultipleKeypresses(
       } else if (inPaste) {
         // Sequences inside paste are treated as literal text
         pasteBuffer += token.value
+      } else if (isFlush && DANGLING_MOUSE_PREFIX_RE.test(token.value)) {
+        // Truncated mouse-report prefix flushed by App's 50ms watchdog. A
+        // heavy render blocked the event loop while a report was mid-arrival,
+        // so the tokenizer holds an incomplete CSI like `\x1b[`, `\x1b[<`, or
+        // `\x1b[<35;80` with no final byte yet. No physical keypress produces
+        // a dangling mouse prefix (Alt+[ arrives complete in one read), so on
+        // flush we drop it rather than leak `[`, `[<`, etc. into the prompt.
+        // The report's tail (`<35;80;24M`) arrives next as a text token and is
+        // recovered by parseTextWithSgrMouseFragments.
       } else {
         const response = parseTerminalResponse(token.value)
 
@@ -311,12 +326,19 @@ export function parseMultipleKeypresses(
 
         if (mouseFragments) {
           keys.push(...mouseFragments)
-        } else if (/^\[M[\x60-\x7f][\x20-\uffff]{2}$/.test(token.value)) {
-          // Orphaned X10 wheel tail (fullscreen only — mouse tracking is off
+        } else if (/^\[M[\x20-\x7f][\x20-\uffff]{2}$/.test(token.value)) {
+          // Orphaned X10 mouse tail (fullscreen only — mouse tracking is off
           // otherwise). A heavy render blocked the event loop past App's 50ms
           // flush timer, so the buffered ESC was flushed as a lone Escape and
           // the continuation arrived as text. Re-synthesize with ESC so the
-          // scroll event still fires instead of leaking into the prompt.
+          // event is parsed as a mouse event instead of leaking into the prompt.
+          //
+          // The button-byte range is the full \x20-\x7f (X10 Cb = byte − 32,
+          // values 0–95): wheel events (Cb 64/65 → byte \x60/\x61) AND motion,
+          // drag, click, and mode-1003 hover events (Cb 0–35 → byte \x20-\x43).
+          // The original \x60-\x7f range only re-synthesized wheel tails, so on
+          // long sessions every split hover/motion report (Cb 35 → byte 'C')
+          // leaked its `[MCxy` payload into the prompt row as the cursor moved.
           const resynthesized = '\x1b' + token.value
           keys.push(parseKeypress(resynthesized))
         } else {
