@@ -2684,7 +2684,7 @@ class AIAgent:
         return sanitize_api_messages(messages)
 
     @staticmethod
-    def _is_thinking_only_assistant(msg: Dict[str, Any]) -> bool:
+    def _is_thinking_only_assistant(msg: Dict[str, Any], api_mode: Optional[str] = None) -> bool:
         """Return True if ``msg`` is an assistant turn whose only payload is reasoning.
 
         "Thinking-only" means the model emitted reasoning (``reasoning`` or
@@ -2694,6 +2694,13 @@ class AIAgent:
         gateways), the resulting message has only thinking blocks — which
         Anthropic rejects with HTTP 400 "The final block in an assistant
         message cannot be `thinking`."
+
+        ``api_mode`` is the target API mode for the call being prepared. Codex
+        Responses encrypted reasoning-only turns (``codex_reasoning_items``)
+        are legitimate replay state when the target is ``codex_responses`` and
+        must be kept there; for any other target they are dead weight that the
+        Anthropic converter turns into ``"(empty)"`` assistant text, which can
+        leave the request ending in assistant prefill (see #29205).
 
         Symmetric with Claude Code's ``filterOrphanedThinkingOnlyMessages``
         (src/utils/messages.ts). We drop the whole turn from the API copy
@@ -2735,15 +2742,26 @@ class AIAgent:
         rd = msg.get("reasoning_details")
         if isinstance(rd, list) and rd:
             return True
+        # Codex Responses encrypted reasoning-only turns. The Responses model
+        # can return no visible content but encrypted reasoning state, stored
+        # as codex_reasoning_items. Keep them for codex_responses replay; for
+        # any other target (e.g. an Anthropic fallback) they would otherwise
+        # survive the sanitizer and get converted to "(empty)" assistant text,
+        # leaving the request ending in assistant prefill.
+        if api_mode != "codex_responses":
+            cri = msg.get("codex_reasoning_items")
+            if isinstance(cri, list) and cri:
+                return True
         return False
 
     @staticmethod
     def _drop_thinking_only_and_merge_users(
         messages: List[Dict[str, Any]],
+        api_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Forwarder — see ``agent.agent_runtime_helpers.drop_thinking_only_and_merge_users``."""
         from agent.agent_runtime_helpers import drop_thinking_only_and_merge_users
-        return drop_thinking_only_and_merge_users(messages)
+        return drop_thinking_only_and_merge_users(messages, api_mode)
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:

@@ -1037,7 +1037,7 @@ def run_conversation(
         # a thinking-only turn. Runs on the per-call copy only — the
         # stored conversation history keeps the reasoning block for the
         # UI transcript and session persistence.
-        api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+        api_messages = agent._drop_thinking_only_and_merge_users(api_messages, agent.api_mode)
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
