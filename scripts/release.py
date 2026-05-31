@@ -89,6 +89,7 @@ AUTHOR_MAP = {
     "me@promplate.dev": "CNSeniorious000",
     "yichengqiao21@gmail.com": "YarrowQiao",
     "erhanyasarx@gmail.com": "erhnysr",
+    "draihan@student.ubc.ca": "0xdany",
     "30366221+WorldWriter@users.noreply.github.com": "WorldWriter",
     "dafeng@DafengdeMacBook-Pro.local": "WorldWriter",
     "schepers.zander1@gmail.com": "Strontvod",
