@@ -1043,7 +1043,7 @@ def list_authenticated_providers(
     current_base_url: str = "",
     user_providers: dict = None,
     custom_providers: list | None = None,
-    max_models: int = 8,
+    max_models: int | None = 8,
     current_model: str = "",
 ) -> List[dict]:
     """Detect which providers have credentials and list their curated models.
@@ -1243,7 +1243,7 @@ def list_authenticated_providers(
             if hermes_id in _MODELS_DEV_PREFERRED:
                 model_ids = _merge_with_models_dev(hermes_id, model_ids)
         total = len(model_ids)
-        top = model_ids[:max_models]
+        top = model_ids if max_models is None else model_ids[:max_models]
 
         slug = hermes_id
         pinfo = _mdev_pinfo(mdev_id)
@@ -1369,7 +1369,7 @@ def list_authenticated_providers(
                 if hermes_slug in _MODELS_DEV_PREFERRED:
                     model_ids = _merge_with_models_dev(hermes_slug, model_ids)
         total = len(model_ids)
-        top = model_ids[:max_models]
+        top = model_ids if max_models is None else model_ids[:max_models]
 
         results.append({
             "slug": hermes_slug,
@@ -1444,7 +1444,7 @@ def list_authenticated_providers(
             if not _cp_model_ids:
                 _cp_model_ids = curated.get(_cp.slug, [])
         _cp_total = len(_cp_model_ids)
-        _cp_top = _cp_model_ids[:max_models]
+        _cp_top = _cp_model_ids if max_models is None else _cp_model_ids[:max_models]
 
         results.append({
             "slug": _cp.slug,
@@ -1752,7 +1752,7 @@ def list_picker_providers(
     current_base_url: str = "",
     user_providers: dict = None,
     custom_providers: list | None = None,
-    max_models: int = 8,
+    max_models: int | None = 8,
     current_model: str = "",
 ) -> List[dict]:
     """Interactive-picker variant of :func:`list_authenticated_providers`.
@@ -1795,7 +1795,7 @@ def list_picker_providers(
             except Exception:
                 live_ids = list(p.get("models", []))
             p = dict(p)
-            p["models"] = live_ids[:max_models]
+            p["models"] = live_ids if max_models is None else live_ids[:max_models]
             p["total_models"] = len(live_ids)
 
         has_models = bool(p.get("models"))
