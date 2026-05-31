@@ -148,6 +148,7 @@ hermes gateway status --system         # Linux only: inspect the system service 
 | `/title [name]` | Set or show the session title |
 | `/resume [name]` | Resume a previously named session |
 | `/usage` | Show token usage for this session |
+| `/context` | Show what is occupying the current context window |
 | `/insights [days]` | Show usage insights and analytics |
 | `/reasoning [level\|show\|hide]` | Change reasoning effort or toggle reasoning display |
 | `/voice [on\|off\|tts\|join\|leave\|status]` | Control messaging voice replies and Discord voice-channel behavior |

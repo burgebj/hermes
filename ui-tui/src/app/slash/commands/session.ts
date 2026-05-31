@@ -7,6 +7,7 @@ import type {
   ImageAttachResponse,
   SessionBranchResponse,
   SessionCompressResponse,
+  SessionContextResponse,
   SessionUsageResponse,
   VoiceToggleResponse
 } from '../../../gatewayTypes.js'
@@ -549,6 +550,19 @@ export const sessionCommands: SlashCommand[] = [
 
         ctx.transcript.panel('Usage', sections)
       })
+    }
+  },
+
+  {
+    help: 'show current context-window composition',
+    name: 'context',
+    run: (_arg, ctx) => {
+      ctx.gateway.rpc<SessionContextResponse>('session.context', { session_id: ctx.sid }).then(r => {
+        if (ctx.stale()) {
+          return
+        }
+        ctx.transcript.sys(r.output || 'no context data yet')
+      }).catch(ctx.guardedErr)
     }
   }
 ]

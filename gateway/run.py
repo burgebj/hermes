@@ -7814,6 +7814,9 @@ class GatewayRunner:
         if canonical == "usage":
             return await self._handle_usage_command(event)
 
+        if canonical == "context":
+            return await self._handle_context_command(event)
+
         if canonical == "insights":
             return await self._handle_insights_command(event)
 
@@ -13591,6 +13594,47 @@ class GatewayRunner:
         if account_lines:
             return "\n".join(account_lines)
         return t("gateway.usage.no_data")
+
+    async def _handle_context_command(self, event: MessageEvent) -> str:
+        """Handle /context -- show what occupies the current prompt window."""
+        source = event.source
+        session_key = self._session_key_for_source(source)
+
+        agent = self._running_agents.get(session_key)
+        if not agent or agent is _AGENT_PENDING_SENTINEL:
+            _cache_lock = getattr(self, "_agent_cache_lock", None)
+            _cache = getattr(self, "_agent_cache", None)
+            if _cache_lock and _cache is not None:
+                with _cache_lock:
+                    cached = _cache.get(session_key)
+                    if cached:
+                        agent = cached[0]
+
+        session_entry = self.session_store.get_or_create_session(source)
+        history = self.session_store.load_transcript(session_entry.session_id)
+        messages = list(getattr(agent, "_session_messages", None) or history or [])
+        if not agent:
+            if history:
+                from agent.model_metadata import estimate_messages_tokens_rough
+
+                msgs = [m for m in history if m.get("role") in {"user", "assistant", "tool", "system"}]
+                approx = estimate_messages_tokens_rough(msgs)
+                return (
+                    "🧠 Context Window\n"
+                    f"Estimated messages: {approx:,} tok\n"
+                    f"Messages: {len(msgs)}\n"
+                    "Detailed system/tool breakdown is available after the first agent turn."
+                )
+            return "No context data yet -- send a message first."
+
+        try:
+            from agent.context_report import build_context_report, format_context_report
+
+            report = build_context_report(agent, messages)
+            return format_context_report(report, compact=True)
+        except Exception as e:
+            logger.warning("Context command failed: %s", e)
+            return f"Context report failed: {e}"
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights command -- show usage insights and analytics."""

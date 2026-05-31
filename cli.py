@@ -8649,6 +8649,8 @@ class HermesCLI:
             self._manual_compress(cmd_original)
         elif canonical == "usage":
             self._show_usage()
+        elif canonical == "context":
+            self._show_context()
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "copy":
@@ -10289,6 +10291,20 @@ class HermesCLI:
             # into stream-retry events, credential rotations, etc.
             # Console quietness is enforced by hermes_logging not
             # installing a console StreamHandler in non-verbose mode.
+
+    def _show_context(self):
+        """Show an estimated breakdown of the current context window."""
+        if not self.agent:
+            print("(._.) No active agent -- send a message first.")
+            return
+
+        from agent.context_report import build_context_report, format_context_report
+
+        try:
+            report = build_context_report(self.agent, self.conversation_history)
+            print(format_context_report(report))
+        except Exception as e:
+            print(f"  Context report failed: {e}")
 
     def _show_insights(self, command: str = "/insights"):
         """Show usage insights and analytics from session history."""

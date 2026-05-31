@@ -88,7 +88,7 @@ The bar adapts to terminal width — full layout at ≥ 76 columns, compact at 5
 | Orange | 80–95% | Approaching limit |
 | Red | ≥ 95% | Near overflow — consider `/compress` |
 
-Use `/usage` for a detailed breakdown including per-category costs (input vs output tokens).
+Use `/usage` for a detailed breakdown including per-category costs (input vs output tokens). Use `/context` to inspect what is occupying the current context window, including system prompt, tools, messages, tool results, and skill-related context.
 
 ### Session Resume Display
 
@@ -132,6 +132,7 @@ Common examples:
 | `/voice tts` | Toggle spoken playback for Hermes replies |
 | `/reasoning high` | Increase reasoning effort |
 | `/title My Session` | Name the current session |
+| `/context` | Show what is occupying the current context window |
 | `/status` | Show session info — model/profile/tokens/duration — followed by a local **Session recap** block (recent turn counts, top tools used, files touched, latest user prompt + assistant reply). Pure local compute; no LLM call. |
 | `/sessions` | Open an interactive session picker right inside the classic CLI (same surface the TUI uses). Type to filter, arrow keys to navigate, Enter to resume. |
 

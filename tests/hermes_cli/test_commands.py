@@ -98,6 +98,7 @@ class TestResolveCommand:
         assert resolve_command("background").name == "background"
         assert resolve_command("copy").name == "copy"
         assert resolve_command("agents").name == "agents"
+        assert resolve_command("context").name == "context"
 
     def test_alias_resolves_to_canonical(self):
         assert resolve_command("bg").name == "background"

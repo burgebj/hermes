@@ -2755,6 +2755,40 @@ def _(rid, params: dict) -> dict:
     )
 
 
+@method("session.context")
+def _(rid, params: dict) -> dict:
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    agent = session.get("agent")
+    if agent is None:
+        history = list(session.get("history", []))
+        try:
+            from agent.model_metadata import estimate_messages_tokens_rough
+
+            return _ok(
+                rid,
+                {
+                    "output": (
+                        "Context composition\n"
+                        f"Estimated messages: {estimate_messages_tokens_rough(history):,} tokens\n"
+                        f"Messages: {len(history)}\n"
+                        "Detailed system/tool breakdown is available after the first agent turn."
+                    )
+                },
+            )
+        except Exception:
+            return _ok(rid, {"output": "No context data yet -- send a message first."})
+    try:
+        from agent.context_report import build_context_report, format_context_report
+
+        messages = list(session.get("history", []) or getattr(agent, "_session_messages", None) or [])
+        report = build_context_report(agent, messages)
+        return _ok(rid, {"output": format_context_report(report)})
+    except Exception as e:
+        return _err(rid, 5025, f"Context report failed: {e}")
+
+
 @method("session.status")
 def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
