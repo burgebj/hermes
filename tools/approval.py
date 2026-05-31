@@ -89,6 +89,75 @@ def get_current_session_key(default: str = "default") -> str:
     return get_session_env("HERMES_SESSION_KEY", default)
 
 
+def get_env_immune_session_key() -> str:
+    """Return the per-turn session key from context-local state ONLY.
+
+    Unlike :func:`get_current_session_key`, this NEVER falls back to the
+    process-global ``os.environ['HERMES_SESSION_KEY']``. It reads, in order:
+
+    1. ``tools.approval._approval_session_key`` contextvar
+       (bound by gateway / api_server / tui / WebUI Option 1 before the
+       agent turn; propagated into background-spawn worker threads via
+       ``contextvars.copy_context()`` in ``agent/tool_executor.py``).
+    2. ``gateway.session_context.get_bound_session_key_or_none()`` — the
+       public env-immune accessor. It returns the bound session key, or
+       ``None`` when ``_SESSION_KEY`` was never bound in this context.
+       ``get_session_env`` cannot be reused here because it intentionally
+       falls through to ``os.environ`` for the unbound case; that
+       fallback is the exact race vector this helper exists to bypass.
+       Calling the public accessor (instead of importing the private
+       ``_SESSION_KEY`` / ``_UNSET`` names) keeps the cross-module
+       contract explicit and refactor-safe.
+
+    Returns ``""`` when no per-turn session-identity contextvar was bound
+    (CLI / cron / plain tests / pre-Option-1 WebUI). Empty is the safe
+    sentinel: callers stamp it onto ``ProcessSession.spawn_session_id``
+    and the WebUI Option 3 wakeup-routing safety net treats an absent
+    env-immune owner as a pure pass-through (never suppresses a valid
+    wakeup). This value is therefore immune to a concurrent turn
+    overwriting the process-global env slot mid-turn.
+    """
+    session_key = _approval_session_key.get()
+    if session_key:
+        return session_key
+    try:
+        # R3-C3: this import is INTENTIONALLY lazy, not redundant defensive
+        # coding. tools.approval has NO module-top gateway import -- every
+        # gateway.session_context reference in this module is deferred
+        # (get_current_session_key, _get_session_platform, here). approval.py
+        # is imported very early (before plugins/gateway are wired up) and
+        # `import gateway.session_context` transitively pulls gateway/__init__
+        # (config + session + delivery). Hoisting to module top would make
+        # approval.py -- a safety-critical, early-loaded module -- hard-fail
+        # in bare/minimal contexts where the gateway stack isn't importable.
+        # The except-ImportError below is the graceful "" degrade for exactly
+        # that case; keeping the import lazy and local is consistent with the
+        # rest of this module, not an inconsistency to fix.
+        from gateway.session_context import get_bound_session_key_or_none
+
+        value = get_bound_session_key_or_none()
+        if value:
+            return str(value)
+    except ImportError:
+        # The only expected failure: the gateway module isn't importable
+        # in this execution context (bare tool-only imports, minimal test
+        # environments). Fall through to the "" sentinel silently.
+        pass
+    except Exception:
+        # Any other exception here is a genuine regression, not an
+        # expected fallthrough. This helper is the load-bearing primitive
+        # for the wakeup-misroute safety net, so surface it at debug level
+        # (with traceback) instead of hiding it behind the empty-string
+        # sentinel. Behavior is unchanged: we still return "" so Option 3
+        # stays a pure pass-through and never suppresses a valid wakeup.
+        logger.debug(
+            "get_env_immune_session_key: unexpected error reading "
+            "gateway.session_context bound session key; falling back to \"\"",
+            exc_info=True,
+        )
+    return ""
+
+
 def _get_session_platform() -> str:
     """Return the current gateway platform from contextvars/env fallback."""
     try:
