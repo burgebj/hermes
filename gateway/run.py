@@ -10041,9 +10041,9 @@ class GatewayRunner:
             ctx_display = str(context_length)
 
         lines = [
-            f"◆ Model: `{model}`",
-            f"◆ Provider: {provider or 'openrouter'}",
-            f"◆ Context: {ctx_display} tokens ({ctx_source})",
+            t("gateway.reset.model", "◆ Model: `{model}`").format(model=model),
+            t("gateway.reset.provider", "◆ Provider: {provider}").format(provider=provider or 'openrouter'),
+            t("gateway.reset.context", "◆ Context: {ctx_display} tokens ({ctx_source})").format(ctx_display=ctx_display, ctx_source=ctx_source),
         ]
 
         # Show endpoint for local/custom setups
@@ -10153,7 +10153,7 @@ class GatewayRunner:
             session_info = ""
 
         if new_entry:
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_default")
+            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_default", "✨ New session started")
         else:
             # No existing session, just create one
             new_entry = self.session_store.get_or_create_session(source, force_new=True)
@@ -14608,7 +14608,7 @@ class GatewayRunner:
 
         async def _on_confirm(choice: str):
             if choice == "cancel":
-                return f"🟡 /{command} cancelled. Conversation unchanged."
+                return t("gateway.confirm.cancelled", "🟡 /{command} cancelled. Conversation unchanged.").format(command=command)
             if choice == "always":
                 try:
                     from cli import save_config_value
@@ -14624,9 +14624,10 @@ class GatewayRunner:
             result = await execute()
             if choice == "always":
                 note = (
-                    "\n\nℹ️ Future /clear, /new, /reset, and /undo will run "
-                    "without confirmation. Re-enable via "
-                    "`approvals.destructive_slash_confirm: true` in config.yaml."
+                    "\n\n" + t("gateway.confirm.always_note",
+                        "ℹ️ Future /clear, /new, /reset, and /undo will run "
+                        "without confirmation. Re-enable via "
+                        "`approvals.destructive_slash_confirm: true` in config.yaml.")
                 )
                 if isinstance(result, str):
                     return result + note
@@ -14637,13 +14638,13 @@ class GatewayRunner:
             return result
 
         prompt_message = (
-            f"⚠️ **Confirm /{command}**\n\n"
-            f"{detail}\n\n"
-            "Choose:\n"
-            "• **Approve Once** — proceed this time only\n"
-            "• **Always Approve** — proceed and silence this prompt permanently\n"
-            "• **Cancel** — keep current conversation\n\n"
-            "_Text fallback: reply `/approve`, `/always`, or `/cancel`._"
+            t("gateway.confirm.title", "⚠️ **Confirm /{command}**").format(command=command) + "\n\n"
+            + detail + "\n\n"
+            + t("gateway.confirm.choose", "Choose:") + "\n"
+            + t("gateway.confirm.once", "• **Approve Once** — proceed this time only") + "\n"
+            + t("gateway.confirm.always", "• **Always Approve** — proceed and silence this prompt permanently") + "\n"
+            + t("gateway.confirm.cancel", "• **Cancel** — keep current conversation") + "\n\n"
+            + t("gateway.confirm.fallback", "_Text fallback: reply `/approve`, `/always`, or `/cancel`._")
         )
         return await self._request_slash_confirm(
             event=event,
