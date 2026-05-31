@@ -223,6 +223,24 @@ def run_oneshot(
     if not response.endswith("\n"):
         real_stdout.write("\n")
     real_stdout.flush()
+
+    # Auto-complete kanban task when running as a worker.  The KANBAN_GUIDANCE
+    # system prompt asks the agent to call kanban_complete, but models
+    # occasionally finish their response without doing so (token limit, early
+    # stop, etc.).  A dangling running-task wastes a dispatcher slot and
+    # blocks downstream tasks.  This safety net catches the common case
+    # where the agent produced output but forgot the lifecycle call.
+    _kanban_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if _kanban_task:
+        try:
+            from hermes_cli import kanban_db as _kb
+
+            with _kb.connect_closing() as _conn:
+                _kb.complete_task(_conn, _kanban_task, summary="oneshot: agent responded successfully")
+        except Exception as _exc:
+            real_stderr.write(f"hermes -z: kanban_complete failed for {_kanban_task}: {_exc}\n")
+            real_stderr.flush()
+
     return 0
 
 
