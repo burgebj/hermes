@@ -4531,6 +4531,15 @@ class TelegramAdapter(BasePlatformAdapter):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
 
+    def _telegram_observe_only_chats(self) -> set[str]:
+        """Return group chats that should be observed but never trigger the bot."""
+        raw = self.config.extra.get("observe_only_chats")
+        if raw is None:
+            raw = os.getenv("TELEGRAM_OBSERVE_ONLY_CHATS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        return {part.strip() for part in str(raw).split(",") if part.strip()}
+
     def _telegram_allowed_chats(self) -> set[str]:
         """Return the whitelist of group/supergroup chat IDs the bot will respond in.
 
@@ -4675,14 +4684,26 @@ class TelegramAdapter(BasePlatformAdapter):
         for source_text, entities in _iter_sources():
             for entity in entities:
                 entity_type = str(getattr(entity, "type", "")).split(".")[-1].lower()
-                if entity_type not in {"mention", "bot_command"}:
+                if entity_type not in {"mention", "text_mention", "bot_command"}:
                     continue
+
+                if entity_type == "text_mention":
+                    # Some Telegram clients emit bot-picker mentions as
+                    # text_mention(user=...) instead of a plain @username
+                    # mention. Use the attached bot user's username when
+                    # present so exclusive multi-bot routing still works.
+                    user = getattr(entity, "user", None)
+                    handle = (getattr(user, "username", None) or "").lstrip("@").lower()
+                    if handle and re.fullmatch(r"[a-z0-9_]{2,29}bot", handle, re.IGNORECASE):
+                        mentioned_bot_usernames.add(handle)
+                    continue
+
                 offset = int(getattr(entity, "offset", -1))
                 length = int(getattr(entity, "length", 0))
                 if offset < 0 or length <= 0:
                     continue
-
                 entity_text = source_text[offset:offset + length].strip()
+
                 if entity_type == "mention":
                     handle = entity_text.lstrip("@").lower()
                     if re.fullmatch(r"[a-z0-9_]{2,29}bot", handle, re.IGNORECASE):
@@ -4842,6 +4863,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
             return False
 
+        observe_only = self._telegram_observe_only_chats()
+        if chat_id_str in observe_only:
+            allowed = self._telegram_observe_allowed_chats() | observe_only
+            return chat_id_str in allowed
+
         allowed = self._telegram_observe_allowed_chats()
         # Observed context is shared at chat/topic scope so a later trigger from
         # another user can see it.  Require an explicit chat allowlist; that
@@ -4992,6 +5018,8 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
 
         chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
+        if chat_id_str in self._telegram_observe_only_chats():
+            return False
 
         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
             return False

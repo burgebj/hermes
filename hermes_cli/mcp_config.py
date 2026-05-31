@@ -645,8 +645,12 @@ def cmd_mcp_login(args):
     _info(f"Starting OAuth flow for '{name}'...")
 
     # Probe triggers the OAuth flow (browser redirect + callback capture).
+    # Use a longer timeout than normal `mcp test`: OAuth callback handling is
+    # intentionally allowed to wait up to 300s, and the old 40s wrapper timeout
+    # killed the login after the browser had already opened, creating a loop
+    # where the user could complete auth but Hermes discarded the callback.
     try:
-        tools = _probe_single_server(name, server_config)
+        tools = _probe_single_server(name, server_config, connect_timeout=360)
         # A clean probe is NOT proof of authentication. Some MCP servers
         # (notably Google's official Drive server) serve initialize +
         # tools/list WITHOUT auth, so the probe lists tools even when the

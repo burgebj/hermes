@@ -435,7 +435,16 @@ async def _redirect_handler(authorization_url: str) -> None:
             file=sys.stderr,
         )
 
-    if _can_open_browser():
+    # Never auto-open a browser from daemon/non-interactive contexts such as
+    # Telegram/Weixin gateways, cron jobs, or `hermes chat -q`. Those flows can
+    # hit OAuth while refreshing an already-cached token; popping Chrome in the
+    # user's face on every reconnect is worse than surfacing a reauth error.
+    # Explicit interactive commands (`hermes mcp login <server>`, `mcp add`)
+    # still open the browser because stdin is a TTY. Tests/advanced wrappers can
+    # opt in with HERMES_MCP_OAUTH_ALLOW_BROWSER=1.
+    allow_browser = _is_interactive() or os.getenv("HERMES_MCP_OAUTH_ALLOW_BROWSER") == "1"
+
+    if allow_browser and _can_open_browser():
         try:
             opened = webbrowser.open(authorization_url)
             if opened:
@@ -445,7 +454,7 @@ async def _redirect_handler(authorization_url: str) -> None:
         except Exception:
             print("  (Could not open browser — please open the URL manually.)\n", file=sys.stderr)
     else:
-        print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
+        print("  (Headless environment detected — open the URL manually; auto-open disabled for non-interactive context.)\n", file=sys.stderr)
 
 
 async def _wait_for_callback() -> tuple[str, str | None]:
