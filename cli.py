@@ -7731,7 +7731,14 @@ class HermesCLI:
             try:
                 if ctx is None:
                     raise RuntimeError("inventory context unavailable")
-                providers = build_models_payload(ctx, max_models=50)["providers"]
+                # The prompt-toolkit picker already virtualizes long lists via
+                # _compute_model_picker_viewport(), so do not truncate the
+                # selectable model inventory here.  Providers can have more
+                # than 50 models (e.g. Nous Portal); capping the payload makes
+                # entries after index 49 unreachable even though total_models
+                # advertises them.  Passing None preserves all models while
+                # keeping preview-oriented callers free to request a cap.
+                providers = build_models_payload(ctx, max_models=None)["providers"]
             except Exception:
                 providers = []
 
