@@ -6,6 +6,37 @@ import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
 from gateway.config import Platform, PlatformConfig
+from gateway.run import _resolve_progress_thread_id
+
+
+# ---------------------------------------------------------------------------
+# Platform & Config
+# ---------------------------------------------------------------------------
+
+class TestMattermostProgressThreadRouting:
+    def test_top_level_mattermost_progress_uses_event_message_id(self):
+        """Top-level Mattermost posts are valid thread roots for progress."""
+        assert _resolve_progress_thread_id(
+            Platform.MATTERMOST,
+            source_thread_id=None,
+            event_message_id="top_post_123",
+        ) == "top_post_123"
+
+    def test_threaded_mattermost_progress_prefers_existing_thread_root(self):
+        """Thread replies must keep using the root post, not the reply id."""
+        assert _resolve_progress_thread_id(
+            Platform.MATTERMOST,
+            source_thread_id="root_post_123",
+            event_message_id="reply_post_456",
+        ) == "root_post_123"
+
+    def test_telegram_progress_does_not_use_message_id_as_thread_id(self):
+        """Telegram message IDs are not forum topic IDs."""
+        assert _resolve_progress_thread_id(
+            Platform.TELEGRAM,
+            source_thread_id=None,
+            event_message_id="12345",
+        ) is None
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +249,31 @@ class TestMattermostSend:
         assert payload["root_id"] == "root_post"
 
     @pytest.mark.asyncio
+    async def test_send_uses_metadata_thread_id_for_progress_messages(self):
+        """Progress/status messages pass Mattermost thread context via metadata."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post_123", "root_id": ""})
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"id": "progress_post"})
+        mock_resp.text = AsyncMock(return_value="")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        self.adapter._session.post = MagicMock(return_value=mock_resp)
+
+        result = await self.adapter.send(
+            "channel_1",
+            "⚡ terminal...",
+            metadata={"thread_id": "root_post_123"},
+        )
+
+        assert result.success is True
+        payload = self.adapter._session.post.call_args[1]["json"]
+        assert payload["root_id"] == "root_post_123"
+
+    @pytest.mark.asyncio
     async def test_send_without_thread_no_root_id(self):
         """When reply_mode is 'off', reply_to should NOT set root_id."""
         self.adapter._reply_mode = "off"
@@ -238,6 +294,20 @@ class TestMattermostSend:
         assert "root_id" not in payload
 
     @pytest.mark.asyncio
+    async def test_send_with_invalid_thread_root_does_not_fall_back_flat(self):
+        """If Mattermost rejects root_id, never leak the reply into the channel."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "bad_root", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        result = await self.adapter.send("channel_1", "Reply!", reply_to="bad_root")
+
+        assert result.success is False
+        assert self.adapter._api_post.call_count == 1
+        payload = self.adapter._api_post.call_args_list[0][0][1]
+        assert payload["root_id"] == "bad_root"
+
+    @pytest.mark.asyncio
     async def test_send_api_failure(self):
         """When API returns error, send should return failure."""
         mock_resp = AsyncMock()
@@ -252,6 +322,47 @@ class TestMattermostSend:
         result = await self.adapter.send("channel_1", "Hello!")
 
         assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_uses_metadata_thread_id(self, tmp_path):
+        """Local file uploads should keep Mattermost thread context from metadata."""
+        self.adapter._reply_mode = "thread"
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+        self.adapter._upload_file = AsyncMock(return_value="file_123")
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post_123", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={"id": "post_with_file"})
+
+        result = await self.adapter.send_image_file(
+            "channel_1",
+            str(image_path),
+            metadata={"thread_id": "root_post_123"},
+        )
+
+        assert result.success is True
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload["root_id"] == "root_post_123"
+        assert payload["file_ids"] == ["file_123"]
+
+    @pytest.mark.asyncio
+    async def test_send_multiple_images_uses_metadata_thread_id(self, tmp_path):
+        """Batched MEDIA image uploads should stay inside the Mattermost thread."""
+        self.adapter._reply_mode = "thread"
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+        self.adapter._upload_file = AsyncMock(return_value="file_123")
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post_123", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={"id": "post_with_file"})
+
+        await self.adapter.send_multiple_images(
+            "channel_1",
+            [(f"file://{image_path}", "")],
+            metadata={"thread_id": "root_post_123"},
+        )
+
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload["root_id"] == "root_post_123"
+        assert payload["file_ids"] == ["file_123"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +500,58 @@ class TestMattermostWebSocketParsing:
         assert self.adapter.handle_message.called
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.source.thread_id == "root_post_123"
+
+    @pytest.mark.asyncio
+    async def test_top_level_channel_post_seeds_thread_id_in_thread_mode(self):
+        """In thread reply mode, a top-level channel post is the thread root."""
+        self.adapter._reply_mode = "thread"
+        post_data = {
+            "id": "top_post_123",
+            "user_id": "user_123",
+            "channel_id": "chan_456",
+            "message": "@bot_user_id Start a threaded turn",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "O",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id == "top_post_123"
+        assert msg_event.source.message_id == "top_post_123"
+
+    @pytest.mark.asyncio
+    async def test_dm_post_does_not_seed_thread_id_in_thread_mode(self):
+        """Mattermost DMs stay one stable chat session unless they carry root_id."""
+        self.adapter._reply_mode = "thread"
+        post_data = {
+            "id": "dm_post_123",
+            "user_id": "user_123",
+            "channel_id": "dm_chan",
+            "message": "DM turn",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "D",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id is None
+        assert msg_event.source.message_id == "dm_post_123"
 
     @pytest.mark.asyncio
     async def test_invalid_post_json_ignored(self):
