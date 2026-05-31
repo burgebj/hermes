@@ -90,6 +90,7 @@ export interface Translations {
       documentation: string;
       keys: string;
       logs: string;
+      memory: string;
       models: string;
       profiles: string;
       plugins: string;
@@ -194,6 +195,24 @@ export interface Translations {
     perDayAvg: string;
     acrossModels: string;
     inOut: string;
+  };
+
+  // ── Memory page ──
+  memory: {
+    title: string;
+    userProfile: string;
+    notes: string;
+    refresh: string;
+    addEntry: string;
+    emptyStore: string;
+    entryCount: string;
+    chars: string;
+    edit: string;
+    delete: string;
+    saveFailed: string;
+    addFailed: string;
+    deleteFailed: string;
+    target: string;
   };
 
   // ── Models page ──
