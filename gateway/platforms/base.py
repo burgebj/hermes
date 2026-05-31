@@ -1831,13 +1831,63 @@ class BasePlatformAdapter(ABC):
         return bool(self._auto_tts_default)
 
     def set_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
+        """Set the primary fatal error handler (replaces any existing one)."""
         self._fatal_error_handler = handler
+
+    def add_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
+        """Add an additional fatal error handler (chained, called after primary)."""
+        if not hasattr(self, "_fatal_error_extra_handlers"):
+            self._fatal_error_extra_handlers = []
+        self._fatal_error_extra_handlers.append(handler)
+
+    # ── Enhancement 1: Fatal error history ────────────────────────────
+    # Track the last N fatal errors with timestamps for debugging.
+    # Stored as a deque of dicts: [{code, message, retryable, timestamp}, ...]
+    # ──────────────────────────────────────────────────────────────────
+    _fatal_error_history: list = []
+    _FATAL_ERROR_HISTORY_MAX = 20
+
+    def _record_fatal_error_history(self, code: str, message: str, retryable: bool) -> None:
+        """Record a fatal error in the history ring buffer."""
+        import time as _time
+        entry = {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "timestamp": _time.time(),
+        }
+        self._fatal_error_history.append(entry)
+        if len(self._fatal_error_history) > self._FATAL_ERROR_HISTORY_MAX:
+            self._fatal_error_history = self._fatal_error_history[-self._FATAL_ERROR_HISTORY_MAX:]
+
+    @property
+    def fatal_error_history(self) -> list:
+        """Return a copy of the fatal error history."""
+        return list(self._fatal_error_history)
+
+    # ── Enhancement 2: Retry backoff hint ─────────────────────────────
+    # Track consecutive retryable errors to suggest exponential backoff.
+    # ──────────────────────────────────────────────────────────────────
+    _consecutive_retryable_errors: int = 0
+
+    @property
+    def retry_backoff_seconds(self) -> float:
+        """Suggested backoff delay in seconds based on consecutive retryable errors.
+
+        Returns 0 for non-retryable or first errors, then 2, 4, 8, ...
+        capped at 300 seconds (5 minutes).
+        """
+        if self._consecutive_retryable_errors <= 0:
+            return 0.0
+        delay = min(2 ** self._consecutive_retryable_errors, 300)
+        return float(delay)
 
     def _mark_connected(self) -> None:
         self._running = True
         self._fatal_error_code = None
         self._fatal_error_message = None
         self._fatal_error_retryable = True
+        self._consecutive_retryable_errors = 0
         self._write_runtime_status_safe("connected", platform_state="connected", error_code=None, error_message=None)
 
     def _mark_disconnected(self) -> None:
@@ -1851,6 +1901,13 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_code = code
         self._fatal_error_message = message
         self._fatal_error_retryable = retryable
+        # Track consecutive retryable errors for backoff calculation
+        if retryable:
+            self._consecutive_retryable_errors += 1
+        else:
+            self._consecutive_retryable_errors = 0
+        # Record in history ring buffer
+        self._record_fatal_error_history(code, message, retryable)
         self._write_runtime_status_safe("fatal", platform_state="fatal", error_code=code, error_message=message)
         self._schedule_fatal_notify()
 
@@ -1900,12 +1957,21 @@ class BasePlatformAdapter(ABC):
                 logger.debug("Failed to write runtime status (%s) for %s: %s", context, self.platform.value, exc)
 
     async def _notify_fatal_error(self) -> None:
+        """Notify all registered fatal error handlers (primary + extras)."""
+        # Call primary handler
         handler = self._fatal_error_handler
-        if not handler:
-            return
-        result = handler(self)
-        if asyncio.iscoroutine(result):
-            await result
+        if handler:
+            result = handler(self)
+            if asyncio.iscoroutine(result):
+                await result
+        # Call chained extra handlers
+        for extra in getattr(self, "_fatal_error_extra_handlers", []):
+            try:
+                result = extra(self)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.debug("Extra fatal error handler failed", exc_info=True)
 
     def _acquire_platform_lock(self, scope: str, identity: str, resource_desc: str) -> bool:
         """Acquire a scoped lock for this adapter. Returns True on success."""
