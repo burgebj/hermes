@@ -10048,7 +10048,7 @@ class GatewayRunner:
 
         # Show endpoint for local/custom setups
         if base_url and ("localhost" in base_url or "127.0.0.1" in base_url or "0.0.0.0" in base_url):
-            lines.append(f"◆ Endpoint: {base_url}")
+            lines.append(t("gateway.reset.endpoint", "◆ Endpoint: {base_url}").format(base_url=base_url))
 
         return "\n".join(lines)
 
