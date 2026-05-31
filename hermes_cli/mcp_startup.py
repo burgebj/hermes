@@ -57,3 +57,9 @@ def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
     if thread is None or not thread.is_alive():
         return
     thread.join(timeout=timeout)
+
+
+def is_mcp_discovery_in_progress() -> bool:
+    """Return True while background MCP discovery is still connecting servers."""
+    thread = _mcp_discovery_thread
+    return bool(thread is not None and thread.is_alive())
