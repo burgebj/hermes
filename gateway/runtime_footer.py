@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
@@ -179,6 +180,19 @@ def _quota_label(window: Any, provider: Optional[str] = None, model: Optional[st
     return raw
 
 
+def _compact_quota_detail(detail: Any) -> str:
+    text = str(detail or "").strip()
+    if not text:
+        return ""
+    # Keep footer quota compact. Detailed breakdowns remain available via the
+    # usage renderer; the footer only needs the immediately useful balance.
+    if not re.match(r"^(credits\s+)?balance\s*:", text, flags=re.IGNORECASE):
+        return ""
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+    text = re.sub(r"^(credits\s+)?balance\s*:", "balance", text, flags=re.IGNORECASE).strip()
+    return text
+
+
 def _format_quota(account_usage: Any, *, provider: Optional[str] = None, model: Optional[str] = None) -> list[str]:
     if not account_usage:
         return []
@@ -198,6 +212,10 @@ def _format_quota(account_usage: Any, *, provider: Optional[str] = None, model: 
         if reset:
             text += f" {reset}"
         parts.append(text)
+    for detail in getattr(account_usage, "details", ()) or ():
+        compact = _compact_quota_detail(detail)
+        if compact:
+            parts.append(compact)
     return parts
 
 

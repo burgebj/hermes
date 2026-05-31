@@ -212,6 +212,26 @@ def test_format_footer_uses_provider_specific_compact_quota_labels():
     assert out == "7d 60% · opus7d 50% · sonnet7d 40%"
 
 
+def test_format_footer_includes_balance_details_for_quota():
+    snapshot = AccountUsageSnapshot(
+        provider="deepseek",
+        source="balance_api",
+        fetched_at=datetime.now(timezone.utc),
+        details=("Balance: ¥110.00 CNY (granted ¥10.00, topped up ¥100.00)",),
+    )
+
+    out = format_runtime_footer(
+        model="deepseek/deepseek-chat",
+        provider="deepseek",
+        context_tokens=0,
+        context_length=200_000,
+        account_usage=snapshot,
+        fields=("quota",),
+    )
+
+    assert out == "balance ¥110.00 CNY"
+
+
 def test_format_footer_unknown_field_silently_ignored():
     out = format_runtime_footer(
         model="openai/gpt-5.4",
