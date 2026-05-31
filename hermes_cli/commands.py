@@ -539,6 +539,7 @@ _TELEGRAM_MENU_PRIORITY = (
     "platform",
     "profile",
     "whoami",
+    "workspace",
 )
 """Built-in commands that should stay visible in Telegram's capped menu.
 
