@@ -6814,6 +6814,16 @@ class GatewayRunner:
                 return None
             return YuanbaoAdapter(config)
 
+        elif platform == Platform.ZULIP:
+            from gateway.platforms.zulip import ZulipAdapter, check_zulip_requirements
+            if not check_zulip_requirements():
+                logger.warning(
+                    "Zulip: zulip not installed or ZULIP_* credentials not set. "
+                    "Run: pip install 'hermes-agent[zulip]'"
+                )
+                return None
+            return ZulipAdapter(config)
+
         return None
 
     def _adapter_enforces_own_access_policy(self, platform: Optional[Platform]) -> bool:
