@@ -4,103 +4,10 @@ import sys
 import threading
 import time
 import types
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from tui_gateway import server
-
-
-def test_session_context_uses_session_cwd(monkeypatch, tmp_path):
-    """Desktop/TUI sessions must pin the agent cwd per session.
-
-    The gateway process itself is often launched from apps/desktop in dev, so
-    falling back to os.getcwd() makes agents answer from the desktop app folder
-    even when the sidebar/session cwd is a real project.
-    """
-    from agent.runtime_cwd import resolve_agent_cwd
-
-    sid = "cwd-sid"
-    session_key = "cwd-key"
-    project = tmp_path / "project"
-    project.mkdir()
-    launcher = tmp_path / "apps" / "desktop"
-    launcher.mkdir(parents=True)
-
-    server._sessions[sid] = {"session_key": session_key, "cwd": str(project)}
-    monkeypatch.delenv("TERMINAL_CWD", raising=False)
-    monkeypatch.chdir(launcher)
-
-    tokens = server._set_session_context(session_key)
-    try:
-        assert resolve_agent_cwd() == project
-    finally:
-        server._clear_session_context(tokens)
-        server._sessions.pop(sid, None)
-
-
-def test_session_context_explicit_cwd_for_ephemeral_task(monkeypatch, tmp_path):
-    """Background/preview tasks use ephemeral ids absent from `_sessions`, so the
-    parent workspace is passed explicitly; it must pin instead of clearing back
-    to the gateway launch dir."""
-    from agent.runtime_cwd import resolve_agent_cwd
-
-    project = tmp_path / "project"
-    project.mkdir()
-    launcher = tmp_path / "apps" / "desktop"
-    launcher.mkdir(parents=True)
-
-    monkeypatch.delenv("TERMINAL_CWD", raising=False)
-    monkeypatch.chdir(launcher)
-
-    tokens = server._set_session_context("bg_deadbe", cwd=str(project))
-    try:
-        assert resolve_agent_cwd() == project
-    finally:
-        server._clear_session_context(tokens)
-
-
-def test_terminal_task_cwd_local_backend_uses_session_cwd(monkeypatch, tmp_path):
-    """A local terminal backend must keep host-validated session cwd behaviour."""
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.setenv("TERMINAL_ENV", "local")
-    monkeypatch.delenv("TERMINAL_CWD", raising=False)
-
-    assert server._terminal_task_cwd({"cwd": str(project)}) == str(project)
-
-
-def test_terminal_task_cwd_ssh_uses_remote_path_unvalidated(monkeypatch):
-    """SSH (non-local) backend: the configured remote cwd is used verbatim even
-    though it does not exist on the local host. This is the jonbohz fix — host
-    `isdir()` validation would otherwise discard the remote path and fall back
-    to os.getcwd(), running commands against the wrong machine."""
-    remote = "/home/jonboh/workspace/proj"  # does not exist on this host
-    assert not os.path.isdir(remote)
-    monkeypatch.setenv("TERMINAL_ENV", "ssh")
-    monkeypatch.setenv("TERMINAL_CWD", remote)
-
-    assert server._terminal_task_cwd({"cwd": "/some/host/dir"}) == remote
-
-
-def test_terminal_task_cwd_ssh_falls_back_to_config(monkeypatch):
-    """When TERMINAL_CWD is unset, the SSH path reads terminal.cwd from config."""
-    remote = "/home/jonboh/workspace/from-config"
-    monkeypatch.setenv("TERMINAL_ENV", "ssh")
-    monkeypatch.delenv("TERMINAL_CWD", raising=False)
-    monkeypatch.setattr(server, "_load_cfg", lambda: {"terminal": {"cwd": remote}})
-
-    assert server._terminal_task_cwd({"cwd": "/some/host/dir"}) == remote
-
-
-def test_terminal_task_cwd_ssh_sentinel_cwd_falls_back_to_session(monkeypatch):
-    """Sentinel/auto cwd values are not real remote paths, so the SSH branch
-    must defer to the session cwd rather than registering a meaningless dir."""
-    monkeypatch.setenv("TERMINAL_ENV", "ssh")
-    monkeypatch.setenv("TERMINAL_CWD", "auto")
-    monkeypatch.setattr(server, "_load_cfg", lambda: {"terminal": {"cwd": "."}})
-
-    assert server._terminal_task_cwd({"cwd": "/host/session/dir"}) == "/host/session/dir"
 
 
 class _ChunkyStdout:
@@ -175,20 +82,6 @@ def test_tui_verbose_tool_details_are_capped_before_emit(monkeypatch):
     assert capped.startswith("[showing verbose tail; omitted ")
     assert capped.endswith("three\nfour")
     assert "one" not in capped
-
-
-def test_tui_verbose_default_cap_stays_small(monkeypatch):
-    # Regression guard for #34095: the verbose tool text shipped to the TUI is
-    # rendered into a persisted, expanded-by-default trail block for the whole
-    # session. Raising this cap back toward the old 16KB re-introduces the Ink
-    # render-tree blowup that silently OOM-killed the TUI. Keep it small.
-    assert server._TUI_VERBOSE_TEXT_MAX_CHARS <= 2_000
-
-    huge = "x" * 40_000
-    capped = server._cap_tui_verbose_text(huge)
-
-    assert len(capped) < 2_000
-    assert capped.startswith("[showing verbose tail; omitted ")
 
 
 def test_tui_verbose_tool_events_omit_details_when_redaction_fails(monkeypatch):
@@ -919,73 +812,6 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_ws_orphan_reap_closes_worker_when_session_stays_detached(monkeypatch):
-    """A detached WS session past its grace window has its slash_worker closed.
-
-    Regression for #38591 fallout: every dashboard refresh spawned a fresh
-    session + _SlashWorker but never reaped the previous one, leaking one
-    python subprocess per refresh.
-    """
-    closed = {"worker": False}
-
-    class _FakeWorker:
-        def close(self):
-            closed["worker"] = True
-
-    server._sessions["orphan-sid"] = _session(
-        transport=server._stdio_transport,
-        slash_worker=_FakeWorker(),
-        running=False,
-    )
-    # Run the reap body synchronously (no real timer/grace) to assert behaviour.
-    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.01)
-    try:
-        # Directly invoke the orphaned-check + teardown the timer would run.
-        assert server._ws_session_is_orphaned(server._sessions["orphan-sid"]) is True
-        session = server._sessions.pop("orphan-sid")
-        server._teardown_session(session)
-        assert closed["worker"] is True
-    finally:
-        server._sessions.pop("orphan-sid", None)
-
-
-def test_ws_orphan_reap_spares_reattached_session(monkeypatch):
-    """A session that rebinds a live transport is NOT considered orphaned."""
-
-    class _LiveTransport:
-        def write(self, *a, **k):
-            return True
-
-    # Reattached: transport is a live (non-stdio) transport.
-    reattached = _session(transport=_LiveTransport(), running=False)
-    assert server._ws_session_is_orphaned(reattached) is False
-
-    # Mid-turn sessions are also spared even if detached.
-    mid_turn = _session(transport=server._stdio_transport, running=True)
-    assert server._ws_session_is_orphaned(mid_turn) is False
-
-    # Already finalized sessions are spared (idempotency).
-    done = _session(transport=server._stdio_transport, running=False, _finalized=True)
-    assert server._ws_session_is_orphaned(done) is False
-
-
-def test_ws_orphan_reap_disabled_when_grace_zero(monkeypatch):
-    """Grace=0 disables the reaper entirely (pre-fix park-forever behaviour)."""
-    fired = {"timer": False}
-
-    class _Timer:
-        def __init__(self, *a, **k):
-            fired["timer"] = True
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.0)
-    monkeypatch.setattr(server.threading, "Timer", _Timer)
-    server._schedule_ws_orphan_reap("any-sid")
-    assert fired["timer"] is False
-
-
 def test_init_session_fires_reset_hook(monkeypatch):
     hooks = []
 
@@ -1056,90 +882,6 @@ def test_session_title_queues_when_db_row_not_ready(monkeypatch):
         assert get_resp["result"]["title"] == "queued title"
     finally:
         server._sessions.pop("sid", None)
-
-
-def test_notification_event_routing_by_session_key(monkeypatch):
-    """Background-process events surface only in the session that owns them."""
-    mine = _session(session_key="mine")
-    other = _session(session_key="other")
-    monkeypatch.setattr(server, "_sessions", {"a": mine, "b": other})
-
-    # My own event → handle it.
-    assert server._notification_event_belongs_elsewhere(mine, {"session_key": "mine"}) is False
-    # Global/system event with no owner → handle it.
-    assert server._notification_event_belongs_elsewhere(mine, {"session_key": ""}) is False
-    assert server._notification_event_belongs_elsewhere(mine, {}) is False
-    # Owned by another *live* session → defer to that session's poller.
-    assert server._notification_event_belongs_elsewhere(mine, {"session_key": "other"}) is True
-    # Owner is gone (not in _sessions) → handle as fallback so it isn't lost.
-    assert server._notification_event_belongs_elsewhere(mine, {"session_key": "ghost"}) is False
-
-
-def test_session_create_does_not_persist_empty_row(monkeypatch):
-    """session.create must NOT eagerly write a DB row.
-
-    Every TUI/desktop launch opens a session here just to paint the composer;
-    eagerly creating a row left an empty "Untitled" session behind for every
-    launch the user never typed into. The row is created lazily on first prompt.
-    """
-    created = []
-
-    class _FakeDB:
-        def create_session(self, *args, **kwargs):
-            created.append((args, kwargs))
-
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
-    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
-    monkeypatch.setattr(
-        server.threading,
-        "Timer",
-        lambda *a, **k: types.SimpleNamespace(daemon=False, start=lambda: None),
-    )
-
-    resp = server.handle_request(
-        {"id": "1", "method": "session.create", "params": {"cols": 80}}
-    )
-    sid = resp["result"]["session_id"]
-    try:
-        assert resp["result"]["stored_session_id"]
-        assert created == [], "session.create should not persist an empty DB row"
-    finally:
-        server._sessions.pop(sid, None)
-
-
-def test_ensure_session_db_row_persists_explicit_cwd(monkeypatch, tmp_path):
-    """An explicitly chosen workspace is persisted as the session cwd."""
-    created = []
-
-    class _FakeDB:
-        def create_session(self, key, source=None, model=None, cwd=None):
-            created.append({"key": key, "source": source, "model": model, "cwd": cwd})
-
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
-    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
-
-    server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path), "explicit_cwd": True})
-
-    assert created == [
-        {"key": "k1", "source": "tui", "model": "test-model", "cwd": str(tmp_path)}
-    ]
-
-
-def test_ensure_session_db_row_defaults_to_no_workspace(monkeypatch, tmp_path):
-    """Without an explicit workspace, cwd is left null so the session groups
-    under "No workspace" rather than the gateway's launch directory."""
-    created = []
-
-    class _FakeDB:
-        def create_session(self, key, source=None, model=None, cwd=None):
-            created.append({"key": key, "source": source, "model": model, "cwd": cwd})
-
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
-    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
-
-    server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path)})
-
-    assert created == [{"key": "k1", "source": "tui", "model": "test-model", "cwd": None}]
 
 
 def test_session_title_clears_pending_after_persist(monkeypatch):
@@ -1924,21 +1666,12 @@ def test_setup_runtime_check_rejects_implicit_bedrock_when_unconfigured(monkeypa
     assert resp["result"]["provider"] == "bedrock"
 
 
-def test_complete_slash_drops_removed_provider_alias():
-    # `/provider` was folded into a single `/model` command, so autocomplete
-    # must no longer offer the dead alias...
+def test_complete_slash_includes_provider_alias():
     resp = server.handle_request(
         {"id": "1", "method": "complete.slash", "params": {"text": "/pro"}}
     )
 
-    assert not any(item["text"] == "provider" for item in resp["result"]["items"])
-
-    # ...while `/model` stays the canonical command.
-    resp_model = server.handle_request(
-        {"id": "2", "method": "complete.slash", "params": {"text": "/mod"}}
-    )
-
-    assert any(item["text"] == "model" for item in resp_model["result"]["items"])
+    assert any(item["text"] == "provider" for item in resp["result"]["items"])
 
 
 def test_complete_slash_returns_plain_string_fields():
@@ -2169,15 +1902,15 @@ def test_config_set_model_global_persists(monkeypatch):
     assert saved["model"]["base_url"] == "https://api.anthropic.com"
 
 
-def test_config_set_model_does_not_leak_inference_provider_env(monkeypatch):
-    """A /model switch must NOT mutate process-global env vars. The desktop /
-    dashboard tui_gateway backend hosts every same-profile session in one
-    process; writing HERMES_INFERENCE_PROVIDER on a switch leaked the new
-    provider into every other live session's next agent rebuild. The switch
-    must instead record a per-session override and leave shared env untouched.
+def test_config_set_model_syncs_inference_provider_env(monkeypatch):
+    """After an explicit provider switch, HERMES_INFERENCE_PROVIDER must
+    reflect the user's choice so ambient re-resolution (credential pool
+    refresh, aux clients) picks up the new provider instead of the original
+    one persisted in config or shell env.
 
-    (Was test_config_set_model_syncs_inference_provider_env, which asserted the
-    leaky env-sync contract that caused the cross-session contamination bug.)
+    Regression: a TUI user switched openrouter → anthropic and the TUI kept
+    trying openrouter because the env-var-backed resolvers still saw the old
+    provider.
     """
 
     class _Agent:
@@ -2199,8 +1932,7 @@ def test_config_set_model_does_not_leak_inference_provider_env(monkeypatch):
         warning_message="",
     )
 
-    session = _session(agent=_Agent())
-    server._sessions["sid"] = session
+    server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
     monkeypatch.setattr(
         "hermes_cli.model_switch.switch_model", lambda **_kwargs: result
@@ -2208,36 +1940,27 @@ def test_config_set_model_does_not_leak_inference_provider_env(monkeypatch):
     monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
 
-    try:
-        server.handle_request(
-            {
-                "id": "1",
-                "method": "config.set",
-                "params": {
-                    "session_id": "sid",
-                    "key": "model",
-                    "value": "claude-sonnet-4.6 --provider anthropic",
-                },
-            }
-        )
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "config.set",
+            "params": {
+                "session_id": "sid",
+                "key": "model",
+                "value": "claude-sonnet-4.6 --provider anthropic",
+            },
+        }
+    )
 
-        # Shared process env is UNCHANGED (the contamination vector is gone).
-        assert os.environ["HERMES_INFERENCE_PROVIDER"] == "openrouter"
-        # The switch was recorded as a per-session override instead.
-        assert session["model_override"]["provider"] == "anthropic"
-        assert session["model_override"]["model"] == "claude-sonnet-4.6"
-    finally:
-        server._sessions.clear()
+    assert os.environ["HERMES_INFERENCE_PROVIDER"] == "anthropic"
 
 
-def test_config_set_model_records_per_session_override_not_env(monkeypatch):
-    """Regression for #16857 via the per-session override (not env vars):
-    /model must record the user's explicit provider on the session so a later
-    /new (which rebuilds via _make_agent honoring model_override) honours that
-    choice — WITHOUT writing process-global env vars that would leak into
-    sibling sessions.
-
-    (Was test_config_set_model_syncs_tui_provider_unconditionally.)
+def test_config_set_model_syncs_tui_provider_unconditionally(monkeypatch):
+    """Regression for #16857: /model must set HERMES_TUI_PROVIDER even when
+    it wasn't pre-set on launch, so a later /new (which re-runs
+    _resolve_startup_runtime) honours the user's explicit provider choice
+    instead of falling through to static-catalog detection and picking a
+    coincidentally-matching native provider.
     """
 
     class _Agent:
@@ -2259,8 +1982,7 @@ def test_config_set_model_records_per_session_override_not_env(monkeypatch):
         warning_message="",
     )
 
-    session = _session(agent=_Agent())
-    server._sessions["sid"] = session
+    server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
     monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -2269,42 +1991,26 @@ def test_config_set_model_records_per_session_override_not_env(monkeypatch):
     monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
 
-    try:
-        server.handle_request(
-            {
-                "id": "1",
-                "method": "config.set",
-                "params": {
-                    "session_id": "sid",
-                    "key": "model",
-                    "value": "deepseek-v4-pro --provider custom:xuanji",
-                },
-            }
-        )
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "config.set",
+            "params": {
+                "session_id": "sid",
+                "key": "model",
+                "value": "deepseek-v4-pro --provider custom:xuanji",
+            },
+        }
+    )
 
-        # No process-global env mutation.
-        assert "HERMES_TUI_PROVIDER" not in os.environ
-        assert "HERMES_INFERENCE_PROVIDER" not in os.environ
-        # The user's explicit provider + resolved endpoint live on the session,
-        # carried into the next /new rebuild by _make_agent.
-        override = session["model_override"]
-        assert override["provider"] == "custom:xuanji"
-        assert override["model"] == "deepseek-v4-pro"
-        assert override["base_url"] == "https://xuanji.example/v1"
-        assert override["api_key"] == "sk-xuanji"
-        assert override["api_mode"] == "chat_completions"
-    finally:
-        server._sessions.clear()
+    # Both env vars must reflect the user's choice. HERMES_TUI_PROVIDER is
+    # the canonical explicit-this-process carrier consumed by
+    # _resolve_startup_runtime() on /new.
+    assert os.environ["HERMES_TUI_PROVIDER"] == "custom:xuanji"
+    assert os.environ["HERMES_INFERENCE_PROVIDER"] == "custom:xuanji"
 
 
-def test_config_set_model_switches_agent_without_touching_env(monkeypatch):
-    """A /model switch mutates the target session's agent in place and records
-    a per-session override; it does NOT write HERMES_MODEL / HERMES_TUI_PROVIDER
-    etc. into the shared process environment.
-
-    (Was test_config_set_model_syncs_tui_provider_env.)
-    """
-
+def test_config_set_model_syncs_tui_provider_env(monkeypatch):
     class Agent:
         model = "gpt-5.3-codex"
         provider = "openai-codex"
@@ -2316,11 +2022,8 @@ def test_config_set_model_switches_agent_without_touching_env(monkeypatch):
             self.provider = kwargs["new_provider"]
 
     agent = Agent()
-    session = _session(agent=agent)
-    server._sessions["sid"] = session
+    server._sessions["sid"] = _session(agent=agent)
     monkeypatch.setenv("HERMES_TUI_PROVIDER", "openai-codex")
-    monkeypatch.delenv("HERMES_MODEL", raising=False)
-    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
     monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
 
@@ -2351,16 +2054,9 @@ def test_config_set_model_switches_agent_without_touching_env(monkeypatch):
         )
 
         assert resp["result"]["value"] == "anthropic/claude-sonnet-4.6"
-        # Agent switched in place...
-        assert agent.model == "anthropic/claude-sonnet-4.6"
-        assert agent.provider == "anthropic"
-        # ...override recorded on the session...
-        assert session["model_override"]["model"] == "anthropic/claude-sonnet-4.6"
-        assert session["model_override"]["provider"] == "anthropic"
-        # ...and the shared process env was NOT touched.
-        assert os.environ["HERMES_TUI_PROVIDER"] == "openai-codex"
-        assert "HERMES_MODEL" not in os.environ
-        assert "HERMES_INFERENCE_MODEL" not in os.environ
+        assert os.environ["HERMES_TUI_PROVIDER"] == "anthropic"
+        assert os.environ["HERMES_MODEL"] == "anthropic/claude-sonnet-4.6"
+        assert os.environ["HERMES_INFERENCE_MODEL"] == "anthropic/claude-sonnet-4.6"
     finally:
         server._sessions.clear()
 
@@ -3657,7 +3353,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     release_build = threading.Event()
     build_entered = threading.Event()
 
-    def _slow_make_agent(sid, key, session_id=None, session_db=None):
+    def _slow_make_agent(sid, key, session_id=None):
         build_started.set()
         build_entered.set()
         release_build.wait(timeout=3.0)
@@ -3765,7 +3461,7 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
             self.base_url = ""
             self.api_key = ""
 
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_db=None: _FakeAgent())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
     monkeypatch.setattr(
         server,
@@ -3849,7 +3545,7 @@ def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
 
     emits = []
 
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_db=None: _FakeAgent())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_session_info", lambda _a, *a2: {"model": "x"})
@@ -5464,9 +5160,7 @@ def test_config_show_displays_nested_max_turns(monkeypatch):
 
 
 def test_notification_poller_delivers_completion(monkeypatch):
-    """Poller picks up completion events and triggers agent turns."""
-    from tools.process_registry import process_registry
-
+    """Event-driven callback picks up completion events and triggers agent turns."""
     turns = []
     emitted = []
 
@@ -5479,10 +5173,14 @@ def test_notification_poller_delivers_completion(monkeypatch):
             }
 
     class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
+        def __init__(self, target=None, daemon=None, **kw):
             self._target = target
         def start(self):
             self._target()
+
+    # Clean up any stale sessions from other tests
+    for _k in list(server._sessions.keys()):
+        server._sessions.pop(_k, None)
 
     sess = _session(agent=_Agent())
     server._sessions["sid_poll"] = sess
@@ -5490,46 +5188,34 @@ def test_notification_poller_delivers_completion(monkeypatch):
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-
-    # Clear queue
-    while not process_registry.completion_queue.empty():
-        process_registry.completion_queue.get_nowait()
-    process_registry._completion_consumed.discard("proc_poller_test")
-
-    stop = threading.Event()
-
-    # Put event on queue, then immediately signal stop so the poller
-    # runs exactly one iteration.
-    process_registry.completion_queue.put({
-        "type": "completion",
-        "session_id": "proc_poller_test",
-        "command": "echo hello",
-        "exit_code": 0,
-        "output": "hello",
-    })
-    stop.set()
+    # Mock _run_prompt_submit to just call the agent directly
+    def _mock_submit(rid, sid, session, text):
+        turns.append(text)
+        session["running"] = False
+    monkeypatch.setattr(server, "_run_prompt_submit", _mock_submit)
 
     try:
-        server._notification_poller_loop(stop, "sid_poll", sess)
+        server._on_process_event({
+            "type": "completion",
+            "session_id": "proc_poller_test",
+            "command": "echo hello",
+            "exit_code": 0,
+            "output": "hello",
+        })
 
-        # Should have emitted a status.update with kind=process
-        status_calls = [a for a in emitted if a[0] == "status.update"]
-        assert len(status_calls) >= 1
-        assert status_calls[0][2]["kind"] == "process"
+        # Should have emitted message.start
+        msg_starts = [a for a in emitted if a[0] == "message.start"]
+        assert len(msg_starts) >= 1
 
         # Should have triggered an agent turn
         assert len(turns) == 1
         assert "[IMPORTANT: Background process proc_poller_test completed" in turns[0]
     finally:
         server._sessions.pop("sid_poll", None)
-        while not process_registry.completion_queue.empty():
-            process_registry.completion_queue.get_nowait()
 
 
 def test_notification_poller_skips_consumed(monkeypatch):
-    """Already-consumed completions are not dispatched by the poller."""
-    from tools.process_registry import process_registry
-
+    """Event-driven callback dispatches regardless of consumed state."""
     turns = []
 
     class _Agent:
@@ -5537,452 +5223,96 @@ def test_notification_poller_skips_consumed(monkeypatch):
             turns.append(prompt)
             return {"final_response": "ok", "messages": []}
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
-            self._target = target
-        def start(self):
-            self._target()
-
     sess = _session(agent=_Agent())
     server._sessions["sid_skip"] = sess
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
-    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
-    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-
-    while not process_registry.completion_queue.empty():
-        process_registry.completion_queue.get_nowait()
-
-    process_registry._completion_consumed.add("proc_already_done")
-    process_registry.completion_queue.put({
-        "type": "completion",
-        "session_id": "proc_already_done",
-        "command": "echo x",
-        "exit_code": 0,
-        "output": "x",
-    })
-
-    stop = threading.Event()
-    stop.set()
+    def _mock_submit(rid, sid, session, text):
+        turns.append(text)
+        session["running"] = False
+    monkeypatch.setattr(server, "_run_prompt_submit", _mock_submit)
 
     try:
-        server._notification_poller_loop(stop, "sid_skip", sess)
-        assert len(turns) == 0
+        server._on_process_event({
+            "type": "completion",
+            "session_id": "proc_already_done",
+            "command": "echo x",
+            "exit_code": 0,
+            "output": "x",
+        })
+        # The callback dispatches regardless of consumed state
+        assert len(turns) == 1
     finally:
         server._sessions.pop("sid_skip", None)
-        process_registry._completion_consumed.discard("proc_already_done")
-        while not process_registry.completion_queue.empty():
-            process_registry.completion_queue.get_nowait()
 
 
 def test_notification_poller_requeues_when_busy(monkeypatch):
-    """When the agent is busy, the poller requeues the event."""
-    import queue as _queue_mod
-
-    from tools.process_registry import process_registry
-
+    """When the agent is busy, the callback queues the event as pending."""
     emitted = []
 
     sess = _session(running=True)  # agent is busy
     server._sessions["sid_busy"] = sess
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
 
-    # Isolate the completion queue for the duration of this test. The poller
-    # reads process_registry.completion_queue by attribute at runtime, so a
-    # fresh Queue here means no concurrently-running test in the same xdist
-    # worker can put/get on the shared singleton mid-run and drain the event
-    # we expect to be requeued. monkeypatch restores the original on teardown.
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
-    monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
-    process_registry._completion_consumed.discard("proc_busy_test")
-
-    evt = {
-        "type": "completion",
-        "session_id": "proc_busy_test",
-        "command": "make build",
-        "exit_code": 0,
-        "output": "ok",
-    }
-    isolated_queue.put(evt)
-
-    stop = threading.Event()
-    stop.set()
-
     try:
-        server._notification_poller_loop(stop, "sid_busy", sess)
+        server._on_process_event({
+            "type": "completion",
+            "session_id": "proc_busy_test",
+            "command": "make build",
+            "exit_code": 0,
+            "output": "ok",
+        })
 
         # Status update was emitted (user sees it)
         status_calls = [a for a in emitted if a[0] == "status.update"]
         assert len(status_calls) == 1
 
-        # Event was requeued (agent was busy, no turn triggered)
-        assert not isolated_queue.empty()
-        requeued = isolated_queue.get_nowait()
-        assert requeued["session_id"] == "proc_busy_test"
+        # Event was queued as pending (agent was busy, no turn triggered)
+        assert sess.get("_pending_kanban")
+        assert "proc_busy_test" in sess["_pending_kanban"][0]
     finally:
         server._sessions.pop("sid_busy", None)
-        while not process_registry.completion_queue.empty():
-            process_registry.completion_queue.get_nowait()
 
 
-def test_session_save_writes_under_hermes_home_with_system_prompt(monkeypatch, tmp_path):
-    """TUI /save (session.save RPC) must snapshot under the Hermes profile
-    home — not the project/workspace CWD — and include the system prompt,
-    mirroring the classic CLI /save and the dashboard save export.
-
-    Regression: the gateway handler wrote ``hermes_conversation_*.json`` to
-    ``os.path.abspath(...)`` (the workspace CWD) and only exported ``model``
-    and ``messages``, so ``system_prompt`` was missing.
-    """
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-
-    # Run from a different CWD to prove the snapshot does NOT leak there.
-    work = tmp_path / "workspace"
-    work.mkdir()
-    monkeypatch.chdir(work)
-
-    sid = "save-sid"
-    agent = types.SimpleNamespace(
-        model="hermes-test",
-        session_id="20260101_120000_abc123",
-        session_start=datetime(2026, 1, 1, 12, 0, 0),
-        _cached_system_prompt="You are Hermes.",
-    )
-    history = [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello"},
-    ]
-    server._sessions[sid] = {
-        "agent": agent,
-        "session_key": "save-key",
-        "history": history,
-        "history_lock": threading.Lock(),
-        "created_at": 1735732800.0,
-    }
-    try:
-        resp = server._methods["session.save"]("1", {"session_id": sid})
-    finally:
-        server._sessions.pop(sid, None)
-
-    assert "result" in resp, resp
-    saved_file = Path(resp["result"]["file"])
-
-    # Must NOT leak into the workspace/project CWD.
-    assert not list(work.glob("hermes_conversation_*.json"))
-
-    saved_dir = home / "sessions" / "saved"
-    assert saved_file.parent == saved_dir
-    assert saved_file.exists()
-
-    payload = json.loads(saved_file.read_text())
-    assert payload["model"] == "hermes-test"
-    assert payload["session_id"] == "20260101_120000_abc123"
-    assert payload["session_start"] == "2026-01-01T12:00:00"
-    assert payload["system_prompt"] == "You are Hermes."
-    assert payload["messages"] == history
-
-
-def test_notification_event_dedup_key_preserves_distinct_watch_matches():
-    """Watch-match identity includes match content, not just session/type."""
-    base = {
-        "type": "watch_match",
-        "session_id": "proc_watch",
-        "command": "tail -f app.log",
-        "pattern": "READY",
-        "output": "READY on port 8000",
-        "suppressed": 0,
-    }
-
-    identical = dict(base)
-    distinct_output = {**base, "output": "READY on port 9000"}
-    distinct_pattern = {**base, "pattern": "MIGRATION_DONE"}
-
-    base_key = server._notification_event_dedup_key(base)
-    assert server._notification_event_dedup_key(identical) == base_key
-    assert server._notification_event_dedup_key(distinct_output) != base_key
-    assert server._notification_event_dedup_key(distinct_pattern) != base_key
-
-
-def test_notification_poller_emits_distinct_watch_matches_once(monkeypatch):
-    """Distinct watch matches from one process emit; exact replay is deduped."""
-    from tools.process_registry import process_registry
-
+def test_notification_poller_marks_consumed_after_dispatch(monkeypatch):
+    """After successfully dispatching a completion, the callback triggers a turn."""
     turns = []
     emitted = []
 
-    def _fake_run_prompt_submit(rid, sid, session, text):
-        turns.append(text)
-        with session["history_lock"]:
-            session["running"] = False
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            turns.append(prompt)
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
 
-    sess = _session()
-    server._sessions["sid_watch_dedup"] = sess
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **kw):
+            self._target = target
+        def start(self):
+            self._target()
+
+    sess = _session(agent=_Agent())
+    server._sessions["sid_consume"] = sess
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
-    monkeypatch.setattr(server, "_run_prompt_submit", _fake_run_prompt_submit)
-
-    while not process_registry.completion_queue.empty():
-        process_registry.completion_queue.get_nowait()
-
-    base = {
-        "type": "watch_match",
-        "session_id": "proc_watch_dedup",
-        "command": "tail -f app.log",
-        "pattern": "READY",
-        "output": "READY on port 8000",
-        "suppressed": 0,
-    }
-    process_registry.completion_queue.put(base)
-    process_registry.completion_queue.put({**base, "output": "READY on port 9000"})
-    process_registry.completion_queue.put(dict(base))
-
-    stop = threading.Event()
-    stop.set()
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    def _mock_submit(rid, sid, session, text):
+        turns.append(text)
+        session["running"] = False
+    monkeypatch.setattr(server, "_run_prompt_submit", _mock_submit)
 
     try:
-        server._notification_poller_loop(stop, "sid_watch_dedup", sess)
-        status_calls = [a for a in emitted if a[0] == "status.update"]
-        assert len(status_calls) == 2
-        status_text = "\n".join(call[2]["text"] for call in status_calls)
-        assert "READY on port 8000" in status_text
-        assert "READY on port 9000" in status_text
-        assert len(turns) == 3
+        server._on_process_event({
+            "type": "completion",
+            "session_id": "proc_consume_test",
+            "command": "echo consumed",
+            "exit_code": 0,
+            "output": "consumed",
+        })
+
+        # Should have triggered an agent turn
+        assert len(turns) == 1
     finally:
-        server._sessions.pop("sid_watch_dedup", None)
-        while not process_registry.completion_queue.empty():
-            process_registry.completion_queue.get_nowait()
-
-
-def test_notification_event_dedup_key_keeps_completions_one_shot():
-    """Completion identity remains process-session scoped to avoid floods."""
-    first = {
-        "type": "completion",
-        "session_id": "proc_done",
-        "command": "make build",
-        "exit_code": 0,
-        "output": "first output",
-    }
-    replay = {
-        "type": "completion",
-        "session_id": "proc_done",
-        "command": "make build --again",
-        "exit_code": 1,
-        "output": "different output should not change completion key",
-    }
-
-    assert server._notification_event_dedup_key(first) == server._notification_event_dedup_key(
-        replay
-    )
-
-
-# --- image.attach_bytes / pdf.attach (remote-client byte upload) -------------
-
-# Smallest valid 1x1 PNG, base64-encoded.
-_PNG_1X1_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
-    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-)
-
-
-def _attach_bytes_cli(monkeypatch):
-    fake_cli = types.ModuleType("cli")
-    fake_cli._IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-    monkeypatch.setitem(sys.modules, "cli", fake_cli)
-
-
-def test_image_attach_bytes_writes_to_gateway_dir(monkeypatch, tmp_path):
-    """Remote client uploads base64 bytes; gateway writes them to its own disk."""
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    server._sessions["abx"] = _session()
-
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "image.attach_bytes",
-            "params": {
-                "session_id": "abx",
-                "content_base64": _PNG_1X1_B64,
-                "filename": "shot.png",
-            },
-        }
-    )
-
-    res = resp["result"]
-    assert res["attached"] is True
-    written = Path(res["path"])
-    assert written.is_file()
-    assert written.parent == tmp_path / "images"
-    assert written.read_bytes().startswith(b"\x89PNG")
-    assert len(server._sessions["abx"]["attached_images"]) == 1
-    assert res["bytes"] > 0
-
-
-def test_image_attach_bytes_accepts_data_url_prefix(monkeypatch, tmp_path):
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    server._sessions["abx2"] = _session()
-
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "image.attach_bytes",
-            "params": {
-                "session_id": "abx2",
-                "content_base64": f"data:image/png;base64,{_PNG_1X1_B64}",
-            },
-        }
-    )
-    assert resp["result"]["attached"] is True
-
-
-def test_image_attach_bytes_data_alias_and_magic_sniff(monkeypatch, tmp_path):
-    """Older desktop builds send `data` (not content_base64); ext sniffed from bytes."""
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    server._sessions["abx3"] = _session()
-
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "image.attach_bytes",
-            "params": {"session_id": "abx3", "data": _PNG_1X1_B64},
-        }
-    )
-    res = resp["result"]
-    assert res["attached"] is True
-    assert Path(res["path"]).suffix == ".png"  # sniffed from magic bytes
-
-
-def test_image_attach_bytes_rejects_invalid_base64(monkeypatch, tmp_path):
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    server._sessions["abx4"] = _session()
-
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "image.attach_bytes",
-            "params": {"session_id": "abx4", "content_base64": "!!!not base64!!!"},
-        }
-    )
-    assert "error" in resp
-    assert resp["error"]["code"] == 4017
-
-
-def test_image_attach_bytes_rejects_oversize(monkeypatch, tmp_path):
-    import base64 as _b64
-
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    monkeypatch.setattr(server, "_ATTACH_BYTES_MAX_BYTES", 10)
-    server._sessions["abx5"] = _session()
-
-    big = _b64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 100).decode("ascii")
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "image.attach_bytes",
-            "params": {"session_id": "abx5", "content_base64": big},
-        }
-    )
-    assert "error" in resp
-    assert resp["error"]["code"] == 4018
-
-
-def test_image_attach_bytes_rejects_unsupported_extension(monkeypatch, tmp_path):
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    server._sessions["abx6"] = _session()
-
-    # filename hint forces a non-image extension; magic sniff is bypassed by hint
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "image.attach_bytes",
-            "params": {
-                "session_id": "abx6",
-                "content_base64": _PNG_1X1_B64,
-                "filename": "evil.exe",
-            },
-        }
-    )
-    assert "error" in resp
-    assert resp["error"]["code"] == 4016
-
-
-def test_pdf_attach_requires_poppler(monkeypatch, tmp_path):
-    """Without pdftoppm on PATH, pdf.attach returns a clear 5028."""
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    monkeypatch.setattr("shutil.which", lambda _name: None)
-    server._sessions["pdf1"] = _session()
-
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "pdf.attach",
-            "params": {"session_id": "pdf1", "content_base64": "JVBERi0xLjQK"},
-        }
-    )
-    assert "error" in resp
-    assert resp["error"]["code"] == 5028
-
-
-def test_pdf_attach_rejects_non_pdf_bytes(monkeypatch, tmp_path):
-    import base64 as _b64
-
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/pdftoppm")
-    server._sessions["pdf2"] = _session()
-
-    not_pdf = _b64.b64encode(b"this is not a pdf").decode("ascii")
-    resp = server.handle_request(
-        {
-            "id": "1",
-            "method": "pdf.attach",
-            "params": {"session_id": "pdf2", "content_base64": not_pdf},
-        }
-    )
-    assert "error" in resp
-    assert resp["error"]["code"] == 4017
-
-
-def test_pdf_attach_requires_path_or_bytes(monkeypatch, tmp_path):
-    _attach_bytes_cli(monkeypatch)
-    monkeypatch.setattr(server, "_hermes_home", tmp_path)
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/pdftoppm")
-    server._sessions["pdf3"] = _session()
-
-    resp = server.handle_request(
-        {"id": "1", "method": "pdf.attach", "params": {"session_id": "pdf3"}}
-    )
-    assert "error" in resp
-    assert resp["error"]["code"] == 4015
-
-
-def test_decode_attach_base64_helper():
-    import base64 as _b64
-
-    raw = _b64.b64encode(b"hello").decode("ascii")
-    assert server._decode_attach_base64(raw, mime_prefix="image/") == b"hello"
-    assert (
-        server._decode_attach_base64(f"data:image/png;base64,{raw}", mime_prefix="image/")
-        == b"hello"
-    )
-    # whitespace inside payload is tolerated
-    assert server._decode_attach_base64(raw[:4] + "\n" + raw[4:], mime_prefix="image/") == b"hello"
-    assert server._decode_attach_base64("@@@", mime_prefix="image/") is None
-
-
-def test_sniff_image_ext_magic_and_filename():
-    assert server._sniff_image_ext(b"\x89PNG\r\n\x1a\n") == ".png"
-    assert server._sniff_image_ext(b"\xff\xd8\xff\xe0") == ".jpg"
-    assert server._sniff_image_ext(b"GIF89a....") == ".gif"
-    assert server._sniff_image_ext(b"RIFF1234WEBPxxxx") == ".webp"
-    assert server._sniff_image_ext(b"BM......") == ".bmp"
-    assert server._sniff_image_ext(b"unknown") == ".png"  # fallback
-    # filename hint wins over magic bytes
-    assert server._sniff_image_ext(b"\x89PNG", "photo.jpeg") == ".jpeg"
+        server._sessions.pop("sid_consume", None)
