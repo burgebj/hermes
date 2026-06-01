@@ -74,7 +74,7 @@ class TestFirecrawlClientConfig:
     def test_tool_gateway_domain_builds_firecrawl_gateway_origin(self):
         """Shared gateway domain should derive the Firecrawl vendor hostname."""
         with patch.dict(os.environ, {"TOOL_GATEWAY_DOMAIN": "nousresearch.com"}):
-            with patch("tools.web_tools._peek_nous_access_token", return_value="nous-token"):
+            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
                 with patch("tools.web_tools.Firecrawl") as mock_fc:
                     from tools.web_tools import _get_firecrawl_client
                     result = _get_firecrawl_client()
@@ -90,7 +90,7 @@ class TestFirecrawlClientConfig:
             "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
             "TOOL_GATEWAY_SCHEME": "http",
         }):
-            with patch("tools.web_tools._peek_nous_access_token", return_value="nous-token"):
+            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
                 with patch("tools.web_tools.Firecrawl") as mock_fc:
                     from tools.web_tools import _get_firecrawl_client
                     result = _get_firecrawl_client()
@@ -106,7 +106,7 @@ class TestFirecrawlClientConfig:
             "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
             "TOOL_GATEWAY_SCHEME": "ftp",
         }):
-            with patch("tools.web_tools._peek_nous_access_token", return_value="nous-token"):
+            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
                 from tools.web_tools import _get_firecrawl_client
                 with pytest.raises(ValueError, match="TOOL_GATEWAY_SCHEME"):
                     _get_firecrawl_client()
@@ -117,7 +117,7 @@ class TestFirecrawlClientConfig:
             "FIRECRAWL_GATEWAY_URL": "https://firecrawl-gateway.localhost:3009/",
             "TOOL_GATEWAY_DOMAIN": "nousresearch.com",
         }):
-            with patch("tools.web_tools._peek_nous_access_token", return_value="nous-token"):
+            with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
                 with patch("tools.web_tools.Firecrawl") as mock_fc:
                     from tools.web_tools import _get_firecrawl_client
                     _get_firecrawl_client()
@@ -128,7 +128,7 @@ class TestFirecrawlClientConfig:
 
     def test_default_gateway_domain_targets_nous_production_origin(self):
         """Default gateway origin should point at the Firecrawl vendor hostname."""
-        with patch("tools.web_tools._peek_nous_access_token", return_value="nous-token"):
+        with patch("tools.web_tools._read_nous_access_token", return_value="nous-token"):
             with patch("tools.web_tools.Firecrawl") as mock_fc:
                 from tools.web_tools import _get_firecrawl_client
                 _get_firecrawl_client()
