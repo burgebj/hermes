@@ -30,6 +30,19 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TELEGRAM_SMART_MENTION_SYSTEM_PROMPT = """You are Hermes's Telegram smart mention router.
+
+Decide whether the current Telegram group message is addressed to Hermes or asks Hermes to do something.
+
+Return only JSON with this shape:
+{"should_respond": true|false, "confidence": 0.0-1.0, "reason": "short reason"}
+
+Return true when the message asks Hermes, the bot, or an assistant to help, answer, summarize, decide, run a task, or otherwise take action. Recent context is only supporting evidence; the current message is the one being classified.
+
+Return false for ordinary human-to-human conversation, status chatter, jokes, messages addressed to someone else, or messages that only mention a topic without asking Hermes to act.
+
+Do not answer the user. Only classify routing."""
+
 # Track which (config_path, mtime_ns, size) tuples we've already warned about
 # so concurrent CLI/gateway loads of a broken config.yaml don't spam stderr
 # every time. Cleared automatically when the file changes (different mtime).
@@ -1212,6 +1225,14 @@ DEFAULT_CONFIG = {
             "timeout": 30,
             "extra_body": {},
         },
+        "smart_mention": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 30,
+            "extra_body": {},
+        },
         # Triage specifier — flesh out a rough one-liner in the Kanban
         # Triage column into a concrete spec, then promote it to ``todo``.
         # Invoked by ``hermes kanban specify`` (single id or --all). Set a
@@ -1724,9 +1745,28 @@ DEFAULT_CONFIG = {
 
     # Telegram platform settings (gateway mode)
     "telegram": {
+        "require_mention": False,      # Require @mention/reply/wake pattern to respond in group chats
+        "mention_patterns": [],        # Regex wake-word patterns checked next to @mentions
+        "exclusive_bot_mentions": True,  # Ignore messages explicitly addressed to another @...bot
+        "free_response_chats": "",     # Comma-separated chat IDs where bot responds without mention
+        "allowed_chats": "",           # If set, bot ONLY responds in these group/supergroup chat IDs (whitelist)
+        "allowed_topics": "",          # Optional forum topic allowlist; General topic is 1
+        "ignored_threads": "",         # Optional forum topic IDs to ignore
         "reactions": False,            # Add 👀/✅/❌ reactions to messages during processing
         "channel_prompts": {},         # Per-chat/topic ephemeral system prompts (topics inherit from parent group)
-        "allowed_chats": "",           # If set, bot ONLY responds in these group/supergroup chat IDs (whitelist)
+        "smart_mention": {
+            "enabled": False,
+            "system_prompt": DEFAULT_TELEGRAM_SMART_MENTION_SYSTEM_PROMPT,
+            "include_recent_context": True,
+            "recent_context_messages": 5,
+            "recent_context_max_chars": 2000,
+            "pass_recent_context_to_agent": False,
+            "min_confidence": 0.6,
+            "max_tokens": 128,
+            "log_decisions": True,
+            "log_message_text": False,
+            "on_error": "ignore",
+        },
     },
 
     # Mattermost platform settings (gateway mode)

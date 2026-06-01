@@ -73,6 +73,7 @@ const CATEGORY_ICONS: Record<
   tts: Volume2,
   stt: Ear,
   logging: ClipboardList,
+  telegram: MessageCircle,
   discord: MessageCircle,
   auxiliary: Wrench,
   bedrock: Cloud,
@@ -365,8 +366,13 @@ export default function ConfigPage() {
     let lastCat = "";
     return fields.map(([key, s]) => {
       const parts = key.split(".");
-      const section = parts.length > 1 ? parts[0] : "";
       const cat = String(s.category ?? "general");
+      const section =
+        !showCategory && parts[0] === activeCategory && parts.length > 2
+          ? parts[1]
+          : parts.length > 1
+            ? parts[0]
+            : "";
       const showCatBadge = showCategory && cat !== lastCat;
       const showSection =
         !showCategory &&

@@ -991,6 +991,20 @@ def load_gateway_config() -> GatewayConfig:
                         "disable_topic_auto_rename",
                         telegram_cfg["disable_topic_auto_rename"],
                     )
+                # Canonical user-facing config for Telegram smart mention lives
+                # at telegram.smart_mention. Bridge it into the platform extra
+                # dict consumed by the adapter; top-level wins over legacy
+                # platforms.telegram.extra.smart_mention.
+                if "smart_mention" in telegram_cfg:
+                    _tg_plat = platforms_data.setdefault(Platform.TELEGRAM.value, {})
+                    if not isinstance(_tg_plat, dict):
+                        _tg_plat = {}
+                        platforms_data[Platform.TELEGRAM.value] = _tg_plat
+                    _tg_extra = _tg_plat.setdefault("extra", {})
+                    if not isinstance(_tg_extra, dict):
+                        _tg_extra = {}
+                        _tg_plat["extra"] = _tg_extra
+                    _tg_extra["smart_mention"] = telegram_cfg["smart_mention"]
                 # Prefer telegram.require_mention; fall back to the top-level shorthand.
                 _effective_rm = telegram_cfg.get("require_mention", yaml_cfg.get("require_mention"))
                 if _effective_rm is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION"):

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.platforms.base import MessageType
+from gateway.platforms.telegram_smart_mention import parse_smart_mention_response
 from gateway.session import SessionSource
 
 
@@ -21,6 +22,7 @@ def _make_adapter(
     group_allowed_chats=None,
     guest_mode=None,
     observe_unmentioned_group_messages=None,
+    smart_mention=None,
     bot_username="hermes_bot",
 ):
     from gateway.platforms.telegram import TelegramAdapter
@@ -62,6 +64,8 @@ def _make_adapter(
         extra["guest_mode"] = guest_mode
     if observe_unmentioned_group_messages is not None:
         extra["observe_unmentioned_group_messages"] = observe_unmentioned_group_messages
+    if smart_mention is not None:
+        extra["smart_mention"] = smart_mention
 
     adapter = object.__new__(TelegramAdapter)
     adapter.platform = Platform.TELEGRAM
@@ -70,6 +74,7 @@ def _make_adapter(
     adapter._message_handler = AsyncMock()
     adapter._pending_text_batches = {}
     adapter._pending_text_batch_tasks = {}
+    adapter._smart_mention_context = {}
     adapter._text_batch_delay_seconds = 0.01
     adapter._text_batch_split_delay_seconds = 0.01
     adapter._mention_patterns = adapter._compile_mention_patterns()
@@ -154,6 +159,144 @@ def test_group_messages_can_be_opened_via_config():
     adapter = _make_adapter(require_mention=False)
 
     assert adapter._should_process_message(_group_message("hello everyone")) is True
+
+
+def test_smart_mention_is_async_candidate_not_sync_process():
+    adapter = _make_adapter(
+        require_mention=True,
+        smart_mention={"enabled": True},
+    )
+    msg = _group_message("could Hermes help with this deploy?")
+
+    assert adapter._telegram_group_trigger_decision(msg) == "smart_mention_candidate"
+    assert adapter._should_process_message(msg) is False
+
+
+def test_bare_group_command_is_not_smart_mention_candidate():
+    adapter = _make_adapter(
+        require_mention=True,
+        smart_mention={"enabled": True},
+    )
+    msg = _group_message("/status", entities=[_bot_command_entity("/status", "/status")])
+
+    assert adapter._telegram_group_trigger_decision(msg, is_command=True) == "ignore"
+
+
+def test_smart_mention_classifier_uses_recent_context(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            smart_mention={
+                "enabled": True,
+                "recent_context_messages": 3,
+                "pass_recent_context_to_agent": True,
+                "min_confidence": 0.5,
+            },
+        )
+        adapter._append_telegram_smart_mention_context(_group_message("deploy failed with exit 2"))
+        current = _group_message("can you fix it?")
+        captured = {}
+
+        async def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"should_respond": true, "confidence": 0.91, "reason": "asks for help"}'
+                        )
+                    )
+                ]
+            )
+
+        monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fake_call_llm)
+
+        recent = adapter._telegram_smart_mention_recent_context(current)
+        accepted = await adapter._evaluate_telegram_smart_mention(current, recent_context=recent)
+
+        assert accepted is True
+        assert captured["task"] == "smart_mention"
+        assert captured["max_tokens"] == 128
+        user_payload = captured["messages"][1]["content"]
+        assert "deploy failed with exit 2" in user_payload
+        assert "can you fix it?" in user_payload
+
+        event = adapter._build_message_event(current, MessageType.TEXT, update_id=1005)
+        event = adapter._apply_telegram_smart_mention_context_prompt(event, recent)
+        assert "Telegram recent group context" in event.channel_prompt
+        assert "deploy failed with exit 2" in event.channel_prompt
+
+    asyncio.run(_run())
+
+
+def test_smart_mention_malformed_classifier_response_is_ignored():
+    result = parse_smart_mention_response("yes, respond to this message")
+
+    assert result.should_respond is False
+    assert result.confidence == 0.0
+
+
+def test_smart_mention_does_not_call_classifier_for_unauthorized_group_user(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            smart_mention={"enabled": True},
+        )
+
+        class _Runner:
+            def _is_user_authorized(self, source):
+                assert source.platform == Platform.TELEGRAM
+                assert source.chat_id == "-100"
+                assert source.user_id == "111"
+                return False
+
+        async def _message_handler(_event):
+            raise AssertionError("unauthorized smart mention should not dispatch")
+
+        _message_handler.__self__ = _Runner()
+        adapter._message_handler = _message_handler
+
+        call_llm = AsyncMock()
+        monkeypatch.setattr("agent.auxiliary_client.async_call_llm", call_llm)
+
+        update = SimpleNamespace(
+            update_id=1006,
+            message=_group_message("Hermes should help with this"),
+            effective_message=None,
+        )
+
+        await adapter._handle_text_message(update, SimpleNamespace())
+
+        call_llm.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+def test_top_level_telegram_smart_mention_bridges_to_platform_extra(tmp_path, monkeypatch):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "gateway:\n"
+        "  platforms:\n"
+        "    telegram:\n"
+        "      enabled: true\n"
+        "      token: test-token\n"
+        "      extra:\n"
+        "        smart_mention:\n"
+        "          enabled: false\n"
+        "telegram:\n"
+        "  smart_mention:\n"
+        "    enabled: true\n"
+        "    min_confidence: 0.7\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    config = load_gateway_config()
+
+    telegram = config.platforms[Platform.TELEGRAM]
+    assert telegram.extra["smart_mention"]["enabled"] is True
+    assert telegram.extra["smart_mention"]["min_confidence"] == 0.7
 
 
 def test_unmentioned_group_messages_can_be_observed_without_dispatching():

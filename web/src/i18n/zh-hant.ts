@@ -356,6 +356,7 @@ export const zhHant: Translations = {
       tts: "文字轉語音",
       stt: "語音轉文字",
       logging: "日誌",
+      telegram: "Telegram",
       discord: "Discord",
       auxiliary: "輔助",
     },

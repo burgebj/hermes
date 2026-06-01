@@ -890,6 +890,16 @@ class TestBuildSchemaFromConfig:
         assert "privacy" not in categories  # merged into security
         assert "context" not in categories  # merged into agent
 
+    def test_telegram_smart_mention_schema_has_own_category_and_text_prompt(self):
+        from hermes_cli.web_server import CONFIG_SCHEMA
+
+        enabled = CONFIG_SCHEMA["telegram.smart_mention.enabled"]
+        prompt = CONFIG_SCHEMA["telegram.smart_mention.system_prompt"]
+
+        assert enabled["category"] == "telegram"
+        assert prompt["category"] == "telegram"
+        assert prompt["type"] == "text"
+
     def test_no_single_field_categories(self):
         """After merging, no category should have just 1 field."""
         from hermes_cli.web_server import CONFIG_SCHEMA

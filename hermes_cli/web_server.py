@@ -393,6 +393,15 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Reasoning effort for delegated subagents",
         "options": ["", "low", "medium", "high"],
     },
+    "telegram.smart_mention.system_prompt": {
+        "type": "text",
+        "description": "System prompt for Telegram smart mention classification",
+    },
+    "telegram.smart_mention.on_error": {
+        "type": "select",
+        "description": "Fallback behavior when smart mention classification fails",
+        "options": ["ignore", "process"],
+    },
 }
 
 # Categories with fewer fields get merged into "general" to avoid tab sprawl.
@@ -409,17 +418,13 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "code_execution": "agent",
     "prompt_caching": "agent",
     "goals": "agent",
-    # Only `telegram.reactions` currently lives under telegram — fold it in
-    # with the other messaging-platform config (discord) so it isn't an
-    # orphan tab of one field.
-    "telegram": "discord",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
 _CATEGORY_ORDER = [
     "general", "agent", "terminal", "display", "delegation",
     "memory", "compression", "security", "browser", "voice",
-    "tts", "stt", "logging", "discord", "auxiliary",
+    "tts", "stt", "logging", "telegram", "discord", "auxiliary",
 ]
 
 
@@ -1333,6 +1338,7 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
     "triage_specifier",
     "kanban_decomposer",
     "profile_describer",
+    "smart_mention",
     "curator",
 )
 

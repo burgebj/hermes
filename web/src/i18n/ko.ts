@@ -356,6 +356,7 @@ export const ko: Translations = {
       tts: "텍스트 음성 변환",
       stt: "음성 텍스트 변환",
       logging: "로깅",
+      telegram: "Telegram",
       discord: "Discord",
       auxiliary: "보조",
     },

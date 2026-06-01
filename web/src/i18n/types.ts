@@ -376,6 +376,7 @@ export interface Translations {
       tts: string;
       stt: string;
       logging: string;
+      telegram: string;
       discord: string;
       auxiliary: string;
     };

@@ -15,6 +15,7 @@ import os
 import tempfile
 import html as _html
 import re
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
@@ -85,6 +86,13 @@ from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
     parse_fallback_ip_env,
+)
+from gateway.platforms.telegram_smart_mention import (
+    SmartMentionConfig,
+    build_smart_mention_messages,
+    format_recent_context_for_agent,
+    normalize_smart_mention_config,
+    parse_smart_mention_response,
 )
 from utils import atomic_replace
 
@@ -407,6 +415,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
         self._mention_patterns = self._compile_mention_patterns()
+        self._smart_mention_context: Dict[tuple[str, str], deque] = {}
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
         # Buffer rapid/album photo updates so Telegram image bursts are handled
@@ -4947,6 +4956,274 @@ class TelegramAdapter(BasePlatformAdapter):
             adapter_name = getattr(self, "name", "telegram")
             logger.warning("[%s] Failed to observe Telegram group message: %s", adapter_name, exc)
 
+    def _telegram_smart_mention_config(self) -> SmartMentionConfig:
+        raw = self.config.extra.get("smart_mention")
+        config = normalize_smart_mention_config(raw)
+        if (
+            config.enabled
+            and isinstance(raw, dict)
+            and "system_prompt" in raw
+            and not str(raw.get("system_prompt") or "").strip()
+            and not getattr(self, "_smart_mention_blank_prompt_warned", False)
+        ):
+            logger.warning(
+                "[%s] telegram.smart_mention.system_prompt is blank; using default prompt",
+                getattr(self, "name", "telegram"),
+            )
+            self._smart_mention_blank_prompt_warned = True
+        return config
+
+    def _telegram_smart_mention_context_key(self, message: Message) -> tuple[str, str]:
+        chat = getattr(message, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(message, "message_thread_id", None)
+        if thread_id is None and getattr(chat, "is_forum", False) is True:
+            return chat_id, self._GENERAL_TOPIC_THREAD_ID
+        return chat_id, str(thread_id or self._GENERAL_TOPIC_THREAD_ID)
+
+    def _telegram_smart_mention_text(self, message: Message) -> str:
+        return str(getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+
+    def _telegram_smart_mention_media_metadata(self, message: Message) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        if getattr(message, "sticker", None):
+            sticker = message.sticker
+            metadata["type"] = "sticker"
+            metadata["emoji"] = getattr(sticker, "emoji", None)
+            metadata["file_size"] = getattr(sticker, "file_size", None)
+        elif getattr(message, "photo", None):
+            metadata["type"] = "photo"
+        elif getattr(message, "video", None):
+            video = message.video
+            metadata["type"] = "video"
+            metadata["mime_type"] = getattr(video, "mime_type", None)
+            metadata["file_size"] = getattr(video, "file_size", None)
+        elif getattr(message, "audio", None):
+            audio = message.audio
+            metadata["type"] = "audio"
+            metadata["mime_type"] = getattr(audio, "mime_type", None)
+            metadata["file_name"] = getattr(audio, "file_name", None)
+            metadata["file_size"] = getattr(audio, "file_size", None)
+        elif getattr(message, "voice", None):
+            voice = message.voice
+            metadata["type"] = "voice"
+            metadata["mime_type"] = getattr(voice, "mime_type", None)
+            metadata["duration"] = getattr(voice, "duration", None)
+            metadata["file_size"] = getattr(voice, "file_size", None)
+        elif getattr(message, "document", None):
+            doc = message.document
+            metadata["type"] = "document"
+            metadata["mime_type"] = getattr(doc, "mime_type", None)
+            metadata["file_name"] = getattr(doc, "file_name", None)
+            metadata["file_size"] = getattr(doc, "file_size", None)
+        return metadata
+
+    def _telegram_smart_mention_candidate_allowed(self, message: Message, *, is_command: bool = False) -> bool:
+        config = self._telegram_smart_mention_config()
+        if not config.enabled or is_command:
+            return False
+        if not self._is_group_chat(message):
+            return False
+        # Do not run local download/transcription/vision before routing. Media
+        # without a caption has no text signal for smart mention classification.
+        return bool(self._telegram_smart_mention_text(message))
+
+    def _telegram_group_trigger_decision(self, message: Message, *, is_command: bool = False) -> str:
+        """Return process, ignore, or smart_mention_candidate for group routing."""
+        if not self._is_group_chat(message):
+            return "process"
+
+        thread_id = getattr(message, "message_thread_id", None)
+        allowed_topics = self._telegram_allowed_topics()
+        if allowed_topics:
+            topic_id = str(thread_id) if thread_id is not None else self._GENERAL_TOPIC_THREAD_ID
+            if topic_id not in allowed_topics:
+                return "ignore"
+
+        if thread_id is not None:
+            try:
+                if int(thread_id) in self._telegram_ignored_threads():
+                    return "ignore"
+            except (TypeError, ValueError):
+                logger.warning(
+                    "[%s] Ignoring non-numeric Telegram message_thread_id: %r",
+                    getattr(self, "name", "telegram"),
+                    thread_id,
+                )
+
+        chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
+
+        if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
+            return "ignore"
+
+        guest_mention = self._is_guest_mention(message)
+
+        allowed = self._telegram_allowed_chats()
+        if allowed and chat_id_str not in allowed:
+            return "process" if guest_mention else "ignore"
+
+        if guest_mention:
+            return "process"
+        if chat_id_str in self._telegram_free_response_chats():
+            return "process"
+        if not self._telegram_require_mention():
+            return "process"
+        if self._is_reply_to_bot(message):
+            return "process"
+        if not self._telegram_guest_mode() and self._message_mentions_bot(message):
+            return "process"
+        if self._message_matches_mention_patterns(message):
+            return "process"
+        if self._telegram_smart_mention_candidate_allowed(message, is_command=is_command):
+            return "smart_mention_candidate"
+        return "ignore"
+
+    def _telegram_smart_mention_recent_context(self, message: Message) -> list[dict[str, Any]]:
+        key = self._telegram_smart_mention_context_key(message)
+        return list(getattr(self, "_smart_mention_context", {}).get(key, ()))
+
+    def _telegram_smart_mention_sender_authorized(self, message: Message) -> bool:
+        """Check gateway auth before sending smart candidates to an auxiliary LLM."""
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        auth_fn = getattr(runner, "_is_user_authorized", None)
+        if not callable(auth_fn):
+            return True
+        try:
+            # Message type does not affect SessionSource construction. Avoid
+            # dispatching into handle_message(), which would trigger pairing
+            # and plugin side effects before the routing decision is known.
+            source = self._build_message_event(message, MessageType.TEXT).source
+            return bool(auth_fn(source))
+        except Exception as exc:
+            logger.warning(
+                "[%s] Telegram smart mention auth check failed: %s",
+                getattr(self, "name", "telegram"),
+                exc,
+            )
+            return False
+
+    def _telegram_smart_mention_sender(self, message: Message) -> str:
+        user = getattr(message, "from_user", None)
+        if not user:
+            return "user"
+        return (
+            getattr(user, "full_name", None)
+            or getattr(user, "first_name", None)
+            or getattr(user, "username", None)
+            or "user"
+        )
+
+    def _append_telegram_smart_mention_context(self, message: Message) -> None:
+        config = self._telegram_smart_mention_config()
+        max_items = max(config.recent_context_messages, 0)
+        if not config.enabled or max_items <= 0:
+            return
+        if not self._is_group_chat(message):
+            return
+        text = self._telegram_smart_mention_text(message)
+        if not text:
+            return
+        key = self._telegram_smart_mention_context_key(message)
+        store = getattr(self, "_smart_mention_context", None)
+        if store is None:
+            self._smart_mention_context = {}
+            store = self._smart_mention_context
+        ring = store.get(key)
+        if ring is None or getattr(ring, "maxlen", None) != max_items:
+            existing = list(ring or [])[-max_items:]
+            ring = deque(existing, maxlen=max_items)
+            store[key] = ring
+        ring.append(
+            {
+                "sender": self._telegram_smart_mention_sender(message),
+                "text": text,
+                "media": self._telegram_smart_mention_media_metadata(message).get("type", ""),
+            }
+        )
+
+    async def _evaluate_telegram_smart_mention(
+        self,
+        message: Message,
+        *,
+        recent_context: Optional[list[dict[str, Any]]] = None,
+    ) -> bool:
+        config = self._telegram_smart_mention_config()
+        text = self._telegram_smart_mention_text(message)
+        if not config.enabled or not text:
+            return False
+
+        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+        chat = getattr(message, "chat", None)
+        bot_username = (getattr(getattr(self, "_bot", None), "username", None) or "").lstrip("@")
+        chat_id, thread_id = self._telegram_smart_mention_context_key(message)
+        messages = build_smart_mention_messages(
+            config=config,
+            current_text=text,
+            recent_context=recent_context if recent_context is not None else self._telegram_smart_mention_recent_context(message),
+            media_metadata=self._telegram_smart_mention_media_metadata(message),
+            bot_username=bot_username,
+            chat_id=chat_id or str(getattr(chat, "id", "")),
+            thread_id=thread_id,
+        )
+        try:
+            response = await async_call_llm(
+                task="smart_mention",
+                messages=messages,
+                temperature=0,
+                max_tokens=config.max_tokens,
+            )
+            raw = extract_content_or_reasoning(response)
+            classification = parse_smart_mention_response(raw)
+            accepted = classification.should_respond and classification.confidence >= config.min_confidence
+            if config.log_decisions:
+                if config.log_message_text:
+                    logger.info(
+                        "[%s] Telegram smart mention decision=%s confidence=%.2f reason=%s text=%r",
+                        getattr(self, "name", "telegram"),
+                        "process" if accepted else "ignore",
+                        classification.confidence,
+                        classification.reason,
+                        text,
+                    )
+                else:
+                    logger.info(
+                        "[%s] Telegram smart mention decision=%s confidence=%.2f text_len=%d",
+                        getattr(self, "name", "telegram"),
+                        "process" if accepted else "ignore",
+                        classification.confidence,
+                        len(text),
+                    )
+            return accepted
+        except Exception as exc:
+            logger.warning(
+                "[%s] Telegram smart mention classifier failed: %s",
+                getattr(self, "name", "telegram"),
+                exc,
+            )
+            return config.on_error == "process"
+
+    def _apply_telegram_smart_mention_context_prompt(
+        self,
+        event: MessageEvent,
+        recent_context: list[dict[str, Any]],
+    ) -> MessageEvent:
+        config = self._telegram_smart_mention_config()
+        if not config.pass_recent_context_to_agent:
+            return event
+        context_prompt = format_recent_context_for_agent(
+            recent_context,
+            config.recent_context_max_chars,
+        )
+        if not context_prompt:
+            return event
+        event.channel_prompt = (
+            f"{event.channel_prompt}\n\n{context_prompt}"
+            if event.channel_prompt
+            else context_prompt
+        )
+        return event
+
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
         """Apply Telegram group trigger rules.
 
@@ -4969,61 +5246,7 @@ class TelegramAdapter(BasePlatformAdapter):
         mentioning the bot (``@botname /command``), both of which are
         recognised as mentions by :meth:`_message_mentions_bot`.
         """
-        if not self._is_group_chat(message):
-            return True
-
-        thread_id = getattr(message, "message_thread_id", None)
-        allowed_topics = self._telegram_allowed_topics()
-        if allowed_topics:
-            topic_id = str(thread_id) if thread_id is not None else self._GENERAL_TOPIC_THREAD_ID
-            if topic_id not in allowed_topics:
-                return False
-
-        # Check ignored_threads first — applies to both groups and DM topics
-        if thread_id is not None:
-            try:
-                if int(thread_id) in self._telegram_ignored_threads():
-                    return False
-            except (TypeError, ValueError):
-                logger.warning("[%s] Ignoring non-numeric Telegram message_thread_id: %r", self.name, thread_id)
-
-        if not self._is_group_chat(message):
-            # Root DM (non-topic): ignore if ignore_root_dm is configured
-            if thread_id is None and self.config.extra.get("ignore_root_dm", False):
-                chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
-                if not is_command and chat_id in self._dm_topic_chat_ids:
-                    return False
-            return True
-
-        chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
-
-        if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
-            return False
-
-        # Resolve guest-mode mention bypass once so _message_mentions_bot
-        # is not called redundantly in the normal flow below.
-        guest_mention = self._is_guest_mention(message)
-
-        # allowed_chats check (whitelist). When set, group messages from chats
-        # outside the whitelist are ignored unless guest_mode permits this
-        # exact message as an explicit direct mention. DMs are excluded above.
-        allowed = self._telegram_allowed_chats()
-        if allowed and chat_id_str not in allowed:
-            return guest_mention
-
-        if guest_mention:
-            return True
-        if chat_id_str in self._telegram_free_response_chats():
-            return True
-        if not self._telegram_require_mention():
-            return True
-        if self._is_reply_to_bot(message):
-            return True
-        # When guest_mode is True, _is_guest_mention already called
-        # _message_mentions_bot above — skip the redundant second call.
-        if not self._telegram_guest_mode() and self._message_mentions_bot(message):
-            return True
-        return self._message_matches_mention_patterns(message)
+        return self._telegram_group_trigger_decision(message, is_command=is_command) == "process"
 
     async def _ensure_forum_commands(self, message) -> None:
         """Lazy-register bot commands for forum supergroups.
@@ -5070,15 +5293,33 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
-        if not self._should_process_message(msg):
+        decision = self._telegram_group_trigger_decision(msg)
+        smart_recent_context: list[dict[str, Any]] = []
+        smart_accepted = False
+        if decision == "smart_mention_candidate":
+            if not self._telegram_smart_mention_sender_authorized(msg):
+                return
+            smart_recent_context = self._telegram_smart_mention_recent_context(msg)
+            smart_accepted = await self._evaluate_telegram_smart_mention(
+                msg,
+                recent_context=smart_recent_context,
+            )
+            self._append_telegram_smart_mention_context(msg)
+            if not smart_accepted:
+                return
+        elif decision != "process":
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
-        await self._ensure_forum_commands(update.message)
+        else:
+            self._append_telegram_smart_mention_context(msg)
+        await self._ensure_forum_commands(msg)
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
         event = self._apply_telegram_group_observe_attribution(event)
+        if smart_accepted:
+            event = self._apply_telegram_smart_mention_context_prompt(event, smart_recent_context)
         self._enqueue_text_event(event)
 
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5086,7 +5327,7 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
-        if not self._should_process_message(msg, is_command=True):
+        if self._telegram_group_trigger_decision(msg, is_command=True) != "process":
             return
         await self._ensure_forum_commands(msg)
 
@@ -5100,7 +5341,7 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg:
             return
-        if not self._should_process_message(msg):
+        if self._telegram_group_trigger_decision(msg) != "process":
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.LOCATION, update_id=update.update_id)
             return
@@ -5271,6 +5512,12 @@ class TelegramAdapter(BasePlatformAdapter):
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = self._merge_caption(existing.text, event.text)
+            if event.channel_prompt and event.channel_prompt not in (existing.channel_prompt or ""):
+                existing.channel_prompt = (
+                    f"{existing.channel_prompt}\n\n{event.channel_prompt}"
+                    if existing.channel_prompt
+                    else event.channel_prompt
+                )
 
         prior_task = self._pending_photo_batch_tasks.get(batch_key)
         if prior_task and not prior_task.done():
@@ -5282,9 +5529,24 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming media messages, downloading images to local cache."""
         if not update.message:
             return
-        if not self._should_process_message(update.message):
-            if self._should_observe_unmentioned_group_message(update.message):
-                _m = update.message
+        msg = update.message
+        decision = self._telegram_group_trigger_decision(msg)
+        smart_recent_context: list[dict[str, Any]] = []
+        smart_accepted = False
+        if decision == "smart_mention_candidate":
+            if not self._telegram_smart_mention_sender_authorized(msg):
+                return
+            smart_recent_context = self._telegram_smart_mention_recent_context(msg)
+            smart_accepted = await self._evaluate_telegram_smart_mention(
+                msg,
+                recent_context=smart_recent_context,
+            )
+            self._append_telegram_smart_mention_context(msg)
+            if not smart_accepted:
+                return
+        elif decision != "process":
+            if self._should_observe_unmentioned_group_message(msg):
+                _m = msg
                 if _m.sticker:
                     _observe_type = MessageType.STICKER
                 elif _m.photo:
@@ -5299,8 +5561,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     _observe_type = MessageType.DOCUMENT
                 self._observe_unmentioned_group_message(_m, _observe_type, update_id=update.update_id)
             return
-
-        msg = update.message
+        else:
+            self._append_telegram_smart_mention_context(msg)
         
         # Determine media type
         if msg.sticker:
@@ -5328,12 +5590,16 @@ class TelegramAdapter(BasePlatformAdapter):
         if msg.sticker:
             await self._handle_sticker(msg, event)
             event = self._apply_telegram_group_observe_attribution(event)
+            if smart_accepted:
+                event = self._apply_telegram_smart_mention_context_prompt(event, smart_recent_context)
             await self.handle_message(event)
             return
 
         # Apply observe attribution after caption is set; sticker is handled above
         # because _handle_sticker overwrites event.text with its vision description.
         event = self._apply_telegram_group_observe_attribution(event)
+        if smart_accepted:
+            event = self._apply_telegram_smart_mention_context_prompt(event, smart_recent_context)
 
         # Download photo to local image cache so the vision tool can access it
         # even after Telegram's ephemeral file URLs expire (~1 hour).
@@ -5565,6 +5831,12 @@ class TelegramAdapter(BasePlatformAdapter):
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = self._merge_caption(existing.text, event.text)
+            if event.channel_prompt and event.channel_prompt not in (existing.channel_prompt or ""):
+                existing.channel_prompt = (
+                    f"{existing.channel_prompt}\n\n{event.channel_prompt}"
+                    if existing.channel_prompt
+                    else event.channel_prompt
+                )
 
         prior_task = self._media_group_tasks.get(media_group_id)
         if prior_task:

@@ -7,7 +7,7 @@ sidebar_position: 3
 Hermes uses two kinds of model slots:
 
 - **Main model** — what the agent thinks with. Every user message, every tool-call loop, every streamed response goes through this model.
-- **Auxiliary models** — smaller side-jobs the agent offloads. Context compression, vision (image analysis), web-page summarization, approval scoring, MCP tool routing, session-title generation, and skill search. Each has its own slot and can be overridden independently.
+- **Auxiliary models** — smaller side-jobs the agent offloads. Context compression, vision (image analysis), web-page summarization, approval scoring, Telegram smart mention routing, MCP tool routing, session-title generation, and skill search. Each has its own slot and can be overridden independently.
 
 This page covers configuring both from the dashboard. If you prefer config files or the CLI, jump to [Alternative methods](#alternative-methods) at the bottom.
 
@@ -49,7 +49,7 @@ Pick a model, hit **Switch**, and Hermes writes it to `~/.hermes/config.yaml` un
 
 ## Setting auxiliary models
 
-Click **Show auxiliary** to reveal the eight task slots:
+Click **Show auxiliary** to reveal the task slots:
 
 ![Auxiliary panel expanded](/img/docs/dashboard-models/auxiliary-expanded.png)
 
@@ -63,6 +63,7 @@ Every auxiliary task defaults to `auto` — meaning Hermes uses your main model 
 | **Vision** | When your main model lacks vision support. Point it at `google/gemini-2.5-flash` or `gpt-4o-mini`. |
 | **Compression** | When you're burning reasoning tokens on Opus/M2.7 just to summarize context. A fast chat model does the job at 1/50th the cost. |
 | **Approval** | For `approval_mode: smart` — a fast/cheap model (haiku, flash, gpt-5-mini) decides whether to auto-approve low-risk commands. Expensive models here are waste. |
+| **Smart Mention** | For Telegram group smart mention routing — a small local or flash model decides whether an unmentioned group message is actually addressed to Hermes. |
 | **Web Extract** | When you use `web_extract` heavily. Same logic as compression — summarization doesn't need reasoning. |
 | **Skills Hub** | `hermes skills search` uses this. Usually fine at `auto`. |
 | **MCP** | MCP tool routing. Usually fine at `auto`. |
@@ -84,7 +85,7 @@ Every model card on the page has a **Use as** dropdown. This is the fast path �
 The dropdown has:
 
 - **Main model** — same as clicking Change on the main row.
-- **All auxiliary tasks** — assigns this model to all 8 aux slots at once. Useful when you just want every side-job on a cheap flash model.
+- **All auxiliary tasks** — assigns this model to all auxiliary slots at once. Useful when you just want every side-job on a cheap flash model.
 - **Individual task options** — Vision, Web Extract, Compression, etc. The currently-assigned model for each task is marked `current`.
 
 Cards are badged with `main` or `aux · <task>` when they're currently assigned to something — so you can see at a glance which of your historical models are wired in where.

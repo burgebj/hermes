@@ -356,6 +356,7 @@ export const af: Translations = {
       tts: "Teks-na-Spraak",
       stt: "Spraak-na-Teks",
       logging: "Aantekening",
+      telegram: "Telegram",
       discord: "Discord",
       auxiliary: "Hulpmiddels",
     },
