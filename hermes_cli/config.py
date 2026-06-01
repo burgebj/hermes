@@ -212,7 +212,8 @@ _EXTRA_ENV_KEYS = frozenset({
     "MATRIX_RECOVERY_KEY",
     # Langfuse observability plugin — optional tuning keys + standard SDK vars.
     # Activation is via plugins.enabled (opt-in through `hermes plugins enable
-    # observability/langfuse`); credentials gate the plugin at runtime.
+    # observability/langfuse` or `hermes tools → Langfuse`); credentials gate
+    # the plugin at runtime.
     "HERMES_LANGFUSE_ENV",
     "HERMES_LANGFUSE_RELEASE",
     "HERMES_LANGFUSE_SAMPLE_RATE",
@@ -1201,7 +1202,7 @@ DEFAULT_CONFIG = {
     
     "display": {
         "compact": False,
-        "personality": "kawaii",
+        "personality": "",
         "resume_display": "full",
         # Recap tuning for /resume and startup resume. The defaults match the
         # historical hardcoded values; expose them as config so power users can
@@ -1407,7 +1408,7 @@ DEFAULT_CONFIG = {
     
     "stt": {
         "enabled": True,
-        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe)
+        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "elevenlabs" (Scribe)
         "local": {
             "model": "base",  # tiny, base, small, medium, large-v3
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
@@ -1417,6 +1418,12 @@ DEFAULT_CONFIG = {
         },
         "mistral": {
             "model": "voxtral-mini-latest",  # voxtral-mini-latest, voxtral-mini-2602
+        },
+        "elevenlabs": {
+            "model_id": "scribe_v2",  # scribe_v2, scribe_v1
+            "language_code": "",  # auto-detect by default; set to "eng", "spa", "fra", etc. to force
+            "tag_audio_events": False,
+            "diarize": False,
         },
     },
 
@@ -1881,15 +1888,6 @@ DEFAULT_CONFIG = {
         "level": "INFO",       # Minimum level for agent.log: DEBUG, INFO, WARNING
         "max_size_mb": 5,      # Max size per log file before rotation
         "backup_count": 3,     # Number of rotated backup files to keep
-        # Periodic process memory usage logging (gateway only). Emits a
-        # grep-friendly "[MEMORY] rss=...MB ..." line at the configured
-        # interval so slow leaks in the long-lived gateway are visible
-        # in agent.log / gateway.log as a time series. Ported from
-        # cline/cline#10343.
-        "memory_monitor": {
-            "enabled": True,         # Flip to false to silence the periodic line
-            "interval_seconds": 300, # Default: every 5 minutes
-        },
     },
 
     # Remotely-hosted model catalog manifest.  When enabled, the CLI fetches
@@ -1903,7 +1901,7 @@ DEFAULT_CONFIG = {
         # Disk cache TTL in hours.  Beyond this, the CLI refetches on the
         # next /model or `hermes model` invocation; network failures
         # silently fall back to the stale cache.
-        "ttl_hours": 24,
+        "ttl_hours": 1,
         # Optional per-provider override URLs for third parties that want
         # to self-host their own curation list using the same schema.
         # Example:
@@ -2151,7 +2149,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 24,
+    "_config_version": 25,
 }
 
 # =============================================================================
@@ -2736,9 +2734,10 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "ELEVENLABS_API_KEY": {
-        "description": "ElevenLabs API key for premium text-to-speech voices",
+        "description": "ElevenLabs API key for premium text-to-speech voices and Scribe transcription",
         "prompt": "ElevenLabs API key",
         "url": "https://elevenlabs.io/",
+        "tools": ["elevenlabs_tts", "voice_transcription"],
         "password": True,
         "category": "tool",
     },
@@ -4344,6 +4343,22 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                         f"{', '.join(added_aux)}"
                     )
 
+    # ── Version 24 → 25: lower model_catalog TTL 24h → 1h ──
+    # The model picker now refreshes its curated list hourly so freshly
+    # published model-catalog.json deploys reach users without a day-long
+    # stale window. Only rewrite the OLD default (24) — never clobber a
+    # value the user deliberately customized.
+    if current_ver < 25:
+        config = read_raw_config()
+        raw_mc = config.get("model_catalog")
+        if isinstance(raw_mc, dict) and raw_mc.get("ttl_hours") == 24:
+            raw_mc["ttl_hours"] = 1
+            config["model_catalog"] = raw_mc
+            save_config(config)
+            results["config_added"].append("model_catalog.ttl_hours 24→1")
+            if not quiet:
+                print("  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")
+
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")
     
@@ -5443,7 +5458,7 @@ def show_config():
     print()
     print(color("◆ Display", Colors.CYAN, Colors.BOLD))
     display = config.get('display', {})
-    print(f"  Personality:  {display.get('personality', 'kawaii')}")
+    print(f"  Personality:  {display.get('personality') or 'none'}")
     print(f"  Reasoning:    {'on' if display.get('show_reasoning', False) else 'off'}")
     print(f"  Bell:         {'on' if display.get('bell_on_complete', False) else 'off'}")
     ump = display.get('user_message_preview', {}) if isinstance(display.get('user_message_preview', {}), dict) else {}
