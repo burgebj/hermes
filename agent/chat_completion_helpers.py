@@ -191,20 +191,20 @@ def _local_provider_first_chunk_timeout(api_payload: Any, model: Any) -> float |
 
     timeout = _env_float(
         "HERMES_LOCAL_FIRST_CHUNK_TIMEOUT",
-        _env_float("HERMES_LOCAL_TTFB_TIMEOUT", 180.0),
+        _env_float("HERMES_LOCAL_TTFB_TIMEOUT", 90.0),
     )
     if timeout <= 0:
         return float("inf")
 
     est_tokens = estimate_request_context_tokens(api_payload)
     if est_tokens > 100_000:
-        return max(timeout, 900.0)
-    if est_tokens > 50_000:
         return max(timeout, 600.0)
-    if est_tokens > 25_000:
+    if est_tokens > 50_000:
         return max(timeout, 360.0)
-    if est_tokens > 10_000:
+    if est_tokens > 25_000:
         return max(timeout, 240.0)
+    if est_tokens > 10_000:
+        return max(timeout, 150.0)
     return timeout
 
 

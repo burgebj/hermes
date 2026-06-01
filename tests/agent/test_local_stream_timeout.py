@@ -144,7 +144,7 @@ class TestLocalDflashStaleTimeout:
             "qwen3.6-27b-256k",
         )
 
-        assert timeout == 180.0
+        assert timeout == 90.0
 
     def test_generic_local_first_chunk_timeout_scales_for_large_context(self, monkeypatch):
         monkeypatch.setenv("HERMES_LOCAL_FIRST_CHUNK_TIMEOUT", "120")
@@ -154,7 +154,7 @@ class TestLocalDflashStaleTimeout:
             "qwen3.6-27b-256k",
         )
 
-        assert timeout == 600.0
+        assert timeout == 360.0
 
     def test_dflash_first_chunk_timeout_marker_preserves_watchdog_metadata(self):
         err = RuntimeError("Connection error.")

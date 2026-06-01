@@ -140,12 +140,9 @@ def run_oneshot(
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
-    # Silence every stdlib logger for the duration.  AIAgent, tools, and
-    # provider adapters all log to stderr through the root logger; file
-    # handlers added by setup_logging() keep working (they're attached to
-    # the root logger's handler list, not affected by level), but no
-    # bytes reach the terminal.
-    logging.disable(logging.CRITICAL)
+    # Do not call logging.disable() here.  stdout/stderr are redirected below
+    # so terminal chatter stays hidden, while file handlers keep the provider
+    # watchdog evidence needed by automated hardening loops.
 
     # --provider without --model is ambiguous: carrying the user's configured
     # model across to a different provider is usually wrong (that provider may
