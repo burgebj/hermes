@@ -38,6 +38,7 @@ class FailoverReason(enum.Enum):
 
     # Transport
     timeout = "timeout"                  # Connection/read timeout — rebuild client + retry
+    local_first_chunk_timeout = "local_first_chunk_timeout"  # Local stream accepted request but emitted no first chunk — fail over immediately
 
     # Context / payload
     context_overflow = "context_overflow"  # Context too large — compress, not failover
@@ -531,6 +532,25 @@ def classify_api_error(
         return ClassifiedError(**defaults)
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
+
+    # The local-provider TTFB watchdog may force-close the SDK stream, which can
+    # surface as a generic APIConnectionError. Honor the marker from the
+    # watchdog so the retry loop fails over instead of rebuilding and waiting
+    # on the same wedged local path again.
+    if (
+        getattr(error, "_hermes_local_first_chunk_timeout", False)
+        or getattr(error, "_hermes_local_dflash_first_chunk_timeout", False)
+    ):
+        return _result(
+            FailoverReason.local_first_chunk_timeout,
+            retryable=False,
+            should_fallback=True,
+            error_context=(
+                getattr(error, "_hermes_local_first_chunk_meta", None)
+                or getattr(error, "_hermes_dflash_first_chunk_meta", {})
+                or {}
+            ),
+        )
 
     # Provider content-policy / safety-filter block. The provider has made a
     # deterministic refusal decision about THIS prompt — retrying unchanged

@@ -122,6 +122,179 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _is_dflash_like_model(model: Any) -> bool:
+    return "dflash" in str(model or "").lower()
+
+
+def _dflash_local_stale_timeout(api_payload: Any, model: Any) -> float | None:
+    """Return a bounded local-provider stale timeout for dflash models.
+
+    Generic local endpoints still need generous prefill behavior for large
+    self-hosted models, but dflash's failure mode is different: a request can
+    park on an open local socket forever without producing a first chunk. Keep
+    dflash bounded so the normal retry/fallback path gets a chance to run.
+    """
+    if not _is_dflash_like_model(model):
+        return None
+
+    timeout = _env_float(
+        "HERMES_DFLASH_STALE_TIMEOUT",
+        _env_float("HERMES_DFLASH_STREAM_STALE_TIMEOUT", 75.0),
+    )
+    if timeout <= 0:
+        # Preserve the stale-timeout convention that non-positive env values
+        # explicitly disable the watchdog, even for dflash.
+        return float("inf")
+
+    est_tokens = estimate_request_context_tokens(api_payload)
+    if est_tokens > 100_000:
+        return max(timeout, 300.0)
+    if est_tokens > 50_000:
+        return max(timeout, 240.0)
+    if est_tokens > 25_000:
+        return max(timeout, 150.0)
+    if est_tokens > 10_000:
+        return max(timeout, 90.0)
+    return timeout
+
+
+def _dflash_local_first_chunk_timeout(api_payload: Any, model: Any) -> float | None:
+    """Return the dflash no-first-chunk cutoff for local streaming calls.
+
+    This is intentionally separate from the post-first-chunk stale timeout.
+    Long contexts can justify longer gaps between chunks after generation has
+    started, but the 2026-05-31 dflash failure mode was an accepted local
+    request that never emitted its first stream chunk and kept decoding after
+    the client disconnected.
+    """
+    if not _is_dflash_like_model(model):
+        return None
+
+    timeout = _env_float(
+        "HERMES_DFLASH_FIRST_CHUNK_TIMEOUT",
+        _env_float("HERMES_DFLASH_TTFB_TIMEOUT", 75.0),
+    )
+    if timeout <= 0:
+        return float("inf")
+    return timeout
+
+
+def _local_provider_first_chunk_timeout(api_payload: Any, model: Any) -> float | None:
+    """Return the generic local-provider no-first-chunk cutoff.
+
+    Local backends can legitimately spend longer pre-filling than cloud
+    providers, but they still need a finite TTFB watchdog so a fallback model
+    cannot inherit an infinite wait after the primary already stalled.
+    """
+    if _is_dflash_like_model(model):
+        return _dflash_local_first_chunk_timeout(api_payload, model)
+
+    timeout = _env_float(
+        "HERMES_LOCAL_FIRST_CHUNK_TIMEOUT",
+        _env_float("HERMES_LOCAL_TTFB_TIMEOUT", 180.0),
+    )
+    if timeout <= 0:
+        return float("inf")
+
+    est_tokens = estimate_request_context_tokens(api_payload)
+    if est_tokens > 100_000:
+        return max(timeout, 900.0)
+    if est_tokens > 50_000:
+        return max(timeout, 600.0)
+    if est_tokens > 25_000:
+        return max(timeout, 360.0)
+    if est_tokens > 10_000:
+        return max(timeout, 240.0)
+    return timeout
+
+
+def _mark_local_first_chunk_timeout(
+    error: Exception,
+    *,
+    elapsed: float,
+    threshold: float,
+    model: Any,
+    context_tokens: int,
+) -> Exception:
+    """Preserve the local TTFB watchdog reason across SDK transport wrappers."""
+    meta = {
+        "elapsed": int(elapsed),
+        "threshold": int(threshold),
+        "model": str(model or "unknown"),
+        "context_tokens": int(context_tokens or 0),
+    }
+    try:
+        setattr(error, "_hermes_local_first_chunk_timeout", True)
+        setattr(error, "_hermes_local_first_chunk_meta", meta)
+        if _is_dflash_like_model(model):
+            setattr(error, "_hermes_local_dflash_first_chunk_timeout", True)
+            setattr(error, "_hermes_dflash_first_chunk_meta", meta)
+    except Exception:
+        pass
+    return error
+
+
+def _mark_dflash_first_chunk_timeout(
+    error: Exception,
+    *,
+    elapsed: float,
+    threshold: float,
+    model: Any,
+    context_tokens: int,
+) -> Exception:
+    """Backward-compatible wrapper for tests and older call sites."""
+    return _mark_local_first_chunk_timeout(
+        error,
+        elapsed=elapsed,
+        threshold=threshold,
+        model=model,
+        context_tokens=context_tokens,
+    )
+
+
+def resolve_stream_stale_timeout(agent, api_kwargs: dict) -> float:
+    """Resolve the no-chunk timeout for streaming chat completions."""
+    _cfg_stale = get_provider_stale_timeout(agent.provider, agent.model)
+    if _cfg_stale is not None:
+        _stream_stale_timeout_base = _cfg_stale
+        _uses_implicit_default = False
+    else:
+        _env_stale = os.getenv("HERMES_STREAM_STALE_TIMEOUT")
+        if _env_stale is not None:
+            _stream_stale_timeout_base = _env_float("HERMES_STREAM_STALE_TIMEOUT", 180.0)
+            _uses_implicit_default = False
+        else:
+            _stream_stale_timeout_base = 180.0
+            _uses_implicit_default = True
+
+    _est_tokens = estimate_request_context_tokens(api_kwargs)
+    if (
+        _uses_implicit_default
+        and agent.base_url
+        and is_local_endpoint(agent.base_url)
+    ):
+        _model = api_kwargs.get("model") or agent.model
+        _dflash_timeout = _dflash_local_stale_timeout(api_kwargs, _model)
+        if _dflash_timeout is not None:
+            logger.debug(
+                "Local dflash provider detected (%s) — stream stale timeout set to %.0fs",
+                agent.base_url,
+                _dflash_timeout,
+            )
+            return _dflash_timeout
+        logger.debug(
+            "Local provider detected (%s) — stale stream timeout disabled",
+            agent.base_url,
+        )
+        return float("inf")
+
+    if _est_tokens > 100_000:
+        return max(_stream_stale_timeout_base, 300.0)
+    if _est_tokens > 50_000:
+        return max(_stream_stale_timeout_base, 240.0)
+    return _stream_stale_timeout_base
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -1622,7 +1795,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             raise result["error"]
         return result["response"]
 
-    result = {"response": None, "error": None, "partial_tool_names": []}
+    result = {
+        "response": None,
+        "error": None,
+        "partial_tool_names": [],
+        "local_first_chunk_timeout": None,
+    }
     request_client_holder = {"client": None, "diag": None, "owner_tid": None}
     request_client_lock = threading.Lock()
 
@@ -2287,31 +2465,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         finally:
             _close_request_client_once("stream_request_complete")
 
-    # Provider-configured stale timeout takes priority over env default.
-    _cfg_stale = get_provider_stale_timeout(agent.provider, agent.model)
-    if _cfg_stale is not None:
-        _stream_stale_timeout_base = _cfg_stale
-    else:
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
-    # Local providers (Ollama, oMLX, llama-cpp) can take 300+ seconds
-    # for prefill on large contexts.  Disable the stale detector unless
-    # the user explicitly set HERMES_STREAM_STALE_TIMEOUT.
-    if _stream_stale_timeout_base == 180.0 and agent.base_url and is_local_endpoint(agent.base_url):
-        _stream_stale_timeout = float("inf")
-        logger.debug("Local provider detected (%s) — stale stream timeout disabled", agent.base_url)
-    else:
-        # Scale the stale timeout for large contexts: slow models (like Opus)
-        # can legitimately think for minutes before producing the first token
-        # when the context is large.  Without this, the stale detector kills
-        # healthy connections during the model's thinking phase, producing
-        # spurious RemoteProtocolError ("peer closed connection").
-        _est_tokens = estimate_request_context_tokens(api_kwargs)
-        if _est_tokens > 100_000:
-            _stream_stale_timeout = max(_stream_stale_timeout_base, 300.0)
-        elif _est_tokens > 50_000:
-            _stream_stale_timeout = max(_stream_stale_timeout_base, 240.0)
-        else:
-            _stream_stale_timeout = _stream_stale_timeout_base
+    _stream_stale_timeout = resolve_stream_stale_timeout(agent, api_kwargs)
+    _local_first_chunk_timeout = None
+    _local_first_chunk_model = api_kwargs.get("model") or agent.model
+    if agent.base_url and is_local_endpoint(agent.base_url):
+        _local_first_chunk_timeout = _local_provider_first_chunk_timeout(
+            api_kwargs,
+            _local_first_chunk_model,
+        )
 
     t = threading.Thread(target=_call, daemon=True)
     t.start()
@@ -2335,6 +2496,72 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             agent._touch_activity(
                 f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
             )
+
+        # Local providers have a distinct no-first-chunk failure mode: the HTTP
+        # request is accepted but the server never emits the first SSE chunk.
+        # Do not inherit the larger long-context stale timeout for this phase;
+        # once any chunk arrives, the normal stale detector below takes over.
+        if _local_first_chunk_timeout is not None and not first_chunk_seen["yes"]:
+            _first_elapsed = time.time() - last_chunk_time["t"]
+            if _first_elapsed > _local_first_chunk_timeout:
+                _est_ctx = estimate_request_context_tokens(api_kwargs)
+                _is_dflash_first_chunk = _is_dflash_like_model(_local_first_chunk_model)
+                _local_label = (
+                    "local dflash"
+                    if _is_dflash_first_chunk
+                    else f"local {_local_first_chunk_model or 'model'}"
+                )
+                logger.warning(
+                    "%s stream produced no first chunk for %.0fs "
+                    "(threshold %.0fs). model=%s context=~%s tokens. "
+                    "Killing connection.",
+                    _local_label.capitalize(),
+                    _first_elapsed,
+                    _local_first_chunk_timeout,
+                    api_kwargs.get("model", "unknown"),
+                    f"{_est_ctx:,}",
+                )
+                agent._buffer_status(
+                    f"⚠️ No first stream chunk from {_local_label} for "
+                    f"{int(_first_elapsed)}s "
+                    f"(context: ~{_est_ctx:,} tokens). Switching fallback..."
+                )
+                result["local_first_chunk_timeout"] = {
+                    "elapsed": _first_elapsed,
+                    "threshold": _local_first_chunk_timeout,
+                    "model": _local_first_chunk_model,
+                    "context_tokens": _est_ctx,
+                }
+                try:
+                    _close_request_client_once("local_first_chunk_kill")
+                except Exception:
+                    pass
+                try:
+                    agent._replace_primary_openai_client(
+                        reason="local_first_chunk_pool_cleanup"
+                    )
+                except Exception:
+                    pass
+                t.join(timeout=_env_float("HERMES_STREAM_ABORT_JOIN_TIMEOUT", 2.0))
+                if result["error"] is None and result["response"] is None:
+                    result["error"] = _mark_local_first_chunk_timeout(
+                        TimeoutError(
+                            f"{_local_label.capitalize()} stream produced no first chunk after "
+                            f"{int(_first_elapsed)}s "
+                            f"(threshold: {int(_local_first_chunk_timeout)}s)"
+                        ),
+                        elapsed=_first_elapsed,
+                        threshold=_local_first_chunk_timeout,
+                        model=_local_first_chunk_model,
+                        context_tokens=_est_ctx,
+                    )
+                    break
+                if result["error"] is not None or result["response"] is not None:
+                    break
+                last_chunk_time["t"] = time.time()
+                agent._touch_activity(
+                    f"{_local_label} first-chunk timeout after {int(_first_elapsed)}s"
+                )
 
         # Detect stale streams: connections kept alive by SSE pings
         # but delivering no real chunks.  Kill the client so the
@@ -2382,6 +2609,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 pass
             raise InterruptedError("Agent interrupted during streaming API call")
     if result["error"] is not None:
+        _first_chunk_meta = result.get("local_first_chunk_timeout")
+        if _first_chunk_meta:
+            result["error"] = _mark_local_first_chunk_timeout(
+                result["error"],
+                elapsed=float(_first_chunk_meta.get("elapsed") or 0.0),
+                threshold=float(_first_chunk_meta.get("threshold") or 0.0),
+                model=_first_chunk_meta.get("model"),
+                context_tokens=int(_first_chunk_meta.get("context_tokens") or 0),
+            )
         if deltas_were_sent["yes"]:
             # Streaming failed AFTER some tokens were already delivered to
             # the platform.  Re-raising would let the outer retry loop make

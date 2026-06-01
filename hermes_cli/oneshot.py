@@ -364,7 +364,10 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    return agent.chat(prompt) or ""
+    result = agent.run_conversation(prompt)
+    if result.get("failed") or (result.get("error") and not result.get("final_response")):
+        raise RuntimeError(result.get("error") or "agent failed without final response")
+    return result.get("final_response") or ""
 
 
 def _oneshot_clarify_callback(question: str, choices=None) -> str:
