@@ -2373,7 +2373,7 @@ def terminal_tool(
         logger.error("terminal_tool exception:\n%s", tb_str)
         # Sanitize traceback: strip absolute paths and truncate to avoid
         # leaking sensitive local variables or long stack traces to LLM context.
-        tb_str = re.sub(r'/(?:[\w.-]+/)+[\w.-]+', '<path>', tb_str)
+        tb_str = re.sub(r'(?:/(?:home|Users|opt|var|tmp|etc|usr|root|srv|proc|sys|dev|mnt|media|run|boot|lib|bin|sbin|snap|nix|private))(?:/[\w.-]+)+', '<path>', tb_str)
         tb_str = re.sub(r'[A-Za-z]:\\(?:[\w.-]+\\)+[\w.-]+', '<path>', tb_str)
         if len(tb_str) > 2000:
             tb_str = tb_str[:2000] + "\n... (truncated)"
