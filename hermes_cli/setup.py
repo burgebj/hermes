@@ -2077,7 +2077,7 @@ def setup_gateway(config: dict):
 
     if not selected:
         print_info("No platforms selected. Run 'hermes setup gateway' later to configure.")
-        return
+        return False
 
     for idx in selected:
         _configure_platform(platforms[idx])
@@ -2097,6 +2097,10 @@ def setup_gateway(config: dict):
     any_messaging = any(
         _is_progress(_platform_status(p)) for p in _all_platforms()
     )
+    if not any_messaging:
+        print_warning("No messaging platform was configured.")
+        return False
+
     if any_messaging:
         print()
         print_info("━" * 50)
@@ -2286,6 +2290,7 @@ def setup_gateway(config: dict):
                 print_info("   hermes gateway              # Run in foreground")
 
         print_info("━" * 50)
+        return True
 
 
 # =============================================================================
@@ -2911,10 +2916,13 @@ def run_setup_wizard(args):
                         Colors.MAGENTA,
                     )
                 )
-                func(config)
+                completed = func(config)
                 save_config(config)
                 print()
-                print_success(f"{label} configuration complete!")
+                if completed is False:
+                    print_warning(f"{label} configuration was not completed.")
+                else:
+                    print_success(f"{label} configuration complete!")
                 return
 
         print_error(f"Unknown setup section: {section}")

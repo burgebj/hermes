@@ -1453,4 +1453,3 @@ def test_apply_provider_selection_does_not_prompt_or_post_setup(monkeypatch):
     config = {}
     tools_config.apply_provider_selection("tts", "Microsoft Edge TTS", config)
     assert config["tts"]["provider"] == "edge"
-

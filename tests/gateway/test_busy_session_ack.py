@@ -120,6 +120,123 @@ class TestBusySessionAck:
         running_agent.interrupt.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_canon_delivery_intent_queue_overrides_default_interrupt(self):
+        """Canon queued sends should wait behind the active turn without interrupting."""
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        adapter = _make_adapter()
+        event = _make_event(text="queue this")
+        event.raw_message = {
+            "message": {
+                "metadata": {
+                    "deliveryIntent": "queue",
+                    "inboundDisposition": "queued",
+                }
+            }
+        }
+        sk = build_session_key(event.source)
+
+        running_agent = MagicMock()
+        runner._busy_input_mode = "interrupt"
+        runner._running_agents[sk] = running_agent
+        runner.adapters[event.source.platform] = adapter
+
+        result = await GatewayRunner._handle_active_session_busy_message(runner, event, sk)
+
+        assert result is True
+        assert adapter._pending_messages[sk] is event
+        running_agent.interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_canon_delivery_intent_interrupt_overrides_queue_mode(self):
+        """Canon Send Now should interrupt and prioritize that prompt over queued work."""
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        adapter = _make_adapter()
+        event = _make_event(text="send now")
+        event.raw_message = {"message": {"metadata": {"deliveryIntent": "interrupt"}}}
+        sk = build_session_key(event.source)
+        adapter._pending_messages[sk] = _make_event(text="older queued")
+
+        running_agent = MagicMock()
+        runner._busy_input_mode = "queue"
+        runner._running_agents[sk] = running_agent
+        runner.adapters[event.source.platform] = adapter
+
+        result = await GatewayRunner._handle_active_session_busy_message(runner, event, sk)
+
+        assert result is True
+        assert adapter._pending_messages[sk] is event
+        running_agent.interrupt.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_canon_runtime_interrupt_preserves_queued_prompt(self):
+        """Canon Stop should interrupt the active turn without dropping queued prompts."""
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        adapter = _make_adapter()
+        event = _make_event(text="")
+        sk = build_session_key(event.source)
+        queued = _make_event(text="run this after stop")
+        adapter._pending_messages[sk] = queued
+        runner._pending_messages[sk] = "runner queued marker"
+        runner.adapters[event.source.platform] = adapter
+        runner._running_agents[sk] = MagicMock()
+        runner._invalidate_session_run_generation = MagicMock()
+        runner._release_running_agent_state = MagicMock()
+        adapter.interrupt_session_activity = AsyncMock()
+        adapter.get_pending_message = MagicMock(
+            side_effect=lambda key: adapter._pending_messages.pop(key, None)
+        )
+
+        result = await GatewayRunner._handle_runtime_control_signal(
+            runner,
+            event,
+            sk,
+            "interrupt",
+        )
+
+        assert result is True
+        assert adapter._pending_messages[sk] is queued
+        assert runner._pending_messages[sk] == "runner queued marker"
+        adapter.get_pending_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_canon_stop_and_drop_clears_queued_prompt(self):
+        """Canon Stop & Clear Queue should still discard queued prompts."""
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        adapter = _make_adapter()
+        event = _make_event(text="")
+        sk = build_session_key(event.source)
+        adapter._pending_messages[sk] = _make_event(text="drop this")
+        runner._queued_events = {sk: [_make_event(text="overflow")]}
+        runner.adapters[event.source.platform] = adapter
+        runner._running_agents[sk] = MagicMock()
+        runner._invalidate_session_run_generation = MagicMock()
+        runner._release_running_agent_state = MagicMock()
+        adapter.interrupt_session_activity = AsyncMock()
+        adapter.get_pending_message = MagicMock(
+            side_effect=lambda key: adapter._pending_messages.pop(key, None)
+        )
+
+        result = await GatewayRunner._handle_runtime_control_signal(
+            runner,
+            event,
+            sk,
+            "stop_and_drop",
+        )
+
+        assert result is True
+        assert sk not in adapter._pending_messages
+        assert sk not in runner._queued_events
+        adapter.get_pending_message.assert_called_once_with(sk)
+
+    @pytest.mark.asyncio
     async def test_sends_ack_when_agent_running(self):
         """First message during busy session should get a status ack."""
         runner, sentinel = _make_runner()

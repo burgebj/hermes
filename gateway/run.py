@@ -2822,6 +2822,52 @@ class GatewayRunner:
             depth += 1
         return depth
 
+    def _remove_queued_message(self, conversation_id: str, message_id: str) -> int:
+        """Remove queued Canon events by conversation/message id."""
+        removed = 0
+        if not conversation_id or not message_id:
+            return removed
+        for adapter in getattr(self, "adapters", {}).values():
+            pending_slot = getattr(adapter, "_pending_messages", None)
+            if isinstance(pending_slot, dict):
+                for key, pending_event in list(pending_slot.items()):
+                    if (
+                        getattr(getattr(pending_event, "source", None), "chat_id", None) == conversation_id
+                        and getattr(pending_event, "message_id", None) == message_id
+                    ):
+                        pending_slot.pop(key, None)
+                        removed += 1
+        queued_events = getattr(self, "_queued_events", None)
+        if isinstance(queued_events, dict):
+            for key, overflow in list(queued_events.items()):
+                kept = [
+                    event for event in overflow
+                    if not (
+                        getattr(getattr(event, "source", None), "chat_id", None) == conversation_id
+                        and getattr(event, "message_id", None) == message_id
+                    )
+                ]
+                removed += len(overflow) - len(kept)
+                if kept:
+                    queued_events[key] = kept
+                else:
+                    queued_events.pop(key, None)
+        return removed
+
+    @staticmethod
+    def _canon_delivery_intent(event: "MessageEvent") -> Optional[str]:
+        raw = getattr(event, "raw_message", None)
+        if not isinstance(raw, dict):
+            return None
+        message = raw.get("message")
+        if not isinstance(message, dict):
+            return None
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        intent = metadata.get("deliveryIntent")
+        return intent if intent in {"queue", "interrupt"} else None
+
     @staticmethod
     def _is_goal_continuation_event(event_or_text: Any) -> bool:
         """Return True for synthetic /goal continuation turns.
@@ -3280,6 +3326,33 @@ class GatewayRunner:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
+    async def _notify_adapter_message_accepted(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        *,
+        phase: str = "active",
+    ) -> None:
+        """Notify an adapter after gateway auth/skip gates accept an inbound event."""
+        if not event or getattr(event, "internal", False):
+            return
+        source = getattr(event, "source", None)
+        platform = getattr(source, "platform", None)
+        if platform is None:
+            return
+        adapter = self.adapters.get(platform)
+        if adapter is None:
+            return
+        hook = getattr(adapter, "on_gateway_message_accepted", None)
+        if not callable(hook):
+            return
+        try:
+            result = hook(event, session_key, phase=phase)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Adapter accepted-message hook failed", exc_info=True)
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -3331,11 +3404,18 @@ class GatewayRunner:
             return False  # let default path handle it
 
         running_agent = self._running_agents.get(session_key)
+        canon_delivery_intent = self._canon_delivery_intent(event)
 
         effective_mode = self._busy_input_mode
+        if canon_delivery_intent == "queue":
+            effective_mode = "queue"
+        elif canon_delivery_intent == "interrupt":
+            effective_mode = "interrupt"
+
         busy_text_mode = getattr(self, "_busy_text_mode", "queue")
         if (
-            event.message_type == MessageType.TEXT
+            canon_delivery_intent is None
+            and event.message_type == MessageType.TEXT
             and busy_text_mode == "queue"
             and effective_mode != "steer"
         ):
@@ -3382,18 +3462,32 @@ class GatewayRunner:
             if not steered:
                 # Fall back to queue (merge into pending messages, no interrupt)
                 effective_mode = "queue"
+            else:
+                await self._notify_adapter_message_accepted(event, session_key, phase="steer")
 
         # Store the message so it's processed as the next turn after the
         # current run finishes (or is interrupted).  Skip this for a
         # successful steer — the text already landed inside the run and
         # must NOT also be replayed as a next-turn user message.
         if not steered:
-            merge_pending_message_event(
-                adapter._pending_messages,
-                session_key,
-                event,
-                merge_text=event.message_type == MessageType.TEXT,
-            )
+            if canon_delivery_intent == "queue":
+                self._enqueue_fifo(session_key, event, adapter)
+            elif canon_delivery_intent == "interrupt":
+                adapter._pending_messages[session_key] = event
+            else:
+                merge_pending_message_event(
+                    adapter._pending_messages,
+                    session_key,
+                    event,
+                    merge_text=event.message_type == MessageType.TEXT,
+                )
+
+            queue_changed = getattr(adapter, "_on_runtime_queue_changed", None)
+            if callable(queue_changed):
+                try:
+                    await queue_changed(session_key)
+                except Exception:
+                    logger.debug("Runtime queue-change hook failed", exc_info=True)
 
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
@@ -3528,6 +3622,51 @@ class GatewayRunner:
             logger.debug("Failed to send busy-ack: %s", e)
 
         return True
+
+    async def _handle_runtime_control_signal(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        signal: str,
+    ) -> bool:
+        """Handle trusted platform runtime controls without routing them as user text."""
+        source = event.source
+        adapter = self.adapters.get(source.platform) if source else None
+        if not source or not session_key:
+            return False
+
+        if signal in {"interrupt", "stop_and_drop"}:
+            if signal == "stop_and_drop":
+                if adapter is not None and hasattr(adapter, "_pending_messages"):
+                    adapter._pending_messages.pop(session_key, None)
+                queued_events = getattr(self, "_queued_events", None)
+                if isinstance(queued_events, dict):
+                    queued_events.pop(session_key, None)
+            await self._interrupt_and_clear_session(
+                session_key,
+                source,
+                interrupt_reason=_INTERRUPT_REASON_STOP,
+                invalidation_reason=f"canon_{signal}",
+                discard_pending=signal == "stop_and_drop",
+            )
+            return True
+
+        if signal == "new_session":
+            if adapter is not None and hasattr(adapter, "_pending_messages"):
+                adapter._pending_messages.pop(session_key, None)
+            queued_events = getattr(self, "_queued_events", None)
+            if isinstance(queued_events, dict):
+                queued_events.pop(session_key, None)
+            await self._interrupt_and_clear_session(
+                session_key,
+                source,
+                interrupt_reason=_INTERRUPT_REASON_RESET,
+                invalidation_reason="canon_new_session",
+            )
+            await self._handle_reset_command(event)
+            return True
+
+        return False
 
     async def _drain_active_agents(self, timeout: float) -> tuple[Dict[str, Any], bool]:
         snapshot = self._snapshot_running_agents()
@@ -4273,6 +4412,17 @@ class GatewayRunner:
             )
         
         # Warn if no user allowlists are configured and open access is not opted in
+        # Discover plugins before inspecting auth env vars so plugin platforms
+        # such as Canon contribute their allowlist metadata to the startup
+        # warning and auth policy.
+        try:
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()
+        except Exception:
+            logger.warning(
+                "plugin discovery failed at gateway startup", exc_info=True,
+            )
+
         _builtin_allowed_vars = (
             "TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
             "WHATSAPP_ALLOWED_USERS", "SLACK_ALLOWED_USERS",
@@ -4336,20 +4486,6 @@ class GatewayRunner:
                 "or configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id)."
             )
         
-        # Discover Python plugins before shell hooks so plugin block
-        # decisions take precedence in tie cases.  The CLI startup path
-        # does this via an explicit call in hermes_cli/main.py; the
-        # gateway lazily imports run_agent inside per-request handlers,
-        # so the discover_plugins() side-effect in model_tools.py is NOT
-        # guaranteed to have run by the time we reach this point.
-        try:
-            from hermes_cli.plugins import discover_plugins
-            discover_plugins()
-        except Exception:
-            logger.warning(
-                "plugin discovery failed at gateway startup", exc_info=True,
-            )
-
         # Register declarative shell hooks from cli-config.yaml.  Gateway
         # has no TTY, so consent has to come from one of the three opt-in
         # channels (--accept-hooks on launch, HERMES_ACCEPT_HOOKS env var,
@@ -4450,6 +4586,14 @@ class GatewayRunner:
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
             adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
             adapter._busy_text_mode = self._busy_text_mode
+            if hasattr(adapter, "set_runtime_control_handler"):
+                adapter.set_runtime_control_handler(self._handle_runtime_control_signal)
+            if hasattr(adapter, "set_queue_depth_provider"):
+                adapter.set_queue_depth_provider(
+                    lambda session_key, _adapter=adapter: self._queue_depth(session_key, adapter=_adapter)
+                )
+            if hasattr(adapter, "set_queued_message_delete_handler"):
+                adapter.set_queued_message_delete_handler(self._remove_queued_message)
             
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
@@ -6167,6 +6311,14 @@ class GatewayRunner:
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
                     adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
                     adapter._busy_text_mode = self._busy_text_mode
+                    if hasattr(adapter, "set_runtime_control_handler"):
+                        adapter.set_runtime_control_handler(self._handle_runtime_control_signal)
+                    if hasattr(adapter, "set_queue_depth_provider"):
+                        adapter.set_queue_depth_provider(
+                            lambda session_key, _adapter=adapter: self._queue_depth(session_key, adapter=_adapter)
+                        )
+                    if hasattr(adapter, "set_queued_message_delete_handler"):
+                        adapter.set_queued_message_delete_handler(self._remove_queued_message)
 
                     success = await self._connect_adapter_with_timeout(adapter, platform)
                     if success:
@@ -6876,6 +7028,14 @@ class GatewayRunner:
                 Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
                 Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
             }.get(source.platform, "")
+            if not chat_allowlist_env:
+                try:
+                    from gateway.platform_registry import platform_registry
+                    entry = platform_registry.get(source.platform.value)
+                    if entry and entry.group_allowed_chats_env:
+                        chat_allowlist_env = entry.group_allowed_chats_env
+                except Exception:
+                    pass
             if chat_allowlist_env:
                 raw_chat_allowlist = os.getenv(chat_allowlist_env, "").strip()
                 if raw_chat_allowlist:
@@ -6951,6 +7111,10 @@ class GatewayRunner:
                         platform_env_map[source.platform] = entry.allowed_users_env
                     if entry.allow_all_env:
                         platform_allow_all_map[source.platform] = entry.allow_all_env
+                    if entry.group_allowed_users_env:
+                        platform_group_user_env_map[source.platform] = entry.group_allowed_users_env
+                    if entry.group_allowed_chats_env:
+                        platform_group_chat_env_map[source.platform] = entry.group_allowed_chats_env
             except Exception:
                 pass
 
@@ -6973,7 +7137,7 @@ class GatewayRunner:
         platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()
         group_user_allowlist = ""
         group_chat_allowlist = ""
-        if source.chat_type in {"group", "forum"}:
+        if source.chat_type in {"group", "forum", "channel"}:
             group_user_allowlist = os.getenv(platform_group_user_env_map.get(source.platform, ""), "").strip()
             group_chat_allowlist = os.getenv(platform_group_chat_env_map.get(source.platform, ""), "").strip()
         global_allowlist = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
@@ -6994,7 +7158,7 @@ class GatewayRunner:
         # Telegram can optionally authorize group traffic by chat ID.
         # Keep this separate from TELEGRAM_GROUP_ALLOWED_USERS, which gates
         # the sender user ID for group/forum messages.
-        if group_chat_allowlist and source.chat_type in {"group", "forum"} and source.chat_id:
+        if group_chat_allowlist and source.chat_type in {"group", "forum", "channel"} and source.chat_id:
             allowed_group_ids = {
                 chat_id.strip() for chat_id in group_chat_allowlist.split(",") if chat_id.strip()
             }
@@ -7138,6 +7302,25 @@ class GatewayRunner:
                 ),
                 Platform.QQBOT: ("QQ_GROUP_ALLOWED_USERS",),
             }
+            if platform not in platform_env_map:
+                try:
+                    from gateway.platform_registry import platform_registry
+                    entry = platform_registry.get(platform.value)
+                    if entry:
+                        if entry.allowed_users_env:
+                            platform_env_map[platform] = entry.allowed_users_env
+                        group_envs = tuple(
+                            env
+                            for env in (
+                                entry.group_allowed_users_env,
+                                entry.group_allowed_chats_env,
+                            )
+                            if env
+                        )
+                        if group_envs:
+                            platform_group_env_map[platform] = group_envs
+                except Exception:
+                    pass
             if os.getenv(platform_env_map.get(platform, ""), "").strip():
                 return "ignore"
             for env_key in platform_group_env_map.get(platform, ()):
@@ -7296,6 +7479,9 @@ class GatewayRunner:
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        if not is_internal:
+            await self._notify_adapter_message_accepted(event, _quick_key, phase="active")
+
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -16148,6 +16334,7 @@ class GatewayRunner:
         interrupt_reason: str,
         invalidation_reason: str,
         release_running_state: bool = True,
+        discard_pending: bool = True,
     ) -> None:
         """Interrupt the current run and clear queued session state consistently."""
         if not session_key:
@@ -16159,9 +16346,10 @@ class GatewayRunner:
         adapter = self.adapters.get(source.platform)
         if adapter and hasattr(adapter, "interrupt_session_activity"):
             await adapter.interrupt_session_activity(session_key, source.chat_id)
-        if adapter and hasattr(adapter, "get_pending_message"):
-            adapter.get_pending_message(session_key)  # consume and discard
-        self._pending_messages.pop(session_key, None)
+        if discard_pending:
+            if adapter and hasattr(adapter, "get_pending_message"):
+                adapter.get_pending_message(session_key)  # consume and discard
+            self._pending_messages.pop(session_key, None)
         if release_running_state:
             self._release_running_agent_state(session_key)
 
@@ -16469,12 +16657,16 @@ class GatewayRunner:
                 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                 _adapter = self.adapters.get(source.platform)
                 if _adapter:
+                    _platform_value = getattr(source.platform, "value", source.platform)
+                    _is_canon = _platform_value == "canon"
                     _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
                     _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
                     _buffer_only = False
                     if source.platform == Platform.MATRIX:
                         _effective_cursor = ""
                         _buffer_only = True
+                    if _is_canon:
+                        _effective_cursor = ""
                     # Fresh-final applies to Telegram only — other
                     # platforms either edit in place cheaply (Discord,
                     # Slack) or don't have the timestamp-on-edit
@@ -16493,11 +16685,15 @@ class GatewayRunner:
                         transport=_scfg.transport or "edit",
                         chat_type=getattr(source, "chat_type", "") or "",
                     )
+                    _stream_metadata = dict(_thread_metadata) if isinstance(_thread_metadata, dict) else _thread_metadata
+                    if _is_canon:
+                        _stream_metadata = dict(_stream_metadata or {})
+                        _stream_metadata["canon_streaming_preview"] = True
                     _stream_consumer = GatewayStreamConsumer(
                         adapter=_adapter,
                         chat_id=source.chat_id,
                         config=_consumer_cfg,
-                        metadata=_thread_metadata,
+                        metadata=_stream_metadata,
                         initial_reply_to_id=event_message_id,
                     )
             except Exception as _sc_err:
@@ -17421,6 +17617,8 @@ class GatewayRunner:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                     _adapter = self.adapters.get(source.platform)
                     if _adapter:
+                        _platform_value = getattr(source.platform, "value", source.platform)
+                        _is_canon = _platform_value == "canon"
                         # Platforms that don't support editing sent messages
                         # (e.g. QQ, WeChat) should skip streaming entirely —
                         # without edit support, the consumer sends a partial
@@ -17437,6 +17635,8 @@ class GatewayRunner:
                         if source.platform == Platform.MATRIX:
                             _effective_cursor = ""
                             _buffer_only = True
+                        if _is_canon:
+                            _effective_cursor = ""
                         # Fresh-final applies to Telegram only — other
                         # platforms either edit in place cheaply or don't
                         # have the edit-timestamp-stays-stale problem.
@@ -17455,11 +17655,15 @@ class GatewayRunner:
                             transport=_scfg.transport or "edit",
                             chat_type=getattr(source, "chat_type", "") or "",
                         )
+                        _stream_metadata = dict(_status_thread_metadata) if isinstance(_status_thread_metadata, dict) else _status_thread_metadata
+                        if _is_canon:
+                            _stream_metadata = dict(_stream_metadata or {})
+                            _stream_metadata["canon_streaming_preview"] = True
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata=_status_thread_metadata,
+                            metadata=_stream_metadata,
                             on_new_message=(
                                 (lambda: progress_queue.put(("__reset__",)))
                                 if progress_queue is not None
@@ -18755,6 +18959,11 @@ class GatewayRunner:
                         return result
                     next_message_id = self._reply_anchor_for_event(pending_event)
                     next_channel_prompt = getattr(pending_event, "channel_prompt", None)
+                    await self._notify_adapter_message_accepted(
+                        pending_event,
+                        session_key,
+                        phase="queued_turn",
+                    )
 
                 # Restart typing indicator so the user sees activity while
                 # the follow-up turn runs.  The outer _process_message_background
