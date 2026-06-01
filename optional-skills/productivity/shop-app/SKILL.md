@@ -7,6 +7,9 @@ license: MIT
 platforms: [linux, macos, windows]
 prerequisites:
   commands: [curl]
+required_environment_variables:
+  - ACCESS_TOKEN
+  - REFRESH_TOKEN
 metadata:
   hermes:
     tags: [Shopping, E-commerce, Shop.app, Products, Orders, Returns]

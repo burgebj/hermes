@@ -4,6 +4,11 @@ description: Use when a Hermes Kanban worker wants to run Codex CLI as an isolat
 version: 1.0.0
 author: Hermes Agent
 license: MIT
+required_environment_variables:
+  - name: OPENAI_API_KEY
+    prompt: "OpenAI API key"
+    required_for: "Codex API auth fallback"
+    optional: true
 metadata:
   hermes:
     tags: [kanban, codex, worktrees, autonomous-agents, prediction-market-bot]

@@ -8,6 +8,8 @@ platforms: [linux, macos, windows]
 prerequisites:
   env_vars: [LINEAR_API_KEY]
   commands: [curl]
+required_environment_variables:
+  - LINEAR_API_KEY
 metadata:
   hermes:
     tags: [Linear, Project Management, Issues, GraphQL, API, Productivity]

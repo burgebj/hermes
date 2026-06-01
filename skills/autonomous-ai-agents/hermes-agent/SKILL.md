@@ -901,7 +901,7 @@ hermes-agent/
 └── website/              # Docusaurus docs site
 ```
 
-Config: `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys).
+Config: `~/.hermes/config.yaml` (settings), secrets via Bitwarden Secrets Manager (preferred) or `~/.hermes/.env`.
 
 ### Adding a Tool (3 files)
 
