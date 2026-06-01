@@ -18,6 +18,18 @@ def _load_package_data():
     return tool["setuptools"]["package-data"]
 
 
+def _exact_pins(specs):
+    pins = {}
+    for spec in specs:
+        requirement = spec.split(";", 1)[0].strip()
+        if "==" not in requirement:
+            continue
+        package, version = requirement.split("==", 1)
+        package = package.split("[", 1)[0].lower().replace("_", "-")
+        pins[package] = version
+    return pins
+
+
 def test_matrix_extra_not_in_all():
     """The [matrix] extra pulls `mautrix[encryption]` -> `python-olm`,
     which has Linux-only wheels and no native build path on Windows or
@@ -86,6 +98,33 @@ def test_lazy_installable_extras_excluded_from_all():
             f"Remove it from [all] in pyproject.toml — it lazy-installs "
             f"at first use. Found in [all]: {offending}"
         )
+
+
+def test_pyproject_aiohttp_pins_match_lazy_slack_pin():
+    """Avoid update/lazy-install churn from conflicting aiohttp pins."""
+    from tools.lazy_deps import LAZY_DEPS
+
+    optional_dependencies = _load_optional_dependencies()
+    lazy_aiohttp = _exact_pins(LAZY_DEPS["platform.slack"])["aiohttp"]
+
+    pyproject_aiohttp_pins = {
+        extra: pins["aiohttp"]
+        for extra, specs in optional_dependencies.items()
+        if "aiohttp" in (pins := _exact_pins(specs))
+    }
+
+    assert pyproject_aiohttp_pins, "expected at least one pyproject extra to pin aiohttp"
+    mismatches = {
+        extra: pin
+        for extra, pin in pyproject_aiohttp_pins.items()
+        if pin != lazy_aiohttp
+    }
+    assert not mismatches, (
+        "pyproject.toml aiohttp pins must match "
+        "LAZY_DEPS['platform.slack'] to avoid hermes update downgrading "
+        "aiohttp before Slack's lazy refresh upgrades it again. "
+        f"lazy aiohttp=={lazy_aiohttp}; mismatched extras: {mismatches}"
+    )
 
 
 def test_messaging_extra_includes_qrcode_for_weixin_setup():
