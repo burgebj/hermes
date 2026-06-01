@@ -233,6 +233,18 @@ class TestGatewayConfigRoundtrip:
         restored = GatewayConfig.from_dict({"always_log_local": "false"})
         assert restored.always_log_local is False
 
+    def test_startup_notification_defaults_to_false(self):
+        config = GatewayConfig.from_dict({})
+
+        assert config.gateway_startup_notification is False
+
+    def test_roundtrip_preserves_startup_notification_flag(self):
+        config = GatewayConfig(gateway_startup_notification=True)
+
+        restored = GatewayConfig.from_dict(config.to_dict())
+
+        assert restored.gateway_startup_notification is True
+
     def test_get_notice_delivery_defaults_to_public(self):
         config = GatewayConfig(
             platforms={Platform.SLACK: PlatformConfig(enabled=True, token="***")}
@@ -296,6 +308,31 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.thread_sessions_per_user is True
+
+    def test_bridges_gateway_startup_notification_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("gateway_startup_notification: true\n", encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.gateway_startup_notification is True
+
+    def test_gateway_startup_notification_env_overrides_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("gateway_startup_notification: false\n", encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("GATEWAY_STARTUP_NOTIFICATION", "true")
+
+        config = load_gateway_config()
+
+        assert config.gateway_startup_notification is True
 
     def test_thread_sessions_per_user_defaults_to_false(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"

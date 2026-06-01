@@ -520,6 +520,12 @@ session_reset:
 # explicitly want one shared "room brain" per group/channel.
 group_sessions_per_user: true
 
+# Send the home-channel "Gateway online" notification after ordinary gateway
+# cold starts too (Docker/systemd/reboot), not only after /restart. Disabled by
+# default to avoid noisy boot pings; enable for operator back-channels where an
+# explicit up-and-running signal is useful.
+# gateway_startup_notification: false
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming
 # ─────────────────────────────────────────────────────────────────────────────
