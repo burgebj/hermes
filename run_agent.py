@@ -1053,9 +1053,9 @@ class AIAgent:
              ``_compute_non_stream_stale_timeout``.
 
         Returns ``(timeout_seconds, uses_implicit_default)`` so the caller can
-        preserve legacy behaviors that only apply when the user has *not*
-        explicitly configured a stale timeout, such as auto-disabling the
-        detector for local endpoints.
+        apply behaviors that only make sense when the user has *not* explicitly
+        configured a stale timeout, such as using local-backend defaults for
+        loopback endpoints.
         """
         cfg = get_provider_stale_timeout(self.provider, self.model)
         if cfg is not None:
