@@ -99,12 +99,61 @@ class MattermostAdapter(BasePlatformAdapter):
         # Dedup cache (prevent reprocessing)
         self._dedup = MessageDeduplicator()
 
+        # Diagnostics for the most recent POST failure.  Used to distinguish
+        # broken thread roots (safe to final-fallback flat) from transient/API
+        # failures (do not duplicate or flatten blindly).
+        self._last_post_status: Optional[int] = None
+        self._last_post_error: str = ""
+
     def _metadata_thread_id(self, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
         """Return a Mattermost thread root from gateway send metadata."""
         if not isinstance(metadata, dict):
             return None
         thread_id = metadata.get("thread_id")
         return str(thread_id) if thread_id else None
+
+    def _metadata_allows_flat_fallback(self, metadata: Optional[Dict[str, Any]]) -> bool:
+        """Return True for notify-worthy user-visible sends."""
+        return isinstance(metadata, dict) and metadata.get("notify") is True
+
+    def _last_post_failure_is_broken_thread_root(self) -> bool:
+        """Return True when the last POST failure looks like an invalid root_id."""
+        status = self._last_post_status
+        body = (self._last_post_error or "").lower()
+        if status is None and not body:
+            # Direct unit-test mocks of _api_post do not populate HTTP
+            # diagnostics.  Treat unknown mocked failure as eligible while
+            # production HTTP/network failures below remain constrained.
+            return True
+        if status not in {400, 404}:
+            return False
+        if not body:
+            return True
+        return (
+            "root_id" in body
+            or "root post" in body
+            or ("thread" in body and ("not found" in body or "invalid" in body))
+            or ("post" in body and ("not found" in body or "invalid" in body))
+        )
+
+    def _metadata_allows_flat_fallback_for_last_failure(
+        self,
+        metadata: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Notify-worthy replies may fall back flat only for broken-thread failures."""
+        return (
+            self._metadata_allows_flat_fallback(metadata)
+            and self._last_post_failure_is_broken_thread_root()
+        )
+
+    @staticmethod
+    def _with_thread_failure_warning(message: str) -> str:
+        body = str(message or "").strip()
+        warning = (
+            "⚠️ **Mattermost thread delivery failed** — posting this final "
+            "reply in the channel instead so it does not get lost."
+        )
+        return f"{warning}\n\n{body}" if body else warning
 
     async def _thread_root_for_send(
         self,
@@ -117,14 +166,37 @@ class MattermostAdapter(BasePlatformAdapter):
             return None
         return await self._resolve_root_id(str(thread_root))
 
-    async def _post_preserving_thread(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _post_preserving_thread(
+        self,
+        payload: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """POST a Mattermost payload without silently losing thread context."""
         data = await self._api_post("posts", payload)
-        if (not data or "id" not in data) and payload.get("root_id"):
-            logger.error(
-                "Mattermost: threaded post failed for root_id=%s; refusing flat channel fallback",
-                payload.get("root_id"),
+        if data and "id" in data:
+            return data
+        root_id = payload.get("root_id")
+        if not root_id:
+            return data
+
+        if self._metadata_allows_flat_fallback_for_last_failure(metadata):
+            flat_payload = dict(payload)
+            flat_payload.pop("root_id", None)
+            flat_payload["message"] = self._with_thread_failure_warning(
+                flat_payload.get("message", "")
             )
+            flat_data = await self._api_post("posts", flat_payload)
+            if flat_data and "id" in flat_data:
+                logger.warning(
+                    "Mattermost: threaded final post failed for root_id=%s; posted flat fallback",
+                    root_id,
+                )
+                return flat_data
+
+        logger.error(
+            "Mattermost: threaded post failed for root_id=%s; refusing flat channel fallback",
+            root_id,
+        )
         return data
 
     # ------------------------------------------------------------------
@@ -158,6 +230,8 @@ class MattermostAdapter(BasePlatformAdapter):
         """POST /api/v4/{path} with JSON body."""
         import aiohttp
         url = f"{self._base_url}/api/v4/{path.lstrip('/')}"
+        self._last_post_status = None
+        self._last_post_error = ""
         try:
             async with self._session.post(
                 url, headers=self._headers(), json=payload,
@@ -165,10 +239,14 @@ class MattermostAdapter(BasePlatformAdapter):
             ) as resp:
                 if resp.status >= 400:
                     body = await resp.text()
+                    self._last_post_status = int(resp.status)
+                    self._last_post_error = body[:1000]
                     logger.error("MM API POST %s → %s: %s", path, resp.status, body[:200])
                     return {}
                 return await resp.json()
         except aiohttp.ClientError as exc:
+            self._last_post_status = None
+            self._last_post_error = str(exc)[:1000]
             logger.error("MM API POST %s network error: %s", path, exc)
             return {}
 
@@ -320,7 +398,7 @@ class MattermostAdapter(BasePlatformAdapter):
             if resolved_root:
                 payload["root_id"] = resolved_root
 
-            data = await self._post_preserving_thread(payload)
+            data = await self._post_preserving_thread(payload, metadata)
             if not data or "id" not in data:
                 return SendResult(success=False, error="Failed to create post")
             last_id = data["id"]
@@ -502,7 +580,7 @@ class MattermostAdapter(BasePlatformAdapter):
         if resolved_root:
             payload["root_id"] = resolved_root
 
-        data = await self._post_preserving_thread(payload)
+        data = await self._post_preserving_thread(payload, metadata)
         if not data or "id" not in data:
             return SendResult(success=False, error="Failed to post with file")
         return SendResult(success=True, message_id=data["id"])
@@ -543,7 +621,7 @@ class MattermostAdapter(BasePlatformAdapter):
         if resolved_root:
             payload["root_id"] = resolved_root
 
-        data = await self._post_preserving_thread(payload)
+        data = await self._post_preserving_thread(payload, metadata)
         if not data or "id" not in data:
             return SendResult(success=False, error="Failed to post with file")
         return SendResult(success=True, message_id=data["id"])
@@ -634,7 +712,7 @@ class MattermostAdapter(BasePlatformAdapter):
                     "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
                     len(file_ids), chunk_idx + 1, len(chunks),
                 )
-                data = await self._post_preserving_thread(payload)
+                data = await self._post_preserving_thread(payload, metadata)
                 if not data or "id" not in data:
                     logger.warning("Mattermost: multi-image post failed, falling back")
                     await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
