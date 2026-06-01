@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import agent.anthropic_adapter as anthropic_adapter
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.anthropic_adapter import (
     _is_azure_anthropic_endpoint,
@@ -20,6 +21,7 @@ from agent.anthropic_adapter import (
     build_anthropic_kwargs,
     convert_messages_to_anthropic,
     convert_tools_to_anthropic,
+    exchange_anthropic_wif_for_access_token,
     is_claude_code_token_valid,
     normalize_model_name,
     read_claude_code_credentials,
@@ -93,9 +95,9 @@ class TestBuildAnthropicClient:
 
     def test_api_key_uses_api_key(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
-            build_anthropic_client("sk-ant-api03-something")
+            build_anthropic_client("sk-ant-api03-test-key")
             kwargs = mock_sdk.Anthropic.call_args[1]
-            assert kwargs["api_key"] == "sk-ant-api03-something"
+            assert kwargs["api_key"] == "sk-ant-api03-test-key"
             assert "auth_token" not in kwargs
             # API key auth should still get common betas
             betas = kwargs["default_headers"]["anthropic-beta"]
@@ -103,6 +105,18 @@ class TestBuildAnthropicClient:
             assert "context-1m-2025-08-07" not in betas
             assert "oauth-2025-04-20" not in betas  # OAuth-only beta NOT present
             assert "claude-code-20250219" not in betas  # OAuth-only beta NOT present
+
+    def test_force_bearer_auth_uses_auth_token_for_opaque_wif_token(self):
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("opaque-wif-token", force_bearer_auth=True)
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["auth_token"] == "opaque-wif-token"
+            assert "api_key" not in kwargs
+            betas = kwargs["default_headers"]["anthropic-beta"]
+            assert "oauth-2025-04-20" in betas
+            assert "claude-code-20250219" in betas
+            assert "context-1m-2025-08-07" not in betas
+            assert "fine-grained-tool-streaming-2025-05-14" not in betas
 
     def test_custom_base_url(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
@@ -397,6 +411,96 @@ class TestRefreshOauthToken:
 
         with patch("urllib.request.urlopen", side_effect=Exception("network error")):
             assert _refresh_oauth_token(creds) is None
+
+
+class TestAnthropicWifExchangeCaching:
+    def test_reuses_cached_access_token_for_same_assertion(self, tmp_path, monkeypatch):
+        anthropic_adapter._WIF_ACCESS_TOKEN_CACHE.clear()
+        token_file = tmp_path / "oidc.jwt"
+        token_file.write_text("jwt-assertion", encoding="utf-8")
+
+        config = {
+            "federation_rule_id": "fdrl_test123",
+            "organization_id": "org_test456",
+            "service_account_id": "svac_test789",
+            "identity_token_file": str(token_file),
+            "api_base_url": "https://api.anthropic.com",
+        }
+
+        monkeypatch.setattr("agent.anthropic_adapter._get_claude_code_version", lambda: "2.1.74")
+
+        calls = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "access_token": "cached-wif-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }).encode()
+
+        def _fake_urlopen(req, timeout=0):
+            calls.append((req.full_url, timeout))
+            return _Resp()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            first = exchange_anthropic_wif_for_access_token(config)
+            second = exchange_anthropic_wif_for_access_token(config)
+
+        assert first["access_token"] == "cached-wif-token"
+        assert second["access_token"] == "cached-wif-token"
+        assert len(calls) == 1
+
+    def test_reuses_persisted_wif_exchange_cache_across_processes(self, monkeypatch, tmp_path):
+        token_file = tmp_path / "oidc.jwt"
+        token_file.write_text("gh-oidc-jwt")
+        monkeypatch.setattr("agent.anthropic_adapter.get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr("agent.anthropic_adapter._get_claude_code_version", lambda: "2.1.74")
+        anthropic_adapter._WIF_ACCESS_TOKEN_CACHE.clear()
+
+        config = {
+            "federation_rule_id": "fdrl_test123",
+            "organization_id": "org_test456",
+            "service_account_id": "svac_test789",
+            "identity_token_file": str(token_file),
+            "api_base_url": "https://api.anthropic.com",
+        }
+
+        calls = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "access_token": "persisted-wif-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }).encode()
+
+        def _fake_urlopen(req, timeout=0):
+            calls.append((req.full_url, timeout))
+            return _Resp()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            first = exchange_anthropic_wif_for_access_token(config)
+            anthropic_adapter._WIF_ACCESS_TOKEN_CACHE.clear()
+            second = exchange_anthropic_wif_for_access_token(config)
+
+        assert first["access_token"] == "persisted-wif-token"
+        assert second["access_token"] == "persisted-wif-token"
+        assert len(calls) == 1
+        assert (tmp_path / ".anthropic_wif_token_cache.json").exists()
 
 
 class TestWriteClaudeCodeCredentials:

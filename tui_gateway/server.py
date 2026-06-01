@@ -2556,6 +2556,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, session_db=No
         acp_command=runtime.get("command"),
         acp_args=runtime.get("args"),
         credential_pool=runtime.get("credential_pool"),
+        anthropic_force_bearer_auth=bool(runtime.get("anthropic_force_bearer_auth")),
         quiet_mode=True,
         # verbose_logging controls DEBUG-level agent logging; it is intentionally
         # independent of tool_progress_mode (which only controls per-tool

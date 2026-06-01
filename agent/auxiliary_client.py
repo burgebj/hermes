@@ -5132,6 +5132,7 @@ def call_llm(
         ):
             kwargs.pop("max_tokens", None)
             kwargs.pop("max_completion_tokens", None)
+            kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
                     client.chat.completions.create(**kwargs), task)
@@ -5595,6 +5596,7 @@ async def async_call_llm(
         ):
             kwargs.pop("max_tokens", None)
             kwargs.pop("max_completion_tokens", None)
+            kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
                     await client.chat.completions.create(**kwargs), task)
