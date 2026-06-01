@@ -306,6 +306,17 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         extra={"region": "global", "cn_portal_base_url": MINIMAX_OAUTH_CN_BASE,
                "cn_inference_base_url": MINIMAX_OAUTH_CN_INFERENCE},
     ),
+    "minimax-cn-oauth": ProviderConfig(
+        id="minimax-cn-oauth",
+        name="MiniMax China (OAuth \u00b7 minimaxi.com)",
+        auth_type="oauth_minimax",
+        portal_base_url=MINIMAX_OAUTH_CN_BASE,
+        inference_base_url=MINIMAX_OAUTH_CN_INFERENCE,
+        client_id=MINIMAX_OAUTH_CLIENT_ID,
+        scope=MINIMAX_OAUTH_SCOPE,
+        extra={"region": "cn", "global_portal_base_url": MINIMAX_OAUTH_GLOBAL_BASE,
+               "global_inference_base_url": MINIMAX_OAUTH_GLOBAL_INFERENCE},
+    ),
     "anthropic": ProviderConfig(
         id="anthropic",
         name="Anthropic",
