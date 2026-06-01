@@ -1346,6 +1346,11 @@ WEB_SEARCH_SCHEMA = {
                 "minimum": 1,
                 "maximum": 100,
                 "default": 5
+            },
+            "categories": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional category filter for server-side result scoping. Values depend on the configured search backend. For SearXNG: general, news, science, it, images, files, social media, map, music, videos. For Firecrawl: web, news, images, research, github, pdf. For Exa: company, people, news, code. For Brave: web, news, images, video. For Tavily: general, news, finance."
             }
         },
         "required": ["query"]
@@ -1373,7 +1378,9 @@ registry.register(
     name="web_search",
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
-    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
+    handler=lambda args, **kw: web_search_tool(
+        args.get("query", ""), limit=args.get("limit", 5), categories=args.get("categories")
+    ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
