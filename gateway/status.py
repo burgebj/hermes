@@ -770,9 +770,9 @@ def _get_takeover_marker_path() -> Path:
     return home / _TAKEOVER_MARKER_FILENAME
 
 
-def _get_planned_stop_marker_path() -> Path:
+def _get_planned_stop_marker_path(hermes_home: Optional[Path] = None) -> Path:
     """Return the path to the intentional gateway stop marker file."""
-    home = get_hermes_home()
+    home = hermes_home or get_hermes_home()
     return home / _PLANNED_STOP_MARKER_FILENAME
 
 
@@ -895,7 +895,11 @@ def clear_takeover_marker() -> None:
         pass
 
 
-def write_planned_stop_marker(target_pid: int) -> bool:
+def write_planned_stop_marker(
+    target_pid: int,
+    *,
+    hermes_home: Optional[Path] = None,
+) -> bool:
     """Record that ``target_pid`` is being stopped intentionally.
 
     The gateway exits non-zero for unexpected SIGTERM so service managers can
@@ -910,7 +914,7 @@ def write_planned_stop_marker(target_pid: int) -> bool:
             "stopper_pid": os.getpid(),
             "written_at": _utc_now_iso(),
         }
-        _write_json_file(_get_planned_stop_marker_path(), record)
+        _write_json_file(_get_planned_stop_marker_path(hermes_home), record)
         return True
     except (OSError, PermissionError):
         return False

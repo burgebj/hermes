@@ -556,6 +556,27 @@ class S6ServiceManager:
         return f"{S6_SERVICE_PREFIX}{profile}"
 
     @staticmethod
+    def _profile_name_from_service_name(name: str) -> str:
+        return (
+            name[len(S6_SERVICE_PREFIX):]
+            if name.startswith(S6_SERVICE_PREFIX)
+            else name
+        )
+
+    def _write_planned_stop_marker_for_service(self, name: str) -> None:
+        from gateway.status import get_running_pid, write_planned_stop_marker
+        from hermes_cli.profiles import get_profile_dir
+
+        profile = self._profile_name_from_service_name(name)
+        profile_home = get_profile_dir(profile)
+        pid = get_running_pid(
+            profile_home / "gateway.pid",
+            cleanup_stale=False,
+        )
+        if pid is not None:
+            write_planned_stop_marker(pid, hermes_home=profile_home)
+
+    @staticmethod
     def _render_run_script(
         profile: str,
         extra_env: dict[str, str],
@@ -742,6 +763,7 @@ class S6ServiceManager:
             GatewayNotRegisteredError: no service directory for ``name``.
             S6CommandError: s6-svc exited non-zero for any other reason.
         """
+        self._write_planned_stop_marker_for_service(name)
         self._run_svc("-d", "stop", name)
 
     def restart(self, name: str) -> None:
@@ -751,6 +773,7 @@ class S6ServiceManager:
             GatewayNotRegisteredError: no service directory for ``name``.
             S6CommandError: s6-svc exited non-zero for any other reason.
         """
+        self._write_planned_stop_marker_for_service(name)
         self._run_svc("-t", "restart", name)
 
     def is_running(self, name: str) -> bool:

@@ -223,3 +223,50 @@ class TestCleanShutdownMarker:
             asyncio.get_event_loop().run_until_complete(runner.stop(restart=True))
 
         assert marker.exists(), ".clean_shutdown marker should exist after restart-stop too"
+
+    def test_signal_shutdown_preserves_running_runtime_state(self, tmp_path, monkeypatch):
+        """Unexpected signal shutdown should keep the prior running autostart state."""
+        monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+        monkeypatch.setattr("gateway.status.get_hermes_home", lambda: tmp_path)
+
+        from gateway.run import GatewayRunner
+        from gateway.status import read_runtime_status, write_runtime_status
+
+        write_runtime_status(gateway_state="running", exit_reason=None, restart_requested=False, active_agents=0)
+
+        runner = object.__new__(GatewayRunner)
+        runner._restart_requested = False
+        runner._restart_detached = False
+        runner._restart_via_service = False
+        runner._restart_task_started = False
+        runner._preserve_running_state_on_signal_shutdown = True
+        runner._running = True
+        runner._draining = False
+        runner._stop_task = None
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._pending_approvals = {}
+        runner._background_tasks = set()
+        runner._shutdown_event = MagicMock()
+        runner._restart_drain_timeout = 5
+        runner._exit_code = None
+        runner._exit_reason = "Received SIGTERM"
+        runner.adapters = {}
+        runner.config = GatewayConfig()
+
+        with patch("gateway.run.GatewayRunner._drain_active_agents", new_callable=AsyncMock, return_value=([], False)), \
+             patch("gateway.run.GatewayRunner._finalize_shutdown_agents"), \
+             patch("gateway.status.remove_pid_file"), \
+             patch("gateway.status.release_gateway_runtime_lock"), \
+             patch("tools.process_registry.process_registry") as mock_proc_reg, \
+             patch("tools.terminal_tool.cleanup_all_environments"), \
+             patch("tools.browser_tool.cleanup_all_browsers"):
+            mock_proc_reg.kill_all = MagicMock()
+
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(runner.stop())
+
+        runtime = read_runtime_status()
+        assert runtime is not None
+        assert runtime["gateway_state"] == "running"
+        assert runtime["exit_reason"] == "Received SIGTERM"

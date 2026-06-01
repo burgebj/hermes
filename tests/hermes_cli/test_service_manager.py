@@ -683,6 +683,68 @@ def test_s6_lifecycle_dispatches_to_s6_svc(
     assert flags == ["-u", "-d", "-t"]
 
 
+def test_s6_stop_writes_planned_stop_marker_for_profile_home(
+    s6_scandir,
+    fake_subprocess_run,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.service_manager import S6ServiceManager
+
+    profile_home = s6_scandir / "profiles" / "coder-home"
+    profile_home.mkdir(parents=True)
+    (s6_scandir / "gateway-coder").mkdir()
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir",
+        lambda name: profile_home,
+    )
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **kw: 4321)
+
+    captured: list[tuple[int, object]] = []
+
+    def _capture(pid: int, *, hermes_home=None):
+        captured.append((pid, hermes_home))
+        return True
+
+    monkeypatch.setattr("gateway.status.write_planned_stop_marker", _capture)
+
+    S6ServiceManager(scandir=s6_scandir).stop("gateway-coder")
+
+    assert captured == [(4321, profile_home)]
+    assert any(cmd[0] == "s6-svc" and "-d" in cmd for cmd in fake_subprocess_run)
+
+
+def test_s6_restart_skips_marker_when_gateway_not_running(
+    s6_scandir,
+    fake_subprocess_run,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.service_manager import S6ServiceManager
+
+    profile_home = s6_scandir / "profiles" / "default-home"
+    profile_home.mkdir(parents=True)
+    (s6_scandir / "gateway-default").mkdir()
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir",
+        lambda name: profile_home,
+    )
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **kw: None)
+
+    marker_calls: list[tuple[int, object]] = []
+
+    def _capture(pid: int, *, hermes_home=None):
+        marker_calls.append((pid, hermes_home))
+        return True
+
+    monkeypatch.setattr("gateway.status.write_planned_stop_marker", _capture)
+
+    S6ServiceManager(scandir=s6_scandir).restart("gateway-default")
+
+    assert marker_calls == []
+    assert any(cmd[0] == "s6-svc" and "-t" in cmd for cmd in fake_subprocess_run)
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle errors — friendly messages, not raw CalledProcessError
 # ---------------------------------------------------------------------------
