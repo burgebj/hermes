@@ -423,6 +423,18 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Job CRUD Operations
 # =============================================================================
 
+def _jobs_from_loaded_data(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        save_jobs(data)
+        logger.warning("Auto-repaired jobs.json (top-level list; wrapped in jobs object)")
+        return data
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Cron database corrupted: expected top-level object or list, got {type(data).__name__}"
+        )
+    return data.get("jobs", [])
+
+
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     ensure_dirs()
@@ -432,13 +444,13 @@ def load_jobs() -> List[Dict[str, Any]]:
     try:
         with open(JOBS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            return data.get("jobs", [])
+            return _jobs_from_loaded_data(data)
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         try:
             with open(JOBS_FILE, 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
-                jobs = data.get("jobs", [])
+                jobs = _jobs_from_loaded_data(data)
                 if jobs:
                     # Auto-repair: rewrite with proper escaping
                     save_jobs(jobs)

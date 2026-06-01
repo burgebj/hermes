@@ -1,9 +1,11 @@
 """Tests for cron/jobs.py — schedule parsing, job CRUD, and due-job detection."""
 
+import json
 import threading
 import pytest
 from datetime import datetime, timedelta, timezone
 
+import cron.jobs as cron_jobs
 from cron.jobs import (
     parse_duration,
     parse_schedule,
@@ -223,6 +225,43 @@ class TestJobCRUD:
         assert jobs[0]["prompt"] == ""
         assert jobs[0]["schedule_display"] == "every 60m"
         assert jobs[0]["state"] == "scheduled"
+
+    def test_load_jobs_repairs_bare_list_database(self, tmp_cron_dir, caplog):
+        bare_jobs = [
+            {
+                "id": "abc123deadbe",
+                "name": "Legacy list job",
+                "prompt": "run from old list shape",
+                "schedule": {"kind": "interval", "minutes": 60},
+                "enabled": True,
+            }
+        ]
+        cron_jobs.ensure_dirs()
+        cron_jobs.JOBS_FILE.write_text(json.dumps(bare_jobs), encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="cron.jobs"):
+            jobs = load_jobs()
+
+        assert jobs == bare_jobs
+        repaired = json.loads(cron_jobs.JOBS_FILE.read_text(encoding="utf-8"))
+        assert repaired["jobs"] == bare_jobs
+        assert any("Auto-repaired jobs.json" in rec.message and "top-level list" in rec.message for rec in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("payload", "type_name"),
+        [
+            ("not a job database", "str"),
+            (123, "int"),
+            (True, "bool"),
+            (None, "NoneType"),
+        ],
+    )
+    def test_load_jobs_rejects_non_dict_non_list_database(self, tmp_cron_dir, payload, type_name):
+        cron_jobs.ensure_dirs()
+        cron_jobs.JOBS_FILE.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match=f"Cron database corrupted.*{type_name}"):
+            load_jobs()
 
     def test_remove_job(self, tmp_cron_dir):
         job = create_job(prompt="Temp job", schedule="30m")
