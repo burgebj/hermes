@@ -331,6 +331,63 @@ class TestCmdUpdateBranchFallback:
             assert "API keys require manual entry" in captured.out
 
 
+class TestCmdUpdateSystemdRestartPrep:
+    def test_refreshes_installed_systemd_units_before_update_restart(self, monkeypatch):
+        """`hermes update` refreshes stale unit files before signaling gateways."""
+        from hermes_cli import main as hm
+
+        calls = []
+        monkeypatch.setattr(
+            "hermes_cli.gateway.supports_systemd_services",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway._ensure_user_systemd_env",
+            lambda: calls.append(("ensure-env", None)),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway.refresh_systemd_unit_if_needed",
+            lambda system=False: calls.append(("refresh", system)) or True,
+        )
+
+        hm._refresh_systemd_units_before_update_restart()
+
+        assert calls == [
+            ("ensure-env", None),
+            ("refresh", False),
+            ("refresh", True),
+        ]
+
+    def test_systemd_unit_refresh_is_best_effort_per_scope(self, monkeypatch):
+        """A permission error on the system unit must not skip the user unit."""
+        from hermes_cli import main as hm
+
+        calls = []
+        monkeypatch.setattr(
+            "hermes_cli.gateway.supports_systemd_services",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway._ensure_user_systemd_env",
+            lambda: None,
+        )
+
+        def fake_refresh(system=False):
+            calls.append(system)
+            if system:
+                raise PermissionError("no system unit access")
+            return True
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway.refresh_systemd_unit_if_needed",
+            fake_refresh,
+        )
+
+        hm._refresh_systemd_units_before_update_restart()
+
+        assert calls == [False, True]
+
+
 class TestCmdUpdateMigrationPrompt:
     """The config-migration prompt names what changed and skips the prompt
     entirely when only the config format version moved.
