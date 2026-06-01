@@ -543,10 +543,22 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-zulip": {
+        "description": "Zulip bot toolset - Zulip messaging via bot API (full access)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": ["zulip-history"]
+    },
+
+    "zulip-history": {
+        "description": "Zulip message history search — browse and paginate through past conversations",
+        "tools": ["zulip_search_messages"],
+        "includes": []
+    },
+
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-yuanbao"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-yuanbao", "hermes-zulip"]
     }
 }
 
