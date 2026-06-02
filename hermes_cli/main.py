@@ -6930,7 +6930,7 @@ def _desktop_macos_relaunchable_fixup(desktop_dir: Path) -> None:
 
 
 def cmd_gui(args):
-    """Build and launch the native Electron desktop GUI."""
+    """Build and launch the local Electron desktop GUI."""
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
     if not (desktop_dir / "package.json").exists():
         print(f"Desktop GUI source not found at: {desktop_dir}")
@@ -6959,8 +6959,9 @@ def cmd_gui(args):
     if source_mode or not skip_build:
         npm = shutil.which("npm")
         if not npm:
-            print("Desktop GUI requires Node.js/npm, but npm was not found on PATH.")
-            print("Install Node.js, then run:  hermes gui")
+            print("Desktop GUI requires Node.js/npm to build from this checkout, but npm was not found on PATH.")
+            print("Install Node.js, then run:  hermes desktop")
+            print("Or download Hermes Desktop from: https://hermes-agent.nousresearch.com/desktop")
             sys.exit(1)
     else:
         npm = None
@@ -6986,6 +6987,8 @@ def cmd_gui(args):
         else:
             print(f"→ Skipping desktop package build (--skip-build); using {packaged_executable}")
     else:
+        if not source_mode:
+            print("→ Building a local unpacked Electron app from this checkout (not a release installer).")
         print("→ Installing desktop workspace dependencies...")
         install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False)
         if install_result.returncode != 0:
@@ -14726,11 +14729,13 @@ Examples:
     gui_parser = subparsers.add_parser(
         "desktop",
         aliases=["gui"],
-        help="Build and launch the native desktop app",
+        help="Build and launch the local desktop app",
         description=(
-            "Launch the Hermes Electron desktop app. By default this installs "
-            "workspace Node dependencies, builds the current OS's unpacked "
-            "Electron app, then launches that packaged artifact."
+            "Launch the Hermes Electron desktop app from this checkout. By default "
+            "this installs workspace Node dependencies, builds the current OS's "
+            "unpacked Electron app with electron-builder --dir, then launches that "
+            "artifact. It does not download Hermes Desktop; use "
+            "https://hermes-agent.nousresearch.com/desktop for that."
         ),
     )
     gui_parser.add_argument(

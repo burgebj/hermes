@@ -14,7 +14,7 @@ Get Hermes Agent up and running in under two minutes with the one-line installer
 
 Prefer a native installer?
 
-- **Desktop downloads:** [GitHub Releases](https://github.com/NousResearch/hermes-agent/releases/latest)
+- **Desktop downloads:** [Hermes Desktop](https://hermes-agent.nousresearch.com/desktop)
 
 Desktop builds ship signed/notarized macOS artifacts and Windows installers with checksum files.
 
