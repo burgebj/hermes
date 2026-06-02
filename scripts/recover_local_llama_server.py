@@ -43,9 +43,18 @@ def _load_key(path: str) -> str:
         return ""
 
 
+def _management_base_url(base_url: str) -> str:
+    parsed = urllib.parse.urlparse(base_url.rstrip("/"))
+    path = parsed.path.rstrip("/")
+    if path.lower().endswith("/v1"):
+        path = path[:-3]
+    normalized = parsed._replace(path=path, params="", query="", fragment="")
+    return urllib.parse.urlunparse(normalized).rstrip("/")
+
+
 def _active_slot_ids(base_url: str, api_key: str, timeout: float) -> list[int]:
     data = _request(
-        base_url.rstrip("/") + "/slots",
+        _management_base_url(base_url) + "/slots",
         api_key=api_key,
         timeout=timeout,
     )
@@ -65,8 +74,9 @@ def _active_slot_ids(base_url: str, api_key: str, timeout: float) -> list[int]:
 
 def _cancel_slots(base_url: str, api_key: str, slot_ids: list[int], timeout: float) -> bool:
     cancelled = False
+    management_base_url = _management_base_url(base_url)
     for slot_id in slot_ids:
-        url = f"{base_url.rstrip('/')}/slots/{slot_id}?action=cancel"
+        url = f"{management_base_url}/slots/{slot_id}?action=cancel"
         try:
             _request(url, api_key=api_key, method="POST", timeout=timeout)
             cancelled = True
