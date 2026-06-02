@@ -15,6 +15,7 @@ from agent.chat_completion_helpers import (
     _dflash_local_first_chunk_timeout,
     _dflash_local_stale_timeout,
     _local_provider_first_chunk_timeout,
+    _local_provider_non_stream_stale_timeout,
     _mark_local_first_chunk_timeout,
     _mark_dflash_first_chunk_timeout,
     resolve_stream_stale_timeout,
@@ -221,6 +222,27 @@ class TestLocalDflashStaleTimeout:
         agent = self._make_agent(model="dflash")
 
         assert agent._compute_non_stream_stale_timeout({"messages": []}) == 75.0
+
+    def test_generic_local_non_stream_stale_timeout_is_finite(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / ".env").write_text("", encoding="utf-8")
+        monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+        monkeypatch.delenv("HERMES_LOCAL_NON_STREAM_STALE_TIMEOUT", raising=False)
+        monkeypatch.delenv("HERMES_LOCAL_RESPONSE_TIMEOUT", raising=False)
+
+        agent = self._make_agent(model="qwen3.6-27b-256k")
+
+        assert agent._compute_non_stream_stale_timeout({"messages": []}) == 120.0
+
+    def test_generic_local_non_stream_stale_timeout_scales(self, monkeypatch):
+        monkeypatch.setenv("HERMES_LOCAL_NON_STREAM_STALE_TIMEOUT", "120")
+
+        timeout = _local_provider_non_stream_stale_timeout(
+            self._payload_for_estimated_tokens(66_000),
+            "qwen3.6-27b-256k",
+        )
+
+        assert timeout == 360.0
 
     def test_explicit_stream_stale_timeout_still_wins_for_dflash(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

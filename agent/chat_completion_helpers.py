@@ -208,6 +208,38 @@ def _local_provider_first_chunk_timeout(api_payload: Any, model: Any) -> float |
     return timeout
 
 
+def _local_provider_non_stream_stale_timeout(api_payload: Any, model: Any) -> float:
+    """Return a finite stale timeout for local non-streaming calls.
+
+    Local non-streaming OpenAI-compatible calls are dangerous when left
+    unbounded: the server may accept the request, generate for a very long time,
+    and send no response headers until the entire completion is done. Keep the
+    default finite so fallback can run, while still scaling for large prompt
+    prefill.
+    """
+    dflash_timeout = _dflash_local_stale_timeout(api_payload, model)
+    if dflash_timeout is not None:
+        return dflash_timeout
+
+    timeout = _env_float(
+        "HERMES_LOCAL_NON_STREAM_STALE_TIMEOUT",
+        _env_float("HERMES_LOCAL_RESPONSE_TIMEOUT", 120.0),
+    )
+    if timeout <= 0:
+        return float("inf")
+
+    est_tokens = estimate_request_context_tokens(api_payload)
+    if est_tokens > 100_000:
+        return max(timeout, 600.0)
+    if est_tokens > 50_000:
+        return max(timeout, 360.0)
+    if est_tokens > 25_000:
+        return max(timeout, 240.0)
+    if est_tokens > 10_000:
+        return max(timeout, 180.0)
+    return timeout
+
+
 def _mark_local_first_chunk_timeout(
     error: Exception,
     *,
