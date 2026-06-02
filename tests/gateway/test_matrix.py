@@ -1221,12 +1221,10 @@ class TestMatrixRequirements:
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
         from gateway.platforms import matrix as matrix_mod
-        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False):
-            try:
-                import mautrix  # noqa: F401
-                assert matrix_mod.check_matrix_requirements() is True
-            except ImportError:
-                assert matrix_mod.check_matrix_requirements() is False
+        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False), \
+             patch("tools.lazy_deps.feature_missing", return_value=()), \
+             patch("tools.lazy_deps.ensure_and_bind", return_value=True):
+            assert matrix_mod.check_matrix_requirements() is True
 
     def test_check_requirements_encryption_false_no_e2ee_deps_ok(self, monkeypatch):
         """Without encryption, missing E2EE deps should not block startup."""

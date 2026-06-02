@@ -3139,7 +3139,8 @@ class MatrixAdapter(BasePlatformAdapter):
             return False
 
         requester = getattr(prompt, "requester_user_id", None)
-        if self._approval_require_sender and requester and sender != requester:
+        approval_require_sender = getattr(self, "_approval_require_sender", True)
+        if approval_require_sender and requester and sender != requester:
             logger.info(
                 "Matrix: ignoring %s reaction from %s; requester is %s",
                 prompt_label, sender, requester,
