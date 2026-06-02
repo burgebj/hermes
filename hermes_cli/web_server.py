@@ -17,6 +17,7 @@ import importlib.util
 import json
 import logging
 import os
+import urllib.parse
 import secrets
 import stat
 import subprocess
@@ -100,6 +101,9 @@ _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``hermes dashboard --tui``
 # or HERMES_DASHBOARD_TUI=1.  Set from :func:`start_server`.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
+_DASHBOARD_AUTH_PASSWORD: Optional[str] = None
+_DASHBOARD_AUTH_COOKIE = "hermes_dashboard_auth"
+_DASHBOARD_AUTH_COOKIE_VALUE = secrets.token_urlsafe(32)
 
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
@@ -161,8 +165,97 @@ def _require_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# Accepted Host header values for loopback binds. DNS rebinding attacks
-# point a victim browser at an attacker-controlled hostname (evil.test)
+def _dashboard_auth_enabled() -> bool:
+    return bool(_DASHBOARD_AUTH_PASSWORD)
+
+
+def _has_valid_dashboard_auth(request: Request) -> bool:
+    if not _dashboard_auth_enabled():
+        return True
+    cookie = request.cookies.get(_DASHBOARD_AUTH_COOKIE, "")
+    return hmac.compare_digest(cookie, _DASHBOARD_AUTH_COOKIE_VALUE)
+
+
+def _dashboard_login_html(error: bool = False) -> str:
+    error_html = """
+        <div class=\"error\">Password salah. Coba lagi.</div>
+    """ if error else ""
+    return f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Hermes Dashboard Login</title>
+  <style>
+    :root {{
+      --midground-base: #ffe6cb;
+      --background-base: #041c1c;
+      --warm-glow: rgba(255, 189, 56, 0.35);
+      --border: color-mix(in srgb, var(--midground-base) 15%, transparent);
+      --muted: color-mix(in srgb, var(--midground-base) 55%, transparent);
+      font-family: system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif;
+      color: var(--midground-base);
+      background: var(--background-base);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      min-height: 100vh; margin: 0; display: grid; place-items: center; overflow: hidden;
+      background:
+        radial-gradient(circle at 20% 20%, rgba(255, 189, 56, .18), transparent 28rem),
+        radial-gradient(circle at 80% 75%, rgba(255, 230, 203, .10), transparent 30rem),
+        var(--background-base);
+    }}
+    body::before {{
+      content: \"\"; position: fixed; inset: 0; opacity: .08; pointer-events: none;
+      background: repeating-conic-gradient(currentColor 0% 25%, transparent 0% 50%) 0 0 / 3px 3px;
+    }}
+    .card {{
+      width: min(420px, calc(100vw - 32px)); padding: 28px; border: 1px solid var(--border);
+      border-radius: 18px; background: color-mix(in srgb, var(--midground-base) 4%, var(--background-base));
+      box-shadow: 0 0 80px rgba(255,189,56,.12), inset 0 1px rgba(255,255,255,.06);
+      backdrop-filter: blur(16px);
+    }}
+    .eyebrow {{ font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; color: var(--muted); text-transform: uppercase; }}
+    h1 {{ margin: 10px 0 8px; font-size: 34px; line-height: 1; letter-spacing: -.04em; }}
+    p {{ margin: 0 0 24px; color: var(--muted); line-height: 1.55; }}
+    label {{ display:block; margin: 0 0 8px; font-size: 13px; color: var(--muted); }}
+    input {{
+      width: 100%; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--border);
+      background: rgba(255,230,203,.06); color: var(--midground-base); outline: none; font-size: 15px;
+    }}
+    input:focus {{ border-color: var(--midground-base); box-shadow: 0 0 0 3px rgba(255,230,203,.10); }}
+    button {{
+      width: 100%; margin-top: 16px; padding: 13px 14px; border: 0; border-radius: 12px;
+      background: var(--midground-base); color: var(--background-base); font-weight: 700; cursor: pointer;
+    }}
+    button:hover {{ filter: brightness(1.04); }}
+    .error {{ margin: 0 0 14px; padding: 10px 12px; border: 1px solid rgba(251,44,54,.45); border-radius: 12px; color: #ffb4b4; background: rgba(251,44,54,.10); }}
+    .foot {{ margin-top: 18px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }}
+  </style>
+</head>
+<body>
+  <main class=\"card\">
+    <div class=\"eyebrow\">Hermes Agent</div>
+    <h1>Dashboard locked</h1>
+    <p>Masukkan password/PIN dashboard untuk lanjut.</p>
+    {error_html}
+    <form method=\"post\" action=\"/login\">
+      <label for=\"password\">Password</label>
+      <input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" autofocus required />
+      <button type=\"submit\">Unlock dashboard</button>
+    </form>
+    <div class=\"foot\">Protected local dashboard · httpOnly session cookie</div>
+  </main>
+</body>
+</html>"""
+
+
+def _dashboard_auth_redirect(request: Request) -> Response:
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(status_code=401, content={"detail": "Dashboard locked"})
+    return Response(status_code=303, headers={"Location": "/login"})
+
+
 # which resolves to 127.0.0.1 after a TTL flip — bypassing same-origin
 # checks because the browser now considers evil.test and our dashboard
 # "same origin". Validating the Host header at the app layer rejects any
@@ -278,6 +371,18 @@ async def _dashboard_auth_gate(request: Request, call_next):
 
 
 @app.middleware("http")
+async def dashboard_password_auth_middleware(request: Request, call_next):
+    """Optionally require a password session for the dashboard surface."""
+    if not _dashboard_auth_enabled():
+        return await call_next(request)
+    if request.url.path == "/login":
+        return await call_next(request)
+    if not _has_valid_dashboard_auth(request):
+        return _dashboard_auth_redirect(request)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     # When the OAuth gate is active, cookie-based auth (gated_auth_middleware
@@ -293,6 +398,30 @@ async def auth_middleware(request: Request, call_next):
                 content={"detail": "Unauthorized"},
             )
     return await call_next(request)
+
+
+@app.get("/login")
+async def dashboard_login_page(error: str = ""):
+    """Hermes-styled password page for optional dashboard auth."""
+    return HTMLResponse(_dashboard_login_html(error=error == "1"))
+
+
+@app.post("/login")
+async def dashboard_login_submit(request: Request):
+    body = (await request.body()).decode("utf-8", errors="replace")
+    fields = urllib.parse.parse_qs(body, keep_blank_values=True)
+    password = fields.get("password", [""])[0]
+    if not (_DASHBOARD_AUTH_PASSWORD and hmac.compare_digest(password, _DASHBOARD_AUTH_PASSWORD)):
+        return Response(status_code=303, headers={"Location": "/login?error=1"})
+    response = Response(status_code=303, headers={"Location": "/"})
+    response.set_cookie(
+        _DASHBOARD_AUTH_COOKIE,
+        _DASHBOARD_AUTH_COOKIE_VALUE,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -7629,12 +7758,14 @@ def start_server(
     allow_public: bool = False,
     *,
     embedded_chat: bool = False,
+    auth_password: Optional[str] = None,
 ):
     """Start the web UI server."""
     import uvicorn
 
-    global _DASHBOARD_EMBEDDED_CHAT_ENABLED
+    global _DASHBOARD_EMBEDDED_CHAT_ENABLED, _DASHBOARD_AUTH_PASSWORD
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
+    _DASHBOARD_AUTH_PASSWORD = auth_password or os.environ.get("HERMES_DASHBOARD_AUTH_PASSWORD")
 
     # Phase 0: stash the auth-gate flag on app.state so middleware / SPA-token
     # injection / WS-auth paths can branch on it consistently.  Phase 3.5

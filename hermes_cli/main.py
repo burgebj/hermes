@@ -11404,6 +11404,7 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,
+        auth_password=getattr(args, "auth_password", None),
     )
 
 
@@ -14686,6 +14687,11 @@ Examples:
             "Expose the in-browser Chat tab (embedded `hermes --tui` via PTY/WebSocket). "
             "Alternatively set HERMES_DASHBOARD_TUI=1."
         ),
+    )
+    dashboard_parser.add_argument(
+        "--auth-password",
+        default=None,
+        help="Require HTTP Basic Auth for the dashboard with this password/PIN (username: hermes; or HERMES_DASHBOARD_AUTH_PASSWORD)",
     )
     dashboard_parser.add_argument(
         "--skip-build",
