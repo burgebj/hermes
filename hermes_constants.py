@@ -309,15 +309,21 @@ def get_subprocess_home() -> str | None:
 
 
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_THINKING_MODES = ("adaptive", "fixed")
 
 
-def parse_reasoning_effort(effort: str) -> dict | None:
+def parse_reasoning_effort(
+    effort: str, *, thinking_mode: str = ""
+) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
     Valid levels: "none", "minimal", "low", "medium", "high", "xhigh".
     Returns None when the input is empty or unrecognized (caller uses default).
     Returns {"enabled": False} for "none".
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
+
+    *thinking_mode* (``"adaptive"`` or ``"fixed"``) is passed through as-is
+    when valid; ignored otherwise.  Default adaptive behavior is unchanged.
     """
     if not effort or not effort.strip():
         return None
@@ -325,7 +331,11 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     if effort == "none":
         return {"enabled": False}
     if effort in VALID_REASONING_EFFORTS:
-        return {"enabled": True, "effort": effort}
+        result: dict = {"enabled": True, "effort": effort}
+        tm = str(thinking_mode or "").strip().lower()
+        if tm in VALID_THINKING_MODES:
+            result["thinking_mode"] = tm
+        return result
     return None
 
 

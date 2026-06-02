@@ -85,7 +85,10 @@ class OpenRouterProfile(ProviderProfile):
         extra_body: dict[str, Any] = {}
         if supports_reasoning:
             if reasoning_config is not None:
-                extra_body["reasoning"] = dict(reasoning_config)
+                extra_body["reasoning"] = {
+                    k: v for k, v in reasoning_config.items()
+                    if k in ("enabled", "effort")
+                }
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
 
