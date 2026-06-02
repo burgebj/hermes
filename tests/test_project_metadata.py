@@ -88,6 +88,49 @@ def test_lazy_installable_extras_excluded_from_all():
         )
 
 
+def test_lazy_dependency_specs_match_packaged_extras():
+    """Lazy install pins must not drift from matching packaged extras."""
+    from tools.lazy_deps import LAZY_DEPS
+
+    optional_dependencies = _load_optional_dependencies()
+    feature_to_extras = {
+        "provider.anthropic": ("anthropic",),
+        "provider.bedrock": ("bedrock",),
+        "provider.azure_identity": ("azure-identity",),
+        "search.exa": ("exa",),
+        "search.firecrawl": ("firecrawl",),
+        "search.parallel": ("parallel-web",),
+        "tts.edge": ("edge-tts",),
+        "tts.elevenlabs": ("tts-premium",),
+        "stt.faster_whisper": ("voice",),
+        "image.fal": ("fal",),
+        "memory.honcho": ("honcho",),
+        "memory.hindsight": ("hindsight",),
+        "platform.telegram": ("messaging",),
+        "platform.discord": ("messaging",),
+        "platform.slack": ("slack", "messaging"),
+        "platform.matrix": ("matrix",),
+        "platform.dingtalk": ("dingtalk",),
+        "platform.feishu": ("feishu",),
+        "platform.wecom_callback": ("wecom",),
+        "terminal.modal": ("modal",),
+        "terminal.daytona": ("daytona",),
+        "skill.google_workspace": ("google",),
+        "skill.youtube": ("youtube",),
+        "tool.acp": ("acp",),
+        "tool.dashboard": ("web",),
+    }
+
+    for feature, extras in feature_to_extras.items():
+        lazy_specs = set(LAZY_DEPS[feature])
+        for extra in extras:
+            extra_specs = set(optional_dependencies[extra])
+            assert lazy_specs <= extra_specs, (
+                f"{feature} lazy specs must be present in [{extra}] extra. "
+                f"Missing: {sorted(lazy_specs - extra_specs)}"
+            )
+
+
 def test_messaging_extra_includes_qrcode_for_weixin_setup():
     optional_dependencies = _load_optional_dependencies()
 
