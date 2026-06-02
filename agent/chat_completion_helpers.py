@@ -213,9 +213,9 @@ def _local_provider_non_stream_stale_timeout(api_payload: Any, model: Any) -> fl
 
     Local non-streaming OpenAI-compatible calls are dangerous when left
     unbounded: the server may accept the request, generate for a very long time,
-    and send no response headers until the entire completion is done. Keep the
-    default finite so fallback can run, while still scaling for large prompt
-    prefill.
+    and send no response headers until the entire completion is done.  Keep the
+    default finite so fallback/recovery can run, while still scaling for large
+    prompt prefill.
     """
     dflash_timeout = _dflash_local_stale_timeout(api_payload, model)
     if dflash_timeout is not None:
@@ -691,6 +691,22 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     _close_request_client_once("stale_call_kill")
             except Exception:
                 pass
+            _base_url = getattr(agent, "base_url", "") or ""
+            if _base_url and is_local_endpoint(_base_url):
+                try:
+                    from agent.local_backend_recovery import maybe_recover_local_backend
+
+                    maybe_recover_local_backend(
+                        agent,
+                        reason="local_non_stream_stale_timeout",
+                        model=api_kwargs.get("model") or agent.model,
+                        base_url=_base_url,
+                        context_tokens=_est_ctx,
+                        elapsed=_elapsed,
+                        threshold=_stale_timeout,
+                    )
+                except Exception:
+                    logger.exception("Local backend recovery hook failed")
             agent._touch_activity(
                 f"stale non-streaming call killed after {int(_elapsed)}s"
             )
@@ -2574,6 +2590,20 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     )
                 except Exception:
                     pass
+                try:
+                    from agent.local_backend_recovery import maybe_recover_local_backend
+
+                    maybe_recover_local_backend(
+                        agent,
+                        reason="local_first_chunk_timeout",
+                        model=_local_first_chunk_model,
+                        base_url=getattr(agent, "base_url", "") or "",
+                        context_tokens=_est_ctx,
+                        elapsed=_first_elapsed,
+                        threshold=_local_first_chunk_timeout,
+                    )
+                except Exception:
+                    logger.exception("Local backend recovery hook failed")
                 t.join(timeout=_env_float("HERMES_STREAM_ABORT_JOIN_TIMEOUT", 2.0))
                 if result["error"] is None and result["response"] is None:
                     result["error"] = _mark_local_first_chunk_timeout(
@@ -2623,6 +2653,29 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 agent._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
             except Exception:
                 pass
+            _base_url = getattr(agent, "base_url", "") or ""
+            if _base_url and is_local_endpoint(_base_url):
+                try:
+                    from agent.local_backend_recovery import maybe_recover_local_backend
+
+                    maybe_recover_local_backend(
+                        agent,
+                        reason="local_stream_stale_timeout",
+                        model=api_kwargs.get("model") or agent.model,
+                        base_url=_base_url,
+                        context_tokens=_est_ctx,
+                        elapsed=_stale_elapsed,
+                        threshold=_stream_stale_timeout,
+                    )
+                except Exception:
+                    logger.exception("Local backend recovery hook failed")
+            t.join(timeout=_env_float("HERMES_STREAM_ABORT_JOIN_TIMEOUT", 2.0))
+            if result["error"] is None and result["response"] is None:
+                result["error"] = TimeoutError(
+                    f"Streaming API call timed out after {int(_stale_elapsed)}s "
+                    f"with no chunks (threshold: {int(_stream_stale_timeout)}s)"
+                )
+                break
             # Reset the timer so we don't kill repeatedly while
             # the inner thread processes the closure.
             last_chunk_time["t"] = time.time()

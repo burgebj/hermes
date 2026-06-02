@@ -10,9 +10,11 @@ reasoning configuration, temperature handling, and extra_body assembly.
 """
 
 import copy
+import os
 from typing import Any, Dict
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
+from agent.model_metadata import is_local_endpoint
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
@@ -97,6 +99,25 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     if "generativelanguage.googleapis.com" not in normalized:
         return False
     return normalized.endswith("/openai")
+
+
+def _local_default_max_tokens(base_url: Any) -> int | None:
+    """Return a finite default output cap for local OpenAI-compatible endpoints."""
+    if not is_local_endpoint(str(base_url or "")):
+        return None
+
+    raw = (
+        os.getenv("HERMES_LOCAL_DEFAULT_MAX_TOKENS")
+        or os.getenv("HERMES_LOCAL_MAX_TOKENS")
+        or "8192"
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 8192
+    if value <= 0:
+        return None
+    return value
 
 
 class ChatCompletionsTransport(ProviderTransport):
@@ -292,6 +313,7 @@ class ChatCompletionsTransport(ProviderTransport):
         is_kimi = params.get("is_kimi", False)
         is_tokenhub = params.get("is_tokenhub", False)
         reasoning_config = params.get("reasoning_config")
+        local_default = _local_default_max_tokens(params.get("base_url"))
 
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
@@ -299,6 +321,11 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs.update(max_tokens_fn(max_tokens))
         elif anthropic_max_out is not None:
             api_kwargs["max_tokens"] = anthropic_max_out
+        elif local_default is not None:
+            if max_tokens_fn:
+                api_kwargs.update(max_tokens_fn(local_default))
+            else:
+                api_kwargs["max_tokens"] = local_default
 
         # Kimi: top-level reasoning_effort (unless thinking disabled)
         if is_kimi:
@@ -480,6 +507,7 @@ class ChatCompletionsTransport(ProviderTransport):
         # they front several backends with different completion-token limits
         # (e.g. opencode-go: mimo-v2.5-pro = 131072).
         profile_max = profile.get_max_tokens(model)
+        local_default = _local_default_max_tokens(params.get("base_url"))
 
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
@@ -489,6 +517,11 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs.update(max_tokens_fn(profile_max))
         elif anthropic_max is not None:
             api_kwargs["max_tokens"] = anthropic_max
+        elif local_default is not None:
+            if max_tokens_fn:
+                api_kwargs.update(max_tokens_fn(local_default))
+            else:
+                api_kwargs["max_tokens"] = local_default
 
         # Provider-specific api_kwargs extras (reasoning_effort, metadata, etc.)
         reasoning_config = params.get("reasoning_config")
