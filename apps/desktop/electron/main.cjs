@@ -26,6 +26,7 @@ const { execFileSync, spawn } = require('node:child_process')
 const { isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
+const { buildPosixUpdateArgs, chooseDesktopUpdateStrategy } = require('./update-strategy.cjs')
 const {
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -1239,16 +1240,16 @@ function resolveUpdaterBinary() {
   return fileExists(candidate) ? candidate : null
 }
 
-// applyUpdates — hand off to the installer's --update flow, then exit.
+// applyUpdates — choose the platform-safe update path.
 //
-// The desktop is a pure consumer: it does NOT git pull / pip install / rebuild
-// itself (the old open-coded git dance lived here and drifted from
-// `hermes update`). Instead we spawn the staged Hermes-Setup binary with
-// --update and quit, so it can run `hermes update` (which refuses while we
-// hold the venv shim) and rebuild the desktop with our exe already gone.
+// Windows keeps the staged Hermes-Setup handoff because the running app can hold
+// the venv shim/exe open. POSIX platforms do not have that mandatory lock, and
+// a stale staged helper can rebuild/relaunch from an old desktop build stamp;
+// macOS/Linux therefore update in-process: `hermes update` + `hermes desktop
+// --build-only`, then swap/relaunch the freshly built app bundle.
 //
 // Detection (checkUpdates / commit changelog / "N behind") stays in the UI;
-// only this apply action changed.
+// this only chooses the apply path.
 async function applyUpdates(opts = {}) {
   if (updateInFlight) {
     throw new Error('An update is already in progress.')
@@ -1257,16 +1258,11 @@ async function applyUpdates(opts = {}) {
 
   try {
     const updater = resolveUpdaterBinary()
-    if (!updater && !IS_WINDOWS) {
-      // macOS/Linux drag-install: no staged Tauri hermes-setup. Unlike Windows
-      // (where a venv-shim file lock forces the quit→hand-off→rebuild dance),
-      // there's no mandatory file locking here, so the desktop can drive the
-      // whole update itself: `hermes update` (backend) + `hermes desktop
-      // --build-only` (OS-aware GUI rebuild), then swap the running .app bundle
-      // with the freshly built one and relaunch.
+    const strategy = chooseDesktopUpdateStrategy({ isWindows: IS_WINDOWS, updater })
+    if (strategy === 'posix-in-app') {
       return await applyUpdatesPosixInApp(opts)
     }
-    if (!updater) {
+    if (strategy === 'manual') {
       // No staged updater binary — this is a CLI-installed user (they ran
       // `hermes desktop`, never the Tauri installer that self-copies
       // hermes-setup.exe into HERMES_HOME). They DO have a working `hermes`
@@ -1371,6 +1367,7 @@ function shellQuote(value) {
 // with the freshly built one and relaunch. Degrades to "backend updated,
 // restart to load the new GUI" if the swap can't be performed.
 async function applyUpdatesPosixInApp(opts = {}) {
+  void opts
   const updateRoot = resolveUpdateRoot()
   const hermes = resolveHermesCliBinary(updateRoot)
   if (!hermes) {
@@ -1388,21 +1385,20 @@ async function applyUpdatesPosixInApp(opts = {}) {
     PATH: [extraPath, process.env.PATH].filter(Boolean).join(path.delimiter)
   }
 
-  // Branch-pin so a non-main checkout doesn't get switched to main (and self-heal
-  // to main when the pinned branch no longer exists on origin).
-  let branchArgs = []
+  // Branch-pin to the same desktop update config used by checkUpdates() so the
+  // UI's "N behind" branch and the apply branch cannot diverge. This also
+  // preserves detached-head installs, where `rev-parse --abbrev-ref HEAD` would
+  // only return HEAD and a bare `hermes update` would silently default to main.
+  let updateBranch = readDesktopUpdateConfig().branch
   try {
-    const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
-    const current = (head.stdout || '').trim()
-    if (head.code === 0 && current && current !== 'HEAD') {
-      branchArgs = ['--branch', await resolveHealedBranch(updateRoot, current)]
-    }
+    updateBranch = await resolveHealedBranch(updateRoot, updateBranch)
   } catch {
-    // best effort
+    // Best effort: keep the configured/default branch if the heal probe fails.
   }
+  const updateArgs = buildPosixUpdateArgs(updateBranch)
 
   emitUpdateProgress({ stage: 'update', message: 'Updating Hermes (git + dependencies)…', percent: 10 })
-  const updated = await runStreamedUpdate(hermes, ['update', '--yes', ...branchArgs], {
+  const updated = await runStreamedUpdate(hermes, updateArgs, {
     cwd: updateRoot,
     env,
     stage: 'update'
@@ -1831,7 +1827,9 @@ async function ensureRuntime(backend) {
         stages: [],
         protocolVersion: null
       })
-    } catch {}
+    } catch {
+      // Best-effort early UI signal; missing/crashed windows should not block bootstrap.
+    }
 
     bootstrapAbortController = new AbortController()
 
@@ -1849,10 +1847,14 @@ async function ensureRuntime(backend) {
         // bootstrap and a log-write failure doesn't suppress the UI signal.
         try {
           rememberLog(`[bootstrap] ${JSON.stringify(ev)}`)
-        } catch {}
+        } catch {
+          // Desktop log failures should not suppress renderer progress events.
+        }
         try {
           broadcastBootstrapEvent(ev)
-        } catch {}
+        } catch {
+          // Renderer may have gone away mid-bootstrap; keep installer running.
+        }
       },
       writeMarker: writeBootstrapMarker
     })
@@ -3436,7 +3438,9 @@ ipcMain.handle('hermes:bootstrap:cancel', async () => {
   if (bootstrapAbortController) {
     try {
       bootstrapAbortController.abort()
-    } catch {}
+    } catch {
+      // Abort is best-effort; runner teardown handles already-finished controllers.
+    }
     return { ok: true, cancelled: true }
   }
   return { ok: false, cancelled: false }
@@ -3986,7 +3990,9 @@ app.on('before-quit', () => {
   if (bootstrapAbortController) {
     try {
       bootstrapAbortController.abort()
-    } catch {}
+    } catch {
+      // Abort is best-effort during app shutdown.
+    }
   }
 
   if (desktopLogFlushTimer) {
