@@ -10913,7 +10913,18 @@ def cmd_profile(args):
             print(f"Error: {e}")
             sys.exit(1)
 
+    elif action == "wizard":
+        from hermes_cli.profile_wizard import run_profile_wizard
+
+        run_profile_wizard(args)
+
     elif action == "create":
+        if getattr(args, "wizard", False):
+            from hermes_cli.profile_wizard import run_profile_wizard
+
+            run_profile_wizard(args)
+            return
+
         name = args.profile_name
         clone = getattr(args, "clone", False)
         clone_all = getattr(args, "clone_all", False)
@@ -14676,6 +14687,42 @@ Examples:
         help="One- or two-sentence description of what this profile is good at. "
              "Used by the kanban decomposer to route tasks based on role instead "
              "of profile name alone. Skip and add later via `hermes profile describe`.",
+    )
+
+    profile_wizard = profile_subparsers.add_parser(
+        "wizard",
+        help="Interactive keyboard-driven agent profile creation wizard",
+    )
+    profile_wizard.add_argument(
+        "profile_name",
+        nargs="?",
+        default=None,
+        help="Optional profile name to pre-fill",
+    )
+    profile_wizard.add_argument(
+        "--clone",
+        action="store_true",
+        help="Copy config.yaml, .env, and skills from active profile before customising",
+    )
+    profile_wizard.add_argument(
+        "--clone-from",
+        metavar="SOURCE",
+        help="Source profile to clone from (default: active when --clone is used)",
+    )
+    profile_wizard.add_argument(
+        "--no-alias",
+        action="store_true",
+        help="Skip wrapper script creation",
+    )
+    profile_wizard.add_argument(
+        "--no-skills",
+        action="store_true",
+        help="Create profile without bundled skill seeding",
+    )
+    profile_create.add_argument(
+        "--wizard",
+        action="store_true",
+        help="Launch the interactive keyboard-driven profile creation wizard",
     )
 
     profile_delete = profile_subparsers.add_parser("delete", help="Delete a profile")
