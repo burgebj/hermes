@@ -20,6 +20,7 @@ import {
   Activity,
   BarChart3,
   BookOpen,
+  Brain,
   Clock,
   Code,
   Cpu,
@@ -72,6 +73,7 @@ import SessionsPage from "@/pages/SessionsPage";
 import LogsPage from "@/pages/LogsPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import ModelsPage from "@/pages/ModelsPage";
+import MemoryPage from "@/pages/MemoryPage";
 import CronPage from "@/pages/CronPage";
 import ProfilesPage from "@/pages/ProfilesPage";
 import SkillsPage from "@/pages/SkillsPage";
@@ -125,6 +127,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/sessions": SessionsPage,
   "/analytics": AnalyticsPage,
+  "/memory": MemoryPage,
   "/models": ModelsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
@@ -163,6 +166,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: BarChart3,
   },
   {
+    path: "/memory",
+    labelKey: "memory",
+    label: "Memory",
+    icon: Brain,
+  },
+  {
     path: "/models",
     labelKey: "models",
     label: "Models",
@@ -191,6 +200,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   Activity,
   BarChart3,
+  Brain,
   Clock,
   Cpu,
   FileText,

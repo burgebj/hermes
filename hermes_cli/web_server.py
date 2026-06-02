@@ -55,6 +55,13 @@ from hermes_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from tools.memory_tool import (
+    MemoryStore,
+    get_memory_dir,
+    load_memory_entries,
+    memory_char_count,
+    memory_entry_id,
+)
 from utils import env_var_enabled
 
 try:
@@ -520,6 +527,14 @@ class AudioTranscriptionRequest(BaseModel):
     mime_type: Optional[str] = None
 
 
+class MemoryEntryCreate(BaseModel):
+    content: str
+
+
+class MemoryEntryUpdate(BaseModel):
+    content: str
+
+
 class ModelAssignment(BaseModel):
     """Payload for POST /api/model/set — assign a provider/model to a slot.
 
@@ -556,20 +571,6 @@ _MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
 def _audio_extension_for_mime(mime_type: str) -> str:
     normalized = (mime_type or "").split(";", 1)[0].strip().lower()
     return _AUDIO_MIME_EXTENSIONS.get(normalized, ".webm")
-
-
-class ModelAssignment(BaseModel):
-    """Payload for POST /api/model/set — assign a provider/model to a slot.
-
-    scope="main"        → writes model.provider + model.default
-    scope="auxiliary"   → writes auxiliary.<task>.provider + auxiliary.<task>.model
-    scope="auxiliary" with task=""  → applied to every auxiliary.* slot
-    scope="auxiliary" with task="__reset__"  → resets every slot to provider="auto"
-    """
-    scope: str
-    provider: str
-    model: str
-    task: str = ""
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -973,6 +974,126 @@ async def run_config_migrate():
 
 
 # ---------------------------------------------------------------------------
+# Memory helpers
+# ---------------------------------------------------------------------------
+
+
+def _memory_file_path(target: str) -> Path:
+    if target == "user":
+        return get_memory_dir() / "USER.md"
+    if target == "memory":
+        return get_memory_dir() / "MEMORY.md"
+    raise HTTPException(status_code=400, detail=f"Invalid memory target '{target}'")
+
+
+def _memory_config() -> Dict[str, Any]:
+    config = load_config()
+    memory_cfg = config.get("memory", {})
+    return memory_cfg if isinstance(memory_cfg, dict) else {}
+
+
+def _configured_memory_limits() -> tuple[int, int]:
+    memory_cfg = _memory_config()
+    defaults = DEFAULT_CONFIG.get("memory", {})
+    default_memory_limit = int(defaults.get("memory_char_limit", 2200)) if isinstance(defaults, dict) else 2200
+    default_user_limit = int(defaults.get("user_char_limit", 1375)) if isinstance(defaults, dict) else 1375
+
+    def _limit(key: str, fallback: int) -> int:
+        try:
+            value = int(memory_cfg.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+
+    return _limit("memory_char_limit", default_memory_limit), _limit("user_char_limit", default_user_limit)
+
+
+def _configured_memory_char_limit(target: str) -> int:
+    memory_limit, user_limit = _configured_memory_limits()
+    if target == "memory":
+        return memory_limit
+    if target == "user":
+        return user_limit
+    raise HTTPException(status_code=400, detail=f"Invalid memory target '{target}'")
+
+
+def _new_memory_store() -> MemoryStore:
+    memory_limit, user_limit = _configured_memory_limits()
+    return MemoryStore(memory_char_limit=memory_limit, user_char_limit=user_limit)
+
+
+def _memory_provider_info() -> tuple[str, str]:
+    memory_cfg = _memory_config()
+    provider = str(memory_cfg.get("provider", "") or "")
+    provider_label = provider or "built-in only"
+    return provider, provider_label
+
+
+def _build_memory_store_payload(target: str) -> dict:
+    entries = load_memory_entries(target)
+    path = _memory_file_path(target)
+    updated_at = None
+    if path.exists():
+        try:
+            updated_at = int(path.stat().st_mtime)
+        except OSError:
+            updated_at = None
+
+    return {
+        "path": str(path),
+        "entry_count": len(entries),
+        "char_count": memory_char_count(entries),
+        "char_limit": _configured_memory_char_limit(target),
+        "updated_at": updated_at,
+        "entries": [
+            {"id": memory_entry_id(target, content), "index": idx, "content": content}
+            for idx, content in enumerate(entries)
+        ],
+    }
+
+
+def _memory_provider_options() -> list[dict]:
+    from plugins.memory import discover_memory_providers
+
+    providers = []
+    try:
+        for name, description, configured in discover_memory_providers():
+            providers.append({
+                "name": name,
+                "description": description,
+                "configured": bool(configured),
+            })
+    except Exception:
+        _log.exception("discover_memory_providers failed")
+    return providers
+
+
+def _builtin_memory_file_sizes() -> dict:
+    files = {}
+    for fname, key in (("MEMORY.md", "memory"), ("USER.md", "user")):
+        path = get_memory_dir() / fname
+        files[key] = path.stat().st_size if path.exists() else 0
+    return files
+
+
+def _build_memory_response() -> dict:
+    provider, provider_label = _memory_provider_info()
+    return {
+        "active": provider,
+        "providers": _memory_provider_options(),
+        "builtin_files": _builtin_memory_file_sizes(),
+        "builtin_active": True,
+        "provider": provider,
+        "provider_label": provider_label,
+        "directory": str(get_memory_dir()),
+        "stores": {
+            "user": _build_memory_store_payload("user"),
+            "memory": _build_memory_store_payload("memory"),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
 #
 # Both commands are spawned as detached subprocesses so the HTTP request
@@ -1355,6 +1476,54 @@ async def get_action_status(name: str, lines: int = 200):
         "pid": pid,
         "lines": tail,
     }
+
+
+@app.get("/api/memory")
+async def get_memory():
+    return _build_memory_response()
+
+
+@app.post("/api/memory/{target}/entries")
+async def add_memory_entry(target: str, body: MemoryEntryCreate):
+    if target not in ("memory", "user"):
+        raise HTTPException(status_code=400, detail=f"Invalid memory target '{target}'")
+
+    store = _new_memory_store()
+    store.load_from_disk()
+    result = store.add(target, body.content)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Failed to add memory entry.")
+    return _build_memory_response()
+
+
+@app.put("/api/memory/{target}/entries/{entry_id}")
+async def update_memory_entry(target: str, entry_id: str, body: MemoryEntryUpdate):
+    if target not in ("memory", "user"):
+        raise HTTPException(status_code=400, detail=f"Invalid memory target '{target}'")
+
+    store = _new_memory_store()
+    store.load_from_disk()
+    result = store.replace_entry_id(target, urllib.parse.unquote(entry_id), body.content)
+    if not result.get("success"):
+        error_type = result.get("error_type")
+        status = 404 if error_type == "not_found" else 400
+        raise HTTPException(status_code=status, detail=result.get("error") or "Failed to update memory entry.")
+    return _build_memory_response()
+
+
+@app.delete("/api/memory/{target}/entries/{entry_id}")
+async def delete_memory_entry(target: str, entry_id: str):
+    if target not in ("memory", "user"):
+        raise HTTPException(status_code=400, detail=f"Invalid memory target '{target}'")
+
+    store = _new_memory_store()
+    store.load_from_disk()
+    result = store.remove_entry_id(target, urllib.parse.unquote(entry_id))
+    if not result.get("success"):
+        error_type = result.get("error_type")
+        status = 404 if error_type == "not_found" else 400
+        raise HTTPException(status_code=status, detail=result.get("error") or "Failed to delete memory entry.")
+    return _build_memory_response()
 
 
 @app.get("/api/sessions")
@@ -4990,41 +5159,6 @@ class MemoryProviderSelect(BaseModel):
 class MemoryReset(BaseModel):
     # "all" | "memory" | "user"
     target: str = "all"
-
-
-@app.get("/api/memory")
-async def get_memory_status():
-    from plugins.memory import discover_memory_providers
-
-    cfg = load_config()
-    active = ""
-    mem = cfg.get("memory")
-    if isinstance(mem, dict):
-        active = str(mem.get("provider") or "")
-
-    providers = []
-    try:
-        for name, description, configured in discover_memory_providers():
-            providers.append({
-                "name": name,
-                "description": description,
-                "configured": bool(configured),
-            })
-    except Exception:
-        _log.exception("discover_memory_providers failed")
-
-    # Built-in memory file sizes (so the UI can show what a reset would erase).
-    mem_dir = get_hermes_home() / "memories"
-    files = {}
-    for fname, key in (("MEMORY.md", "memory"), ("USER.md", "user")):
-        path = mem_dir / fname
-        files[key] = path.stat().st_size if path.exists() else 0
-
-    return {
-        "active": active,
-        "providers": providers,
-        "builtin_files": files,
-    }
 
 
 @app.put("/api/memory/provider")
