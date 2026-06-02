@@ -188,6 +188,12 @@ class _VikingClient:
         )
         return self._parse_response(resp)
 
+    def delete(self, path: str, **kwargs) -> dict:
+        resp = self._httpx.delete(
+            self._url(path), headers=self._headers(), timeout=_TIMEOUT, **kwargs
+        )
+        return self._parse_response(resp)
+
     def upload_temp_file(self, file_path: Path) -> str:
         mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         with file_path.open("rb") as f:
@@ -349,6 +355,25 @@ ADD_RESOURCE_SCHEMA = {
             },
         },
         "required": ["url"],
+    },
+}
+
+DELETE_SCHEMA = {
+    "name": "viking_delete",
+    "description": (
+        "Delete a memory, file, or directory from the OpenViking knowledge base by URI. "
+        "Use recursive=true to delete directories and their contents."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "uri": {"type": "string", "description": "viking:// URI to delete."},
+            "recursive": {
+                "type": "boolean",
+                "description": "Delete directories recursively (default: false).",
+            },
+        },
+        "required": ["uri"],
     },
 }
 
@@ -663,7 +688,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         t.start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, READ_SCHEMA, BROWSE_SCHEMA, REMEMBER_SCHEMA, ADD_RESOURCE_SCHEMA]
+        return [SEARCH_SCHEMA, READ_SCHEMA, BROWSE_SCHEMA, REMEMBER_SCHEMA, ADD_RESOURCE_SCHEMA, DELETE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if not self._client:
@@ -680,6 +705,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 return self._tool_remember(args)
             elif tool_name == "viking_add_resource":
                 return self._tool_add_resource(args)
+            elif tool_name == "viking_delete":
+                return self._tool_delete(args)
             return tool_error(f"Unknown tool: {tool_name}")
         except Exception as e:
             return tool_error(str(e))
@@ -966,6 +993,25 @@ class OpenVikingMemoryProvider(MemoryProvider):
             "status": "added",
             "root_uri": result.get("root_uri", ""),
             "message": "Resource queued for processing. Use viking_search after a moment to find it.",
+        }, ensure_ascii=False)
+
+    def _tool_delete(self, args: dict) -> str:
+        uri = args.get("uri", "")
+        if not uri:
+            return tool_error("uri is required")
+
+        params: Dict[str, Any] = {"uri": uri}
+        recursive = args.get("recursive", False)
+        if recursive:
+            params["recursive"] = "true"
+
+        resp = self._client.delete("/api/v1/fs", params=params)
+        result = self._unwrap_result(resp)
+
+        return json.dumps({
+            "status": "deleted",
+            "uri": uri,
+            "estimated_deleted_count": result.get("estimated_deleted_count", 0) if isinstance(result, dict) else 0,
         }, ensure_ascii=False)
 
 
