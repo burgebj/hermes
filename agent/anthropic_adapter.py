@@ -2050,7 +2050,7 @@ def convert_messages_to_anthropic(
     return system, result
 
 
-# Keyword arguments that belong to OpenAI's Responses/Codex API and are
+# Keyword arguments that belong to OpenAI's Responses/Codex or Chat APIs and are
 # rejected outright by ``anthropic.resources.messages.Messages.stream`` /
 # ``.create`` with a non-retryable ``TypeError`` such as:
 #   ``Messages.stream() got an unexpected keyword argument 'instructions'``
@@ -2059,7 +2059,7 @@ def convert_messages_to_anthropic(
 # Anthropic (see #31673).  Drop them defensively at every Anthropic SDK
 # boundary so a transient build-state leak becomes a logged warning rather
 # than a session-killing crash that cascades through the fallback chain.
-_FOREIGN_OPENAI_RESPONSES_KWARGS = ("instructions", "input")
+_FOREIGN_OPENAI_ONLY_KWARGS = ("instructions", "input", "parallel_tool_calls")
 
 
 def sanitize_anthropic_kwargs(
@@ -2068,7 +2068,7 @@ def sanitize_anthropic_kwargs(
     model: Optional[str] = None,
     where: str = "anthropic",
 ) -> Dict[str, Any]:
-    """Drop OpenAI-Responses-only kwargs from an Anthropic Messages payload.
+    """Drop OpenAI-only kwargs from an Anthropic Messages payload.
 
     Mutates ``kwargs`` in place and returns it for chaining.  Each dropped
     key is logged at WARNING so the leak source can still be diagnosed.
@@ -2076,10 +2076,10 @@ def sanitize_anthropic_kwargs(
     immediately before every ``messages.stream`` / ``messages.create`` call
     site (wire-stage defense) — defense in depth for #31673.
     """
-    for _foreign_key in _FOREIGN_OPENAI_RESPONSES_KWARGS:
+    for _foreign_key in _FOREIGN_OPENAI_ONLY_KWARGS:
         if _foreign_key in kwargs:
             logger.warning(
-                "%s: dropping OpenAI-Responses-only kwarg %r before "
+                "%s: dropping OpenAI-only kwarg %r before "
                 "Anthropic Messages call (model=%s)",
                 where, _foreign_key, model or kwargs.get("model"),
             )

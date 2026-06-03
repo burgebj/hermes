@@ -1983,9 +1983,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # Per-attempt diagnostic dict for the retry block to consume.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
-        # Wire-stage defense: strip OpenAI-Responses-only kwargs that may
-        # have leaked into ``api_kwargs`` (e.g. ``instructions`` after a
-        # vision_analyze aux call routed through the Codex adapter).
+        # Wire-stage defense: strip OpenAI-only kwargs that may have leaked
+        # into ``api_kwargs`` (e.g. ``instructions`` after a vision_analyze
+        # aux call routed through the Codex adapter).
         # ``Messages.stream`` rejects them with a non-retryable TypeError
         # that breaks the whole fallback chain.  See #31673.
         from agent.anthropic_adapter import sanitize_anthropic_kwargs

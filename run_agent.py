@@ -3164,8 +3164,8 @@ class AIAgent:
     def _anthropic_messages_create(self, api_kwargs: dict):
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
-        # Wire-stage defense: strip any OpenAI-Responses-only kwargs
-        # (``instructions``, ``input``) that may have leaked into
+        # Wire-stage defense: strip any OpenAI-only kwargs
+        # (``instructions``, ``input``, etc.) that may have leaked into
         # ``api_kwargs`` after an aux call ran the Codex/Responses
         # adapter — Anthropic's SDK rejects them with a non-retryable
         # TypeError that propagates through the full fallback chain.
