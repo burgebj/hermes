@@ -33,6 +33,39 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+# Self prefixes that may ride along on a model id when a user copies an
+# aggregator-style slug (``google/gemini-2.0-flash``) into config.yaml, or
+# when an upstream resolver leaves the provider prefix attached.  Google's
+# native ``models/{model}:generateContent`` endpoint expects a bare model id
+# (``gemini-2.0-flash``); a self-prefixed value produces a malformed URL like
+# ``models/google/gemini-2.0-flash:generateContent`` and a 404.  We strip only
+# prefixes that name THIS provider so genuine slash-bearing ids are untouched.
+_GEMINI_SELF_PREFIXES = ("google/", "gemini/")
+
+
+def bare_gemini_model_id(model: str) -> str:
+    """Strip a leading ``google/`` or ``gemini/`` self prefix from a model id.
+
+    Only the provider's own prefix is removed, case-insensitively.  Any other
+    slash-bearing value (or a bare id) passes through unchanged so we never
+    mangle a legitimately namespaced model name.
+
+    Examples::
+
+        >>> bare_gemini_model_id("google/gemini-2.0-flash")
+        'gemini-2.0-flash'
+        >>> bare_gemini_model_id("gemini/gemini-3-pro-preview")
+        'gemini-3-pro-preview'
+        >>> bare_gemini_model_id("gemini-2.5-flash")
+        'gemini-2.5-flash'
+    """
+    name = (model or "").strip()
+    lowered = name.lower()
+    for prefix in _GEMINI_SELF_PREFIXES:
+        if lowered.startswith(prefix):
+            return name[len(prefix):].strip() or name
+    return name
+
 
 def is_native_gemini_base_url(base_url: str) -> bool:
     """Return True when the endpoint speaks Gemini's native REST API."""
@@ -895,6 +928,7 @@ class GeminiNativeClient:
             thinking_config=thinking_config,
         )
 
+        model = bare_gemini_model_id(model)
         if stream:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 

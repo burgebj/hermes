@@ -83,8 +83,9 @@ _STRIP_VENDOR_ONLY_PROVIDERS: frozenset[str] = frozenset({
 })
 
 # Providers whose native naming is authoritative -- pass through unchanged.
+# HuggingFace ids are legitimately ``org/model`` (e.g. ``Qwen/Qwen3.5-397B``),
+# so we must NOT strip the leading segment for it.
 _AUTHORITATIVE_NATIVE_PROVIDERS: frozenset[str] = frozenset({
-    "gemini",
     "huggingface",
 })
 
@@ -103,6 +104,13 @@ _MATCHING_PREFIX_STRIP_PROVIDERS: frozenset[str] = frozenset({
     "arcee",
     "ollama-cloud",
     "custom",
+    # Native Google (Gemini) and xAI APIs take bare model ids.  A self-prefixed
+    # value like ``google/gemini-2.0-flash`` or ``xai/grok-4`` — easily pasted
+    # from an aggregator slug into config.yaml — must have the matching prefix
+    # stripped before the native call, or the request 400/404s.  HuggingFace is
+    # deliberately NOT here: its ids are legitimately ``org/model``.
+    "gemini",
+    "xai",
 })
 
 # Providers whose APIs require lowercase model IDs.  Xiaomi's

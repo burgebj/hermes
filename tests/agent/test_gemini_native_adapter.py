@@ -198,6 +198,66 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
     assert response.choices[0].message.content == "hello"
 
 
+@pytest.mark.parametrize("model_in,expected", [
+    ("google/gemini-2.0-flash", "gemini-2.0-flash"),
+    ("gemini/gemini-3-pro-preview", "gemini-3-pro-preview"),
+    ("Google/Gemini-2.5-Pro", "Gemini-2.5-Pro"),   # prefix match is case-insensitive; model casing preserved
+    ("gemini-2.5-flash", "gemini-2.5-flash"),       # bare id unchanged
+    ("models/gemini-x", "models/gemini-x"),         # non-self prefix unchanged
+    ("tunedModels/my-tune", "tunedModels/my-tune"),  # legit Gemini namespaced id unchanged
+    ("", ""),
+])
+def test_bare_gemini_model_id_strips_only_self_prefix(model_in, expected):
+    from agent.gemini_native_adapter import bare_gemini_model_id
+
+    assert bare_gemini_model_id(model_in) == expected
+
+
+def test_native_client_strips_self_prefix_from_model_url(monkeypatch):
+    """A self-prefixed model id must resolve to a bare native resource path.
+
+    Port of openclaw/openclaw#88781.  Before the fix, ``google/gemini-2.0-flash``
+    built ``models/google/gemini-2.0-flash:generateContent`` — an invalid
+    Google resource name that 404s.  The adapter now strips the matching
+    self-prefix at URL construction so the request reaches the real model.
+    """
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    recorded = {}
+
+    class DummyHTTP:
+        def post(self, url, json=None, headers=None, timeout=None):
+            recorded["url"] = url
+            return DummyResponse(
+                payload={
+                    "candidates": [
+                        {"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": 1,
+                        "candidatesTokenCount": 1,
+                        "totalTokenCount": 2,
+                    },
+                }
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+
+    client = GeminiNativeClient(api_key="AIza-test", base_url="https://generativelanguage.googleapis.com/v1beta")
+    client.chat.completions.create(
+        model="google/gemini-2.0-flash",
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+
+    assert recorded["url"] == (
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    )
+    assert "models/google/" not in recorded["url"]
+
+
 def test_native_http_error_keeps_status_and_retry_after():
     from agent.gemini_native_adapter import gemini_http_error
 
