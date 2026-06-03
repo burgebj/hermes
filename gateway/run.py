@@ -9596,9 +9596,25 @@ class GatewayRunner:
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
 
+            _raw_final_response = agent_result.get("final_response")
             response = normalize_live_gateway_response(
-                agent_result.get("final_response"),
+                _raw_final_response,
                 failed=bool(agent_result.get("failed")),
+            )
+
+            # Distinguish an INTENTIONAL silent turn from an empty-generation
+            # FAILURE. When the model emits a recognized silence marker
+            # (canonical NO_REPLY, [SILENT], etc.) on a non-failed turn,
+            # normalize_live_gateway_response() collapses it to "". That empty
+            # string must NOT be re-inflated by _normalize_empty_agent_response()
+            # below into "Processing completed but no response was generated" —
+            # doing so turns a deliberate "stay silent" decision into chat noise
+            # (root cause of #13248). Detect the suppression here so the empty
+            # normalizer is skipped for intentional silence only.
+            _intentional_silence = bool(
+                str(_raw_final_response or "").strip()
+                and not response
+                and not agent_result.get("failed")
             )
 
             # Convert the agent's internal "(empty)" sentinel into a
@@ -9648,9 +9664,13 @@ class GatewayRunner:
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
-            response = _normalize_empty_agent_response(
-                agent_result, response, history_len=len(history),
-            )
+            # Skip for intentional silence (#13248): a deliberate NO_REPLY turn
+            # already normalized to "" above and must stay empty, not be rewritten
+            # into a "no response was generated" notice.
+            if not _intentional_silence:
+                response = _normalize_empty_agent_response(
+                    agent_result, response, history_len=len(history),
+                )
             response = _sanitize_gateway_final_response(source.platform, response)
 
             # If the agent's session_id changed during compression, update

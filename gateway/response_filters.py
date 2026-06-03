@@ -3,12 +3,27 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+# Canonical, harness-emitted silence token. The agent emits this verbatim to
+# mean "this turn was processed, deliver nothing". It is a first-class control
+# token (cf. OpenClaw's SILENT_REPLY_TOKEN), NOT just a placeholder the model
+# stumbled into. Kept here as the single source of truth so prompt guidance,
+# the agent loop, and delivery suppression all agree on the same string.
+SILENT_REPLY_TOKEN = "NO_REPLY"
+
 LIVE_GATEWAY_SILENT_MARKERS = frozenset(
     {
+        # Explicit canonical silence token (and its underscore/space-folded
+        # form). Listed verbatim so the contract is self-documenting and does
+        # not depend on _canonicalize_live_gateway_response() happening to map
+        # "NO_REPLY" -> "no reply". If the canonicalizer ever changes, the
+        # canonical token must still be suppressed — that invariant is locked
+        # by tests/gateway/test_live_silent_responses.py.
+        "no reply",
+        # Placeholder markers a model may emit when it decides to stay silent
+        # but still produces visible filler instead of the canonical token.
         "[silent]",
         "silent",
         "no message",
-        "no reply",
         "no response",
         "no response generated",
         "empty",
