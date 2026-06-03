@@ -437,6 +437,17 @@ def _resolve_skill_target(skill_dir: Path, file_path: str) -> Tuple[Optional[Pat
     return target, None
 
 
+def _prune_empty_skill_subdirs(start_dir: Path, skill_dir: Path) -> None:
+    """Remove empty directories created below a skill root during rollback."""
+    current = start_dir
+    while current != skill_dir and current.exists():
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
 def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -> None:
     """
     Atomically write text content to a file.
@@ -806,7 +817,8 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name, " Create it first with action='create'.")}
 
-    target, err = _resolve_skill_target(existing["path"], file_path)
+    skill_dir = existing["path"]
+    target, err = _resolve_skill_target(skill_dir, file_path)
     if err:
         return {"success": False, "error": err}
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -824,15 +836,17 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
                 target.unlink(missing_ok=True)
             except OSError:
                 pass
+            _prune_empty_skill_subdirs(target.parent, skill_dir)
         return {"success": False, "error": f"Failed to persist file '{file_path}' to skill '{name}': {persist_err}"}
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(skill_dir)
     if scan_error:
         if original_content is not None:
             _atomic_write_text(target, original_content)
         else:
             target.unlink(missing_ok=True)
+            _prune_empty_skill_subdirs(target.parent, skill_dir)
         return {"success": False, "error": scan_error}
 
     return {

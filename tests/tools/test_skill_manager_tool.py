@@ -758,6 +758,51 @@ class TestPersistenceVerification:
         assert decoded["success"] is False
         assert "phantom-skill" in decoded["error"]
 
+    def test_patch_via_dispatcher_reports_failed_persist_and_keeps_original(self, tmp_path):
+        # Same end-to-end guard for action=patch: a write helper that silently
+        # returns without changing disk must not become success=True, and the
+        # original SKILL.md body must remain the source of truth.
+        with _skill_dir(tmp_path):
+            skill_manage(action="create", name="patch-persist", content=VALID_SKILL_CONTENT)
+            with patch("tools.skill_manager_tool._atomic_write_text", return_value=None):
+                payload = skill_manage(
+                    action="patch",
+                    name="patch-persist",
+                    old_string="Do the thing.",
+                    new_string="Do the new thing.",
+                )
+
+        decoded = json.loads(payload)
+        assert decoded["success"] is False
+        assert "patch-persist" in decoded["error"]
+        assert "persist" in decoded["error"].lower()
+        on_disk = (tmp_path / "patch-persist" / "SKILL.md").read_text()
+        assert "Do the thing." in on_disk
+        assert "Do the new thing." not in on_disk
+
+    def test_write_file_via_dispatcher_rolls_back_new_file_on_failed_persist(self, tmp_path):
+        # New supporting files create their parent directory before the atomic
+        # write. If the write never persists, rollback must remove both the
+        # phantom file and any empty directory it created so the skill tree
+        # matches its pre-write state.
+        with _skill_dir(tmp_path):
+            skill_manage(action="create", name="write-persist", content=VALID_SKILL_CONTENT)
+            with patch("tools.skill_manager_tool._atomic_write_text", return_value=None):
+                payload = skill_manage(
+                    action="write_file",
+                    name="write-persist",
+                    file_path="references/api.md",
+                    file_content="# API\nEndpoint docs.",
+                )
+
+        decoded = json.loads(payload)
+        assert decoded["success"] is False
+        assert "write-persist" in decoded["error"]
+        assert "references/api.md" in decoded["error"]
+        assert "persist" in decoded["error"].lower()
+        assert not (tmp_path / "write-persist" / "references" / "api.md").exists()
+        assert not (tmp_path / "write-persist" / "references").exists()
+
 
 # ---------------------------------------------------------------------------
 # External skills directories (skills.external_dirs) — mutations in place
