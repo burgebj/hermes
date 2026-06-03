@@ -380,16 +380,35 @@ class TestAutoVoiceReply:
     def test_empty_response_skipped(self, runner):
         assert self._call(runner, "all", MessageType.TEXT, response="") is False
 
-    def test_dedup_skips_when_agent_called_tts(self, runner):
-        messages = [{
-            "role": "assistant",
-            "tool_calls": [{
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "text_to_speech", "arguments": "{}"},
-            }],
-        }]
+    def test_dedup_skips_when_agent_called_tts_this_turn(self, runner):
+        messages = [
+            {"role": "user", "content": "read this manually"},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "text_to_speech", "arguments": "{}"},
+                }],
+            },
+        ]
         assert self._call(runner, "all", MessageType.TEXT, agent_messages=messages) is False
+
+    def test_old_tts_tool_call_does_not_suppress_new_turn(self, runner):
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_old",
+                    "type": "function",
+                    "function": {"name": "text_to_speech", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_old", "content": "{}"},
+            {"role": "user", "content": "new normal text turn"},
+            {"role": "assistant", "content": "Normal reply."},
+        ]
+        assert self._call(runner, "all", MessageType.TEXT, agent_messages=messages) is True
 
     def test_no_dedup_for_other_tools(self, runner):
         messages = [{

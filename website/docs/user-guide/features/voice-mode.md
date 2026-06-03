@@ -216,6 +216,7 @@ These work in both Telegram and Discord (DMs and text channels):
 /voice          Toggle voice mode on/off
 /voice on       Voice replies only when you send a voice message
 /voice tts      Voice replies for ALL messages
+/voice narrate  Text first, then narrate long replies as ordered voice chunks
 /voice off      Disable voice replies
 /voice status   Show current setting
 ```
@@ -227,8 +228,25 @@ These work in both Telegram and Discord (DMs and text channels):
 | `off` | `/voice off` | Text only (default) |
 | `voice_only` | `/voice on` | Speaks reply only when you send a voice message |
 | `all` | `/voice tts` | Speaks reply to every message |
+| `narration` | `/voice narrate` | Sends the text reply first, then generates and sends long-form narration chunks after text delivery |
 
-Voice mode setting is persisted across gateway restarts.
+Voice mode settings are persisted across gateway restarts. In threaded platforms such as Telegram forum topics, `/voice narrate` applies to the current topic by default; use `/voice narrate chat` to apply it to the whole chat. `/voice off` clears the same topic-level override when one exists.
+
+### Long-form narration provider selection
+
+By default, narration uses the normal `tts.provider` resolution path, so existing Edge, OpenAI, ElevenLabs, command, and plugin providers keep working. To route only long-form narration through a different provider, add an optional override:
+
+```yaml
+tts:
+  provider: edge
+  narration:
+    provider: openai
+    # model and voice are recorded as job metadata for provider-specific follow-up plumbing.
+    model: gpt-4o-mini-tts
+    voice: coral
+```
+
+Narration jobs store hashes and metadata in SQLite. Chunk text is kept only while a job is retryable; once a job completes, sent chunk text and local audio paths are redacted from the store.
 
 ### Platform Delivery
 
