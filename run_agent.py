@@ -1053,9 +1053,9 @@ class AIAgent:
              ``_compute_non_stream_stale_timeout``.
 
         Returns ``(timeout_seconds, uses_implicit_default)`` so the caller can
-        preserve legacy behaviors that only apply when the user has *not*
-        explicitly configured a stale timeout, such as auto-disabling the
-        detector for local endpoints.
+        apply behaviors that only make sense when the user has *not* explicitly
+        configured a stale timeout, such as using local-backend defaults for
+        loopback endpoints.
         """
         cfg = get_provider_stale_timeout(self.provider, self.model)
         if cfg is not None:
@@ -1078,7 +1078,11 @@ class AIAgent:
         stale_base, uses_implicit_default = self._resolved_api_call_stale_timeout_base()
         base_url = getattr(self, "_base_url", None) or self.base_url or ""
         if uses_implicit_default and base_url and is_local_endpoint(base_url):
-            return float("inf")
+            from agent.chat_completion_helpers import _local_provider_non_stream_stale_timeout
+            model = self.model
+            if isinstance(api_payload, dict):
+                model = api_payload.get("model") or model
+            return _local_provider_non_stream_stale_timeout(api_payload, model)
 
         from agent.chat_completion_helpers import estimate_request_context_tokens
         est_tokens = estimate_request_context_tokens(api_payload)
