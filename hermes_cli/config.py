@@ -1283,6 +1283,12 @@ DEFAULT_CONFIG = {
         # behavior of showing tool-call summaries inline.
         "resume_skip_tool_only": True,
         "busy_input_mode": "interrupt",  # interrupt | queue | steer
+        # Which interface bare `hermes` (and `hermes chat`) launches by default:
+        #   "cli" — the classic prompt_toolkit REPL (default, preserves prior behavior)
+        #   "tui" — the modern Ink TUI (same as passing `--tui`)
+        # Explicit flags always win over this setting: `--cli` forces the classic
+        # REPL and `--tui` (or HERMES_TUI=1) forces the TUI regardless of config.
+        "interface": "cli",
         # When true, `hermes --tui` auto-resumes the most recent human-
         # facing session on launch instead of forging a fresh one.
         # Mirrors `hermes -c` muscle memory.  Default off so existing
@@ -1345,7 +1351,27 @@ DEFAULT_CONFIG = {
         # responses and content messages are never touched.  Default 0
         # (disabled) preserves prior behavior.
         "ephemeral_system_ttl": 0,
-        "platforms": {},  # Per-platform display overrides: {"telegram": {"tool_progress": "all"}, "slack": {"tool_progress": "off"}}
+        # Per-platform display/streaming overrides. Each key is a gateway
+        # platform ("telegram", "discord", "slack", …) mapping to a dict of
+        # display settings that override the global value for that platform
+        # only. A setting left unset here falls through to the global default.
+        #
+        # Shipped defaults encode the streaming experience that works best
+        # per platform:
+        #   - Telegram has native animated draft streaming (sendMessageDraft),
+        #     which is smooth, so streaming is on by default there.
+        #   - Discord/Slack/etc. only have edit-based streaming (repeated
+        #     editMessage), which flickers and is noticeably jankier, so
+        #     streaming is off by default there.
+        # These are gap-fillers: a user who explicitly sets, e.g.,
+        # display.platforms.discord.streaming: true keeps their value
+        # (config deep-merge has user values win over defaults). The global
+        # streaming.enabled master switch still gates everything — these
+        # per-platform flags only take effect once streaming is enabled.
+        "platforms": {
+            "telegram": {"streaming": True},
+            "discord": {"streaming": False},
+        },
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
         # e.g. `model · 68% · ~/projects/hermes`. Per-platform overrides go under
@@ -2264,7 +2290,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 25,
+    "_config_version": 26,
 }
 
 # =============================================================================
@@ -3318,13 +3344,6 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Sudo password",
         "url": None,
         "password": True,
-        "category": "setting",
-    },
-    "HERMES_MAX_ITERATIONS": {
-        "description": "Maximum tool-calling iterations per conversation (default: 90)",
-        "prompt": "Max iterations",
-        "url": None,
-        "password": False,
         "category": "setting",
     },
     # HERMES_TOOL_PROGRESS and HERMES_TOOL_PROGRESS_MODE are deprecated —
@@ -5567,7 +5586,21 @@ def show_config():
     print()
     print(color("◆ Model", Colors.CYAN, Colors.BOLD))
     print(f"  Model:        {config.get('model', 'not set')}")
-    print(f"  Max turns:    {config.get('agent', {}).get('max_turns', DEFAULT_CONFIG['agent']['max_turns'])}")
+    _cfg_max_turns = config.get('agent', {}).get('max_turns', DEFAULT_CONFIG['agent']['max_turns'])
+    print(f"  Max turns:    {_cfg_max_turns}")
+    # Warn on stale HERMES_MAX_ITERATIONS ghost in .env that disagrees with
+    # config.yaml (issue #17534). Read the .env FILE directly so we catch the
+    # ghost even when the gateway bridge already overrode os.environ.
+    try:
+        _env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
+        if _env_ghost is not None and str(_env_ghost).strip() != str(_cfg_max_turns).strip():
+            print(color(
+                f"                ⚠ .env has stale HERMES_MAX_ITERATIONS={_env_ghost} "
+                f"(run 'hermes doctor --fix' to remove)",
+                Colors.YELLOW,
+            ))
+    except Exception:
+        pass
     
     # Display
     print()
