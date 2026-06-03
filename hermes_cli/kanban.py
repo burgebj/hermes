@@ -690,6 +690,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--notifier-profile", default=None,
         help="Profile gateway that owns/delivers this subscription (default: active profile)",
     )
+    p_nsub.add_argument(
+        "--trigger-agent", action="store_true",
+        help="After terminal notification delivery, schedule an internal inbound event so the destination gateway agent wakes. Default is passive notification only.",
+    )
 
     p_nlist = sub.add_parser(
         "notify-list",
@@ -2426,6 +2430,7 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
             platform=args.platform, chat_id=args.chat_id,
             thread_id=args.thread_id, user_id=args.user_id,
             notifier_profile=args.notifier_profile or _profile_author(),
+            trigger_agent=bool(getattr(args, "trigger_agent", False)),
         )
     print(f"Subscribed {args.platform}:{args.chat_id}"
           + (f":{args.thread_id}" if args.thread_id else "")
@@ -2445,8 +2450,9 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
     for s in subs:
         thr = f":{s['thread_id']}" if s.get("thread_id") else ""
         owner = f"  owner={s['notifier_profile']}" if s.get("notifier_profile") else ""
+        wake = "  trigger_agent" if s.get("trigger_agent") else ""
         print(f"  {s['task_id']:10s}  {s['platform']}:{s['chat_id']}{thr}"
-              f"  (since event {s['last_event_id']}){owner}")
+              f"  (since event {s['last_event_id']}){owner}{wake}")
     return 0
 
 

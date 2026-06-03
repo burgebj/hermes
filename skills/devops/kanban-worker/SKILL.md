@@ -165,6 +165,8 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 - `notification_sources: ['default', 'zilor-ppt']` or `"default,zilor-ppt"` restricts subscriptions to specified profiles.
 - Omitting the key keeps the default behavior (profile isolation).
 
+Kanban workers should not try to send final Discord/Telegram ACKs directly from a headless CLI worker unless the task explicitly grants a live gateway target and asks for it. Worker shells usually do not own the live platform adapter, so a direct `send_message` call can only be passive or fail with no connected targets. For final ACKs, write a clear `kanban_comment` plus `kanban_complete`/`kanban_block` summary and rely on the gateway notifier/operator fan-in. If the destination agent itself must wake, the subscription must be explicitly active (`notify-subscribe --trigger-agent`) or a live gateway `send_message(..., trigger_agent=True)` handoff must be used; passive notifications are visible messages only.
+
 ## Do NOT
 
 - Call `delegate_task` as a substitute for `kanban_create`. `delegate_task` is for short reasoning subtasks inside YOUR run; `kanban_create` is for cross-agent handoffs that outlive one API loop.

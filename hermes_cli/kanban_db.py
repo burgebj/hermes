@@ -1120,6 +1120,7 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     thread_id     TEXT NOT NULL DEFAULT '',
     user_id       TEXT,
     notifier_profile TEXT,
+    trigger_agent INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
@@ -1733,6 +1734,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
+        if "trigger_agent" not in notify_cols:
+            _add_column_if_missing(
+                conn, "kanban_notify_subs", "trigger_agent", "trigger_agent INTEGER NOT NULL DEFAULT 0"
+            )
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -1856,8 +1861,8 @@ _REBUILD_SPECS = {
         "CREATE TABLE kanban_notify_subs ("
         " task_id TEXT NOT NULL, platform TEXT NOT NULL, chat_id TEXT NOT NULL,"
         " thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,"
-        " notifier_profile TEXT, created_at INTEGER NOT NULL,"
-        " last_event_id INTEGER NOT NULL DEFAULT 0,"
+        " notifier_profile TEXT, trigger_agent INTEGER NOT NULL DEFAULT 0,"
+        " created_at INTEGER NOT NULL, last_event_id INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
@@ -7232,6 +7237,7 @@ def add_notify_sub(
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
+    trigger_agent: bool = False,
 ) -> None:
     """Register a gateway source that wants terminal-state notifications
     for ``task_id``. Idempotent on (task, platform, chat, thread)."""
@@ -7240,14 +7246,15 @@ def add_notify_sub(
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
-                (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (task_id, platform, chat_id, thread_id, user_id, notifier_profile, trigger_agent, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, now),
+            (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, 1 if trigger_agent else 0, now),
         )
         if notifier_profile:
             # Self-heal legacy rows that predate notifier ownership by
-            # backfilling only when the existing value is unset.
+            # backfilling only when the existing value is unset. Do not
+            # overwrite an existing owner during idempotent upgrades.
             conn.execute(
                 """
                 UPDATE kanban_notify_subs
@@ -7256,6 +7263,15 @@ def add_notify_sub(
                    AND (notifier_profile IS NULL OR notifier_profile = '')
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
+            )
+        if trigger_agent:
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET trigger_agent = 1
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (task_id, platform, chat_id, thread_id or ""),
             )
 
 
