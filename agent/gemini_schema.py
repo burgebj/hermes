@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 # Gemini's ``FunctionDeclaration.parameters`` field accepts the ``Schema``
 # object, which is only a subset of OpenAPI 3.0 / JSON Schema.  Strip fields
@@ -87,6 +87,27 @@ def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
         if any(not isinstance(item, str) for item in enum_val):
             cleaned.pop("enum", None)
 
+    # Gemini's Schema object requires ``type`` to be a single string, not an
+    # array.  JSON Schema allows union type arrays like ``["number", "string"]``
+    # or nullable shorthands like ``["string", "null"]``, but Gemini rejects
+    # them with HTTP 400.  Collapse to the most permissive non-null scalar:
+    #   ["string", "null"]         → type: "string", nullable: true
+    #   ["number", "string"]       → type: "string"  (string is most permissive)
+    #   ["integer", "null"]        → type: "integer", nullable: true
+    #   ["null"]                   → type: "string"   (fallback)
+    type_val = cleaned.get("type")
+    if isinstance(type_val, list):
+        non_null = [t for t in type_val if isinstance(t, str) and t != "null"]
+        has_null = any(t == "null" for t in type_val if isinstance(t, str))
+        if not non_null:
+            cleaned["type"] = "string"
+        elif len(non_null) == 1:
+            cleaned["type"] = non_null[0]
+        else:
+            cleaned["type"] = "string" if "string" in non_null else non_null[0]
+        if has_null:
+            cleaned["nullable"] = True
+
     return cleaned
 
 
@@ -97,3 +118,28 @@ def sanitize_gemini_tool_parameters(parameters: Any) -> Dict[str, Any]:
     if not cleaned:
         return {"type": "object", "properties": {}}
     return cleaned
+
+
+def sanitize_gemini_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sanitize an OpenAI-format tool list for Gemini's strict schema subset.
+
+    Applies ``sanitize_gemini_tool_parameters`` to each tool's ``parameters``
+    field.  Used in the chat-completions transport for Gemini models reached
+    via OpenAI-compatible endpoints (Copilot, Google AI Studio /openai, etc.)
+    that enforce the same schema restrictions as the native Gemini API.
+    """
+    result: List[Dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            result.append(tool)
+            continue
+        fn = tool.get("function")
+        if not isinstance(fn, dict):
+            result.append(tool)
+            continue
+        params = fn.get("parameters")
+        if params is None:
+            result.append(tool)
+            continue
+        result.append({**tool, "function": {**fn, "parameters": sanitize_gemini_tool_parameters(params)}})
+    return result
