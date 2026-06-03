@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 
+from agent.compression_config import resolve_compression_settings
 from agent.context_compressor import ContextCompressor
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import StreamingContextScrubber
@@ -1222,20 +1223,19 @@ def init_agent(
 
     # Initialize context compressor for automatic context management
     # Compresses conversation when approaching model's context limit
-    # Configuration via config.yaml (compression section)
+    # Configuration via config.yaml (compression and model.compression sections)
+    _model_cfg = _agent_cfg.get("model", {})
     _compression_cfg = _agent_cfg.get("compression", {})
     if not isinstance(_compression_cfg, dict):
         _compression_cfg = {}
-    compression_threshold = float(_compression_cfg.get("threshold", 0.50))
-    try:
-        from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
-        _model_cthresh = _cthresh_fn(agent.model)
-        if _model_cthresh is not None:
-            compression_threshold = _model_cthresh
-    except Exception:
-        pass
+    _compression_settings = resolve_compression_settings(
+        model=agent.model,
+        compression_cfg=_compression_cfg,
+        model_cfg=_model_cfg,
+    )
+    compression_threshold = _compression_settings.threshold
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
-    compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
+    compression_target_ratio = _compression_settings.target_ratio
     compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
     # protect_first_n is the number of non-system messages to protect at
     # the head, in addition to the system prompt (which is always
@@ -1270,7 +1270,6 @@ def init_agent(
 
     # Read explicit model output-token override from config when the
     # caller did not pass one directly.
-    _model_cfg = _agent_cfg.get("model", {})
     if agent.max_tokens is None and isinstance(_model_cfg, dict):
         _config_max_tokens = _model_cfg.get("max_tokens")
         if _config_max_tokens is not None:

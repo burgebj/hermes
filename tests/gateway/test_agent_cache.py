@@ -153,6 +153,34 @@ class TestAgentConfigSignature:
         )
         assert sig1 != sig2
 
+    def test_model_compression_change_busts_cache(self):
+        from gateway.run import GatewayRunner
+
+        runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
+        sig1 = GatewayRunner._agent_config_signature(
+            "m", runtime, [], "",
+            cache_keys={"model.compression": {"threshold": 0.15, "target_ratio": 0.20}},
+        )
+        sig2 = GatewayRunner._agent_config_signature(
+            "m", runtime, [], "",
+            cache_keys={"model.compression": {"threshold": 0.30, "target_ratio": 0.20}},
+        )
+        assert sig1 != sig2
+
+    def test_extract_cache_keys_reads_model_compression(self):
+        from gateway.run import GatewayRunner
+
+        keys = GatewayRunner._extract_cache_busting_config({
+            "model": {
+                "compression": {"threshold": 0.15, "target_ratio": 0.20},
+            },
+        })
+
+        assert keys["model.compression"] == {
+            "threshold": 0.15,
+            "target_ratio": 0.20,
+        }
+
     def test_compression_enabled_toggle_busts_cache(self):
         from gateway.run import GatewayRunner
 
