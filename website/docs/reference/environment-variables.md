@@ -155,6 +155,13 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `SUPERMEMORY_API_KEY` | Semantic long-term memory with profile recall and session ingest ([supermemory.ai](https://supermemory.ai)) |
 | `DAYTONA_API_KEY` | Daytona cloud sandboxes ([daytona.io](https://daytona.io/)) |
 
+### SIMPLICIO_PROMPT
+
+| Variable | Description |
+|----------|-------------|
+| `SIMPLICIO_PROMPT` | `true` auto-loads the bundled SIMPLICIO_PROMPT plugin and injects the local vendored SIMPLICIO_PROMPT V2 tuple-space overlay into each main-agent turn. |
+| `HERMES_SIMPLICIO_PROMPT` | Alias for `SIMPLICIO_PROMPT`. |
+
 ### Langfuse Observability
 
 Environment variables for the bundled [`observability/langfuse`](/user-guide/features/built-in-plugins#observabilitylangfuse) plugin. Set these in `~/.hermes/.env`. The plugin must also be enabled (`hermes plugins enable observability/langfuse`, or check the box in `hermes plugins`) before any of these take effect.

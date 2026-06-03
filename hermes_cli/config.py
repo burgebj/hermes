@@ -222,6 +222,8 @@ _EXTRA_ENV_KEYS = frozenset({
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
+    "SIMPLICIO_PROMPT",
+    "HERMES_SIMPLICIO_PROMPT",
 })
 import yaml
 
@@ -1081,6 +1083,13 @@ DEFAULT_CONFIG = {
     # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
     "prompt_caching": {
         "cache_ttl": "5m",
+    },
+
+    # SIMPLICIO_PROMPT plugin overlay. When enabled, every main-agent turn
+    # receives a compact tuple-space execution policy as ephemeral user
+    # context via the pre_llm_call hook. Env override: SIMPLICIO_PROMPT=true.
+    "simplicio_prompt": {
+        "enabled": False,
     },
 
     # OpenRouter-specific settings.
@@ -2316,6 +2325,22 @@ REQUIRED_ENV_VARS = {}
 
 # Optional environment variables that enhance functionality
 OPTIONAL_ENV_VARS = {
+    "SIMPLICIO_PROMPT": {
+        "description": "Enable the bundled SIMPLICIO_PROMPT pre-LLM prompt overlay",
+        "prompt": "Enable SIMPLICIO_PROMPT (true/false)",
+        "url": None,
+        "password": False,
+        "category": "plugin",
+        "advanced": True,
+    },
+    "HERMES_SIMPLICIO_PROMPT": {
+        "description": "Alias for SIMPLICIO_PROMPT",
+        "prompt": "Enable SIMPLICIO_PROMPT (true/false)",
+        "url": None,
+        "password": False,
+        "category": "plugin",
+        "advanced": True,
+    },
     # ── Provider (handled in provider selection, not shown in checklists) ──
     "NOUS_BASE_URL": {
         "description": "Nous Portal base URL override",

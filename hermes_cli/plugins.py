@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from hermes_constants import get_hermes_home
-from utils import env_var_enabled
+from utils import env_var_enabled, is_truthy_value
 from hermes_cli.config import cfg_get
 
 
@@ -222,6 +222,43 @@ def _get_enabled_plugins() -> Optional[set]:
         return None
 
 
+def _manifest_auto_enable_gate_open(manifest: "PluginManifest") -> bool:
+    """Return True when a bundled plugin's manifest-declared gate is truthy."""
+    if manifest.source != "bundled":
+        return False
+
+    for env_name in manifest.auto_enable_env:
+        if isinstance(env_name, str) and env_name.strip():
+            if env_var_enabled(env_name.strip()):
+                return True
+
+    config_paths = [
+        path.strip()
+        for path in manifest.auto_enable_config
+        if isinstance(path, str) and path.strip()
+    ]
+    if not config_paths:
+        return False
+
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except Exception:
+        return False
+
+    for dotpath in config_paths:
+        value: Any = config
+        for part in dotpath.split("."):
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(part)
+        if is_truthy_value(value):
+            return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -258,6 +295,12 @@ class PluginManifest:
     #              in ~/.hermes/plugins/ still gated by ``plugins.enabled``
     #              (untrusted code).
     kind: str = "standalone"
+    # Optional auto-enable gates for bundled plugins that are inert until a
+    # user explicitly flips a feature flag. This keeps plugin code discoverable
+    # without requiring a separate ``plugins.enabled`` edit for environment-
+    # driven launch paths.
+    auto_enable_env: List[str] = field(default_factory=list)
+    auto_enable_config: List[str] = field(default_factory=list)
     # Registry key — path-derived, used by ``plugins.enabled``/``disabled``
     # lookups and by ``hermes plugins list``. For a flat plugin at
     # ``plugins/disk-cleanup/`` the key is ``disk-cleanup``; for a nested
@@ -1164,6 +1207,14 @@ class PluginManager:
                 self._load_plugin(manifest)
                 continue
 
+            # Some bundled standalone plugins are intentionally inert unless
+            # a feature flag is set. Their manifest can declare env/config
+            # gates so operators can enable the feature with one boolean,
+            # while the explicit disabled list still wins above.
+            if _manifest_auto_enable_gate_open(manifest):
+                self._load_plugin(manifest)
+                continue
+
             # Everything else (standalone, user-installed backends,
             # entry-point plugins) is opt-in via plugins.enabled.
             # Accept both the path-derived key and the legacy bare name
@@ -1360,6 +1411,8 @@ class PluginManager:
                 source=source,
                 path=str(plugin_dir),
                 kind=kind,
+                auto_enable_env=data.get("auto_enable_env", []),
+                auto_enable_config=data.get("auto_enable_config", []),
                 key=key,
             )
         except Exception as exc:

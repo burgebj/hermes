@@ -1,0 +1,61 @@
+{
+  "name": "simplicio-prompt",
+  "version": "1.1.0",
+  "description": "Tuple-Space + Yool runtime execution prompt for coding agents (Claude, Codex, Hermes, Cursor, Cline). Any user input triggers the runtime — no 'Implement' keyword required. Status output is opt-in via YOOL_TUPLE_STATUS.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./prompt": "./prompts/agent-runtime-execution-prompt.md",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "simplicio-prompt": "./bin/simplicio-prompt.mjs"
+  },
+  "files": [
+    "bin/",
+    "index.mjs",
+    "prompts/",
+    "kernel/",
+    "guardrails/",
+    "examples/",
+    "scripts/",
+    "docs/",
+    "YOOL_TUPLE_HAMT.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "print": "node bin/simplicio-prompt.mjs",
+    "install-claude": "node bin/simplicio-prompt.mjs --install CLAUDE.md",
+    "install-agents": "node bin/simplicio-prompt.mjs --install AGENTS.md"
+  },
+  "keywords": [
+    "claude",
+    "codex",
+    "hermes",
+    "cursor",
+    "cline",
+    "agent",
+    "prompt",
+    "tuple-space",
+    "yool",
+    "hamt",
+    "runtime",
+    "ai-agents",
+    "system-prompt"
+  ],
+  "author": "Wesley Simplicio",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wesleysimplicio/simplicio-prompt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wesleysimplicio/simplicio-prompt/issues"
+  },
+  "homepage": "https://github.com/wesleysimplicio/simplicio-prompt#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
