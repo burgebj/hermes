@@ -991,6 +991,115 @@ class TestAnthropicStreamCallbacks:
         assert touch_calls.count("receiving stream response") == len(events)
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
+    def test_anthropic_tool_use_start_marks_partial_tool_for_mid_tool_retry(
+        self, mock_replace, monkeypatch,
+    ):
+        """Anthropic tool_use starts should populate partial tool names.
+
+        Without that, text + tool_use + transient disconnect falls into the
+        partial-text stub path instead of the mid-tool silent retry path.
+        """
+        from run_agent import AIAgent
+        import httpx as _httpx
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://api.minimax.io/anthropic",
+            provider="minimax",
+            model="MiniMax-M2.7",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "1")
+
+        final_message = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_1",
+                    name="write_file",
+                    input={"path": "/tmp/audit.md", "content": "ok"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+
+        class _FailingToolUseStream:
+            response = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                yield SimpleNamespace(
+                    type="content_block_delta",
+                    delta=SimpleNamespace(
+                        type="text_delta",
+                        text="Let me write the audit: ",
+                    ),
+                )
+                yield SimpleNamespace(
+                    type="content_block_start",
+                    content_block=SimpleNamespace(
+                        type="tool_use",
+                        name="write_file",
+                    ),
+                )
+                raise _httpx.RemoteProtocolError("peer closed connection")
+
+        class _RecoveredToolUseStream:
+            response = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return iter([
+                    SimpleNamespace(
+                        type="content_block_start",
+                        content_block=SimpleNamespace(
+                            type="tool_use",
+                            name="write_file",
+                        ),
+                    )
+                ])
+
+            def get_final_message(self):
+                return final_message
+
+        anthropic_client = MagicMock()
+        anthropic_client.messages.stream.side_effect = [
+            _FailingToolUseStream(),
+            _RecoveredToolUseStream(),
+        ]
+        agent._anthropic_client = anthropic_client
+
+        rebuild_calls = []
+        stream_drops = []
+        fired_deltas = []
+        agent._rebuild_anthropic_client = lambda: rebuild_calls.append(True)
+        agent._emit_stream_drop = lambda **kw: stream_drops.append(kw)
+        agent._fire_stream_delta = lambda text: fired_deltas.append(text)
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response is final_message
+        assert anthropic_client.messages.stream.call_count == 2
+        assert rebuild_calls == [True]
+        assert mock_replace.call_count == 0
+        assert stream_drops and stream_drops[0]["mid_tool_call"] is True
+        assert any("reconnecting" in text.lower() for text in fired_deltas)
+
+    @patch("run_agent.AIAgent._replace_primary_openai_client")
     def test_anthropic_stream_parser_valueerror_retries_before_delivery(
         self, mock_replace, monkeypatch,
     ):

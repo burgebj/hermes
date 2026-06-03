@@ -2020,6 +2020,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         if tool_name:
                             _fire_first_delta()
                             agent._fire_tool_gen_started(tool_name)
+                            result["partial_tool_names"].append(tool_name)
 
                 elif event_type == "content_block_delta":
                     delta = getattr(event, "delta", None)
