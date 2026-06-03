@@ -1288,7 +1288,9 @@ def run_conversation(
                 # API upgrade (lines ~1083-1085).
                 elif (
                     agent.provider == "copilot-acp"
+                    or agent.provider == "claude-code-acp"
                     or str(agent.base_url or "").lower().startswith("acp://copilot")
+                    or str(agent.base_url or "").lower().startswith("acp://claude-code")
                     or str(agent.base_url or "").lower().startswith("acp+tcp://")
                 ):
                     _use_streaming = False
