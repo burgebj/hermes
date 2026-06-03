@@ -3472,8 +3472,53 @@ class TelegramAdapter(BasePlatformAdapter):
                     return
 
                 user_display = getattr(query.from_user, "first_name", "User")
+                stale_prompt_text = "This prompt is no longer active. Please ask again."
+                restart_ack_text = (
+                    "⚠️ Session restarted — this prompt cannot continue. "
+                    "Please /retry."
+                )
+
+                entry = None
+                try:
+                    from tools.clarify_gateway import _entries as _clarify_entries  # type: ignore
+                    entry = _clarify_entries.get(clarify_id)
+                except Exception:
+                    entry = None
+                if entry is None:
+                    self._clarify_state.pop(clarify_id, None)
+                    await query.answer(text=stale_prompt_text)
+                    return
+
+                _entry_restored = False
+                try:
+                    from tools.clarify_gateway import was_restored as _was_restored
+                    _entry_restored = bool(_was_restored(clarify_id))
+                except Exception:
+                    _entry_restored = bool(getattr(entry, "restored", False))
 
                 if choice_token == "other":
+                    if _entry_restored:
+                        self._clarify_state.pop(clarify_id, None)
+                        try:
+                            from tools.clarify_gateway import resolve_gateway_clarify
+                            resolve_gateway_clarify(clarify_id, "")
+                        except Exception as exc:
+                            logger.error("[%s] resolve_gateway_clarify failed: %s", self.name, exc)
+                        await query.answer(text=restart_ack_text)
+                        try:
+                            await query.edit_message_text(
+                                text=(
+                                    f"❓ {_html.escape(query.message.text or '')}\n\n"
+                                    f"<i>⚠️ Gateway restarted before this prompt was answered — "
+                                    f"please /retry to re-run the agent.</i>"
+                                ),
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=None,
+                            )
+                        except Exception:
+                            pass
+                        return
+
                     # Flip into text-capture mode and tell the user to type
                     # their answer.  The gateway's text-intercept will pick
                     # up the next message in this session and resolve the
@@ -3482,9 +3527,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     # is cleared by something else.
                     try:
                         from tools.clarify_gateway import mark_awaiting_text
-                        mark_awaiting_text(clarify_id)
+                        marked = mark_awaiting_text(clarify_id)
                     except Exception as exc:
                         logger.warning("[%s] mark_awaiting_text failed: %s", self.name, exc)
+                        marked = False
+                    if not marked:
+                        self._clarify_state.pop(clarify_id, None)
+                        await query.answer(text=stale_prompt_text)
+                        return
 
                     await query.answer(text="✏️ Type your answer in the chat.")
                     try:
@@ -3508,32 +3558,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 # clarify primitive.  Fall back to the index if the entry
                 # has been cleaned up (race with timeout / session reset).
                 resolved_text: Optional[str] = None
-                try:
-                    from tools.clarify_gateway import _entries as _clarify_entries  # type: ignore
-                    entry = _clarify_entries.get(clarify_id)
-                    if entry and entry.choices and 0 <= idx < len(entry.choices):
-                        resolved_text = entry.choices[idx]
-                except Exception:
-                    resolved_text = None
+                if entry.choices and 0 <= idx < len(entry.choices):
+                    resolved_text = entry.choices[idx]
 
                 if resolved_text is None:
                     # Race: entry vanished. Echo the index as a number so
                     # the agent at least sees an intentional response
                     # rather than nothing.
                     resolved_text = f"choice {idx + 1}"
-
-                # Detect whether the entry was rehydrated from disk
-                # (gateway restart between ask and tap, #32762).  When
-                # restored, no agent thread is waiting — we still record
-                # the response and acknowledge the tap, but the user
-                # message says the session was reset so they know to
-                # re-trigger instead of waiting forever.
-                _entry_restored = False
-                try:
-                    from tools.clarify_gateway import was_restored as _was_restored
-                    _entry_restored = bool(_was_restored(clarify_id))
-                except Exception:
-                    _entry_restored = False
 
                 # Pop state and resolve
                 self._clarify_state.pop(clarify_id, None)
@@ -3556,11 +3588,18 @@ class TelegramAdapter(BasePlatformAdapter):
                         f"please /retry to re-run the agent.</i>"
                     )
                 else:
-                    ack_text = f"✓ {resolved_text[:60]}"
-                    edited_text = (
-                        f"❓ {_html.escape(query.message.text or '')}\n\n"
-                        f"<b>{_html.escape(user_display)}:</b> {_html.escape(resolved_text)}"
-                    )
+                    if resolved:
+                        ack_text = f"✓ {resolved_text[:60]}"
+                        edited_text = (
+                            f"❓ {_html.escape(query.message.text or '')}\n\n"
+                            f"<b>{_html.escape(user_display)}:</b> {_html.escape(resolved_text)}"
+                        )
+                    else:
+                        ack_text = stale_prompt_text
+                        edited_text = (
+                            f"❓ {_html.escape(query.message.text or '')}\n\n"
+                            f"<i>Prompt is no longer active. Please ask again.</i>"
+                        )
 
                 await query.answer(text=ack_text)
                 try:

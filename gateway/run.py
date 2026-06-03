@@ -7502,6 +7502,14 @@ class GatewayRunner:
             # so the user can retry; if it times out, the agent unblocks
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                try:
+                    _clarify_was_restored = bool(
+                        _clarify_mod.was_restored(_pending_clarify.clarify_id)
+                    )
+                except Exception:
+                    _clarify_was_restored = bool(
+                        getattr(_pending_clarify, "restored", False)
+                    )
                 _resolved = _clarify_mod.resolve_gateway_clarify(
                     _pending_clarify.clarify_id, _raw_clarify_reply,
                 )
@@ -7510,10 +7518,22 @@ class GatewayRunner:
                         "Gateway intercepted clarify text response (session=%s, id=%s)",
                         _quick_key, _pending_clarify.clarify_id,
                     )
+                    if _clarify_was_restored:
+                        return (
+                            "⚠️ Gateway restarted before this clarify response "
+                            "arrived, so the previous agent run is no longer "
+                            "waiting. Please /retry to re-run it."
+                        )
                     # Acknowledge with empty string so adapters that emit
                     # the agent's response don't double-post.  The agent
                     # itself will produce the next user-facing message.
                     return ""
+                logger.warning(
+                    "Gateway clarify text response could not resolve stale prompt "
+                    "(session=%s, id=%s)",
+                    _quick_key, _pending_clarify.clarify_id,
+                )
+                return "This clarify prompt is no longer active. Please ask again."
 
         # Intercept messages that are responses to a pending /reload-mcp
         # (or future) slash-confirm prompt.  Recognized confirm replies are

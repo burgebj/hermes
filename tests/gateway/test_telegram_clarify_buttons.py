@@ -7,6 +7,7 @@ Mirrors test_telegram_approval_buttons.py for the new ``send_clarify`` and
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -48,7 +49,9 @@ def _ensure_telegram_mock():
 _ensure_telegram_mock()
 
 from gateway.platforms.telegram import TelegramAdapter
-from gateway.config import PlatformConfig
+from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import MessageEvent
+from gateway.session import SessionSource, build_session_key
 
 
 def _make_adapter(extra=None):
@@ -243,6 +246,35 @@ class TestTelegramClarifyCallback:
         query.edit_message_text.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_numeric_choice_with_stale_adapter_state_shows_expired(self):
+        adapter = _make_adapter()
+        adapter._clarify_state["cidExpired"] = "sk-expired"
+
+        query = AsyncMock()
+        query.data = "cl:cidExpired:0"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.message.text = "Pick"
+        query.from_user = MagicMock()
+        query.from_user.id = "777"
+        query.from_user.first_name = "Tester"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        context = MagicMock()
+
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+            await adapter._handle_callback_query(update, context)
+
+        query.answer.assert_called_once()
+        ack_text = query.answer.call_args[1]["text"].lower()
+        assert "✓" not in ack_text
+        assert "no longer" in ack_text or "expired" in ack_text
+        assert "cidExpired" not in adapter._clarify_state
+
+    @pytest.mark.asyncio
     async def test_other_button_flips_to_text_mode(self):
         from tools import clarify_gateway as cm
 
@@ -280,6 +312,36 @@ class TestTelegramClarifyCallback:
             entry = cm._entries.get("cidB")
         assert entry is not None
         assert not entry.event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_other_button_with_stale_adapter_state_shows_expired(self):
+        adapter = _make_adapter()
+        adapter._clarify_state["cidOtherExpired"] = "sk-other-expired"
+
+        query = AsyncMock()
+        query.data = "cl:cidOtherExpired:other"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.message.text = "Pick"
+        query.from_user = MagicMock()
+        query.from_user.id = "777"
+        query.from_user.first_name = "Tester"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        context = MagicMock()
+
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+            await adapter._handle_callback_query(update, context)
+
+        query.answer.assert_called_once()
+        ack_text = query.answer.call_args[1]["text"].lower()
+        assert "type your answer" not in ack_text
+        assert "no longer" in ack_text or "expired" in ack_text
+        query.edit_message_text.assert_not_called()
+        assert "cidOtherExpired" not in adapter._clarify_state
 
     @pytest.mark.asyncio
     async def test_already_resolved(self):
@@ -421,6 +483,51 @@ class TestTelegramClarifyCallback:
                 cm._session_index.clear()
 
     @pytest.mark.asyncio
+    async def test_other_button_after_gateway_restart_shows_retry_instead_of_text_capture(self, tmp_path):
+        from tools import clarify_gateway as cm
+
+        cm.set_persist_path(tmp_path / "clarify_pending.json")
+        try:
+            cm.register("cidOtherRestored", "sk-other-restored", "Pick", ["red", "green"])
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+            restored = cm.restore_pending(timeout_seconds=600.0)
+            assert len(restored) == 1
+
+            adapter = _make_adapter()
+
+            query = AsyncMock()
+            query.data = "cl:cidOtherRestored:other"
+            query.message = MagicMock()
+            query.message.chat_id = 12345
+            query.message.text = "Pick"
+            query.from_user = MagicMock()
+            query.from_user.id = "777"
+            query.from_user.first_name = "Tester"
+            query.answer = AsyncMock()
+            query.edit_message_text = AsyncMock()
+
+            update = MagicMock()
+            update.callback_query = query
+            context = MagicMock()
+
+            with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+                await adapter._handle_callback_query(update, context)
+
+            query.answer.assert_called_once()
+            ack_text = query.answer.call_args[1]["text"].lower()
+            assert "type your answer" not in ack_text
+            assert "restart" in ack_text or "retry" in ack_text
+            assert cm.get_pending_for_session("sk-other-restored") is None
+            assert "cidOtherRestored" not in adapter._clarify_state
+        finally:
+            cm.set_persist_path(None)
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+
+    @pytest.mark.asyncio
     async def test_invalid_choice_token(self):
         from tools import clarify_gateway as cm
 
@@ -451,6 +558,69 @@ class TestTelegramClarifyCallback:
         assert not entry.event.is_set()
         query.answer.assert_called_once()
         assert "invalid" in query.answer.call_args[1]["text"].lower()
+
+
+class TestGatewayClarifyTextIntercept:
+    """Verify free-form clarify replies do not vanish after restore."""
+
+    def setup_method(self):
+        _clear_clarify_state()
+
+    @staticmethod
+    def _make_source() -> SessionSource:
+        return SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="u1",
+            chat_id="c1",
+            user_name="tester",
+            chat_type="dm",
+        )
+
+    @classmethod
+    def _make_event(cls, text: str) -> MessageEvent:
+        return MessageEvent(text=text, source=cls._make_source(), message_id="m1")
+
+    @staticmethod
+    def _make_runner():
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        runner.config = MagicMock()
+        runner.adapters = {Platform.TELEGRAM: MagicMock()}
+        runner.session_store = None
+        runner.hooks = SimpleNamespace(emit_collect=MagicMock(return_value=[]))
+        runner._update_prompt_pending = {}
+        runner._is_user_authorized = lambda _source: True
+        return runner
+
+    @pytest.mark.asyncio
+    async def test_restored_open_ended_text_reply_returns_retry_hint(self, tmp_path):
+        from tools import clarify_gateway as cm
+
+        cm.set_persist_path(tmp_path / "clarify_pending.json")
+        try:
+            source = self._make_source()
+            session_key = build_session_key(source)
+            cm.register("cidOpenRestored", session_key, "What should I use?", None)
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
+            restored = cm.restore_pending(timeout_seconds=600.0)
+            assert len(restored) == 1
+            assert restored[0].restored is True
+
+            runner = self._make_runner()
+            result = await runner._handle_message(self._make_event("custom value"))
+
+            assert result
+            lowered = result.lower()
+            assert "restart" in lowered or "retry" in lowered
+            assert cm.get_pending_for_session(session_key) is None
+        finally:
+            cm.set_persist_path(None)
+            with cm._lock:
+                cm._entries.clear()
+                cm._session_index.clear()
 
 
 # ===========================================================================
