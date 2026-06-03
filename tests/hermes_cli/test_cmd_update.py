@@ -406,11 +406,136 @@ class TestCmdUpdateMigrationPrompt:
 
             cmd_update(mock_args)
 
-            out = capsys.readouterr().out
-            # Names, not just counts.
-            assert "FOO_API_KEY" in out
-            assert "Foo service API key" in out
-            assert "display.new_widget" in out
+        out = capsys.readouterr().out
+        # Names, not just counts.
+        assert "FOO_API_KEY" in out
+        assert "Foo service API key" in out
+        assert "display.new_widget" in out
+
+
+class TestCmdUpdateStaleRefRecovery:
+    @staticmethod
+    def _stale_fetch_then_clean(retry_result=None):
+        state = {"fetch_calls": 0, "prune_calls": 0}
+        if retry_result is None:
+            retry_result = subprocess.CompletedProcess(
+                ["git", "fetch", "origin"], 0, stdout="", stderr=""
+            )
+
+        def side_effect(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+
+            if "fetch origin" in joined:
+                state["fetch_calls"] += 1
+                if state["fetch_calls"] == 1:
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        128,
+                        stdout="",
+                        stderr="fatal: bad object refs/remotes/origin/codex/stale",
+                    )
+                return retry_result
+
+            if "remote prune origin" in joined:
+                state["prune_calls"] += 1
+                return subprocess.CompletedProcess(cmd, 0, stdout="pruned", stderr="")
+
+            if "rev-parse" in joined and "--abbrev-ref" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="main\n", stderr="")
+
+            if "rev-list" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        side_effect.state = state
+        return side_effect
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_update_auto_prunes_and_retries_on_bad_object(
+        self, mock_run, _mock_which, mock_args, capsys
+    ):
+        from hermes_cli import main as hm
+
+        mock_run.side_effect = self._stale_fetch_then_clean()
+
+        with patch.object(hm, "_run_pre_update_backup"), patch.object(
+            hm, "_discard_lockfile_churn"
+        ), patch.object(hm, "_stash_local_changes_if_needed", return_value=None), patch.object(
+            hm, "_invalidate_update_cache"
+        ), patch.object(hm, "_get_origin_url", return_value=None):
+            cmd_update(mock_args)
+
+        out = capsys.readouterr().out
+        assert "pruning and retrying" in out
+        assert "Recovered after pruning stale remote-tracking refs." in out
+        assert "Already up to date!" in out
+        assert mock_run.side_effect.state["fetch_calls"] == 2
+        assert mock_run.side_effect.state["prune_calls"] == 1
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_update_falls_through_to_manual_message_when_prune_does_not_help(
+        self, mock_run, _mock_which, mock_args, capsys
+    ):
+        from hermes_cli import main as hm
+
+        mock_run.side_effect = self._stale_fetch_then_clean(
+            subprocess.CompletedProcess(
+                ["git", "fetch", "origin"],
+                128,
+                stdout="",
+                stderr="fatal: bad object refs/remotes/origin/codex/stale",
+            )
+        )
+
+        with patch.object(hm, "_run_pre_update_backup"), patch.object(
+            hm, "_discard_lockfile_churn"
+        ), patch.object(hm, "_stash_local_changes_if_needed", return_value=None), patch.object(
+            hm, "_get_origin_url", return_value=None
+        ), pytest.raises(SystemExit) as exc:
+            cmd_update(mock_args)
+
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "Stale remote-tracking refs still block fetch after auto-recovery." in out
+        assert "git remote prune origin && git fetch origin" in out
+        assert mock_run.side_effect.state["fetch_calls"] == 2
+        assert mock_run.side_effect.state["prune_calls"] == 1
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_update_does_not_prune_on_unrelated_fetch_failure(
+        self, mock_run, _mock_which, mock_args, capsys
+    ):
+        from hermes_cli import main as hm
+
+        def side_effect(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "fetch origin" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    128,
+                    stdout="",
+                    stderr="fatal: unable to access 'https://github.com/foo/bar.git': Could not resolve host: github.com",
+                )
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        with patch.object(hm, "_run_pre_update_backup"), patch.object(
+            hm, "_discard_lockfile_churn"
+        ), patch.object(hm, "_get_origin_url", return_value=None), pytest.raises(
+            SystemExit
+        ) as exc:
+            cmd_update(mock_args)
+
+        assert exc.value.code == 1
+        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+        assert not any("remote prune origin" in cmd for cmd in commands)
+        out = capsys.readouterr().out
+        assert "Network error — cannot reach the remote repository." in out
 
 
 class TestCmdUpdateProfileSkillSync:

@@ -9199,6 +9199,60 @@ def _resolve_update_branch(args) -> str:
     return (getattr(args, "branch", None) or "main").strip() or "main"
 
 
+def _is_stale_origin_ref_fetch_error(stderr: str) -> bool:
+    """Return True when git fetch failed due to a stale origin/* ref."""
+    text = stderr.lower()
+    return (
+        "bad object refs/remotes/origin/" in text
+        or (
+            "refs/remotes/origin/" in text
+            and "does not point to a valid object" in text
+        )
+    )
+
+
+def _fetch_origin_with_stale_ref_recovery(git_cmd: list[str], cwd: Path):
+    """Fetch origin, pruning stale remote-tracking refs once when needed."""
+    fetch_result = subprocess.run(
+        git_cmd + ["fetch", "origin"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if fetch_result.returncode == 0:
+        return fetch_result, False, False
+
+    stderr = fetch_result.stderr.strip()
+    if not _is_stale_origin_ref_fetch_error(stderr):
+        return fetch_result, False, False
+
+    print("! Detected stale remote-tracking refs under origin; pruning and retrying...")
+    subprocess.run(
+        git_cmd + ["remote", "prune", "origin"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    retry_result = subprocess.run(
+        git_cmd + ["fetch", "origin"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if retry_result.returncode == 0:
+        print("  ✓ Recovered after pruning stale remote-tracking refs.")
+        return retry_result, True, False
+
+    if _is_stale_origin_ref_fetch_error(retry_result.stderr.strip()):
+        print("✗ Stale remote-tracking refs still block fetch after auto-recovery.")
+        print(
+            "  Run manually: cd ~/.hermes/hermes-agent && git remote prune origin && git fetch origin"
+        )
+        return retry_result, False, True
+
+    return retry_result, False, False
+
+
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     """Implement ``hermes update --check``: fetch and report without installing.
 
@@ -9761,12 +9815,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
     try:
 
         print("→ Fetching updates...")
-        fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
+        fetch_result, _recovered_stale_refs, stale_ref_retry_exhausted = (
+            _fetch_origin_with_stale_ref_recovery(git_cmd, PROJECT_ROOT)
         )
+        if stale_ref_retry_exhausted:
+            sys.exit(1)
         if fetch_result.returncode != 0:
             stderr = fetch_result.stderr.strip()
             if "Could not resolve host" in stderr or "unable to access" in stderr:
