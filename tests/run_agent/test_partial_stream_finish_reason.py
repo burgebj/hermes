@@ -350,3 +350,18 @@ class TestContentFilterStallActivatesFallback:
         assert "remained truncated after 3 continuation attempts" not in (
             result.get("error") or ""
         )
+
+        fourth_call_kwargs = loop_agent.client.chat.completions.create.call_args_list[3]
+        fourth_messages = (
+            fourth_call_kwargs.kwargs.get("messages")
+            or fourth_call_kwargs.args[0].get("messages")
+        )
+        fourth_text = "\n".join(
+            str(message.get("content") or "") for message in fourth_messages
+        )
+        assert "Writing the file..." not in fourth_text, (
+            "Fallback must start from the clean pre-stall checkpoint, not "
+            "see partial-stream assistant stubs left by the failed primary."
+        )
+        assert "was too large" not in fourth_text
+        assert "network error mid-stream" not in fourth_text

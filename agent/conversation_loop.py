@@ -708,6 +708,7 @@ def run_conversation(
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
+    partial_stream_checkpoint_len: Optional[int] = None
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
@@ -1128,6 +1129,7 @@ def run_conversation(
         has_retried_429 = False
         restart_with_compressed_messages = False
         restart_with_length_continuation = False
+        restart_with_rebuilt_messages = False
 
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
@@ -1664,6 +1666,11 @@ def run_conversation(
                             _dropped_tools = getattr(
                                 response, "_dropped_tool_names", None
                             )
+                            if (
+                                _is_partial_stream_stub
+                                and partial_stream_checkpoint_len is None
+                            ):
+                                partial_stream_checkpoint_len = len(messages) - 1
 
                             if length_continue_retries < 3:
                                 if _is_partial_stream_stub and _dropped_tools:
@@ -1732,18 +1739,23 @@ def run_conversation(
                                     # accumulated partial assistant turns and
                                     # continuation prompts we wrote while
                                     # fighting the primary's filter.
-                                    messages = agent._get_messages_up_to_last_assistant(messages)
+                                    if partial_stream_checkpoint_len is not None:
+                                        messages = messages[:partial_stream_checkpoint_len]
+                                    else:
+                                        messages = agent._get_messages_up_to_last_assistant(messages)
                                     agent._session_messages = messages
                                     length_continue_retries = 0
                                     truncated_response_parts = []
+                                    partial_stream_checkpoint_len = None
                                     retry_count = 0
                                     compression_attempts = 0
                                     primary_recovery_attempted = False
                                     # Re-enter the inner API-retry loop against
-                                    # the new (fallback) backend, matching the
-                                    # pattern used by the other fallback-on-
-                                    # exhaustion sites in this file.
-                                    continue
+                                    # the new (fallback) backend after the outer
+                                    # loop rebuilds api_messages from the clean
+                                    # checkpoint.
+                                    restart_with_rebuilt_messages = True
+                                    break
 
                             partial_response = agent._strip_think_blocks("".join(truncated_response_parts)).strip()
                             agent._cleanup_task_resources(effective_task_id)
@@ -3369,6 +3381,9 @@ def run_conversation(
             restart_with_compressed_messages = False
             continue
 
+        if restart_with_rebuilt_messages:
+            continue
+
         if restart_with_length_continuation:
             # Progressively boost the output token budget on each retry.
             # Retry 1 → 2× base, retry 2 → 3× base, capped at 32 768.
@@ -4193,6 +4208,7 @@ def run_conversation(
                     final_response = "".join(truncated_response_parts) + final_response
                     truncated_response_parts = []
                     length_continue_retries = 0
+                    partial_stream_checkpoint_len = None
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
                 
