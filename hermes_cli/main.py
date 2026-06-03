@@ -2016,6 +2016,7 @@ def cmd_chat(args):
         "checkpoints": getattr(args, "checkpoints", False),
         "pass_session_id": getattr(args, "pass_session_id", False),
         "max_turns": getattr(args, "max_turns", None),
+        "output_format": getattr(args, "output_format", "text"),
         "ignore_rules": getattr(args, "ignore_rules", False),
         "ignore_user_config": getattr(args, "ignore_user_config", False),
         "compact": getattr(args, "compact", False),
