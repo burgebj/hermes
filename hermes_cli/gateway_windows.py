@@ -29,6 +29,7 @@ Design notes
 from __future__ import annotations
 
 import ctypes
+import locale
 import os
 import re
 import shlex
@@ -112,6 +113,15 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
             [schtasks, *args],
             capture_output=True,
             text=True,
+            # schtasks.exe emits output in the system code page (cp936 on
+            # Chinese Windows, cp932 on Japanese, cp1251 on Russian, ...).
+            # Without an explicit encoding Python's _readerthread tries to
+            # decode with utf-8 and crashes with UnicodeDecodeError on the
+            # first non-ASCII byte (see #38172). Pin to the locale's
+            # preferred encoding and use errors="replace" so a single
+            # rogue byte cannot tear down the status command.
+            encoding=locale.getpreferredencoding(False) or "utf-8",
+            errors="replace",
             timeout=_SCHTASKS_TIMEOUT_S,
             # CREATE_NO_WINDOW avoids a flashing console window when the CLI
             # is itself hosted in a TUI. See tools/browser_tool.py for the
