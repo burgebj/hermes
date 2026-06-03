@@ -362,6 +362,8 @@ def _is_tz_migration_phantom(
     - the schedule is a cron expression (only cron carries wall-clock intent;
       interval / once jobs are absolute and should not be "repaired"),
     - the stored UTC offset differs from the current Hermes timezone offset,
+      or the legacy stored timestamp is naive and was interpreted as due via
+      the old system-local timezone,
     - the stored *wall-clock time* (the naive part, reinterpreted in the
       current Hermes zone) is still in the future relative to ``now``.
 
@@ -376,14 +378,18 @@ def _is_tz_migration_phantom(
         stored_dt = datetime.fromisoformat(stored_next_run)
     except (TypeError, ValueError):
         return False
-    if stored_dt.tzinfo is None:
-        # Naive timestamps don't carry a migration signal; _ensure_aware()
-        # already interprets them in the configured zone.
-        return False
-
     target_tz = now.tzinfo
     if target_tz is None:
         return False
+
+    if stored_dt.tzinfo is None:
+        # Legacy naive values have no explicit offset, but _ensure_aware()
+        # still interprets them as old system-local wall time. On the due path,
+        # a naive cron wall-clock that is still future in the current Hermes
+        # zone is the same early-fire phantom as an aware timestamp carrying an
+        # old offset.
+        wall_in_current_tz = stored_dt.replace(tzinfo=target_tz)
+        return wall_in_current_tz > now
 
     stored_offset = stored_dt.utcoffset()
     current_offset = now.utcoffset()

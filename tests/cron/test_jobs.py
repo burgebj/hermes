@@ -3,6 +3,7 @@
 import threading
 import pytest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from cron.jobs import (
     parse_duration,
@@ -913,6 +914,73 @@ class TestCronTimezoneMigrationDoubleFire:
         assert rescheduled_dt.utcoffset() == timedelta(hours=2)
         assert rescheduled_dt > now
 
+    def test_cron_with_naive_legacy_timestamp_does_not_fire_early(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        # Legacy jobs may have persisted next_run_at without an offset. If
+        # that naive timestamp came from the old system-local timezone, the
+        # absolute instant can look due before the cron wall clock arrives in
+        # the newly configured Hermes timezone.
+        target_tz = timezone(timedelta(hours=2))
+        old_system_tz = timezone(timedelta(hours=10))
+        now = datetime(2026, 5, 19, 13, 2, 0, tzinfo=target_tz)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        class _FakeSystemDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                old_local_now = datetime(
+                    2026, 5, 19, 21, 2, 0, tzinfo=old_system_tz
+                )
+                if tz is not None:
+                    return old_local_now.astimezone(tz)
+
+                class _FakeLocalNow:
+                    def astimezone(self, tz=None):
+                        if tz is not None:
+                            return old_local_now.astimezone(tz)
+                        return old_local_now
+
+                return _FakeLocalNow()
+
+        monkeypatch.setattr("cron.jobs.datetime", _FakeSystemDateTime)
+
+        stored_next = "2026-05-19T21:00:00"
+        save_jobs(
+            [{
+                "id": "cron-tz-naive-migrated",
+                "name": "Weekly digest",
+                "prompt": "Send digest",
+                "schedule": {
+                    "kind": "cron",
+                    "expr": "0 21 * * 2",
+                    "display": "0 21 * * 2",
+                },
+                "schedule_display": "0 21 * * 2",
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-05-12T21:00:00",
+                "next_run_at": stored_next,
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
+        )
+
+        assert get_due_jobs() == []
+        rescheduled = get_job("cron-tz-naive-migrated")["next_run_at"]
+        assert rescheduled is not None
+        assert rescheduled != stored_next
+        rescheduled_dt = datetime.fromisoformat(rescheduled)
+        assert rescheduled_dt.tzinfo is not None
+        assert rescheduled_dt.utcoffset() == timedelta(hours=2)
+        assert rescheduled_dt > now
+
     def test_cron_with_matching_offset_still_fires_when_due(
         self, tmp_cron_dir, monkeypatch
     ):
@@ -950,6 +1018,45 @@ class TestCronTimezoneMigrationDoubleFire:
 
         due = get_due_jobs()
         assert [j["id"] for j in due] == ["cron-no-migration"]
+
+    def test_cron_with_dst_offset_change_still_fires_when_due(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        # During the New York fall-back transition, the stored occurrence can
+        # carry -04:00 while the current local time carries -05:00. That offset
+        # difference is normal DST behavior, not a timezone migration phantom.
+        ny_tz = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 1, 31, 0, tzinfo=ny_tz, fold=1)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        save_jobs(
+            [{
+                "id": "cron-dst-fallback",
+                "name": "DST digest",
+                "prompt": "Send digest",
+                "schedule": {
+                    "kind": "cron",
+                    "expr": "30 1 * * *",
+                    "display": "30 1 * * *",
+                },
+                "schedule_display": "30 1 * * *",
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-10-31T01:30:00-04:00",
+                "next_run_at": "2026-11-01T01:30:00-04:00",
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
+        )
+
+        due = get_due_jobs()
+        assert [j["id"] for j in due] == ["cron-dst-fallback"]
 
     def test_cron_with_stale_offset_past_wall_clock_still_fast_forwards(
         self, tmp_cron_dir, monkeypatch
