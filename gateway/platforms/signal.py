@@ -1377,6 +1377,24 @@ class SignalAdapter(BasePlatformAdapter):
                 await task
             except asyncio.CancelledError:
                 pass
+        # Send explicit stop-typing signal so the recipient's indicator
+        # disappears immediately instead of waiting for Signal's built-in
+        # timeout (~5 s).
+        try:
+            params: Dict[str, Any] = {"account": self.account}
+            if chat_id.startswith("group:"):
+                params["groupId"] = chat_id[6:]
+            else:
+                params["recipient"] = [await self._resolve_recipient(chat_id)]
+            params["stop"] = True
+            await self._rpc(
+                "sendTyping",
+                params,
+                rpc_id="typing-stop",
+                log_failures=False,
+            )
+        except Exception:
+            pass
         # Reset per-chat typing backoff state so the next agent turn starts
         # fresh rather than inheriting a cooldown from a prior conversation.
         self._typing_failures.pop(chat_id, None)
