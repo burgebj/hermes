@@ -442,7 +442,12 @@ export function ChatBar({
     const detected = detectTrigger(before ?? composerPlainText(editor))
 
     setTrigger(detected)
-    setTriggerActive(0)
+    // Only reset active index when the trigger state actually changes
+    // (new trigger appeared, cleared, or switched kind).  Avoids
+    // clobbering keyboard-navigation state on every keyup refresh.
+    if (!trigger || !detected || trigger.kind !== detected.kind) {
+      setTriggerActive(0)
+    }
   }, [trigger])
 
   const handleEditorInput = (event: FormEvent<HTMLDivElement>) => {
