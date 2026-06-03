@@ -200,3 +200,17 @@ def test_locked_starlette_is_not_vulnerable_to_cve_2026_48710():
             f"floor {'.'.join(map(str, _STARLETTE_CVE_FLOOR))} — regenerate the "
             f"lockfile after bumping the pin"
         )
+
+
+def test_uv_lock_excludes_discord_voice_only_dependency_stack():
+    """The lockfile must not keep PyNaCl/davey after [messaging] drops voice.
+
+    Both packages are pulled by the Discord voice extra, not by Discord text
+    messaging. PyNaCl 1.5.0 is below the GHSA-mrfv-m5wm-5w6w patched version
+    and discord.py 2.7.1 currently prevents resolving PyNaCl 1.6.2.
+    """
+    data = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    names = {pkg["name"].lower() for pkg in data["package"]}
+
+    assert "pynacl" not in names
+    assert "davey" not in names

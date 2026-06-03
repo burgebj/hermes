@@ -69,7 +69,7 @@ def check_packages():
         _discord_available = True
         check("discord.py", True, f"v{discord.__version__}")
     except ImportError:
-        check("discord.py", False, "pip install discord.py[voice]")
+        check("discord.py", False, "pip install discord.py")
         ok = False
 
     # PyNaCl
@@ -84,7 +84,7 @@ def check_packages():
             check("PyNaCl (Aead)", False, f"v{ver} — need >=1.5.0")
             ok = False
     except ImportError:
-        check("PyNaCl", False, "pip install PyNaCl>=1.5.0")
+        check("PyNaCl", False, "install a patched discord.py voice stack when available")
         ok = False
 
     # davey (DAVE E2EE)
@@ -92,7 +92,7 @@ def check_packages():
         import davey
         check("davey (DAVE E2EE)", True, f"v{getattr(davey, '__version__', '?')}")
     except ImportError:
-        check("davey (DAVE E2EE)", False, "pip install davey")
+        check("davey (DAVE E2EE)", False, "install a patched discord.py voice stack when available")
         ok = False
 
     # Optional: local STT
