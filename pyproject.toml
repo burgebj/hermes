@@ -102,6 +102,13 @@ matrix = ["mautrix[encryption]==0.21.0", "Markdown==3.10.2", "aiosqlite==0.22.1"
 wecom = ["defusedxml==0.7.1"]
 cli = ["simple-term-menu==1.6.6"]
 tts-premium = ["elevenlabs==1.59.0"]
+# Vision: Pillow is the soft-dependency that powers the
+# embed-time pixel-dimension pre-cap (Anthropic's 8000px per-side
+# ceiling, #25837 and #37677) and the reactive shrink path in
+# conversation_compression. Without Pillow, both paths silently
+# no-op. Make it opt-in so the base install stays small per the
+# smaller-`dependencies`-smaller-blast-radius rule.
+vision = ["Pillow==11.1.0"]
 voice = [
   # Local STT pulls in wheel-only transitive deps (ctranslate2, onnxruntime),
   # so keep it out of the base install for source-build packagers like Homebrew.

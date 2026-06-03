@@ -166,11 +166,23 @@ _PAYLOAD_TOO_LARGE_PATTERNS = [
 # whole request hits the 413 size limit.  Anthropic's wording is the most
 # important here (hard 5 MB per image, returned as
 # "messages.N.content.K.image.source.base64: image exceeds 5 MB maximum").
+# Anthropic enforces two independent ceilings per image:
+#   1. 5 MB encoded byte size  → "image exceeds 5 MB maximum"
+#   2. 8000px longest side       → "image dimensions exceed max allowed size: 8000 pixels"
+# Hermes must catch BOTH. Pre-fix, only the byte message was matched —
+# a tall full-page screenshot (e.g. 1200×12000 at 0.06 MB) is well
+# under 5 MB but vastly over 8000px, slipped through every guard,
+# got baked into immutable history, and bricked the session on every
+# subsequent replay. See #25837 and #37677.
 _IMAGE_TOO_LARGE_PATTERNS = [
-    "image exceeds",        # Anthropic: "image exceeds 5 MB maximum"
-    "image too large",      # generic
-    "image_too_large",      # error_code variant
-    "image size exceeds",   # variant
+    "image exceeds",                # Anthropic: "image exceeds 5 MB maximum"
+    "image dimensions exceed",      # Anthropic: dimension cap, the most
+                                    # common form of the 8000px message
+    "dimensions exceed max allowed", # Anthropic: full phrase form
+    "max allowed size: 8000",       # Anthropic: includes the magic number
+    "image too large",              # generic
+    "image_too_large",              # error_code variant
+    "image size exceeds",           # variant
     # "request_too_large" on a request known to contain an image → image is
     # the likely culprit; we still try the shrink path before giving up.
 ]
