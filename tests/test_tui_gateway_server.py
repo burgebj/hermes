@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import sys
@@ -2498,6 +2499,33 @@ def test_image_attach_accepts_unquoted_screenshot_path_with_spaces(monkeypatch):
     assert resp["result"]["path"] == str(screenshot)
     assert resp["result"]["remainder"] == ""
     assert len(server._sessions["sid"]["attached_images"]) == 1
+
+
+def test_image_attach_bytes_writes_uploaded_image_to_gateway_home(monkeypatch, tmp_path):
+    png_base64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p94AAAAASUVORK5CYII="
+    )
+    server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "image.attach_bytes",
+            "params": {
+                "session_id": "sid",
+                "content_base64": png_base64,
+                "filename": "desktop-paste.png",
+            },
+        }
+    )
+
+    assert resp["result"]["attached"] is True
+    image_path = Path(resp["result"]["path"])
+    assert image_path.parent == tmp_path / "images"
+    assert image_path.suffix == ".png"
+    assert image_path.read_bytes() == base64.b64decode(png_base64)
+    assert server._sessions["sid"]["attached_images"] == [str(image_path)]
 
 
 def test_commands_catalog_surfaces_quick_commands(monkeypatch):

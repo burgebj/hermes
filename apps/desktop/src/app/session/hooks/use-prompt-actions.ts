@@ -5,6 +5,7 @@ import { transcribeAudio } from '@/hermes'
 import { appendTextPart, branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import {
   attachmentDisplayText,
+  imageAttachRequestForAttachment,
   INTERRUPTED_MARKER,
   parseCommandDispatch,
   parseSlashCommand,
@@ -171,17 +172,18 @@ export function usePromptActions({
       options: { updateComposerAttachments?: boolean } = {}
     ) => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
-      const images = attachments.filter(attachment => attachment.kind === 'image' && attachment.path)
+
+      const images = attachments.filter(
+        attachment => attachment.kind === 'image' && (attachment.path || attachment.contentBase64)
+      )
 
       for (const attachment of images) {
         if (attachment.attachedSessionId === sessionId) {
           continue
         }
 
-        const result = await requestGateway<ImageAttachResponse>('image.attach', {
-          session_id: sessionId,
-          path: attachment.path
-        })
+        const request = imageAttachRequestForAttachment(sessionId, attachment)
+        const result = await requestGateway<ImageAttachResponse>(request.method, request.params)
 
         if (!result.attached) {
           const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')

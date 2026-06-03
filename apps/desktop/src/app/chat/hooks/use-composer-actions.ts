@@ -32,6 +32,16 @@ function blobExtension(blob: Blob): string {
   return (mime && BLOB_MIME_EXTENSION[mime]) || '.png'
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+  }
+
+  return btoa(binary)
+}
+
 function isImagePath(filePath: string): boolean {
   return IMAGE_EXTENSION_PATTERN.test(filePath)
 }
@@ -306,36 +316,48 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
     }
   }, [])
 
-  const attachImageBlob = useCallback(
-    async (blob: Blob) => {
-      if (blob.size === 0) {
-        return false
-      }
+  const attachImageBlob = useCallback(async (blob: Blob) => {
+    if (blob.size === 0) {
+      return false
+    }
 
-      if (blob.type && !blob.type.startsWith('image/')) {
-        return false
-      }
+    if (blob.type && !blob.type.startsWith('image/')) {
+      return false
+    }
 
-      try {
-        const buffer = await blob.arrayBuffer()
-        const data = new Uint8Array(buffer)
-        const savedPath = await window.hermesDesktop?.saveImageBuffer(data, blobExtension(blob))
+    try {
+      const buffer = await blob.arrayBuffer()
+      const data = new Uint8Array(buffer)
+      const savedPath = await window.hermesDesktop?.saveImageBuffer(data, blobExtension(blob))
 
-        if (!savedPath) {
-          notify({ kind: 'error', title: 'Image attach', message: 'Failed to write image to disk.' })
-
-          return false
-        }
-
-        return attachImagePath(savedPath)
-      } catch (err) {
-        notifyError(err, 'Image attach failed')
+      if (!savedPath) {
+        notify({ kind: 'error', title: 'Image attach', message: 'Failed to write image to disk.' })
 
         return false
       }
-    },
-    [attachImagePath]
-  )
+
+      const contentBase64 = bytesToBase64(data)
+      const filename = pathLabel(savedPath)
+      const mimeType = blob.type || 'image/png'
+
+      attachToMain({
+        contentBase64,
+        detail: savedPath,
+        filename,
+        id: attachmentId('image', savedPath),
+        kind: 'image',
+        label: filename,
+        path: savedPath,
+        previewUrl: `data:${mimeType};base64,${contentBase64}`
+      })
+
+      return true
+    } catch (err) {
+      notifyError(err, 'Image attach failed')
+
+      return false
+    }
+  }, [])
 
   const pickImages = useCallback(async () => {
     const paths = await window.hermesDesktop?.selectPaths({

@@ -164,6 +164,30 @@ export function attachmentDisplayText(attachment: ComposerAttachment): string | 
   return null
 }
 
+export function imageAttachRequestForAttachment(sessionId: string, attachment: ComposerAttachment) {
+  const contentBase64 = attachment.contentBase64?.trim()
+
+  if (contentBase64) {
+    return {
+      method: 'image.attach_bytes',
+      params: {
+        content_base64: contentBase64,
+        filename:
+          attachment.filename || attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image.png'),
+        session_id: sessionId
+      }
+    }
+  }
+
+  return {
+    method: 'image.attach',
+    params: {
+      path: attachment.path,
+      session_id: sessionId
+    }
+  }
+}
+
 export function personalityNamesFromConfig(config: unknown): string[] {
   const root = config && typeof config === 'object' ? (config as Record<string, unknown>) : {}
   const agent = root.agent && typeof root.agent === 'object' ? (root.agent as Record<string, unknown>) : {}

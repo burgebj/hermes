@@ -11,6 +11,8 @@ export interface ComposerAttachment {
   previewUrl?: string
   path?: string
   attachedSessionId?: string
+  contentBase64?: string
+  filename?: string
 }
 
 export const $composerDraft = atom('')

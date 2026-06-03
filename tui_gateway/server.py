@@ -1,4 +1,6 @@
 import atexit
+import base64
+import binascii
 import concurrent.futures
 import contextvars
 import copy
@@ -7,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -33,6 +36,11 @@ _hermes_home = get_hermes_home()
 load_hermes_dotenv(
     hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env"
 )
+_IMAGE_ATTACH_BYTES_MAX = 25 * 1024 * 1024
+_IMAGE_ATTACH_EXTENSIONS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg", ".ico"}
+)
+_DATA_URL_BASE64_RE = re.compile(r"^data:[^;,]+;base64,", re.IGNORECASE)
 
 
 # ── Panic logger ─────────────────────────────────────────────────────
@@ -426,6 +434,37 @@ def _image_meta(path: Path) -> dict:
     except Exception:
         pass
     return meta
+
+
+def _decode_image_upload_base64(raw: str) -> bytes:
+    cleaned = _DATA_URL_BASE64_RE.sub("", str(raw or "").strip(), count=1)
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if not cleaned:
+        raise ValueError("content_base64 required")
+    try:
+        data = base64.b64decode(cleaned, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid content_base64") from exc
+    if len(data) > _IMAGE_ATTACH_BYTES_MAX:
+        raise ValueError("image payload too large")
+    return data
+
+
+def _uploaded_image_ext(filename: str, data: bytes) -> str:
+    ext = Path(str(filename or "")).suffix.lower()
+    if ext in _IMAGE_ATTACH_EXTENSIONS:
+        return ext
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    return ".png"
 
 
 def _ok(rid, result: dict) -> dict:
@@ -4572,6 +4611,47 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5027, str(e))
+
+
+@method("image.attach_bytes")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    try:
+        data = _decode_image_upload_base64(
+            params.get("content_base64") or params.get("contentBase64") or ""
+        )
+    except ValueError as exc:
+        code = 4018 if "too large" in str(exc) else 4017
+        return _err(rid, code, str(exc))
+
+    session["image_counter"] = session.get("image_counter", 0) + 1
+    filename = str(params.get("filename") or "upload.png")
+    ext = _uploaded_image_ext(filename, data)
+    img_dir = _hermes_home / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    img_path = (
+        img_dir
+        / f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{session['image_counter']}{ext}"
+    )
+    try:
+        img_path.write_bytes(data)
+        session.setdefault("attached_images", []).append(str(img_path))
+        return _ok(
+            rid,
+            {
+                "attached": True,
+                "path": str(img_path),
+                "count": len(session["attached_images"]),
+                "text": f"[User attached image: {img_path.name}]",
+                "bytes": len(data),
+                **_image_meta(img_path),
+            },
+        )
+    except Exception as exc:
+        session["image_counter"] = max(0, session["image_counter"] - 1)
+        return _err(rid, 5027, str(exc))
 
 
 @method("image.detach")
