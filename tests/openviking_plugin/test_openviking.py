@@ -1,6 +1,7 @@
 """Tests for plugins/memory/openviking/__init__.py — URI normalization and payload handling."""
 
 import json
+import re
 
 from plugins.memory.openviking import OpenVikingMemoryProvider
 
@@ -231,3 +232,47 @@ class TestOpenVikingBrowse:
             "/api/v1/fs/ls",
             {"uri": "viking://user/hermes"},
         )]
+
+
+class TestOpenVikingMemoryUriBuilder:
+    def _provider(self, user="alice", agent="hermes"):
+        p = OpenVikingMemoryProvider()
+        p._user = user
+        p._agent = agent
+        return p
+
+    def test_uri_layout_includes_agent_segment(self):
+        provider = self._provider(user="alice", agent="hermes")
+
+        uri = provider._build_memory_uri("preferences")
+
+        assert uri.startswith("viking://user/alice/agent/hermes/memories/preferences/mem_"), uri
+        assert uri.endswith(".md"), uri
+
+    def test_uri_uses_configured_agent_not_default(self):
+        provider = self._provider(user="bob", agent="research-bot")
+
+        uri = provider._build_memory_uri("patterns")
+
+        assert "agent/research-bot" in uri, uri
+        assert "viking://user/bob/agent/research-bot/memories/patterns/mem_" in uri, uri
+
+    def test_uri_slug_is_twelve_hex_chars_and_unique(self):
+        provider = self._provider()
+
+        slug_re = re.compile(r"mem_([0-9a-f]{12})\.md$")
+        first = provider._build_memory_uri("preferences")
+        second = provider._build_memory_uri("preferences")
+
+        m1 = slug_re.search(first)
+        m2 = slug_re.search(second)
+        assert m1, f"slug shape wrong: {first}"
+        assert m2, f"slug shape wrong: {second}"
+        assert m1.group(1) != m2.group(1), (first, second)
+
+    def test_uri_subdir_is_placed_between_memories_and_slug(self):
+        provider = self._provider()
+
+        for subdir in ("preferences", "entities", "events", "cases", "patterns"):
+            uri = provider._build_memory_uri(subdir)
+            assert f"/memories/{subdir}/mem_" in uri, (subdir, uri)
