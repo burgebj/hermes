@@ -223,7 +223,6 @@ class TestAnyOfParentType:
         assert db_type["type"] == "string"
         assert db_type["enum"] == ["mysql", "postgresql"]  # "" stripped by enum cleanup
 
-
 class TestTopLevelGuarantees:
     """The returned top-level schema is always a well-formed object."""
 
@@ -416,6 +415,26 @@ class TestEnumNullStripping:
         out = sanitize_moonshot_tool_parameters(params)
         # object-typed enum should pass through unchanged
         assert "enum" in out["properties"]["config"]
+
+    def test_enum_on_ref_with_union_type_does_not_crash(self):
+        """$ref nodes skip type inference, so their list type reaches enum cleanup."""
+        params = {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/Payload",
+                    "type": ["string", "integer"],
+                    "enum": ["a", None, ""],
+                },
+            },
+            "$defs": {"Payload": {"type": "object", "properties": {}}},
+        }
+
+        out = sanitize_moonshot_tool_parameters(params)
+        payload = out["properties"]["payload"]
+        assert payload["$ref"] == "#/$defs/Payload"
+        assert payload["type"] == ["string", "integer"]
+        assert payload["enum"] == ["a", None, ""]
 
     def test_anyof_collapse_still_runs_nullable_and_enum_cleanup(self):
         """After anyOf collapses to a single non-null branch, the merged
