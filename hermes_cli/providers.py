@@ -181,6 +181,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="XIAOMI_BASE_URL",
     ),
+    "modelscope": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="MODELSCOPE_BASE_URL",
+    ),
     "tencent-tokenhub": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="TOKENHUB_BASE_URL",
@@ -328,6 +333,9 @@ ALIASES: Dict[str, str] = {
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
 
+    # modelscope
+    "ms": "modelscope",
+
     # tencent
     "tencent": "tencent-tokenhub",
     "tokenhub": "tencent-tokenhub",
@@ -370,6 +378,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "copilot-acp": "GitHub Copilot ACP",
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
+    "modelscope": "ModelScope",
     "gmi": "GMI Cloud",
     "tencent-tokenhub": "Tencent TokenHub",
     "lmstudio": "LM Studio",
