@@ -255,28 +255,33 @@ async def handle_ws(ws: Any) -> None:
                 )
                 break
     finally:
+        reaped_sessions = 0
         detached_sessions = 0
         if transport is not None:
             transport.close()
 
-            # Detach the transport from any sessions it owned so later emits
-            # fall back to stdio instead of crashing into a closed socket.
-            for _, sess in list(server._sessions.items()):
-                if sess.get("transport") is transport:
-                    sess["transport"] = server._stdio_transport
-                    detached_sessions += 1
+            # Reap sessions this transport owned (close_on_disconnect) or detach
+            # the rest back to stdio so later emits don't crash into a closed
+            # socket. Offloaded: _close_session_by_id does a blocking
+            # worker.close() (terminate + waits) plus a synchronous DB write —
+            # inline that would freeze the uvicorn event loop for every other
+            # live connection.
+            reaped_sessions, detached_sessions = await asyncio.to_thread(
+                server._close_sessions_for_transport, transport, end_reason="ws_disconnect"
+            )
         try:
             await ws.close()
         except Exception as exc:
             _log.debug("ws close failed peer=%s error=%s", peer, exc)
         _log.info(
             "ws closed peer=%s reason=%s messages=%d parse_errors=%d "
-            "dispatch_crashes=%d send_failures=%d detached_sessions=%d",
+            "dispatch_crashes=%d send_failures=%d reaped_sessions=%d detached_sessions=%d",
             peer,
             disconnect_reason,
             messages,
             parse_errors,
             dispatch_crashes,
             send_failures,
+            reaped_sessions,
             detached_sessions,
         )

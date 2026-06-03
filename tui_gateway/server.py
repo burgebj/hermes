@@ -117,6 +117,10 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+# Serializes session teardown (pop) against worker attachment so a worker built
+# after its session was reaped can't be orphaned. Reentrant: _close_session_by_id
+# may run under callers that already hold it.
+_sessions_lock = threading.RLock()
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
@@ -201,6 +205,7 @@ class _SlashWorker:
         if model:
             argv += ["--model", model]
 
+        self._closed = False
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -255,15 +260,33 @@ class _SlashWorker:
             )
 
     def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        proc = self.proc
         try:
-            if self.proc.poll() is None:
-                self.proc.terminate()
-                self.proc.wait(timeout=1)
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1)  # reap the zombie SIGKILL leaves behind
+                    except Exception:
+                        pass
         except Exception:
             try:
-                self.proc.kill()
+                proc.kill()
+                proc.wait(timeout=1)
             except Exception:
                 pass
+        finally:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
 
 def _load_busy_input_mode() -> str:
@@ -323,18 +346,119 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
             pass
 
 
+def _attach_worker(sid: str, session: dict, worker) -> None:
+    """Store worker on session iff sid still maps to it, else close it — a
+    concurrent teardown already popped the session and would orphan the worker."""
+    with _sessions_lock:
+        if _sessions.get(sid) is session:
+            session["slash_worker"] = worker
+            return
+    worker.close()
+
+
+def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
+    """Single idempotent teardown for one session: pop, finalize, unregister
+    notify, close agent + slash worker. True iff it closed a live session."""
+    with _sessions_lock:
+        session = _sessions.pop(sid, None)
+    if session is None:
+        return False
+    _finalize_session(session, end_reason=end_reason)
+    try:
+        from tools.approval import unregister_gateway_notify
+
+        if key := session.get("session_key"):
+            unregister_gateway_notify(key)
+    except Exception:
+        pass
+    try:
+        agent = session.get("agent")
+        if agent is not None and hasattr(agent, "close"):
+            agent.close()
+    except Exception:
+        pass
+    try:
+        if worker := session.get("slash_worker"):
+            worker.close()
+    except Exception:
+        pass
+    return True
+
+
+def _close_sessions_for_transport(
+    transport, *, end_reason: str = "ws_disconnect"
+) -> tuple[int, int]:
+    """On transport disconnect, reap the sessions that opted into close_on_disconnect
+    (sidecar) and re-point the rest back to stdio so later emits don't hit a dead socket.
+
+    Returns ``(reaped, detached)`` counts for disconnect-path observability."""
+    with _sessions_lock:
+        owned = [(sid, s) for sid, s in _sessions.items() if s.get("transport") is transport]
+    reaped = 0
+    detached = 0
+    for sid, session in owned:
+        if session.get("close_on_disconnect"):
+            _close_session_by_id(sid, end_reason=end_reason)
+            reaped += 1
+        else:
+            session["transport"] = _stdio_transport
+            detached += 1
+    return reaped, detached
+
+
 def _shutdown_sessions() -> None:
-    for session in list(_sessions.values()):
-        _finalize_session(session, end_reason="tui_shutdown")
-        try:
-            worker = session.get("slash_worker")
-            if worker:
-                worker.close()
-        except Exception:
-            pass
+    for sid in list(_sessions):
+        _close_session_by_id(sid, end_reason="tui_shutdown")
+
+
+# Last-resort net for any disconnect path that slips past the WS finally. TTL is
+# hours-scale because last_active freezes during a long turn and on passive
+# viewing — running/pending/starting/live-transport are hard exemptions instead.
+_SESSION_TTL_S = float(os.environ.get("HERMES_TUI_SESSION_TTL_S", 6 * 3600))
+_REAPER_SCAN_S = 300.0
+
+
+def _transport_is_dead(transport) -> bool:
+    if transport is _stdio_transport:
+        return True
+    return getattr(transport, "_closed", None) is True
+
+
+def _session_is_evictable(sid: str, session: dict, now: float) -> bool:
+    if session.get("running") or _session_pending_kind(sid):
+        return False
+    ready = session.get("agent_ready")
+    if ready is not None and not ready.is_set():  # still starting
+        return False
+    if not _transport_is_dead(session.get("transport")):
+        return False
+    last_active = float(session.get("last_active") or 0.0)
+    created_at = float(session.get("created_at") or 0.0)
+    return (now - last_active) > _SESSION_TTL_S and (now - created_at) > _SESSION_TTL_S
+
+
+def _reap_idle_sessions() -> None:
+    now = time.time()
+    with _sessions_lock:
+        victims = [sid for sid, s in _sessions.items() if _session_is_evictable(sid, s, now)]
+    for sid in victims:
+        _close_session_by_id(sid, end_reason="idle_timeout")
+
+
+def _start_idle_reaper() -> None:
+    def _loop():
+        while True:
+            time.sleep(_REAPER_SCAN_S)
+            try:
+                _reap_idle_sessions()
+            except Exception:
+                pass
+
+    threading.Thread(target=_loop, daemon=True).start()
 
 
 atexit.register(_shutdown_sessions)
+_start_idle_reaper()
 
 
 # ── Plumbing ──────────────────────────────────────────────────────────
@@ -565,7 +689,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
-                current["slash_worker"] = worker
+                _attach_worker(sid, current, worker)
             except Exception:
                 pass
 
@@ -597,19 +721,16 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
-            if _sessions.get(sid) is not current:
-                if worker is not None:
-                    try:
-                        worker.close()
-                    except Exception:
-                        pass
-                if notify_registered:
-                    try:
-                        from tools.approval import unregister_gateway_notify
+            # _attach_worker already closed the worker if this session was
+            # reaped mid-build; only the late notify registration can still
+            # leak (session.close unregistered before _build registered it).
+            if notify_registered and _sessions.get(sid) is not current:
+                try:
+                    from tools.approval import unregister_gateway_notify
 
-                        unregister_gateway_notify(key)
-                    except Exception:
-                        pass
+                    unregister_gateway_notify(key)
+                except Exception:
+                    pass
             ready.set()
 
     threading.Thread(target=_build, daemon=True).start()
@@ -1208,7 +1329,7 @@ def _tool_progress_enabled(sid: str) -> bool:
     return _session_tool_progress_mode(sid) != "off"
 
 
-def _restart_slash_worker(session: dict):
+def _restart_slash_worker(sid: str, session: dict):
     worker = session.get("slash_worker")
     if worker:
         try:
@@ -1216,12 +1337,18 @@ def _restart_slash_worker(session: dict):
         except Exception:
             pass
     try:
-        session["slash_worker"] = _SlashWorker(
+        new_worker = _SlashWorker(
             session["session_key"],
             getattr(session.get("agent"), "model", _resolve_model()),
         )
     except Exception:
         session["slash_worker"] = None
+        return
+    # Route through the same store-iff-still-mapped guard as the spawn sites:
+    # the post-turn restart runs as `running` flips false, exactly when a
+    # close_on_disconnect reap can pop this session — a bare store would orphan
+    # the fresh worker (it self-heals only on gateway exit via the watchdog).
+    _attach_worker(sid, session, new_worker)
 
 
 def _persist_model_switch(result) -> None:
@@ -1307,7 +1434,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             base_url=result.base_url,
             api_mode=result.api_mode,
         )
-        _restart_slash_worker(session)
+        _restart_slash_worker(sid, session)
         _emit("session.info", sid, _session_info(agent, session))
 
     os.environ["HERMES_MODEL"] = result.new_model
@@ -1454,7 +1581,7 @@ def _sync_session_key_after_compress(
         session["pending_title"] = None
     if restart_slash_worker:
         try:
-            _restart_slash_worker(session)
+            _restart_slash_worker(sid, session)
         except Exception:
             pass
 
@@ -2298,7 +2425,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         session["history_version"] = int(session.get("history_version", 0)) + 1
     info = _session_info(new_agent, session)
     _emit("session.info", sid, info)
-    _restart_slash_worker(session)
+    _restart_slash_worker(sid, session)
     return info
 
 
@@ -2409,8 +2536,8 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
                 logger.debug("failed to persist resumed session cwd", exc_info=True)
     _register_session_cwd(_sessions[sid])
     try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
-            key, getattr(agent, "model", _resolve_model())
+        _attach_worker(
+            sid, _sessions[sid], _SlashWorker(key, getattr(agent, "model", _resolve_model()))
         )
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
@@ -2795,6 +2922,7 @@ def _(rid, params: dict) -> dict:
         "agent_error": None,
         "agent_ready": ready,
         "attached_images": [],
+        "close_on_disconnect": is_truthy_value(params.get("close_on_disconnect", False)),
         "cols": cols,
         "created_at": now,
         "edit_snapshots": {},
@@ -3502,29 +3630,7 @@ def _(rid, params: dict) -> dict:
 @method("session.close")
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
-    session = _sessions.pop(sid, None)
-    if not session:
-        return _ok(rid, {"closed": False})
-    _finalize_session(session)
-    try:
-        from tools.approval import unregister_gateway_notify
-
-        unregister_gateway_notify(session["session_key"])
-    except Exception:
-        pass
-    try:
-        agent = session.get("agent")
-        if agent and hasattr(agent, "close"):
-            agent.close()
-    except Exception:
-        pass
-    try:
-        worker = session.get("slash_worker")
-        if worker:
-            worker.close()
-    except Exception:
-        pass
-    return _ok(rid, {"closed": True})
+    return _ok(rid, {"closed": _close_session_by_id(sid, end_reason="tui_close")})
 
 
 @method("session.branch")
@@ -6924,7 +7030,7 @@ def _(rid, params: dict) -> dict:
                 session["session_key"],
                 getattr(session.get("agent"), "model", _resolve_model()),
             )
-            session["slash_worker"] = worker
+            _attach_worker(params.get("session_id", ""), session, worker)
         except Exception as e:
             return _err(rid, 5030, f"slash worker start failed: {e}")
 
