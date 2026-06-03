@@ -24,6 +24,7 @@ import {
   setAwaitingResponse,
   setBusy,
   setCurrentBranch,
+  setCurrentCompressCount,
   setCurrentCwd,
   setCurrentFastMode,
   setCurrentModel,
@@ -211,12 +212,12 @@ function patchSessionWorkspace(sessionId: string, cwd: string | undefined) {
 
 function applyRuntimeInfo(
   info: SessionCreateResponse['info'] | undefined
-): Partial<Pick<ClientSessionState, 'branch' | 'cwd'>> | null {
+): Partial<Pick<ClientSessionState, 'branch' | 'compressCount' | 'cwd'>> | null {
   if (!info) {
     return null
   }
 
-  const sessionState: Partial<Pick<ClientSessionState, 'branch' | 'cwd'>> = {}
+  const sessionState: Partial<Pick<ClientSessionState, 'branch' | 'compressCount' | 'cwd'>> = {}
 
   reportBackendContract(info.desktop_contract)
 
@@ -260,6 +261,12 @@ function applyRuntimeInfo(
 
   if (typeof info.yolo === 'boolean') {
     setYoloActive(info.yolo)
+  }
+
+  if (typeof info.compress_count === 'number') {
+    const count = Math.max(0, info.compress_count)
+    setCurrentCompressCount(count)
+    sessionState.compressCount = count
   }
 
   if (info.usage) {
@@ -306,6 +313,7 @@ export function useSessionActions({
         output: 0,
         total: 0
       })
+      setCurrentCompressCount(0)
       setSessionStartedAt(null)
       setTurnStartedAt(null)
       // New chats inherit the current workspace.
@@ -449,6 +457,7 @@ export function useSessionActions({
         syncSessionStateToView(cachedRuntimeId, cachedState)
         setCurrentCwd(cachedState.cwd)
         setCurrentBranch(cachedState.branch)
+        setCurrentCompressCount(cachedState.compressCount)
         setSessionStartedAt(Date.now())
         clearComposerDraft()
         clearComposerAttachments()

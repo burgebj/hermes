@@ -22,6 +22,7 @@ import { requestDesktopOnboarding } from '@/store/onboarding'
 import { clearAllPrompts, setApprovalRequest, setSecretRequest, setSudoRequest } from '@/store/prompts'
 import {
   setCurrentBranch,
+  setCurrentCompressCount,
   setCurrentCwd,
   setCurrentFastMode,
   setCurrentModel,
@@ -613,7 +614,7 @@ export function useMessageStream({
         const runningChanged = typeof payload?.running === 'boolean'
 
         if (apply) {
-          const runtimeInfo: { branch?: string; cwd?: string } = {}
+          const runtimeInfo: { branch?: string; compressCount?: number; cwd?: string } = {}
 
           if (modelChanged) {
             setCurrentModel(payload!.model || '')
@@ -633,10 +634,22 @@ export function useMessageStream({
             runtimeInfo.branch = payload.branch
           }
 
-          if (sessionId && (runtimeInfo.cwd !== undefined || runtimeInfo.branch !== undefined)) {
+          if (typeof payload?.compress_count === 'number') {
+            const count = Math.max(0, payload.compress_count)
+            setCurrentCompressCount(count)
+            runtimeInfo.compressCount = count
+          }
+
+          if (
+            sessionId &&
+            (runtimeInfo.cwd !== undefined ||
+              runtimeInfo.branch !== undefined ||
+              runtimeInfo.compressCount !== undefined)
+          ) {
             updateSessionState(sessionId, state => ({
               ...state,
               branch: runtimeInfo.branch ?? state.branch,
+              compressCount: runtimeInfo.compressCount ?? state.compressCount,
               cwd: runtimeInfo.cwd ?? state.cwd
             }))
           }

@@ -5,7 +5,14 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import { preserveLocalAssistantErrors } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { setMutableRef } from '@/lib/mutable-ref'
-import { $busy, $messages, noteSessionActivity, setSessionAttention, setSessionWorking } from '@/store/session'
+import {
+  $busy,
+  $messages,
+  noteSessionActivity,
+  setCurrentCompressCount,
+  setSessionAttention,
+  setSessionWorking
+} from '@/store/session'
 
 import type { ClientSessionState } from '../../types'
 
@@ -92,6 +99,7 @@ export function useSessionStateCache({
     setBusy(pending.state.busy)
     setMutableRef(busyRef, pending.state.busy)
     setAwaitingResponse(pending.state.awaitingResponse)
+    setCurrentCompressCount(pending.state.compressCount)
   }, [busyRef, setAwaitingResponse, setBusy, setMessages])
 
   const syncSessionStateToView = useCallback(
