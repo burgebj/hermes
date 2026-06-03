@@ -171,6 +171,27 @@ class TestResolveChannelName:
             assert resolve_channel_name("telegram", "Dev Group (group)") == "456"
             assert resolve_channel_name("telegram", "Coaching Chat / topic 17585 (group)") == "-1001:17585"
 
+    def test_registry_alias_enriches_list_and_resolution(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {"telegram": []})
+        (tmp_path / "config.yaml").write_text(
+            """
+workspace:
+  topic_registry:
+    topics:
+      alerts:
+        target: telegram:-1001:14
+        name: "Eternal / #alerts"
+        purpose: notifications
+""",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}), patch(
+            "gateway.channel_directory.DIRECTORY_PATH", cache_file
+        ):
+            assert resolve_channel_name("telegram", "#alerts") == "-1001:14"
+            display = format_directory_for_display()
+        assert "telegram:Eternal / #alerts" in display
+
 
 class TestBuildFromSessions:
     def _write_sessions(self, tmp_path, sessions_data):

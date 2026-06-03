@@ -3249,6 +3249,70 @@ class GatewayRunner:
         return mode
 
     @staticmethod
+    def _load_background_notification_target() -> str:
+        """Optional target override for process watcher notifications."""
+        raw = os.getenv("HERMES_BACKGROUND_NOTIFICATION_TARGET", "").strip()
+        if raw:
+            return raw
+        cfg = _load_gateway_runtime_config()
+        return str(cfg_get(cfg, "display", "background_process_notification_target", default="") or "").strip()
+
+    def _resolve_background_notification_target(
+        self,
+        *,
+        platform_name: str,
+        chat_id: str,
+        thread_id: str | None,
+    ) -> tuple[str, str, str | None]:
+        """Return configured process-notification destination or original route."""
+        target = self._load_background_notification_target()
+        if not target:
+            return platform_name, chat_id, thread_id
+        try:
+            from tools.send_message_tool import _parse_target_ref
+            platform, rest = target.split(":", 1)
+            platform = platform.strip().lower()
+            parsed_chat, parsed_thread, is_explicit = _parse_target_ref(platform, rest.strip())
+            if not is_explicit:
+                from gateway.channel_directory import resolve_channel_name
+                resolved = resolve_channel_name(platform, rest.strip())
+                if resolved:
+                    parsed_chat, parsed_thread, _ = _parse_target_ref(platform, resolved)
+            if parsed_chat:
+                return platform, parsed_chat, parsed_thread
+        except Exception:
+            logger.warning(
+                "Invalid background_process_notification_target %r; using original route",
+                target,
+            )
+        return platform_name, chat_id, thread_id
+
+    def _build_background_notification_source(
+        self,
+        *,
+        original_source: SessionSource | None,
+        platform_name: str,
+        chat_id: str,
+        thread_id: str | None,
+        user_id: str | None = None,
+        user_name: str | None = None,
+    ) -> SessionSource | None:
+        try:
+            platform = Platform(platform_name)
+        except Exception:
+            return None
+        chat_type = "group" if thread_id or str(chat_id).startswith("-") else "dm"
+        return SessionSource(
+            platform=platform,
+            chat_id=str(chat_id),
+            chat_type=chat_type,
+            thread_id=str(thread_id) if thread_id else None,
+            user_id=(getattr(original_source, "user_id", None) or user_id or None),
+            user_name=(getattr(original_source, "user_name", None) or user_name or None),
+            chat_name=getattr(original_source, "chat_name", None),
+        )
+
+    @staticmethod
     def _load_provider_routing() -> dict:
         """Load OpenRouter provider routing preferences from config.yaml."""
         try:
@@ -8063,7 +8127,34 @@ class GatewayRunner:
 
         if canonical == "topic":
             return await self._handle_topic_command(event)
-        
+
+        if canonical == "whereami":
+            return await self._handle_whereami_command(event)
+
+        if canonical == "guide":
+            return await self._handle_guide_command(event)
+
+        if canonical == "agent_status":
+            return await self._handle_agent_status_command(event)
+
+        if canonical == "summon":
+            return await self._handle_summon_command(event)
+
+        if canonical == "swarm":
+            return await self._handle_swarm_command(event)
+
+        if canonical == "route":
+            return await self._handle_route_command(event)
+
+        if canonical in {"checklist", "cl"}:
+            return await self._handle_checklist_command(event)
+
+        if canonical in {"say", "tts"}:
+            return await self._handle_say_command(event)
+
+        if canonical in {"voice_status", "vs"}:
+            return await self._handle_voice_status_command(event)
+
         if canonical == "help":
             return await self._handle_help_command(event)
 
@@ -8387,6 +8478,14 @@ class GatewayRunner:
         # Pending exec approvals are handled by /approve and /deny commands above.
         # No bare text matching — "yes" in normal conversation must not trigger
         # execution of a dangerous command.
+
+        # @mention dispatch — intercept @agent mentions before the LLM loop.
+        # Messages that begin with @known-agent (and are not slash commands) are
+        # routed to the workspace router so the relevant agent process is
+        # actually invoked.  Returns ack text on match; None to fall through.
+        _mention_result = await self._maybe_dispatch_agent_mention(event)
+        if _mention_result is not None:
+            return _mention_result
 
         if self._is_telegram_topic_root_lobby(source):
             # Debounce the lobby reminder so a user who forgets about
@@ -11833,6 +11932,284 @@ class GatewayRunner:
             )
 
         return t("gateway.set_home.success", name=chat_name, chat_id=chat_id)
+
+    async def _handle_whereami_command(self, event: MessageEvent) -> str:
+        """Handle /whereami -- show current routing/topic diagnostics."""
+        try:
+            from gateway.topic_registry import describe_current_topic
+            return describe_current_topic(event.source)
+        except Exception as exc:
+            return f"Could not inspect current topic: {exc}"
+
+    async def _handle_guide_command(self, event: MessageEvent) -> str:
+        """Handle /guide -- show the multi-agent workspace guide."""
+        try:
+            from gateway.agent_registry import generate_pinned_guide
+            return generate_pinned_guide()
+        except Exception as exc:
+            return f"Could not generate workspace guide: {exc}"
+
+    async def _handle_agent_status_command(self, event: MessageEvent) -> str:
+        """Handle /agent_status (/roster) -- show registered agent roster."""
+        try:
+            from gateway.agent_registry import render_agent_roster
+            return render_agent_roster()
+        except Exception as exc:
+            return f"Could not load agent registry: {exc}"
+
+    async def _handle_summon_command(self, event: MessageEvent) -> str:
+        """Handle /summon @agent [task] -- invoke guidance + inline keyboard."""
+        try:
+            from gateway.agent_registry import render_summon_help, render_agent_roster
+            from gateway import workspace_keyboards as _wk
+            args = event.get_command_args().strip()
+            parts = args.split(None, 1)
+            if not parts:
+                return "Usage: /summon @agent [task]\n\n" + render_agent_roster()
+            alias = parts[0].lstrip("@").lower()
+            task = parts[1] if len(parts) > 1 else ""
+            text = render_summon_help(alias)
+            cid = _wk.store_summon(alias, task)
+            rows = _wk.summon_keyboard_rows(alias, cid)
+            adapter = self.adapters.get(event.source.platform)
+            if hasattr(adapter, "send_with_keyboard"):
+                thread_id = str(getattr(event.source, "thread_id", None) or "")
+                await adapter.send_with_keyboard(
+                    chat_id=event.source.chat_id,
+                    thread_id=thread_id or None,
+                    text=text,
+                    keyboard_rows=rows,
+                )
+                return ""
+            return text
+        except Exception as exc:
+            return f"Could not look up agent: {exc}"
+
+    async def _handle_swarm_command(self, event: MessageEvent) -> str:
+        """Handle /swarm @a @b [task] -- multi-agent dispatch with inline keyboard."""
+        try:
+            from gateway.agent_registry import render_swarm_guidance
+            from gateway import workspace_keyboards as _wk
+            args = event.get_command_args().strip()
+            tokens = args.split()
+            aliases: list[str] = []
+            task_parts: list[str] = []
+            for tok in tokens:
+                if tok.startswith("@"):
+                    aliases.append(tok.lstrip("@"))
+                else:
+                    task_parts.append(tok)
+            task = " ".join(task_parts)
+            text = render_swarm_guidance(aliases, task)
+            cid = _wk.store_swarm(aliases, task)
+            rows = _wk.swarm_keyboard_rows(aliases, cid)
+            adapter = self.adapters.get(event.source.platform)
+            if hasattr(adapter, "send_with_keyboard"):
+                thread_id = str(getattr(event.source, "thread_id", None) or "")
+                await adapter.send_with_keyboard(
+                    chat_id=event.source.chat_id,
+                    thread_id=thread_id or None,
+                    text=text,
+                    keyboard_rows=rows,
+                )
+                return ""
+            return text
+        except Exception as exc:
+            return f"Could not generate swarm guidance: {exc}"
+
+    async def _handle_route_command(self, event: MessageEvent) -> str:
+        """Handle /route @agent [task] -- routing guidance with inline keyboard."""
+        try:
+            from gateway.agent_registry import render_route_guidance, render_agent_roster
+            from gateway import workspace_keyboards as _wk
+            args = event.get_command_args().strip()
+            parts = args.split(None, 1)
+            if not parts:
+                return "Usage: /route @agent [task]\n\n" + render_agent_roster()
+            alias = parts[0].lstrip("@").lower()
+            task = parts[1] if len(parts) > 1 else ""
+            text = render_route_guidance(alias, task)
+            rows = _wk.route_keyboard_rows(alias)
+            # Store a summon pending entry so the keyboard "Summon" button works
+            _wk.store_summon(alias, task)
+            adapter = self.adapters.get(event.source.platform)
+            if hasattr(adapter, "send_with_keyboard"):
+                thread_id = str(getattr(event.source, "thread_id", None) or "")
+                await adapter.send_with_keyboard(
+                    chat_id=event.source.chat_id,
+                    thread_id=thread_id or None,
+                    text=text,
+                    keyboard_rows=rows,
+                )
+                return ""
+            return text
+        except Exception as exc:
+            return f"Could not generate routing guidance: {exc}"
+
+    async def _handle_checklist_command(self, event: MessageEvent) -> str:
+        """Handle /checklist [title] -- create an emulated checklist with inline buttons."""
+        try:
+            from gateway.checklist_store import (
+                STANDARD_AGENT_CHECKLIST,
+                create_checklist,
+                get_checklist,
+                render_checklist_text,
+                build_checklist_keyboard_rows,
+            )
+            args = event.get_command_args().strip()
+            title = args or "Agent Run Checklist"
+            chat_id = event.source.chat_id
+            thread_id = str(getattr(event.source, "thread_id", None) or "")
+
+            cl_id = create_checklist(
+                title=title,
+                items=STANDARD_AGENT_CHECKLIST,
+                chat_id=chat_id,
+                thread_id=thread_id or None,
+                user_id=str(getattr(event.source, "user_id", None) or ""),
+            )
+            data = get_checklist(cl_id)
+            if data is None:
+                return "Could not create checklist."
+            text = render_checklist_text(data)
+            rows = build_checklist_keyboard_rows(data)
+
+            adapter = self.adapters.get(event.source.platform)
+            if hasattr(adapter, "send_with_keyboard"):
+                await adapter.send_with_keyboard(
+                    chat_id=chat_id,
+                    thread_id=thread_id or None,
+                    text=text,
+                    keyboard_rows=rows,
+                )
+                return ""
+            return text
+        except Exception as exc:
+            return f"Could not create checklist: {exc}"
+
+    async def _handle_say_command(self, event: MessageEvent) -> str:
+        """Handle /say <text> or /tts <text> -- send a TTS voice message."""
+        text = event.get_command_args().strip()
+        if not text:
+            return (
+                "Usage: /say <text> — converts text to speech and sends as voice message.\n"
+                "Example: `/say The build passed successfully`"
+            )
+        try:
+            await self._send_voice_reply(event, text)
+            return ""  # voice message already sent
+        except Exception as exc:
+            return f"⚠️ TTS unavailable: {exc}\n\nText: {text}"
+
+    async def _handle_voice_status_command(self, event: MessageEvent) -> str:
+        """Handle /voice_status -- show voice mode with control keyboard."""
+        from gateway import workspace_keyboards as _wk
+        chat_id = event.source.chat_id
+        platform = event.source.platform
+        voice_key = self._voice_key(platform, chat_id)
+        mode = self._voice_mode.get(voice_key, "off")
+        labels = {
+            "off": "🔇 Off",
+            "voice_only": "🎙 Voice-only",
+            "all": "🔊 TTS All",
+        }
+        text = f"Voice mode: **{labels.get(mode, mode)}**\n\nUse /voice to toggle or /voice tts for full TTS."
+        rows = _wk.voice_status_keyboard_rows()
+        adapter = self.adapters.get(platform)
+        if hasattr(adapter, "send_with_keyboard"):
+            thread_id = str(getattr(event.source, "thread_id", None) or "")
+            await adapter.send_with_keyboard(
+                chat_id=chat_id,
+                thread_id=thread_id or None,
+                text=text,
+                keyboard_rows=rows,
+            )
+            return ""
+        return text
+
+    async def _maybe_dispatch_agent_mention(
+        self, event: MessageEvent
+    ) -> Optional[str]:
+        """Intercept @agent mentions in plain messages and dispatch via workspace router.
+
+        Returns an ack string when a mention is dispatched, or None to fall
+        through to the normal LLM conversation loop.
+
+        Only intercepts when:
+        1. The message text starts with an @mention (not a slash command).
+        2. At least one mention resolves to an enabled registered agent.
+        3. We can obtain a bot token to deliver background results.
+        """
+        import re as _re
+        text = (event.text or "").strip()
+        if not text or not text.startswith("@"):
+            return None
+
+        try:
+            from gateway.agent_registry import parse_agent_mentions, load_agent_registry
+            registry_config = self.config if isinstance(self.config, dict) else getattr(self.config, "__dict__", {})
+            mentions = parse_agent_mentions(text, registry_config)
+            if not mentions:
+                return None
+
+            # Resolve @all to all enabled agents
+            registry = load_agent_registry(registry_config)
+            resolved: list[tuple[str, Any]] = []
+            broadcast = False
+            for alias, entry in mentions:
+                if alias == "all":
+                    broadcast = True
+                    resolved = [(a, e) for a, e in registry.items() if e.enabled]
+                    break
+                if entry and entry.enabled:
+                    resolved.append((alias, entry))
+
+            if not resolved:
+                return None
+
+            # Extract task text: strip all @mention tokens
+            task_text = _re.sub(r"@[A-Za-z][A-Za-z0-9_-]*", "", text).strip()
+            if not task_text:
+                task_text = "(no specific task)"
+
+            chat_id = event.source.chat_id
+            thread_id = str(getattr(event.source, "thread_id", None) or "") or None
+
+            # Get bot token from the platform adapter config (Telegram only for now)
+            adapter = self.adapters.get(event.source.platform)
+            token = str(getattr(getattr(adapter, "config", None), "token", None) or "")
+
+            from gateway import workspace_router as _wr
+
+            if len(resolved) == 1:
+                alias, entry = resolved[0]
+                # Single agent: route result to the agent's configured topic lane
+                result_thread = entry.route_target.rsplit(":", 1)[-1] if ":" in (entry.route_target or "") else thread_id
+                ack = await _wr.dispatch_single_agent(
+                    alias=alias,
+                    task=task_text,
+                    bot_token=token,
+                    result_chat_id=chat_id,
+                    result_thread_id=result_thread or thread_id,
+                    config=registry_config,
+                )
+                return ack
+            else:
+                # Multi-agent fanout → deliver to multi-agent-room
+                aliases = [alias for alias, _ in resolved]
+                ack = await _wr.dispatch_fanout(
+                    aliases=aliases,
+                    task=task_text,
+                    bot_token=token,
+                    fanout_chat_id=chat_id,
+                    fanout_thread_id=_wr.MULTI_AGENT_ROOM_THREAD,
+                    config=registry_config,
+                )
+                return ack
+
+        except Exception as exc:
+            logger.warning("_maybe_dispatch_agent_mention failed: %s", exc, exc_info=True)
+            return None
 
     @staticmethod
     def _get_guild_id(event: MessageEvent) -> Optional[int]:
@@ -15874,6 +16251,20 @@ class GatewayRunner:
                             session_id,
                         )
                         break
+                    route_platform, route_chat, route_thread = self._resolve_background_notification_target(
+                        platform_name=source.platform.value,
+                        chat_id=source.chat_id,
+                        thread_id=source.thread_id,
+                    )
+                    routed_source = self._build_background_notification_source(
+                        original_source=source,
+                        platform_name=route_platform,
+                        chat_id=route_chat,
+                        thread_id=route_thread,
+                        user_id=user_id,
+                        user_name=user_name,
+                    )
+                    source = routed_source or source
 
                     adapter = None
                     for p, a in self.adapters.items():
@@ -15908,6 +16299,11 @@ class GatewayRunner:
                     or (notify_mode == "error" and session.exit_code not in {0, None})
                 )
                 if should_notify:
+                    route_platform, route_chat, route_thread = self._resolve_background_notification_target(
+                        platform_name=platform_name,
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                    )
                     new_output = session.output_buffer[-1000:] if session.output_buffer else ""
                     message_text = (
                         f"[Background process {session_id} finished with exit code {session.exit_code}~ "
@@ -15915,13 +16311,13 @@ class GatewayRunner:
                     )
                     adapter = None
                     for p, a in self.adapters.items():
-                        if p.value == platform_name:
+                        if p.value == route_platform:
                             adapter = a
                             break
-                    if adapter and chat_id:
+                    if adapter and route_chat:
                         try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
-                            await adapter.send(chat_id, message_text, metadata=send_meta)
+                            send_meta = {"thread_id": route_thread} if route_thread else None
+                            await adapter.send(route_chat, message_text, metadata=send_meta)
                         except Exception as e:
                             logger.error("Watcher delivery error: %s", e)
                 break
@@ -15941,8 +16337,19 @@ class GatewayRunner:
                         break
                 if adapter and chat_id:
                     try:
-                        send_meta = {"thread_id": thread_id} if thread_id else None
-                        await adapter.send(chat_id, message_text, metadata=send_meta)
+                        route_platform, route_chat, route_thread = self._resolve_background_notification_target(
+                            platform_name=platform_name,
+                            chat_id=chat_id,
+                            thread_id=thread_id,
+                        )
+                        if route_platform != platform_name:
+                            adapter = None
+                            for p, a in self.adapters.items():
+                                if p.value == route_platform:
+                                    adapter = a
+                                    break
+                        send_meta = {"thread_id": route_thread} if route_thread else None
+                        await adapter.send(route_chat, message_text, metadata=send_meta)
                     except Exception as e:
                         logger.error("Watcher delivery error: %s", e)
 

@@ -227,6 +227,39 @@ async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_background_notifications_can_route_to_configured_topic(monkeypatch, tmp_path):
+    import gateway.run as gateway_run
+    import tools.process_registry as pr_module
+
+    (tmp_path / "config.yaml").write_text(
+        "display:\n"
+        "  background_process_notifications: all\n"
+        "  background_process_notification_target: telegram:-100:15\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        pr_module,
+        "process_registry",
+        _FakeRegistry([SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]),
+    )
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = GatewayRunner(GatewayConfig())
+    adapter = SimpleNamespace(send=AsyncMock(), handle_message=AsyncMock())
+    runner.adapters[Platform.TELEGRAM] = adapter
+
+    await runner._run_process_watcher(_watcher_dict(thread_id="42"))
+
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.args[0] == "-100"
+    assert adapter.send.await_args.kwargs["metadata"] == {"thread_id": "15"}
+
+
+@pytest.mark.asyncio
 async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
     """When thread_id is empty, metadata should be None (general topic)."""
     import tools.process_registry as pr_module

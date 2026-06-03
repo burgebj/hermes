@@ -6466,6 +6466,13 @@ def cmd_config(args):
     config_command(args)
 
 
+def cmd_workspace(args):
+    """Workspace/topic registry helpers."""
+    from hermes_cli.workspace import workspace_command
+
+    return workspace_command(args)
+
+
 def cmd_backup(args):
     """Back up Hermes home directory to a zip file."""
     if getattr(args, "quick", False):
@@ -11876,7 +11883,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "prompt-size",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
-        "version", "webhook", "whatsapp", "chat", "secrets", "security",
+        "version", "webhook", "whatsapp", "workspace", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -13491,6 +13498,30 @@ Examples:
     config_subparsers.add_parser("migrate", help="Update config with new options")
 
     config_parser.set_defaults(func=cmd_config)
+
+    # =========================================================================
+    # workspace command
+    # =========================================================================
+    workspace_parser = subparsers.add_parser(
+        "workspace",
+        help="Inspect workspace topic registry and generated guides",
+        description="Generate topic guides, ops indexes, and drift checks from workspace.topic_registry.",
+    )
+    workspace_sub = workspace_parser.add_subparsers(dest="workspace_command")
+    workspace_sub.add_parser("list", help="List configured workspace topics")
+    workspace_sub.add_parser("guide", help="Print a Telegram-pinnable workspace guide")
+    workspace_sub.add_parser("ops-index", help="Print an operator index with topics, cron jobs, routes, and URLs")
+    workspace_sub.add_parser("drift", help="Check topic registry drift across config, env, cron, and directory")
+    eternal = workspace_sub.add_parser(
+        "eternal-example",
+        help="Merge Blaze's Eternal topic registry example and 707/708 prompts",
+    )
+    eternal.add_argument(
+        "--apply",
+        action="store_true",
+        help="Update config.yaml after creating a timestamped backup",
+    )
+    workspace_parser.set_defaults(func=cmd_workspace)
 
     # =========================================================================
     # pairing command

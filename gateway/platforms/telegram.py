@@ -3539,6 +3539,28 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
 
+        # --- Workspace action callbacks (ws:*) ---
+        if data.startswith("ws:"):
+            await self._handle_workspace_callback(
+                query,
+                data,
+                query_chat_id=query_chat_id,
+                query_chat_type=query_chat_type,
+                query_thread_id=query_thread_id,
+                query_user_name=query_user_name,
+            )
+            return
+
+        # --- Checklist callbacks (chk:*) ---
+        if data.startswith("chk:"):
+            await self._handle_checklist_callback(
+                query,
+                data,
+                query_chat_id=query_chat_id,
+                query_thread_id=query_thread_id,
+            )
+            return
+
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):
             return
@@ -3576,6 +3598,375 @@ class TelegramAdapter(BasePlatformAdapter):
                         answer, getattr(query.from_user, "id", "unknown"))
         except Exception as exc:
             logger.error("Failed to write update response from callback: %s", exc)
+
+    async def _handle_workspace_callback(
+        self,
+        query,
+        data: str,
+        *,
+        query_chat_id,
+        query_chat_type,
+        query_thread_id,
+        query_user_name,
+    ) -> None:
+        """Dispatch ``ws:*`` inline-keyboard callbacks for workspace commands."""
+        # Authorization: only configured users may trigger workspace actions.
+        caller_id = str(getattr(query.from_user, "id", ""))
+        if not self._is_callback_user_authorized(
+            caller_id,
+            chat_id=query_chat_id,
+            chat_type=str(query_chat_type) if query_chat_type is not None else None,
+            thread_id=str(query_thread_id) if query_thread_id is not None else None,
+            user_name=query_user_name,
+        ):
+            await query.answer(text="⛔ Not authorized.")
+            return
+
+        parts = data.split(":", 3)
+        action = parts[1] if len(parts) > 1 else ""
+
+        # ── ws:cancel ──────────────────────────────────────────────────────
+        if action == "cancel":
+            await query.answer(text="Cancelled.")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        # ── ws:guide ───────────────────────────────────────────────────────
+        if action == "guide":
+            await query.answer()
+            try:
+                from gateway.agent_registry import generate_pinned_guide
+                guide_text = generate_pinned_guide()
+                chat_id = str(query_chat_id) if query_chat_id else None
+                if chat_id:
+                    send_kwargs: Dict[str, Any] = {
+                        "chat_id": int(chat_id),
+                        "text": self.format_message(guide_text),
+                        "parse_mode": ParseMode.MARKDOWN_V2,
+                        **self._link_preview_kwargs(),
+                    }
+                    if query_thread_id:
+                        send_kwargs.update(
+                            self._thread_kwargs_for_send(
+                                chat_id, str(query_thread_id),
+                                {"thread_id": str(query_thread_id)},
+                                reply_to_mode=self._reply_to_mode,
+                            )
+                        )
+                    await self._send_message_with_thread_fallback(**send_kwargs)
+            except Exception as exc:
+                logger.warning("[%s] ws:guide callback failed: %s", self.name, exc)
+            return
+
+        # ── ws:r:<alias> — route info ──────────────────────────────────────
+        if action == "r" and len(parts) >= 3:
+            alias = parts[2]
+            await query.answer()
+            try:
+                from gateway.agent_registry import render_route_guidance
+                text = render_route_guidance(alias)
+                chat_id = str(query_chat_id) if query_chat_id else None
+                if chat_id:
+                    send_kwargs = {
+                        "chat_id": int(chat_id),
+                        "text": self.format_message(text),
+                        "parse_mode": ParseMode.MARKDOWN_V2,
+                        **self._link_preview_kwargs(),
+                    }
+                    if query_thread_id:
+                        send_kwargs.update(
+                            self._thread_kwargs_for_send(
+                                chat_id, str(query_thread_id),
+                                {"thread_id": str(query_thread_id)},
+                                reply_to_mode=self._reply_to_mode,
+                            )
+                        )
+                    await self._send_message_with_thread_fallback(**send_kwargs)
+            except Exception as exc:
+                logger.warning("[%s] ws:r callback failed: %s", self.name, exc)
+            return
+
+        # ── ws:cl:<alias> — create standard checklist ─────────────────────
+        if action == "cl" and len(parts) >= 3:
+            alias = parts[2]
+            await query.answer(text=f"Creating checklist for @{alias}…")
+            try:
+                from gateway.checklist_store import (
+                    STANDARD_AGENT_CHECKLIST,
+                    create_checklist,
+                    get_checklist,
+                    render_checklist_text,
+                    build_checklist_keyboard_rows,
+                )
+                chat_id = str(query_chat_id) if query_chat_id else None
+                thread_id = str(query_thread_id) if query_thread_id else None
+                if not chat_id:
+                    return
+                cl_id = create_checklist(
+                    title=f"@{alias} Run Checklist",
+                    items=STANDARD_AGENT_CHECKLIST,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                )
+                data_cl = get_checklist(cl_id)
+                if data_cl:
+                    text = render_checklist_text(data_cl)
+                    rows = build_checklist_keyboard_rows(data_cl)
+                    await self.send_with_keyboard(
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                        text=text,
+                        keyboard_rows=rows,
+                    )
+            except Exception as exc:
+                logger.warning("[%s] ws:cl callback failed: %s", self.name, exc)
+            return
+
+        # ── ws:s:<cid> — summon agent using stored pending state ───────────
+        if action == "s" and len(parts) >= 3:
+            cid = parts[2]
+            try:
+                from gateway import workspace_keyboards as _wk, workspace_router as _wr
+                pending = _wk.pop_pending(cid)
+                chat_id = str(query_chat_id) if query_chat_id else None
+                thread_id = str(query_thread_id) if query_thread_id else None
+                if not chat_id:
+                    await query.answer(text="⚠️ Could not determine chat.")
+                    return
+                if pending:
+                    alias = pending.get("alias", cid)
+                    task = pending.get("task", "")
+                else:
+                    # cid may itself be the alias (from route keyboard shortcut)
+                    alias = cid
+                    task = ""
+                token = str(getattr(self.config, "token", "") or "")
+                ack = await _wr.dispatch_single_agent(
+                    alias=alias,
+                    task=task or "(dispatched via button)",
+                    bot_token=token,
+                    result_chat_id=chat_id,
+                    result_thread_id=thread_id,
+                )
+                await query.answer(text=f"⚡ @{alias} dispatched")
+                try:
+                    await query.edit_message_text(
+                        text=self.format_message(ack),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+            except Exception as exc:
+                await query.answer(text=f"❌ {exc}")
+                logger.warning("[%s] ws:s callback failed: %s", self.name, exc)
+            return
+
+        # ── ws:sw:<cid> — confirm swarm ────────────────────────────────────
+        if action == "sw" and len(parts) >= 3:
+            cid = parts[2]
+            try:
+                from gateway import workspace_keyboards as _wk, workspace_router as _wr
+                pending = _wk.pop_pending(cid)
+                chat_id = str(query_chat_id) if query_chat_id else None
+                thread_id = str(query_thread_id) if query_thread_id else None
+                if not chat_id:
+                    await query.answer(text="⚠️ Could not determine chat.")
+                    return
+                aliases = (pending or {}).get("aliases", [])
+                task = (pending or {}).get("task", "")
+                if not aliases:
+                    await query.answer(text="⚠️ No agents stored.")
+                    return
+                token = str(getattr(self.config, "token", "") or "")
+                ack = await _wr.dispatch_fanout(
+                    aliases=aliases,
+                    task=task or "(dispatched via swarm button)",
+                    bot_token=token,
+                    fanout_chat_id=chat_id,
+                    fanout_thread_id=_wr.MULTI_AGENT_ROOM_THREAD,
+                )
+                await query.answer(text="🌐 Swarm dispatched")
+                try:
+                    await query.edit_message_text(
+                        text=self.format_message(ack),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+            except Exception as exc:
+                await query.answer(text=f"❌ {exc}")
+                logger.warning("[%s] ws:sw callback failed: %s", self.name, exc)
+            return
+
+        # ── ws:tts:<cid> — read stored text aloud ─────────────────────────
+        if action == "tts" and len(parts) >= 3:
+            cid = parts[2]
+            try:
+                from gateway import workspace_keyboards as _wk
+                pending = _wk.pop_pending(cid)
+                text = (pending or {}).get("text", "")
+                if not text:
+                    await query.answer(text="⚠️ No text stored.")
+                    return
+                await query.answer(text="🔊 Sending voice…")
+                try:
+                    from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
+                    import uuid as _uuid
+                    import tempfile, os as _os
+                    tts_text = _strip_markdown_for_tts(text[:4000])
+                    if tts_text:
+                        audio_path = _os.path.join(
+                            tempfile.gettempdir(), f"ws_tts_{_uuid.uuid4().hex[:12]}.mp3"
+                        )
+                        from agent.async_utils import run_sync_in_executor
+                        await run_sync_in_executor(
+                            text_to_speech_tool, text=tts_text, output_path=audio_path
+                        )
+                        if _os.path.exists(audio_path):
+                            chat_id = str(query_chat_id) if query_chat_id else None
+                            thread_id = str(query_thread_id) if query_thread_id else None
+                            if chat_id:
+                                await self.send_voice(
+                                    chat_id=chat_id,
+                                    audio_path=audio_path,
+                                    metadata={"thread_id": thread_id} if thread_id else None,
+                                )
+                except Exception as tts_exc:
+                    logger.warning("[%s] ws:tts TTS failed: %s", self.name, tts_exc)
+                    await query.answer(text=f"⚠️ TTS error: {tts_exc}")
+            except Exception as exc:
+                logger.warning("[%s] ws:tts callback failed: %s", self.name, exc)
+            return
+
+        # ── ws:voice:<mode> — set voice mode ──────────────────────────────
+        if action == "voice" and len(parts) >= 3:
+            mode = parts[2]
+            await query.answer(text=f"Voice mode: {mode}")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        # ── ws:m:<action>:<cid> — media lane action ────────────────────────
+        if action == "m" and len(parts) >= 4:
+            media_action = parts[2]
+            media_cid = parts[3]
+            try:
+                from gateway import workspace_keyboards as _wk
+                pending = _wk.get_pending(media_cid)
+                chat_id = str(query_chat_id) if query_chat_id else None
+                thread_id = str(query_thread_id) if query_thread_id else None
+                if media_action == "a":
+                    label = "🔍 Analyzing media…"
+                    prompt = "Analyze this media and describe what you see in detail."
+                elif media_action == "o":
+                    label = "📝 OCR/Summarizing…"
+                    prompt = "Extract all text via OCR and provide a summary of the content."
+                elif media_action == "d":
+                    label = "📂 Routing to dev-logs…"
+                    prompt = "Route this media to #dev-logs with a brief summary."
+                elif media_action == "c":
+                    label = "☑️ Adding to checklist…"
+                    prompt = "Add this media item to the current checklist."
+                else:
+                    await query.answer(text="Unknown media action.")
+                    return
+                await query.answer(text=label)
+                # Post a follow-up message with the action context to trigger Hermes
+                if chat_id and pending:
+                    caption = (pending or {}).get("caption") or ""
+                    media_type = (pending or {}).get("media_type", "media")
+                    follow_up = f"{label}\n\n*{media_type}*: {caption or '(no caption)'}\n\nTask: {prompt}"
+                    send_kwargs = {
+                        "chat_id": int(chat_id),
+                        "text": self.format_message(follow_up),
+                        "parse_mode": ParseMode.MARKDOWN_V2,
+                        **self._link_preview_kwargs(),
+                    }
+                    if thread_id:
+                        send_kwargs.update(
+                            self._thread_kwargs_for_send(
+                                chat_id, thread_id,
+                                {"thread_id": thread_id},
+                                reply_to_mode=self._reply_to_mode,
+                            )
+                        )
+                    await self._send_message_with_thread_fallback(**send_kwargs)
+            except Exception as exc:
+                logger.warning("[%s] ws:m callback failed: %s", self.name, exc)
+            return
+
+        # Unknown ws: action
+        await query.answer(text="Unknown action.")
+
+    async def _handle_checklist_callback(
+        self,
+        query,
+        data: str,
+        *,
+        query_chat_id,
+        query_thread_id,
+    ) -> None:
+        """Dispatch ``chk:*`` inline-keyboard callbacks for emulated checklists."""
+        parts = data.split(":", 3)
+        action = parts[1] if len(parts) > 1 else ""
+
+        # ── chk:close:<cl_id> ──────────────────────────────────────────────
+        if action == "close":
+            await query.answer(text="Checklist closed.")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        # ── chk:t:<cl_id>:<idx> — toggle item ─────────────────────────────
+        if action == "t" and len(parts) == 4:
+            cl_id = parts[2]
+            try:
+                idx = int(parts[3])
+            except (ValueError, TypeError):
+                await query.answer(text="Invalid checklist item.")
+                return
+            try:
+                from gateway.checklist_store import (
+                    toggle_item,
+                    render_checklist_text,
+                    build_checklist_keyboard_rows,
+                )
+                updated = toggle_item(cl_id, idx)
+                if updated is None:
+                    await query.answer(text="Checklist not found.")
+                    return
+                new_text = render_checklist_text(updated)
+                new_rows = build_checklist_keyboard_rows(updated)
+                buttons = [
+                    [InlineKeyboardButton(btn["text"], callback_data=btn["callback_data"])
+                     for btn in row]
+                    for row in new_rows
+                ]
+                markup = InlineKeyboardMarkup(buttons)
+                await query.answer()
+                try:
+                    await query.edit_message_text(
+                        text=self.format_message(new_text),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=markup,
+                    )
+                except Exception as edit_exc:
+                    logger.debug("[%s] chk:t edit failed: %s", self.name, edit_exc)
+            except Exception as exc:
+                await query.answer(text=f"❌ {exc}")
+                logger.warning("[%s] chk:t callback failed: %s", self.name, exc)
+            return
+
+        await query.answer(text="Unknown checklist action.")
 
     # Maps `gt:<verb>` -> (script-name, extra-args, success-label, is_state).
     # Scripts live in ~/.hermes/scripts/gmail-triage/. `arg` from the callback
@@ -3705,6 +4096,93 @@ class TelegramAdapter(BasePlatformAdapter):
                 "path in MEDIA: for gateway file delivery.)"
             )
         return error
+
+    # Thread IDs for media / dev-logs topic lanes in the Eternal workspace.
+    # Media lane keyboards are only shown in these threads to avoid noise.
+    _MEDIA_LANE_THREAD_IDS: frozenset[str] = frozenset({"15", "16"})  # dev-logs, media
+
+    async def _maybe_send_media_lane_keyboard(
+        self,
+        msg,
+        event,
+        media_type: str,
+        media_path: Optional[str],
+    ) -> None:
+        """Send media action buttons when the message lands in a media/dev-logs lane.
+
+        Only fires for the Eternal workspace group's #media (16) and
+        #dev-logs (15) threads.  Silently skips in all other contexts.
+        """
+        thread_id = str(getattr(msg, "message_thread_id", None) or "")
+        if thread_id not in self._MEDIA_LANE_THREAD_IDS:
+            return
+        try:
+            from gateway import workspace_keyboards as _wk
+            chat_id = str(getattr(getattr(msg, "chat", None), "id", "") or "")
+            caption = str(getattr(msg, "caption", "") or "")
+            cid = _wk.store_media(
+                chat_id=chat_id,
+                thread_id=thread_id or None,
+                media_type=media_type,
+                media_path=media_path,
+                caption=caption,
+            )
+            rows = _wk.media_keyboard_rows(cid)
+            lane = "#media" if thread_id == "16" else "#dev-logs"
+            hint = f"*{media_type.capitalize()}* received in {lane}."
+            if caption:
+                hint += f"\nCaption: {caption[:80]}"
+            await self.send_with_keyboard(
+                chat_id=chat_id,
+                thread_id=thread_id or None,
+                text=hint,
+                keyboard_rows=rows,
+            )
+        except Exception as exc:
+            logger.debug("[%s] _maybe_send_media_lane_keyboard failed: %s", self.name, exc)
+
+    async def send_with_keyboard(
+        self,
+        chat_id: str,
+        thread_id: Optional[str],
+        text: str,
+        keyboard_rows: "list[list[dict]]",
+    ) -> None:
+        """Send a Telegram message with an inline keyboard.
+
+        ``keyboard_rows`` is a list of rows, each row a list of dicts with
+        ``text`` and ``callback_data`` keys.  This is the gateway-internal
+        representation — it is converted to ``InlineKeyboardMarkup`` here.
+        """
+        if not self._bot or not TELEGRAM_AVAILABLE:
+            logger.warning("[%s] send_with_keyboard: bot not connected", self.name)
+            return
+        try:
+            buttons = [
+                [InlineKeyboardButton(btn["text"], callback_data=btn["callback_data"])
+                 for btn in row]
+                for row in keyboard_rows
+            ]
+            markup = InlineKeyboardMarkup(buttons)
+            send_kwargs: Dict[str, Any] = {
+                "chat_id": int(chat_id),
+                "text": self.format_message(text),
+                "parse_mode": ParseMode.MARKDOWN_V2,
+                "reply_markup": markup,
+                **self._link_preview_kwargs(),
+            }
+            if thread_id:
+                send_kwargs.update(
+                    self._thread_kwargs_for_send(
+                        chat_id,
+                        str(thread_id),
+                        {"thread_id": str(thread_id)},
+                        reply_to_mode=self._reply_to_mode,
+                    )
+                )
+            await self._send_message_with_thread_fallback(**send_kwargs)
+        except Exception as exc:
+            logger.warning("[%s] send_with_keyboard failed: %s", self.name, exc)
 
     async def send_voice(
         self,
@@ -5457,6 +5935,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_urls = [cached_path]
                 event.media_types = [f"image/{ext.lstrip('.')}" ]
                 logger.info("[Telegram] Cached user photo at %s", cached_path)
+                # Send media action buttons in #media / #dev-logs lanes
+                await self._maybe_send_media_lane_keyboard(
+                    msg=msg, event=event, media_type="photo", media_path=cached_path
+                )
                 media_group_id = getattr(msg, "media_group_id", None)
                 if media_group_id:
                     await self._queue_media_group_event(str(media_group_id), event)
@@ -5877,6 +6359,17 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_type = "group"
         elif telegram_chat_type == "channel":
             chat_type = "channel"
+        else:
+            # Some tests/plugins install partial telegram mocks where ChatType
+            # constants resolve to ``typing.Any`` or another non-string object.
+            # Telegram's real group/supergroup chat IDs are negative, while DMs
+            # are positive; use that stable Bot API invariant as a fallback so
+            # prior mocks cannot accidentally downgrade groups to DMs.
+            try:
+                if int(getattr(chat, "id", 0)) < 0:
+                    chat_type = "group"
+            except (TypeError, ValueError):
+                pass
 
         # Resolve Telegram topic name and skill binding.
         # Only preserve message_thread_id when Telegram marks the message as

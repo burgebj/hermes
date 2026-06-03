@@ -526,7 +526,11 @@ def active_features() -> list[str]:
     """
     active = []
     for feature, specs in LAZY_DEPS.items():
-        if any(_is_present(s) for s in specs):
+        # Require the primary (first) package to be present.  Using
+        # ``any(...)`` was too eager — shared utility deps (asyncpg,
+        # aiosqlite, …) installed for unrelated reasons would falsely
+        # mark a platform as "active" and trigger a doomed refresh.
+        if _is_present(specs[0]):
             active.append(feature)
     return active
 

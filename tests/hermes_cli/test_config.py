@@ -71,6 +71,7 @@ class TestLoadConfigDefaults:
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
+            assert "topic_registry" in config["workspace"]
 
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
@@ -80,6 +81,23 @@ class TestLoadConfigDefaults:
             config = load_config()
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
+
+
+def test_config_set_writes_decision_record_when_enabled(tmp_path):
+    from hermes_cli.config import set_config_value
+
+    with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        (tmp_path / "config.yaml").write_text(
+            "workspace:\n  decision_records:\n    enabled: true\n",
+            encoding="utf-8",
+        )
+        set_config_value("model.default", "openai/gpt-5")
+
+        records = list((tmp_path / "decisions").glob("*.md"))
+        assert len(records) == 1
+        text = records[0].read_text(encoding="utf-8")
+        assert "Config changed: model.default" in text
+        assert "openai/gpt-5" in text
 
 
 class TestLoadConfigParseFailure:
@@ -904,4 +922,3 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
-

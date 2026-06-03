@@ -25,6 +25,12 @@ def _normalize_channel_query(value: str) -> str:
 
 def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     """Return the human-facing target label shown to users for a channel entry."""
+    alias = channel.get("alias")
+    display_name = channel.get("display_name")
+    if display_name:
+        return display_name
+    if alias:
+        return f"#{alias}"
     name = channel["name"]
     if platform_name == "discord" and channel.get("guild"):
         return f"#{name}"
@@ -51,6 +57,37 @@ def _session_entry_name(origin: Dict[str, Any]) -> str:
 
     topic_label = origin.get("chat_topic") or f"topic {thread_id}"
     return f"{base_name} / {topic_label}"
+
+
+def _apply_topic_registry(platforms: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Merge configured friendly topic aliases into the directory in-place."""
+    try:
+        from gateway.topic_registry import load_topic_registry
+    except Exception:
+        return
+
+    by_ref = load_topic_registry()
+    for full_ref, entry in by_ref.items():
+        channels = platforms.setdefault(entry.ref.platform, [])
+        existing = None
+        for channel in channels:
+            if channel.get("id") == entry.ref.id:
+                existing = channel
+                break
+        payload = {
+            "id": entry.ref.id,
+            "name": entry.display_name,
+            "display_name": entry.display_name,
+            "alias": entry.alias,
+            "purpose": entry.purpose,
+            "type": "topic" if entry.ref.thread_id else "group",
+            "thread_id": entry.ref.thread_id,
+            "registry_ref": full_ref,
+        }
+        if existing is None:
+            channels.append(payload)
+        else:
+            existing.update({k: v for k, v in payload.items() if v})
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +137,7 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         "updated_at": datetime.now().isoformat(),
         "platforms": platforms,
     }
+    _apply_topic_registry(platforms)
 
     try:
         atomic_json_write(DIRECTORY_PATH, directory)
@@ -247,12 +285,20 @@ def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
 def load_directory() -> Dict[str, Any]:
     """Load the cached channel directory from disk."""
     if not DIRECTORY_PATH.exists():
-        return {"updated_at": None, "platforms": {}}
+        data = {"updated_at": None, "platforms": {}}
+        _apply_topic_registry(data["platforms"])
+        return data
     try:
         with open(DIRECTORY_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            platforms = data.setdefault("platforms", {})
+            if isinstance(platforms, dict):
+                _apply_topic_registry(platforms)
+            return data
     except Exception:
-        return {"updated_at": None, "platforms": {}}
+        data = {"updated_at": None, "platforms": {}}
+        _apply_topic_registry(data["platforms"])
+        return data
 
 
 def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:
@@ -294,6 +340,10 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
             return ch["id"]
         if _normalize_channel_query(_channel_target_name(platform_name, ch)) == query:
             return ch["id"]
+        if ch.get("alias") and _normalize_channel_query(str(ch["alias"])) == query:
+            return ch["id"]
+        if ch.get("display_name") and _normalize_channel_query(str(ch["display_name"])) == query:
+            return ch["id"]
 
     # 2. Guild-qualified match for Discord ("GuildName/channel")
     if "/" in query:
@@ -304,7 +354,11 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
                 return ch["id"]
 
     # 3. Partial prefix match (only if unambiguous)
-    matches = [ch for ch in channels if _normalize_channel_query(ch["name"]).startswith(query)]
+    matches = [
+        ch for ch in channels
+        if _normalize_channel_query(ch["name"]).startswith(query)
+        or (ch.get("alias") and _normalize_channel_query(str(ch["alias"])).startswith(query))
+    ]
     if len(matches) == 1:
         return matches[0]["id"]
 

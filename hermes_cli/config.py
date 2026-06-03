@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -1340,6 +1341,8 @@ DEFAULT_CONFIG = {
             "last_lines": 2,
         },
         "interim_assistant_messages": True,  # Gateway: show natural mid-turn assistant status messages
+        "background_process_notifications": "all",  # Gateway process watcher notices: all | result | error | off
+        "background_process_notification_target": "",  # Optional target override, e.g. telegram:-100123:15
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
         "tool_progress_overrides": {},  # DEPRECATED — use display.platforms instead
         "tool_preview_length": 0,  # Max chars for tool call previews (0 = no limit, show full paths/commands)
@@ -2100,6 +2103,28 @@ DEFAULT_CONFIG = {
         # least this many seconds, so the platform timestamp reflects
         # completion time. Telegram only; other platforms ignore it.
         "fresh_final_after_seconds": 60.0,
+    },
+
+    # Operator-authored workspace metadata.  Empty by default; users can add
+    # topic/channel aliases here so gateway diagnostics, send_message listing,
+    # drift checks, and generated pinned guides use stable friendly names.
+    "workspace": {
+        "topic_registry": {
+            "topics": {},
+        },
+        # Operator-authored agent roster.  Each key is the agent alias (e.g.
+        # "codex", "glm", "blazemind").  Built-in agents are always present;
+        # entries here override or extend them.  Set enabled: false to suppress
+        # a built-in.  See `gateway/agent_registry.py` for the full schema and
+        # `hermes workspace guide` for the compatibility contract.
+        "agent_registry": {
+            "agents": {},
+        },
+        "decision_records": {
+            "enabled": False,
+            "target": "",
+        },
+        "service_urls": {},
     },
 
     # Session storage — controls automatic cleanup of ~/.hermes/state.db.
@@ -5784,6 +5809,7 @@ def set_config_value(key: str, value: str):
     
     if key.upper() in api_keys or key.upper().endswith(('_API_KEY', '_TOKEN')) or key.upper().startswith('TERMINAL_SSH'):
         save_env_value(key.upper(), value)
+        _maybe_record_config_decision(key.upper(), before=None, after=value, secret=True)
         print(f"✓ Set {key} in {get_env_path()}")
         return
     
@@ -5814,6 +5840,7 @@ def set_config_value(key: str, value: str):
     elif value.replace('.', '', 1).isdigit():
         value = float(value)
 
+    before_value = _get_nested(user_config, key)
     _set_nested(user_config, key, value)
     
     # Write only user config back (not the full merged defaults)
@@ -5849,7 +5876,44 @@ def set_config_value(key: str, value: str):
     if key in _config_to_env_sync:
         save_env_value(_config_to_env_sync[key], str(value))
 
+    _maybe_record_config_decision(key, before=before_value, after=value, secret=False)
     print(f"✓ Set {key} = {value} in {config_path}")
+
+
+def _get_nested(config: dict, key: str):
+    current = config
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _maybe_record_config_decision(key: str, *, before, after, secret: bool = False) -> None:
+    try:
+        cfg = load_config()
+        workspace = cfg.get("workspace", {}) if isinstance(cfg, dict) else {}
+        records = workspace.get("decision_records", {}) if isinstance(workspace, dict) else {}
+        if not isinstance(records, dict) or not records.get("enabled"):
+            return
+        from gateway.decision_records import format_decision_record
+
+        record = format_decision_record(
+            title=f"Config changed: {key}",
+            change_type="secret" if secret else "config",
+            actor="hermes config set",
+            target=key,
+            before="***" if secret and before is not None else before,
+            after="***" if secret else after,
+            reason="Captured by workspace.decision_records.enabled.",
+        )
+        out_dir = get_hermes_home() / "decisions"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key).strip("._") or "config"
+        (out_dir / f"{stamp}-{safe_key}.md").write_text(record + "\n", encoding="utf-8")
+    except Exception:
+        logger.debug("Decision record capture skipped", exc_info=True)
 
 
 # =============================================================================
