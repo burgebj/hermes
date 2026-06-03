@@ -197,6 +197,58 @@ MATTERMOST_HOME_CHANNEL=abc123def456ghi789jkl012mn
 
 Replace the ID with the actual channel ID (click the channel name → View Info → copy the ID).
 
+## Interactive approval buttons
+
+When Hermes needs user input — exec approval, slash-command confirmation, update prompts, or clarify choices — it normally asks you to type a reply. On Mattermost, messages starting with `/` are intercepted as slash commands, so the plain-text `/approve` fallback is **unusable**. Interactive buttons are the only working approval path ([issue #27587](https://github.com/NousResearch/hermes-agent/issues/27587)).
+
+The Mattermost plugin serves button-click callbacks on a **plugin-owned HTTP server** (default `127.0.0.1:18065`, route `POST /hermes-callback`). No core webhook configuration is required.
+
+### What's supported
+
+| Surface | Buttons |
+|---------|---------|
+| Exec approval | Allow Once / Allow Session / Always Allow / Deny |
+| Slash confirm | Approve Once / Always Approve / Cancel |
+| Update prompt | Yes / No |
+| Clarify | One button per choice + "Other (type answer)" |
+
+### Configuration
+
+Optional env vars in `~/.hermes/.env`:
+
+```bash
+# Bind address for the callback server (defaults shown)
+MATTERMOST_CALLBACK_HOST=127.0.0.1
+MATTERMOST_CALLBACK_PORT=18065
+
+# External URL embedded in buttons (cross-host setups where Mattermost
+# reaches Hermes at a different address than the bind host)
+# MATTERMOST_CALLBACK_URL=http://192.168.1.50:18065/hermes-callback
+```
+
+For single-host deployments where Mattermost and Hermes run on the same machine, Mattermost must be allowed to POST to localhost. Add to your Mattermost `config.json`:
+
+```json
+"ServiceSettings": {
+  "AllowedUntrustedInternalConnections": "127.0.0.1"
+}
+```
+
+### Fallback behavior
+
+If the callback server cannot start (port in use, bind failure), each `send_*` method returns failure and the gateway falls back to its existing text prompt unchanged.
+
+### Security
+
+Button clicks are gated by `MATTERMOST_ALLOWED_USERS` (same list that gates normal bot access). Set `*` to allow all authorized clickers. A double-click guard prevents the same prompt from resolving twice.
+
+**Bind-host security:** The default bind of `127.0.0.1` means the callback server is only reachable from the same machine — no external traffic can reach it. If you change `MATTERMOST_CALLBACK_HOST` to `0.0.0.0` (cross-host deployments), the endpoint is accessible from the network. In that configuration, the only protections are:
+
+- Each prompt uses a per-click unguessable random token (`action_id`) embedded in the button URL — guessing or replaying it is not feasible.
+- `MATTERMOST_ALLOWED_USERS` gates the click, but note that the `user_id` field is **self-reported in the POST body**; Mattermost integration buttons do not sign their payloads by default.
+
+For cross-host deployments, place the callback server behind a reverse proxy or firewall so only your Mattermost instance can reach port `18065`.
+
 ## Reply Mode
 
 The `MATTERMOST_REPLY_MODE` setting controls how Hermes posts responses:
