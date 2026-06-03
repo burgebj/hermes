@@ -52,6 +52,8 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
+    # Rich interactive prompts (forms, file uploads, modal dialogs)
+    "interactive_prompt",
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Cronjob management
@@ -231,6 +233,12 @@ TOOLSETS = {
     "clarify": {
         "description": "Ask the user clarifying questions (multiple-choice or open-ended)",
         "tools": ["clarify"],
+        "includes": []
+    },
+
+    "interactive_prompt": {
+        "description": "Rich interactive prompts with per-option actions (forms, file uploads, modals)",
+        "tools": ["interactive_prompt"],
         "includes": []
     },
     

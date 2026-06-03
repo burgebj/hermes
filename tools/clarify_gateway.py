@@ -224,6 +224,27 @@ def clear_session(session_key: str) -> int:
     return cancelled
 
 
+def clear_all() -> int:
+    """Cancel every pending clarify across all sessions.
+
+    Called during gateway shutdown so blocked agent threads resolve
+    immediately instead of hanging until their timeout.
+    Returns the total number of entries cancelled.
+    """
+    with _lock:
+        all_ids = list(_entries.keys())
+        _session_index.clear()
+        entries = [_entries.pop(cid, None) for cid in all_ids]
+    cancelled = 0
+    for entry in entries:
+        if entry is None:
+            continue
+        entry.response = ""
+        entry.event.set()
+        cancelled += 1
+    return cancelled
+
+
 # =========================================================================
 # Config
 # =========================================================================

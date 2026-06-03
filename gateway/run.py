@@ -6444,6 +6444,26 @@ class GatewayRunner:
                     cleanup_all_browsers()
                 except Exception as _e:
                     logger.debug("cleanup_all_browsers (%s) error: %s", phase, _e)
+                try:
+                    from tools.clarify_gateway import clear_all as _clear_all_clarify
+                    _n = _clear_all_clarify()
+                    if _n:
+                        logger.info(
+                            "Shutdown (%s): cancelled %d pending clarify prompt(s)",
+                            phase, _n,
+                        )
+                except Exception as _e:
+                    logger.debug("clarify_gateway.clear_all (%s) error: %s", phase, _e)
+                try:
+                    from tools.human_input_gateway import clear_all as _clear_all_human
+                    _n = _clear_all_human()
+                    if _n:
+                        logger.info(
+                            "Shutdown (%s): cancelled %d pending interactive prompt(s)",
+                            phase, _n,
+                        )
+                except Exception as _e:
+                    logger.debug("human_input_gateway.clear_all (%s) error: %s", phase, _e)
 
             logger.info(
                 "Stopping gateway%s...",
@@ -16360,6 +16380,17 @@ class GatewayRunner:
                 e,
             )
 
+        # Clear any pending interactive_prompt entries for this session.
+        try:
+            from tools.human_input_gateway import clear_session as _clear_human_input
+            _clear_human_input(session_key)
+        except Exception as e:
+            logger.debug(
+                "Failed to clear human_input state for session boundary %s: %s",
+                session_key,
+                e,
+            )
+
     def _begin_session_run_generation(self, session_key: str) -> int:
         """Claim a fresh run generation token for ``session_key``.
 
@@ -18025,6 +18056,84 @@ class GatewayRunner:
                 return response
 
             agent.clarify_callback = _clarify_callback_sync
+
+            # ------------------------------------------------------------------
+            # Interactive prompt callback: present a rich prompt with per-option
+            # actions (return / modal) and block on a response.
+            #
+            # Same pattern as clarify: register → send via adapter → block on
+            # threading.Event with heartbeat polling → return structured result.
+            # ------------------------------------------------------------------
+            def _interactive_prompt_callback_sync(
+                question: str,
+                options: list,
+                display_type: str,
+                timeout_seconds: float,
+                auth_policy: str,
+            ) -> str:
+                import json as _json
+                from tools import human_input_gateway as _hig
+
+                if not _status_adapter:
+                    return _json.dumps({"status": "cancelled", "error": "no adapter"})
+
+                prompt_id = _hig.generate_prompt_id()
+                _hig.register(
+                    prompt_id=prompt_id,
+                    session_key=session_key or "",
+                    question=question,
+                    options=options,
+                    timeout_seconds=timeout_seconds,
+                    auth_policy=auth_policy,
+                    origin_user_id=str(source.user_id) if auth_policy == "session_owner_only" else None,
+                    display_type=display_type,
+                )
+
+                try:
+                    _status_adapter.pause_typing_for_chat(_status_chat_id)
+                except Exception:
+                    pass
+
+                send_ok = False
+                fut = safe_schedule_threadsafe(
+                    _status_adapter.send_human_input(
+                        chat_id=_status_chat_id,
+                        question=question,
+                        options=options,
+                        prompt_id=prompt_id,
+                        session_key=session_key or "",
+                        display_type=display_type,
+                        auth_policy=auth_policy,
+                        origin_user_id=str(source.user_id) if auth_policy == "session_owner_only" else None,
+                        timeout_seconds=timeout_seconds,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                    logger=logger,
+                    log_message="Interactive prompt send failed to schedule",
+                )
+                if fut is None:
+                    send_ok = False
+                else:
+                    try:
+                        result = fut.result(timeout=15)
+                        send_ok = bool(getattr(result, "success", False))
+                    except Exception as exc:
+                        logger.warning("Interactive prompt send failed: %s", exc)
+                        send_ok = False
+
+                if not send_ok:
+                    _hig.clear_session(session_key or "")
+                    return _json.dumps({"status": "cancelled", "error": "prompt could not be delivered"})
+
+                result = _hig.wait_for_response(prompt_id, timeout=timeout_seconds)
+                if result is None:
+                    return _json.dumps({"status": "timeout", "timed_out": True})
+
+                # Serialize the HumanInputResult dataclass to JSON
+                return _json.dumps(result.to_dict(), ensure_ascii=False)
+
+            agent.interactive_prompt_callback = _interactive_prompt_callback_sync
 
             # Store agent reference for interrupt support
             agent_holder[0] = agent

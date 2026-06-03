@@ -1133,6 +1133,7 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".ts": "text/plain",
     ".py": "text/plain",
     ".sh": "text/plain",
+    ".ps1": "text/plain",
 }
 
 
@@ -2470,6 +2471,58 @@ class BasePlatformAdapter(ABC):
             mark_awaiting_text(clarify_id)
         else:
             text = f"❓ {question}"
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            metadata=metadata,
+        )
+
+    async def send_human_input(
+        self,
+        chat_id: str,
+        question: str,
+        options: list,
+        prompt_id: str,
+        session_key: str,
+        display_type: str = "buttons",
+        auth_policy: str = "session_owner_only",
+        origin_user_id: Optional[str] = None,
+        timeout_seconds: float = 900,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive prompt with per-option actions.
+
+        Default text fallback — renders a numbered list of options.
+        Adapters with rich UIs (Discord, Telegram) override this to render
+        buttons, select menus, and modal popups.
+
+        The resolution flow mirrors clarify:
+
+        * **Return options** — user picks a choice → adapter calls
+          ``tools.human_input_gateway.resolve_choice(prompt_id, value, actor)``.
+        * **Modal options** — user picks a choice that opens a modal →
+          adapter renders modal, collects fields, calls
+          ``tools.human_input_gateway.resolve_modal(prompt_id, value, fields, files, actor)``.
+        * **Timeout** — gateway's ``wait_for_response`` handles this.
+        """
+        if display_type != "buttons":
+            logger.debug(
+                "send_human_input text fallback ignoring display_type=%r",
+                display_type,
+            )
+        lines = [f"🔘 {question}", ""]
+        for i, opt in enumerate(options, start=1):
+            label = opt.get("label", f"Option {i}")
+            desc = opt.get("description", "")
+            action = opt.get("action", "return")
+            suffix = " (opens form)" if action == "modal" else ""
+            line = f"  {i}. {label}{suffix}"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+        lines.append("")
+        lines.append("Reply with the number or option text.")
+        text = "\n".join(lines)
         return await self.send(
             chat_id=chat_id,
             content=text,
