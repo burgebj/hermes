@@ -1162,6 +1162,16 @@ class TestParseTargetRefE164:
         assert chat_id == "15551234567"
         assert is_explicit is True
 
+    def test_signal_group_id_is_explicit(self):
+        """Resolved Signal group:<id> targets must not fall back to home."""
+        chat_id, thread_id, is_explicit = _parse_target_ref(
+            "signal",
+            "group:w3W0kYAdHINWdTXDFl18LiH9O1xVwIadYMhVOD9tFaE=",
+        )
+        assert chat_id == "group:w3W0kYAdHINWdTXDFl18LiH9O1xVwIadYMhVOD9tFaE="
+        assert thread_id is None
+        assert is_explicit is True
+
     def test_signal_invalid_e164_rejected(self):
         """Too-short, too-long, and non-numeric E.164 strings are not explicit."""
         assert _parse_target_ref("signal", "+123")[2] is False
