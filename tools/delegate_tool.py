@@ -274,7 +274,7 @@ def _extract_output_tail(
     return tail
 
 
-def _looks_like_error_output(content: str) -> bool:
+def _looks_like_error_output(content) -> bool:
     """Conservative stderr/error detector for tool-result previews.
 
     The old heuristic flagged any preview containing the substring "error",
@@ -286,6 +286,9 @@ def _looks_like_error_output(content: str) -> bool:
     """
     if not content:
         return False
+
+    if not isinstance(content, str):
+        content = str(content)
 
     head = content.lstrip()
     if head.startswith("{") or head.startswith("["):
@@ -1670,6 +1673,8 @@ def _run_single_child(
                             trace_by_id[tc_id] = entry_t
                 elif msg.get("role") == "tool":
                     content = msg.get("content", "")
+                    if not isinstance(content, str):
+                        content = str(content)
                     is_error = _looks_like_error_output(content)
                     result_meta = {
                         "result_bytes": len(content),
