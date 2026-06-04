@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -65,6 +66,9 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
+_FOOTER_ACCOUNT_USAGE_TTL_SECS = 90.0
+_FOOTER_ACCOUNT_USAGE_CACHE: dict[tuple[str, str, str], tuple[float, Any]] = {}
+_FOOTER_ACCOUNT_USAGE_CACHE_LOCK = threading.Lock()
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
@@ -372,6 +376,51 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
 # ``config.yaml`` ``agent.gateway_auto_continue_freshness``.
 _AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT = 60 * 60
 
+
+
+
+def _footer_account_usage_cache_key(
+    provider: Any,
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+    account_label: Any = None,
+) -> tuple[str, str, str]:
+    provider_text = str(provider or "").strip().lower()
+    base_text = str(base_url or "").strip().rstrip("/")
+    key_text = str(api_key or "")
+    key_hash = hashlib.sha256(key_text.encode("utf-8", "ignore")).hexdigest()[:16] if key_text else ""
+    pool_label = str(account_label or "").strip()
+    return (provider_text, base_text, key_hash + ":" + pool_label)
+
+
+def _fetch_footer_account_usage_cached(
+    provider: Any,
+    *,
+    base_url: Any = None,
+    api_key: Any = None,
+    account_label: Any = None,
+    ttl_seconds: float = _FOOTER_ACCOUNT_USAGE_TTL_SECS,
+):
+    """Fetch account-usage data for automatic footers with a short TTL.
+
+    The interactive `/usage` command remains live/uncached.  Footers can be
+    appended to every gateway reply, so they reuse the official
+    `fetch_account_usage()` provider integrations behind a small per-credential
+    cache instead of hitting usage APIs on every turn.
+    """
+    if not provider:
+        return None
+    key = _footer_account_usage_cache_key(provider, base_url=base_url, api_key=api_key, account_label=account_label)
+    now = time.monotonic()
+    with _FOOTER_ACCOUNT_USAGE_CACHE_LOCK:
+        cached = _FOOTER_ACCOUNT_USAGE_CACHE.get(key)
+        if cached and now - cached[0] < max(1.0, float(ttl_seconds or 0)):
+            return cached[1]
+    snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key)
+    with _FOOTER_ACCOUNT_USAGE_CACHE_LOCK:
+        _FOOTER_ACCOUNT_USAGE_CACHE[key] = (time.monotonic(), snapshot)
+    return snapshot
 
 def _coerce_gateway_timestamp(value: Any) -> Optional[float]:
     """Best-effort conversion of stored gateway timestamps to epoch seconds.
@@ -9492,11 +9541,29 @@ class GatewayRunner:
             # text, so we fire a separate trailing send below.
             _footer_line = ""
             try:
-                from gateway.runtime_footer import build_footer_line as _bfl
+                from gateway.runtime_footer import build_footer_line as _bfl, resolve_footer_config as _rfc
+                _footer_cfg = _load_gateway_config()
+                _footer_platform = _platform_config_key(source.platform)
+                _footer_resolved = _rfc(_footer_cfg, _footer_platform)
+                _account_usage = None
+                if "quota" in (_footer_resolved.get("fields") or []):
+                    try:
+                        _account_usage = await asyncio.to_thread(
+                            _fetch_footer_account_usage_cached,
+                            agent_result.get("provider"),
+                            base_url=agent_result.get("base_url"),
+                            api_key=agent_result.get("api_key"),
+                            account_label=agent_result.get("account_label"),
+                        )
+                    except Exception:
+                        _account_usage = None
                 _footer_line = _bfl(
-                    user_config=_load_gateway_config(),
-                    platform_key=_platform_config_key(source.platform),
+                    user_config=_footer_cfg,
+                    platform_key=_footer_platform,
                     model=agent_result.get("model"),
+                    provider=agent_result.get("provider"),
+                    account_label=agent_result.get("account_label") or getattr(_account_usage, "account_label", None),
+                    account_usage=_account_usage,
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
@@ -18154,6 +18221,26 @@ class GatewayRunner:
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
+            _resolved_provider = getattr(_agent, "provider", None) if _agent else None
+            _resolved_base_url = getattr(_agent, "base_url", None) if _agent else None
+            _resolved_api_key = getattr(_agent, "api_key", None) if _agent else None
+            _resolved_account_label = None
+            if _agent:
+                try:
+                    _pool = getattr(_agent, "_credential_pool", None)
+                    _entry = _pool.current() or (_pool.peek() if _pool is not None and hasattr(_pool, "peek") else None)
+                    _label = getattr(_entry, "label", None) if _entry is not None else None
+                    if isinstance(_label, str) and _label.strip():
+                        _resolved_account_label = _label.strip()
+                    if _entry is not None:
+                        _entry_base_url = getattr(_entry, "runtime_base_url", None) or getattr(_entry, "base_url", None)
+                        _entry_api_key = getattr(_entry, "runtime_api_key", None) or getattr(_entry, "access_token", None)
+                        if _entry_base_url:
+                            _resolved_base_url = _entry_base_url
+                        if _entry_api_key:
+                            _resolved_api_key = _entry_api_key
+                except Exception:
+                    _resolved_account_label = None
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
@@ -18174,6 +18261,10 @@ class GatewayRunner:
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
+                    "provider": _resolved_provider,
+                    "account_label": _resolved_account_label,
+                    "base_url": _resolved_base_url,
+                    "api_key": _resolved_api_key,
                     "context_length": _context_length,
                 }
             
@@ -18330,6 +18421,10 @@ class GatewayRunner:
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
                 "model": _resolved_model,
+                "provider": _resolved_provider,
+                "account_label": _resolved_account_label,
+                "base_url": _resolved_base_url,
+                "api_key": _resolved_api_key,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
