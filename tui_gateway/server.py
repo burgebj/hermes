@@ -5,6 +5,7 @@ import copy
 import inspect
 import json
 import logging
+import math
 import os
 import queue
 import subprocess
@@ -168,6 +169,10 @@ _pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=_rpc_pool_workers,
     thread_name_prefix="tui-rpc",
 )
+
+_IDLE_COMPRESSION_THREADS: dict[str, tuple[threading.Thread, threading.Event]] = {}
+_IDLE_COMPRESSION_LOCK = threading.Lock()
+_IDLE_COMPRESSION_GLOBAL_SEMAPHORE = threading.BoundedSemaphore(1)
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
 
 # Reserve real stdout for JSON-RPC only; redirect Python's stdout to stderr
@@ -292,6 +297,14 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     stop_event = session.get("_notif_stop")
     if stop_event is not None:
         stop_event.set()
+
+    sid = session.get("sid") or session.get("tui_session_id") or ""
+    if sid:
+        with _IDLE_COMPRESSION_LOCK:
+            worker = _IDLE_COMPRESSION_THREADS.pop(sid, None)
+        if worker:
+            _thread, idle_stop = worker
+            idle_stop.set()
 
     agent = session.get("agent")
     lock = session.get("history_lock")
@@ -1336,6 +1349,7 @@ def _compress_session_history(
     approx_tokens: int | None = None,
     before_messages: list | None = None,
     history_version: int | None = None,
+    abort_if_running: bool = False,
 ) -> tuple[int, dict]:
     from agent.model_metadata import estimate_request_tokens_rough
 
@@ -1372,6 +1386,12 @@ def _compress_session_history(
         focus_topic=focus_topic or None,
     )
     with session["history_lock"]:
+        if abort_if_running and session.get("running"):
+            # A new turn started while the LLM-bound compression call was in
+            # flight. Drop the compressed snapshot rather than racing the turn
+            # or using the same AIAgent instance concurrently.
+            usage = _get_usage(agent)
+            return 0, usage
         if int(session.get("history_version", 0)) != history_version:
             # External mutation during compaction — drop the compressed
             # result so we don't clobber concurrent edits.
@@ -1381,6 +1401,261 @@ def _compress_session_history(
         session["history_version"] = history_version + 1
     usage = _get_usage(agent)
     return len(history) - len(compressed), usage
+
+
+def _session_busy(session: dict) -> bool:
+    return bool(session.get("running") or session.get("idle_compression_running"))
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return default
+    return coerced if math.isfinite(coerced) else default
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+    return default
+
+
+def _load_idle_compression_config() -> dict:
+    """Read conservative Gateway idle pre-compression settings.
+
+    This feature is opt-in.  Defaults deliberately preserve historical
+    behaviour while exposing a safe implementation path: the Gateway may
+    compact an idle, non-running session after a cool-down so the next user
+    turn does not pay the synchronous preflight-compression cost.
+    """
+    cfg = _load_cfg().get("compression") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    parent_enabled = _coerce_bool(cfg.get("enabled"), True)
+    idle = cfg.get("idle") or cfg.get("idle_precompression") or {}
+    if not isinstance(idle, dict):
+        idle = {}
+
+    base_threshold = _coerce_float(cfg.get("threshold"), 0.5)
+    if "threshold" in idle:
+        threshold = _coerce_float(idle.get("threshold"), max(0.1, base_threshold * 0.9))
+    else:
+        threshold = max(0.1, base_threshold * 0.9)
+    threshold = max(0.1, min(threshold, 0.95))
+
+    idle_after = _coerce_float(
+        idle.get("idle_after_seconds", idle.get("after_seconds", 120.0)), 120.0
+    )
+    min_interval = _coerce_float(
+        idle.get("min_interval_seconds", idle.get("cooldown_seconds", 1800.0)),
+        1800.0,
+    )
+
+    return {
+        "enabled": parent_enabled and _coerce_bool(idle.get("enabled"), False),
+        "threshold": threshold,
+        "idle_after_seconds": min(3600.0, max(10.0, idle_after)),
+        "min_interval_seconds": min(86400.0, max(60.0, min_interval)),
+        "emit_status": _coerce_bool(idle.get("emit_status"), False),
+    }
+
+
+def _session_compression_threshold_tokens(agent: Any, cfg: dict) -> int:
+    compressor = getattr(agent, "context_compressor", None)
+    context_length = getattr(compressor, "context_length", None)
+    if not context_length:
+        try:
+            from agent.model_metadata import get_model_context_length
+
+            context_length = get_model_context_length(
+                getattr(agent, "model", "") or _resolve_model(),
+                base_url=getattr(agent, "base_url", "") or "",
+                api_key=getattr(agent, "api_key", "") or "",
+                provider=getattr(agent, "provider", "") or "",
+                config_context_length=getattr(agent, "_config_context_length", None),
+            )
+        except Exception:
+            context_length = 0
+    if not context_length:
+        return 0
+    return int(context_length * float(cfg.get("threshold", 0.5)))
+
+
+def _run_idle_compression_once(sid: str, session: dict) -> bool:
+    """Attempt one safe idle compression pass for a Gateway session.
+
+    Returns True only when compression was actually attempted.  The helper is
+    intentionally quiet by default: success should make the next turn faster,
+    not generate user-visible chatter.
+    """
+    cfg = _load_idle_compression_config()
+    if not cfg.get("enabled"):
+        return False
+
+    now = time.time()
+    with session["history_lock"]:
+        if _session_busy(session) or session.get("_finalized"):
+            return False
+        last_active = float(session.get("last_active") or 0.0)
+        if now - last_active < float(cfg["idle_after_seconds"]):
+            return False
+        last_attempt = float(
+            session.get("last_idle_compression_attempt_at")
+            or session.get("last_idle_compression_at")
+            or 0.0
+        )
+        if last_attempt and now - last_attempt < float(cfg["min_interval_seconds"]):
+            return False
+        history = list(session.get("history", []))
+        history_version = int(session.get("history_version", 0))
+    if len(history) < 4:
+        return False
+
+    agent = session.get("agent")
+    if agent is None:
+        return False
+
+    try:
+        from agent.model_metadata import estimate_request_tokens_rough
+
+        sys_prompt = getattr(agent, "_cached_system_prompt", "") or ""
+        tools = getattr(agent, "tools", None) or None
+        approx_tokens = estimate_request_tokens_rough(
+            history, system_prompt=sys_prompt, tools=tools
+        )
+    except Exception as exc:
+        logger.debug("idle compression token estimate skipped for %s: %s", sid, exc)
+        return False
+
+    threshold_tokens = _session_compression_threshold_tokens(agent, cfg)
+    if not threshold_tokens or approx_tokens < threshold_tokens:
+        return False
+
+    acquired = _IDLE_COMPRESSION_GLOBAL_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        with session["history_lock"]:
+            if not session.get("_finalized") and not _session_busy(session):
+                session["idle_compression_due_at"] = time.time() + min(
+                    30.0, float(cfg["idle_after_seconds"])
+                )
+        return False
+    try:
+        with session["history_lock"]:
+            if _session_busy(session) or int(session.get("history_version", 0)) != history_version:
+                return False
+            session["idle_compression_running"] = True
+            session["last_idle_compression_attempt_at"] = now
+        if cfg.get("emit_status"):
+            _emit(
+                "status.update",
+                sid,
+                {
+                    "kind": "status",
+                    "text": f"idle compacting ~{approx_tokens:,} tokens…",
+                },
+            )
+        try:
+            removed, _usage = _compress_session_history(
+                session,
+                approx_tokens=approx_tokens,
+                before_messages=history,
+                history_version=history_version,
+                abort_if_running=True,
+            )
+            if removed > 0:
+                _sync_session_key_after_compress(
+                    sid,
+                    session,
+                    clear_pending_title=False,
+                    restart_slash_worker=True,
+                )
+                with session["history_lock"]:
+                    session["last_idle_compression_at"] = now
+                logger.info(
+                    "idle compression completed: sid=%s approx_tokens=%s threshold=%s removed=%s",
+                    sid,
+                    approx_tokens,
+                    threshold_tokens,
+                    removed,
+                )
+                return True
+            return False
+        finally:
+            with session["history_lock"]:
+                session["idle_compression_running"] = False
+            if cfg.get("emit_status"):
+                _emit("status.update", sid, {"kind": "status", "text": "ready"})
+    except Exception as exc:
+        logger.warning("idle compression failed for sid=%s: %s", sid, exc)
+        return False
+    finally:
+        _IDLE_COMPRESSION_GLOBAL_SEMAPHORE.release()
+
+
+def _schedule_idle_compression(sid: str, session: dict) -> None:
+    # Only real sessions created via _init_session carry their TUI sid.  Many
+    # unit tests call _run_prompt_submit with hand-built session dicts and
+    # monkeypatch threading.Thread to run synchronously; do not let the optional
+    # background idle worker leak into those paths.
+    if session.get("sid") != sid:
+        return
+    cfg = _load_idle_compression_config()
+    if not cfg.get("enabled"):
+        return
+
+    delay = float(cfg["idle_after_seconds"])
+    due_at = time.time() + delay
+    with session["history_lock"]:
+        if session.get("_finalized") or _session_busy(session):
+            return
+        # Debounce to the latest completed prompt.  If a second prompt arrives
+        # while the previous idle timer is sleeping, the worker must wait for
+        # this newer due time instead of waking early, seeing a too-recent
+        # ``last_active``, and dropping the compression opportunity entirely.
+        session["idle_compression_due_at"] = due_at
+
+    stop_event = threading.Event()
+
+    def _worker() -> None:
+        try:
+            while True:
+                with session["history_lock"]:
+                    if session.get("_finalized"):
+                        return
+                    target_due_at = float(session.get("idle_compression_due_at") or 0.0)
+                remaining = max(0.0, target_due_at - time.time())
+                if remaining > 0 and stop_event.wait(timeout=remaining):
+                    return
+                _run_idle_compression_once(sid, session)
+                with session["history_lock"]:
+                    next_due_at = float(session.get("idle_compression_due_at") or 0.0)
+                    finalized = bool(session.get("_finalized"))
+                if finalized or next_due_at <= time.time():
+                    return
+        finally:
+            with _IDLE_COMPRESSION_LOCK:
+                cur = _IDLE_COMPRESSION_THREADS.get(sid)
+                if cur and cur[0] is threading.current_thread():
+                    _IDLE_COMPRESSION_THREADS.pop(sid, None)
+
+    with _IDLE_COMPRESSION_LOCK:
+        existing = _IDLE_COMPRESSION_THREADS.get(sid)
+        if existing and existing[0].is_alive():
+            return
+        thread = threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"idle-compress-{sid[:12] or 'session'}",
+        )
+        _IDLE_COMPRESSION_THREADS[sid] = (thread, stop_event)
+        thread.start()
 
 
 def _sync_session_key_after_compress(
@@ -1612,7 +1887,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "cwd": cwd,
         "branch": _git_branch_for_cwd(cwd),
         "personality": str(personality or ""),
-        "running": bool((session or {}).get("running")),
+        "running": _session_busy(session or {}),
         "desktop_contract": DESKTOP_BACKEND_CONTRACT,
         "version": "",
         "release_date": "",
@@ -2403,6 +2678,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     now = time.time()
     _sessions[sid] = {
         "agent": agent,
+        "sid": sid,
         "session_key": key,
         "history": history,
         "history_lock": threading.Lock(),
@@ -3023,7 +3299,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    if session.get("running"):
+    if _session_busy(session):
         return _err(rid, 4009, "session busy")
     raw = str(params.get("cwd", "") or "").strip()
     if not raw:
@@ -3057,7 +3333,7 @@ def _session_live_status(sid: str, session: dict) -> str:
     ready = session.get("agent_ready")
     if ready is not None and not ready.is_set():
         return "starting"
-    if session.get("running"):
+    if _session_busy(session):
         return "working"
     return "idle"
 
@@ -3386,7 +3662,7 @@ def _(rid, params: dict) -> dict:
     # write would either clobber the undo (version matches) or
     # silently drop the agent's output (version mismatch, see below).
     # Neither is what the user wants — make them /interrupt first.
-    if session.get("running"):
+    if _session_busy(session):
         return _err(
             rid, 4009, "session busy — /interrupt the current turn before /undo"
         )
@@ -3409,7 +3685,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    if session.get("running"):
+    if _session_busy(session):
         return _err(
             rid, 4009, "session busy — /interrupt the current turn before /compress"
         )
@@ -3935,7 +4211,7 @@ def _(rid, params: dict) -> dict:
     if (t := current_transport()) is not None:
         session["transport"] = t
     with session["history_lock"]:
-        if session.get("running"):
+        if _session_busy(session):
             return _err(rid, 4009, "session busy")
         if truncate_user_ordinal is not None:
             try:
@@ -4056,7 +4332,7 @@ def _notification_poller_loop(
         _emit("status.update", sid, {"kind": "process", "text": text})
 
         with session["history_lock"]:
-            if session.get("running"):
+            if _session_busy(session):
                 process_registry.completion_queue.put(evt)
                 continue
             session["running"] = True
@@ -4096,7 +4372,7 @@ def _notification_poller_loop(
         _emit("status.update", sid, {"kind": "process", "text": text})
 
         with session["history_lock"]:
-            if session.get("running"):
+            if _session_busy(session):
                 process_registry.completion_queue.put(evt)
                 break
             session["running"] = True
@@ -4497,7 +4773,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         # we check that guard before re-firing.
         if goal_followup:
             with session["history_lock"]:
-                if session.get("running"):
+                if _session_busy(session):
                     # User already sent something — their turn wins,
                     # the judge will re-run on the next turn anyway.
                     return
@@ -4522,7 +4798,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
 
             for _evt, synth in process_registry.drain_notifications():
                 with session["history_lock"]:
-                    if session.get("running"):
+                    if _session_busy(session):
                         process_registry.completion_queue.put(_evt)
                         break
                     session["running"] = True
@@ -4543,6 +4819,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 f"{type(_drain_exc).__name__}: {_drain_exc}",
                 file=sys.stderr,
             )
+
+        _schedule_idle_compression(sid, session)
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -4928,7 +5206,7 @@ def _(rid, params: dict) -> dict:
                 # with the new base_url but old model (or vice versa),
                 # producing 400/404s the user never asked for.  Parity
                 # with the gateway's running-agent /model guard.
-                if session.get("running"):
+                if _session_busy(session):
                     return _err(
                         rid,
                         4009,
@@ -5963,7 +6241,7 @@ def _(rid, params: dict) -> dict:
     if name == "retry":
         if not session:
             return _err(rid, 4001, "no active session to retry")
-        if session.get("running"):
+        if _session_busy(session):
             return _err(
                 rid, 4009, "session busy — /interrupt the current turn before /retry"
             )
@@ -6093,7 +6371,7 @@ def _(rid, params: dict) -> dict:
         # /undo 3 backs up three user turns at once. See issue #21910.
         if not session:
             return _err(rid, 4001, "no active session to undo")
-        if session.get("running"):
+        if _session_busy(session):
             return _err(
                 rid, 4009, "session busy — /interrupt the current turn before /undo"
             )
@@ -6896,7 +7174,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # with the session.compress / session.undo guards and the gateway
     # runner's running-agent /model guard.
     _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress"}
-    if name in _MUTATES_WHILE_RUNNING and session.get("running"):
+    if name in _MUTATES_WHILE_RUNNING and _session_busy(session):
         return f"session busy — /interrupt the current turn before running /{name}"
 
     try:
@@ -7349,7 +7627,7 @@ def _(rid, params: dict) -> dict:
     # the agent's output (version mismatch path) or clobbering the
     # rollback (version-matches path).  A file-scoped rollback only
     # touches disk, so we allow it.
-    if not file_path and session.get("running"):
+    if not file_path and _session_busy(session):
         return _err(
             rid,
             4009,
