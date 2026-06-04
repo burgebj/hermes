@@ -1401,12 +1401,16 @@ def _tui_need_rebuild(root: Path) -> bool:
     except OSError:
         return True
 
-    for path in _iter_tui_build_inputs(root):
-        try:
-            if path.stat().st_mtime > output_mtime:
+    # The workspace root may differ from root (e.g. ui-tui/ vs hermes-agent/)
+    # when lockfiles are consolidated. Check both for build inputs.
+    check_roots = {root, root.parent}
+    for check_root in check_roots:
+        for path in _iter_tui_build_inputs(check_root):
+            try:
+                if path.stat().st_mtime > output_mtime:
+                    return True
+            except OSError:
                 return True
-        except OSError:
-            return True
     return False
 
 
@@ -1555,10 +1559,10 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         # stale after a pull, newer hooks/components can exist in src while
         # being missing at runtime (e.g. useCursorAdvance). Prebuild it here.
         npm = _node_bin("npm")
-        ink_dir = tui_dir / "packages" / "hermes-ink"
+        workspace_root = _workspace_root(tui_dir)
         result = subprocess.run(
-            [npm, "run", "build"],
-            cwd=str(ink_dir),
+            [npm, "--workspace=ui-tui", "run", "build"],
+            cwd=str(workspace_root),
             capture_output=True,
             text=True,
         )
@@ -1584,9 +1588,10 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
 
     if should_build:
         npm = _node_bin("npm")
+        workspace_root = _workspace_root(tui_dir)
         result = subprocess.run(
-            [npm, "run", "build"],
-            cwd=str(tui_dir),
+            [npm, "--workspace=ui-tui", "run", "build"],
+            cwd=str(workspace_root),
             capture_output=True,
             text=True,
         )
