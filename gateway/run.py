@@ -55,6 +55,7 @@ from agent.async_utils import safe_schedule_threadsafe
 from agent.i18n import t
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from gateway.subprocess_env import scrubbed_env
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -1330,6 +1331,7 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=scrubbed_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
         if proc.returncode == 0:
@@ -4028,6 +4030,7 @@ class GatewayRunner:
                 [sys.executable, "-c", watcher, str(current_pid), *cmd_argv],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=scrubbed_env(),
                 **windows_detach_popen_kwargs(),
             )
             return
@@ -4044,6 +4047,7 @@ class GatewayRunner:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=scrubbed_env(),
             )
         else:
             subprocess.Popen(
@@ -4051,6 +4055,7 @@ class GatewayRunner:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=scrubbed_env(),
             )
 
     def _launch_systemd_restart_shortcut(self) -> None:
@@ -4121,6 +4126,7 @@ class GatewayRunner:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=scrubbed_env(),
             )
             logger.info(
                 "Launched systemd planned-restart helper for %s (pid=%s)",
@@ -14950,6 +14956,7 @@ class GatewayRunner:
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    env=scrubbed_env(),
                     **windows_detach_popen_kwargs(),
                 )
             else:
@@ -14971,6 +14978,7 @@ class GatewayRunner:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True,
+                        env=scrubbed_env(),
                     )
                 else:
                     # Fallback: start_new_session=True calls os.setsid() in child
@@ -14979,6 +14987,7 @@ class GatewayRunner:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True,
+                        env=scrubbed_env(),
                     )
         except Exception as e:
             pending_path.unlink(missing_ok=True)
