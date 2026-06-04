@@ -559,6 +559,17 @@ _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
 _IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
 
 
+def _cron_button_metadata(job: dict) -> dict | None:
+    buttons = job.get("buttons")
+    if not buttons:
+        return None
+    return {
+        "job_id": str(job.get("id", "")),
+        "job_name": str(job.get("name") or job.get("id") or "cron job"),
+        "buttons": buttons,
+    }
+
+
 def _send_media_via_adapter(
     adapter,
     chat_id: str,
@@ -716,7 +727,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         runtime_adapter = (adapters or {}).get(platform)
         delivered = False
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
+            send_metadata = {"thread_id": thread_id} if thread_id else {}
+            cron_buttons = _cron_button_metadata(job)
+            if cron_buttons:
+                send_metadata["cron_buttons"] = cron_buttons
+            if not send_metadata:
+                send_metadata = None
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
