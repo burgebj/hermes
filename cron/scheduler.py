@@ -235,6 +235,35 @@ def _get_lock_paths() -> tuple[Path, Path]:
     return lock_dir, lock_dir / ".tick.lock"
 
 
+def _prune_cron_sessions_from_config() -> None:
+    """Apply config-driven retention for completed cron sessions."""
+    try:
+        _cfg = load_config() or {}
+        _cron_cfg = _cfg.get("cron", {}) if isinstance(_cfg, dict) else {}
+        retention_days = int(_cron_cfg.get("session_retention_days") or 0)
+        if retention_days <= 0:
+            return
+
+        from hermes_state import SessionDB
+
+        _session_db = SessionDB()
+        try:
+            removed = _session_db.prune_sessions(
+                older_than_days=retention_days,
+                source="cron",
+            )
+            if removed:
+                logger.info(
+                    "Pruned %d cron session(s) older than %d day(s)",
+                    removed,
+                    retention_days,
+                )
+        finally:
+            _session_db.close()
+    except Exception as exc:
+        logger.warning("Cron session retention cleanup failed: %s", exc)
+
+
 @contextmanager
 def _job_profile_context(job_id: str, profile: Optional[str]):
     """Temporarily run a job under a specific Hermes profile.
@@ -2177,6 +2206,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     logger.error("Cron job future failed: %s", exc)
                     _results.append(False)
             _sweep_mcp_orphans()
+            _prune_cron_sessions_from_config()
             return sum(_results)
 
         # Async (gateway ticker) mode: don't block.  Sweep orphans via a
@@ -2189,12 +2219,14 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 _remaining[0] -= 1
                 if _remaining[0] <= 0:
                     _sweep_mcp_orphans()
+                    _prune_cron_sessions_from_config()
 
             for _f in _all_futures:
                 _f.add_done_callback(_on_done)
         else:
             # Nothing dispatched (all skipped / no due jobs) — sweep inline.
             _sweep_mcp_orphans()
+            _prune_cron_sessions_from_config()
 
         return sum(_results)
     finally:
