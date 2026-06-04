@@ -116,6 +116,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
                args_hint="[name]"),
+    CommandDef("bind-context", "Bind or inspect a durable context anchor for this chat/thread", "Session",
+               gateway_only=True, aliases=("bind_context",), args_hint="[type id-or-url [title] | show | clear]"),
+    CommandDef("recover", "Show the durable context anchor for this chat/thread", "Session",
+               gateway_only=True),
 
     # Configuration
     CommandDef("sessions", "Browse and resume previous sessions", "Session"),

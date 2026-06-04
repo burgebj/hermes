@@ -1146,6 +1146,7 @@ from gateway.session import (
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter
+from gateway.context_anchors import ContextAnchorStore, infer_anchor_type
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -1898,6 +1899,7 @@ class GatewayRunner:
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
         self.delivery_router = DeliveryRouter(self.config)
+        self.context_anchors = ContextAnchorStore(_hermes_home / "context_anchors.json")
         self._running = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
@@ -7901,6 +7903,13 @@ class GatewayRunner:
             if _cmd_def_inner and _cmd_def_inner.name == "background":
                 return await self._handle_background_command(event)
 
+            # Context anchors are control-plane metadata for future turns; they
+            # should not interrupt the active agent turn.
+            if _cmd_def_inner and _cmd_def_inner.name in {"bind-context", "recover"}:
+                if _cmd_def_inner.name == "bind-context":
+                    return await self._handle_bind_context_command(event)
+                return await self._handle_recover_command(event)
+
             # /kanban must bypass the guard. It writes to a profile-agnostic
             # DB (kanban.db), not to the running agent's state. In fact
             # /kanban unblock is often the only way to free a worker that
@@ -8319,6 +8328,12 @@ class GatewayRunner:
 
         if canonical == "title":
             return await self._handle_title_command(event)
+
+        if canonical == "bind-context":
+            return await self._handle_bind_context_command(event)
+
+        if canonical == "recover":
+            return await self._handle_recover_command(event)
 
         if canonical == "resume":
             return await self._handle_resume_command(event)
@@ -8977,6 +8992,8 @@ class GatewayRunner:
             })
         
         # Build session context
+        source = self._source_with_context_anchor(source)
+        event.source = source
         context = build_session_context(source, self.config, session_entry)
         
         # Set session context variables for tools (task-local, concurrency-safe)
@@ -10070,6 +10087,110 @@ class GatewayRunner:
             lines.append(f"◆ Endpoint: {base_url}")
 
         return "\n".join(lines)
+
+    def _get_context_anchor_store(self) -> ContextAnchorStore:
+        store = getattr(self, "context_anchors", None)
+        if store is None:
+            store = ContextAnchorStore(_hermes_home / "context_anchors.json")
+            self.context_anchors = store
+        return store
+
+    def _source_with_context_anchor(self, source: SessionSource) -> SessionSource:
+        """Attach durable context-anchor metadata before prompt injection."""
+
+        try:
+            anchor = self._get_context_anchor_store().resolve_for_source(source)
+        except Exception:
+            logger.debug("Failed to resolve context anchor", exc_info=True)
+            return source
+        if not anchor:
+            return source
+        return dataclasses.replace(source, context_anchor=anchor.to_dict())
+
+    async def _handle_bind_context_command(self, event: MessageEvent) -> str:
+        """Bind, show, or remove a context anchor for the current chat/thread."""
+
+        source = event.source
+        raw_args = event.get_command_args().strip()
+        store = self._get_context_anchor_store()
+        if not raw_args or raw_args.lower() in {"show", "status"}:
+            anchor = store.resolve_for_source(source)
+            if not anchor:
+                return (
+                    "No context anchor is bound to this chat/thread. "
+                    "Use `/bind-context <type> <id-or-url> [title]`."
+                )
+            title = f" — {anchor.title}" if anchor.title else ""
+            url = f"\n{anchor.url}" if anchor.url else ""
+            return f"Bound context anchor: `{anchor.anchor_type}:{anchor.anchor_id}`{title}{url}"
+        if raw_args.lower() in {"off", "clear", "remove", "unbind"}:
+            removed = store.unbind(source)
+            if removed:
+                return (
+                    f"Removed context anchor `{removed.anchor_type}:{removed.anchor_id}` "
+                    "from this chat/thread."
+                )
+            fallback = store.resolve_for_source(source)
+            if fallback and fallback.source == "thread-title":
+                return (
+                    "No manual context anchor was set; this chat/thread still has "
+                    "a context marker in its title. Remove `[context:<type>:<id>]` "
+                    "from the title to disable title fallback."
+                )
+            return "No context anchor was set for this chat/thread."
+
+        parts = raw_args.split(maxsplit=2)
+        if len(parts) == 1:
+            anchor_id = parts[0].strip()
+            anchor_type = infer_anchor_type(anchor_id)
+            title = ""
+        elif len(parts) >= 2:
+            anchor_type = parts[0].strip().lower()
+            anchor_id = parts[1].strip()
+            title = parts[2].strip() if len(parts) == 3 else ""
+        else:
+            anchor_type = ""
+            anchor_id = ""
+            title = ""
+        if not anchor_type or not anchor_id:
+            return "Usage: /bind-context <type> <id-or-url> [optional title]"
+        url = anchor_id if anchor_type == "url" and anchor_id.lower().startswith(("http://", "https://")) else ""
+        try:
+            anchor = store.bind(
+                source,
+                anchor_type=anchor_type,
+                anchor_id=anchor_id,
+                title=title,
+                url=url,
+                source_label="manual",
+            )
+        except ValueError:
+            return "Usage: /bind-context <type> <id-or-url> [optional title]"
+        title_suffix = f" — {anchor.title}" if anchor.title else ""
+        url_suffix = f"\n{anchor.url}" if anchor.url else ""
+        return (
+            f"Bound this chat/thread to context anchor `{anchor.anchor_type}:{anchor.anchor_id}`{title_suffix}.\n"
+            "Future turns will include this anchor in session context."
+            f"{url_suffix}"
+        )
+
+    async def _handle_recover_command(self, event: MessageEvent) -> str:
+        """Show the durable context-recovery anchor for the current chat/thread."""
+
+        anchor = self._get_context_anchor_store().resolve_for_source(event.source)
+        if not anchor:
+            return (
+                "No context anchor found for this chat/thread. "
+                "Add `[context:<type>:<id>]` to the thread title or run "
+                "`/bind-context <type> <id-or-url> [title]`."
+            )
+        title = f"\nTitle: {anchor.title}" if anchor.title else ""
+        url = f"\nURL: {anchor.url}" if anchor.url else ""
+        return (
+            "Recovery anchor for this chat/thread:\n"
+            f"Context anchor: `{anchor.anchor_type}:{anchor.anchor_id}`{title}{url}\n"
+            "I will inject this into future session context automatically."
+        )
 
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""

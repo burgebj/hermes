@@ -91,6 +91,7 @@ class SessionSource:
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
     message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
+    context_anchor: Optional[Dict[str, Any]] = None  # Durable context anchor bound to this chat/thread lane
     
     @property
     def description(self) -> str:
@@ -134,6 +135,8 @@ class SessionSource:
             d["parent_chat_id"] = self.parent_chat_id
         if self.message_id:
             d["message_id"] = self.message_id
+        if self.context_anchor:
+            d["context_anchor"] = self.context_anchor
         return d
 
     @classmethod
@@ -152,6 +155,7 @@ class SessionSource:
             guild_id=data.get("guild_id"),
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
+            context_anchor=data.get("context_anchor") if isinstance(data.get("context_anchor"), dict) else None,
         )
     
 
@@ -292,6 +296,25 @@ def build_session_context_prompt(
     # Channel topic (if available - provides context about the channel's purpose)
     if context.source.chat_topic:
         lines.append(f"**Channel Topic:** {context.source.chat_topic}")
+
+    context_anchor = context.source.context_anchor if isinstance(context.source.context_anchor, dict) else None
+    if context_anchor:
+        anchor_type = str(context_anchor.get("type") or "").strip()
+        anchor_id = str(context_anchor.get("id") or "").strip()
+        if anchor_type and anchor_id:
+            lines.append("")
+            lines.append("**Bound Context Anchor:**")
+            lines.append(f"  - Type: `{anchor_type}`")
+            lines.append(f"  - ID: `{anchor_id}`")
+            title = str(context_anchor.get("title") or "").strip()
+            if title:
+                lines.append(f"  - Title: {title}")
+            url = str(context_anchor.get("url") or "").strip()
+            if url:
+                lines.append(f"  - URL: {url}")
+            source_label = str(context_anchor.get("source") or "").strip()
+            if source_label:
+                lines.append(f"  - Binding source: {source_label}")
 
     # User identity.
     # In shared multi-user sessions (shared threads OR shared non-thread groups
