@@ -348,6 +348,27 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
         )
 
 
+def _has_pending_user_input(agent) -> bool:
+    """Return True if the user has queued a message for the next turn.
+
+    Checks the steer queue, gateway pending-event slot, and interrupt message
+    to determine whether the session is about to process another user turn
+    immediately. Used to defer background skill review (#34102).
+    """
+    steer_lock = getattr(agent, "_pending_steer_lock", None)
+    if steer_lock is not None:
+        with steer_lock:
+            if getattr(agent, "_pending_steer", None):
+                return True
+    elif getattr(agent, "_pending_steer", None):
+        return True
+    if getattr(agent, "_pending_user_message", None):
+        return True
+    if getattr(agent, "_interrupt_message", None):
+        return True
+    return False
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -4791,6 +4812,14 @@ def run_conversation(
         interrupted=interrupted,
         messages=messages,
     )
+
+    # Defer skill review when the user has already queued a message.
+    # skill_manage invalidates the skills prompt cache, forcing a full
+    # re-read on the next turn that takes minutes on local models (#34102).
+    # Memory review is safe (writes MEMORY.md, no cache reset).
+    if _should_review_skills and _has_pending_user_input(agent):
+        _should_review_skills = False
+        agent._iters_since_skill = agent._skill_nudge_interval
 
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.

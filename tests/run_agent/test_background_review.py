@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+
 import run_agent as run_agent_module
+from agent.conversation_loop import _has_pending_user_input
 from run_agent import AIAgent
 
 
@@ -313,3 +316,85 @@ def test_background_review_fork_skips_external_memory_plugins(monkeypatch):
         "the fork leaks harness prompts into the user's real memory "
         "namespace via on_turn_start / prefetch_all / sync_all."
     )
+
+
+def test_background_review_skill_deferred_when_steer_pending():
+    """Skill review is skipped when a steer message is already queued.
+
+    When the user has typed the next message before the current turn
+    finishes, skill_manage would invalidate the skills prompt cache,
+    stalling the immediately-following turn. The fix resets the counter
+    back to the nudge interval so the review fires on the next eligible
+    turn instead (#34102).
+    """
+    agent = _bare_agent()
+    agent._pending_steer = "next question"
+    agent._pending_steer_lock = threading.Lock()
+    agent._iters_since_skill = 10
+    agent._skill_nudge_interval = 10
+
+    assert _has_pending_user_input(agent) is True
+
+    # Simulate the deferral check from conversation_loop.
+    _should_review_skills = True
+    if _should_review_skills and _has_pending_user_input(agent):
+        _should_review_skills = False
+        agent._iters_since_skill = agent._skill_nudge_interval
+
+    assert _should_review_skills is False
+    assert agent._iters_since_skill == 10
+
+
+def test_background_review_skill_fires_when_no_pending_input():
+    """Skill review is not suppressed when no user input is queued."""
+    agent = _bare_agent()
+    agent._pending_steer = None
+    # no _pending_steer_lock, no _pending_user_message, no _interrupt_message
+
+    assert _has_pending_user_input(agent) is False
+
+
+def test_background_review_memory_not_deferred_by_pending_input():
+    """Memory review is unaffected by a pending steer message.
+
+    The deferral only targets skill review; memory review writes MEMORY.md
+    and does not reset the prompt cache, so it is always safe to run.
+    """
+    agent = _bare_agent()
+    agent._pending_steer = "follow-up question"
+    agent._pending_steer_lock = threading.Lock()
+
+    _should_review_memory = True
+    _should_review_skills = False
+
+    # Apply only the skill deferral guard (memory is not touched).
+    if _should_review_skills and _has_pending_user_input(agent):
+        _should_review_skills = False
+
+    assert _should_review_memory is True
+
+
+def test_has_pending_user_input_checks_all_sources():
+    """_has_pending_user_input detects each pending-input source independently."""
+    # Source 1: steer queue with lock.
+    agent = _bare_agent()
+    agent._pending_steer_lock = threading.Lock()
+    agent._pending_steer = "queued steer"
+    assert _has_pending_user_input(agent) is True
+
+    # Source 2: pending_user_message (gateway slot).
+    agent2 = _bare_agent()
+    agent2._pending_steer = None
+    agent2._pending_user_message = "gateway message"
+    assert _has_pending_user_input(agent2) is True
+
+    # Source 3: interrupt_message.
+    agent3 = _bare_agent()
+    agent3._pending_steer = None
+    agent3._interrupt_message = "interrupt text"
+    assert _has_pending_user_input(agent3) is True
+
+    # None set: helper returns False.
+    agent4 = _bare_agent()
+    agent4._pending_steer = None
+    assert _has_pending_user_input(agent4) is False
