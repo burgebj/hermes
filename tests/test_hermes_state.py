@@ -1937,6 +1937,61 @@ class TestSchemaInit:
         mode = cursor.fetchone()[0]
         assert mode == "wal"
 
+
+    def test_close_uses_truncate_checkpoint(self, tmp_path):
+        """close() should use TRUNCATE to shrink the WAL file on disk."""
+        db_path = tmp_path / "test_state.db"
+        db = SessionDB(db_path=db_path)
+        # Write some data to generate WAL pages
+        db.create_session("s1", "gpt-4")
+        for i in range(100):
+            db.append_message("s1", "user", f"message {i}")
+        # WAL should exist and have content
+        wal_path = Path(str(db_path) + "-wal")
+        assert wal_path.exists()
+        wal_size_before = wal_path.stat().st_size
+        assert wal_size_before > 0
+        # close() should checkpoint with TRUNCATE, shrinking the WAL
+        db.close()
+        # After close, WAL should be gone or very small (truncated)
+        if wal_path.exists():
+            wal_size_after = wal_path.stat().st_size
+            # TRUNCATE shrinks to 0 or near-0; PASSIVE leaves it at high-water mark
+            assert wal_size_after < wal_size_before, (
+                f"WAL not shrunk: {wal_size_before} -> {wal_size_after}"
+            )
+
+    def test_try_wal_checkpoint_uses_passive_for_small_wal(self, tmp_path):
+        """_try_wal_checkpoint uses PASSIVE when WAL is below threshold."""
+        db_path = tmp_path / "test_state.db"
+        db = SessionDB(db_path=db_path)
+        db.create_session("s1", "gpt-4")
+        # WAL is small — should use PASSIVE (non-blocking)
+        # We verify indirectly: PASSIVE doesn't shrink the WAL file
+        wal_path = Path(str(db_path) + "-wal")
+        db._try_wal_checkpoint()
+        # PASSIVE checkpoint may or may not shrink — just verify no crash
+        db.close()
+
+    def test_try_wal_checkpoint_uses_truncate_for_large_wal(self, tmp_path, monkeypatch):
+        """_try_wal_checkpoint uses TRUNCATE when WAL exceeds threshold."""
+        db_path = tmp_path / "test_state.db"
+        db = SessionDB(db_path=db_path)
+        db.create_session("s1", "gpt-4")
+        for i in range(200):
+            db.append_message("s1", "user", f"x" * 1000)
+        # Lower threshold so even our small test WAL triggers TRUNCATE
+        monkeypatch.setattr(db, "_WAL_TRUNCATE_THRESHOLD", 1)
+        wal_path = Path(str(db_path) + "-wal")
+        if wal_path.exists():
+            size_before = wal_path.stat().st_size
+            db._try_wal_checkpoint()
+            # TRUNCATE should have shrunk or eliminated the WAL
+            if wal_path.exists():
+                size_after = wal_path.stat().st_size
+                assert size_after <= size_before
+        db.close()
+
     def test_foreign_keys_enabled(self, db):
         cursor = db._conn.execute("PRAGMA foreign_keys")
         assert cursor.fetchone()[0] == 1

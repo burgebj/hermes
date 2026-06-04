@@ -395,6 +395,10 @@ class SessionDB:
     _WRITE_RETRY_MAX_S = 0.150   # 150ms
     # Attempt a PASSIVE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
+    # WAL file size threshold (bytes) above which _try_wal_checkpoint uses
+    # TRUNCATE instead of PASSIVE.  TRUNCATE actually shrinks the WAL file
+    # on disk; PASSIVE only flushes pages without reclaiming space.
+    _WAL_TRUNCATE_THRESHOLD = 10 * 1024 * 1024  # 10 MiB
 
     def __init__(self, db_path: Path = None):
         self.db_path = db_path or DEFAULT_DB_PATH
@@ -595,22 +599,32 @@ class SessionDB:
         )
 
     def _try_wal_checkpoint(self) -> None:
-        """Best-effort PASSIVE WAL checkpoint.  Never blocks, never raises.
+        """Best-effort WAL checkpoint.  Never blocks, never raises.
 
         Flushes committed WAL frames back into the main DB file for any
         frames that no other connection currently needs.  Keeps the WAL
         from growing unbounded when many processes hold persistent
         connections.
+
+        Uses PASSIVE mode by default (non-blocking).  When the WAL file
+        exceeds ``_WAL_TRUNCATE_THRESHOLD`` (10 MiB), switches to TRUNCATE
+        which actually shrinks the WAL file on disk.  TRUNCATE returns
+        ``busy=1`` if another process holds a reader — the existing
+        try/except handles this safely.
         """
         try:
             with self._lock:
+                wal_path = Path(str(self.db_path) + "-wal")
+                mode = "PASSIVE"
+                if wal_path.exists() and wal_path.stat().st_size > self._WAL_TRUNCATE_THRESHOLD:
+                    mode = "TRUNCATE"
                 result = self._conn.execute(
-                    "PRAGMA wal_checkpoint(PASSIVE)"
+                    f"PRAGMA wal_checkpoint({mode})"
                 ).fetchone()
                 if result and result[1] > 0:
                     logger.debug(
-                        "WAL checkpoint: %d/%d pages checkpointed",
-                        result[2], result[1],
+                        "WAL checkpoint (%s): %d/%d pages checkpointed",
+                        mode, result[2], result[1],
                     )
         except Exception:
             pass  # Best effort — never fatal.
@@ -618,13 +632,17 @@ class SessionDB:
     def close(self):
         """Close the database connection.
 
-        Attempts a PASSIVE WAL checkpoint first so that exiting processes
-        help keep the WAL file from growing unbounded.
+        Attempts a TRUNCATE WAL checkpoint first so that exiting processes
+        shrink the WAL file on disk.  TRUNCATE is safe here because this
+        connection is about to close — no competing readers from this
+        process.  If another process holds a reader, TRUNCATE returns
+        ``busy=1`` and the WAL stays at its current size (handled by the
+        try/except).
         """
         with self._lock:
             if self._conn:
                 try:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
                 self._conn.close()
