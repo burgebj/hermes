@@ -44,6 +44,7 @@ from tools.code_execution_tool import (
     EXECUTE_CODE_SCHEMA,
     _TOOL_DOC_LINES,
     _execute_remote,
+    _check_write_safe_root_code,
 )
 
 
@@ -952,6 +953,63 @@ for i in range(15000):
         if "TRUNCATED" in output:
             self.assertIn("chars omitted", output)
             self.assertIn("total", output)
+
+
+# ---------------------------------------------------------------------------
+# HERMES_WRITE_SAFE_ROOT heuristic guard — execute_code
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+
+
+class TestExecuteCodeWriteSafeRoot:
+    """_check_write_safe_root_code() blocks Python code writing outside the safe root."""
+
+    def test_safe_root_blocks_open_write_outside(self, tmp_path, monkeypatch):
+        """open() with a write mode targeting a path outside the safe root is blocked."""
+        safe_root = tmp_path / "session"
+        safe_root.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        code = "open('/root/evil.txt', 'w').write('x')"
+        result = _check_write_safe_root_code(code)
+        assert result is not None
+        assert "Blocked" in result
+
+    def test_safe_root_allows_open_write_inside(self, tmp_path, monkeypatch):
+        """open() with a write mode targeting a path inside the safe root is allowed."""
+        safe_root = tmp_path / "session"
+        safe_root.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        target = str(safe_root / "output.txt")
+        code = f"open('{target}', 'w').write('x')"
+        result = _check_write_safe_root_code(code)
+        assert result is None
+
+    def test_safe_root_blocks_pathlib_write_outside(self, tmp_path, monkeypatch):
+        """Path(...).write_text() targeting outside the safe root is blocked."""
+        safe_root = tmp_path / "session"
+        safe_root.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        code = "from pathlib import Path\nPath('/root/evil.txt').write_text('x')"
+        result = _check_write_safe_root_code(code)
+        assert result is not None
+        assert "Blocked" in result
+
+    def test_safe_root_unset_allows_all(self, monkeypatch):
+        """When HERMES_WRITE_SAFE_ROOT is unset, all code is allowed."""
+        monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+        code = "open('/root/evil.txt', 'w').write('x')"
+        result = _check_write_safe_root_code(code)
+        assert result is None
+
+    def test_safe_root_ignores_read_mode_open(self, tmp_path, monkeypatch):
+        """open() with read-only mode ('r') is not blocked even outside the safe root."""
+        safe_root = tmp_path / "session"
+        safe_root.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        code = "data = open('/root/file.txt', 'r').read()"
+        result = _check_write_safe_root_code(code)
+        assert result is None
 
 
 if __name__ == "__main__":

@@ -263,6 +263,65 @@ def _check_all_guards(command: str, env_type: str) -> dict:
                                   approval_callback=_get_approval_callback())
 
 
+# ---------------------------------------------------------------------------
+# HERMES_WRITE_SAFE_ROOT heuristic guard for shell commands
+# ---------------------------------------------------------------------------
+
+# Patterns that extract write-target paths from common shell constructs.
+# These are defense-in-depth heuristics, not a security boundary — a
+# determined actor can always construct a command that evades regex
+# matching.  The guard catches the most common accidental-write patterns
+# and surfaces a clear error to models that respect tool denials.
+_SAFE_ROOT_REDIRECT_RE = re.compile(r'(?:>>?|[12&]>)\s*([^\s;|&]+)')
+_SAFE_ROOT_TEE_RE = re.compile(r'\btee\s+(?:-a\s+)?([^\s;|&]+)')
+_SAFE_ROOT_CP_MV_RE = re.compile(r'\b(?:cp|mv)\s+(?:-[a-zA-Z]+\s+)*\S+\s+([^\s;|&]+)')
+_SAFE_ROOT_PYTHON_OPEN_RE = re.compile(r"open\s*\(\s*['\"]([^'\"]+)['\"]")
+_SAFE_ROOT_CAT_REDIRECT_RE = re.compile(r'cat\s+>\s*([^\s<;|&]+)')
+
+
+def _check_write_safe_root(command: str) -> str | None:
+    """Heuristic guard: block shell commands that write outside HERMES_WRITE_SAFE_ROOT.
+
+    Returns an error message string when a write-target path is denied, or
+    None when safe (including when HERMES_WRITE_SAFE_ROOT is unset).
+
+    This is defense-in-depth, NOT a security boundary — the terminal tool
+    runs as the same OS user and can bypass this guard via constructs the
+    regexes don't match.  The check exists so clear-text accidental writes
+    to restricted paths surface an actionable error rather than silently
+    succeeding.
+    """
+    from agent.file_safety import get_safe_write_root, is_write_denied
+
+    safe_root = get_safe_write_root()
+    if not safe_root:
+        return None
+
+    candidates: list[str] = []
+    for m in _SAFE_ROOT_REDIRECT_RE.finditer(command):
+        candidates.append(m.group(1))
+    for m in _SAFE_ROOT_TEE_RE.finditer(command):
+        candidates.append(m.group(1))
+    for m in _SAFE_ROOT_CP_MV_RE.finditer(command):
+        candidates.append(m.group(1))
+    for m in _SAFE_ROOT_PYTHON_OPEN_RE.finditer(command):
+        candidates.append(m.group(1))
+    for m in _SAFE_ROOT_CAT_REDIRECT_RE.finditer(command):
+        candidates.append(m.group(1))
+
+    for target in candidates:
+        expanded = os.path.expanduser(target)
+        if is_write_denied(expanded):
+            return (
+                f"Blocked: command attempts to write to {target!r}, which is "
+                f"outside HERMES_WRITE_SAFE_ROOT ({safe_root!r}). "
+                "Writes must stay inside the configured safe root. "
+                "(Defense-in-depth — not a security boundary; regex matching "
+                "may miss obfuscated write targets.)"
+            )
+    return None
+
+
 # Allowlist: characters that can legitimately appear in directory paths.
 # Covers alphanumeric, path separators, Windows drive/UNC separators, tilde,
 # dot, hyphen, underscore, space, plus, at, equals, and comma.  Everything
@@ -2009,6 +2068,18 @@ def terminal_tool(
                     "error": workdir_error,
                     "status": "blocked"
                 }, ensure_ascii=False)
+
+        # Heuristic guard: block writes outside HERMES_WRITE_SAFE_ROOT
+        safe_root_error = _check_write_safe_root(command)
+        if safe_root_error:
+            logger.warning("Blocked write-safe-root violation (command: %s)",
+                           _safe_command_preview(command))
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": safe_root_error,
+                "status": "blocked"
+            }, ensure_ascii=False)
 
         # Prepare command for execution
         pty_disabled_reason = None

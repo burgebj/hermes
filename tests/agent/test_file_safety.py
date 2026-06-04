@@ -11,6 +11,8 @@ import pytest
 from agent.file_safety import (
     _BLOCKED_PROJECT_ENV_BASENAMES,
     get_read_block_error,
+    get_safe_write_root,
+    is_write_denied,
 )
 
 
@@ -146,3 +148,37 @@ class TestCombinedGuards:
             error = get_read_block_error(str(cache))
             assert error is not None
             assert "internal Hermes cache" in error
+
+
+# ---------------------------------------------------------------------------
+# HERMES_WRITE_SAFE_ROOT write guard (is_write_denied + get_safe_write_root)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteSafeRoot:
+    """is_write_denied() respects HERMES_WRITE_SAFE_ROOT when set."""
+
+    def test_is_write_denied_inside_safe_root(self, tmp_path, monkeypatch):
+        """A path inside the safe root is not denied by the safe-root check."""
+        safe_root = tmp_path / "session"
+        safe_root.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        target = str(safe_root / "output.txt")
+        # Must not be blocked by safe-root (may still be blocked by the static
+        # denylist for sensitive names, but a generic .txt inside a temp dir is not).
+        assert not is_write_denied(target)
+
+    def test_is_write_denied_outside_safe_root(self, tmp_path, monkeypatch):
+        """A path outside the safe root is denied."""
+        safe_root = tmp_path / "session"
+        safe_root.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        # /tmp/other is a sibling, not inside safe_root
+        outside = str(tmp_path / "other" / "output.txt")
+        assert is_write_denied(outside)
+
+    def test_is_write_denied_safe_root_unset(self, monkeypatch):
+        """When HERMES_WRITE_SAFE_ROOT is unset, the safe-root check is skipped."""
+        monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+        # /tmp/anywhere is not on the static denylist, so should be allowed.
+        assert not is_write_denied("/tmp/anywhere_test_file.txt")
