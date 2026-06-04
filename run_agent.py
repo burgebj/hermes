@@ -99,6 +99,11 @@ from agent.process_bootstrap import (
     _SafeWriter,  # noqa: F401  # re-exported for tests that `from run_agent import _SafeWriter`
     _get_proxy_for_base_url,
 )
+from agent.api_error_utils import (
+    is_usage_limit_reached_error,
+    summarize_api_error,
+    usage_limit_error_message,
+)
 from agent.iteration_budget import IterationBudget
 
 
@@ -981,6 +986,9 @@ class AIAgent:
 
     def _emit_auxiliary_failure(self, task: str, exc: BaseException) -> None:
         """Surface a compact warning for failed auxiliary work."""
+        if self._is_usage_limit_reached_error(exc):
+            self._emit_warning(f"⚠ {self._usage_limit_error_message(exc)}")
+            return
         try:
             detail = self._summarize_api_error(exc)
         except Exception:
@@ -1688,6 +1696,11 @@ class AIAgent:
         return False
 
     @staticmethod
+    def _is_usage_limit_reached_error(error: Exception) -> bool:
+        """Return True for provider account usage-limit payloads."""
+        return is_usage_limit_reached_error(error)
+
+    @staticmethod
     def _decorate_xai_entitlement_error(detail: str) -> str:
         """Append a neutral hint when xAI's OAuth surface returns the
         permission-denied 403.
@@ -1746,49 +1759,19 @@ class AIAgent:
 
     @staticmethod
     def _summarize_api_error(error: Exception) -> str:
-        """Extract a human-readable one-liner from an API error.
+        """Extract a human-readable one-liner from an API error."""
+        return summarize_api_error(
+            error,
+            detail_decorator=AIAgent._decorate_xai_entitlement_error,
+        )
 
-        Handles Cloudflare HTML error pages (502, 503, etc.) by pulling the
-        <title> tag instead of dumping raw HTML.  Falls back to a truncated
-        str(error) for everything else.
-        """
-        raw = str(error)
-
-        if (
-            isinstance(error, ValueError)
-            and "expected ident at line" in raw.lower()
-        ):
-            return f"Malformed provider streaming response: {raw[:300]}"
-
-        # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
-        if "<!DOCTYPE" in raw or "<html" in raw:
-            m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.IGNORECASE)
-            title = m.group(1).strip() if m else "HTML error page (title not found)"
-            # Also grab Cloudflare Ray ID if present
-            ray = re.search(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>", raw)
-            ray_id = ray.group(1).strip() if ray else None
-            status_code = getattr(error, "status_code", None)
-            parts = []
-            if status_code:
-                parts.append(f"HTTP {status_code}")
-            parts.append(title)
-            if ray_id:
-                parts.append(f"Ray {ray_id}")
-            return " — ".join(parts)
-
-        # JSON body errors from OpenAI/Anthropic SDKs
-        body = getattr(error, "body", None)
-        if isinstance(body, dict):
-            msg = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
-            if msg:
-                status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
-                return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
-
-        # Fallback: truncate the raw string but give more room than 200 chars
-        status_code = getattr(error, "status_code", None)
-        prefix = f"HTTP {status_code}: " if status_code else ""
-        return AIAgent._decorate_xai_entitlement_error(f"{prefix}{raw[:500]}")
+    @staticmethod
+    def _usage_limit_error_message(error: Exception) -> str:
+        """Return the canonical user-facing usage-limit error message."""
+        return usage_limit_error_message(
+            error,
+            detail_decorator=AIAgent._decorate_xai_entitlement_error,
+        )
 
     def _mask_api_key_for_logs(self, key: Any) -> Optional[str]:
         # Azure Foundry Entra ID bearer providers are callables — never

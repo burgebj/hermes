@@ -18,6 +18,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agent.api_error_utils import (
+    is_usage_limit_reached_error,
+    usage_limit_error_message,
+)
 from agent.codex_responses_adapter import _normalize_codex_response
 
 import run_agent
@@ -73,6 +77,101 @@ def agent():
         )
         a.client = MagicMock()
         return a
+
+
+
+
+def test_summarize_api_error_includes_usage_limit_reset_seconds(agent):
+    error = SimpleNamespace(
+        status_code=429,
+        body={
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+                "plan_type": "plus",
+                "resets_at": 1779987634,
+                "resets_in_seconds": 8464,
+            }
+        },
+    )
+
+    summary = agent._summarize_api_error(error)
+
+    assert "HTTP 429" in summary
+    assert "usage limit" in summary.lower()
+    assert "8464" in summary
+    assert "reset_hhmm=02:21" in summary
+    assert "2h 21m" not in summary
+    assert "resets_at=1779987634" in summary
+
+
+def test_summarize_api_error_includes_usage_limit_reset_seconds_from_flat_body(agent):
+    error = SimpleNamespace(
+        status_code=429,
+        body={
+            "type": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+            "plan_type": "plus",
+            "resets_at": 1780080252,
+            "resets_in_seconds": 1591,
+        },
+    )
+
+    summary = agent._summarize_api_error(error)
+
+    assert "HTTP 429" in summary
+    assert "usage limit" in summary.lower()
+    assert "1591" in summary
+    assert "reset_hhmm=00:26" in summary
+    assert "resets_at=1780080252" in summary
+
+
+def test_usage_limit_error_message_is_canonical_for_nested_and_flat_bodies():
+    nested = SimpleNamespace(
+        status_code=429,
+        body={
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+                "resets_in_seconds": 8464,
+            }
+        },
+    )
+    flat = SimpleNamespace(
+        status_code=429,
+        body={
+            "type": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+            "resets_in_seconds": 8464,
+        },
+    )
+
+    assert is_usage_limit_reached_error(nested) is True
+    assert is_usage_limit_reached_error(flat) is True
+    assert usage_limit_error_message(nested) == usage_limit_error_message(flat)
+    assert usage_limit_error_message(nested).startswith("API usage limit reached: HTTP 429:")
+    assert "reset_hhmm=02:21" in usage_limit_error_message(nested)
+
+
+def test_emit_auxiliary_failure_uses_canonical_usage_limit_message(agent):
+    error = SimpleNamespace(
+        status_code=429,
+        body={
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+                "resets_in_seconds": 8464,
+            }
+        },
+    )
+    agent._emit_warning = MagicMock()
+
+    agent._emit_auxiliary_failure("title generation", error)
+
+    emitted = agent._emit_warning.call_args.args[0]
+    assert emitted.startswith("⚠ API usage limit reached: HTTP 429:")
+    assert "Auxiliary title generation failed" not in emitted
+    assert "reset_hhmm=02:21" in emitted
 
 
 @pytest.fixture()
@@ -2218,6 +2317,82 @@ class TestExecuteToolCalls:
         output = captured.getvalue()
         assert "API call failed" not in output
         assert "Rate limit reached" not in output
+
+
+    def test_run_conversation_usage_limit_reached_returns_reset_without_retrying(self, agent):
+        class _UsageLimitError(Exception):
+            status_code = 429
+            body = {
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "The usage limit has been reached",
+                    "plan_type": "plus",
+                    "resets_at": 1779987634,
+                    "resets_in_seconds": 8464,
+                }
+            }
+
+            def __str__(self):
+                return "Error code: 429 - usage limit reached"
+
+        calls = {"count": 0}
+
+        def _fake_api_call(api_kwargs):
+            calls["count"] += 1
+            raise _UsageLimitError()
+
+        agent._interruptible_api_call = _fake_api_call
+        agent._persist_session = lambda *args, **kwargs: None
+        agent._save_trajectory = lambda *args, **kwargs: None
+
+        with patch("run_agent.time.sleep", return_value=None) as sleep_mock:
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert calls["count"] == 1
+        sleep_mock.assert_not_called()
+        assert "API usage limit reached" in result["final_response"]
+        assert "8464" in result["final_response"]
+        assert "reset_hhmm=02:21" in result["final_response"]
+        assert "after 3 retries" not in result["final_response"]
+
+
+    def test_run_conversation_flat_usage_limit_reached_returns_reset_without_retrying(self, agent):
+        class _UsageLimitError(Exception):
+            status_code = 429
+            body = {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+                "plan_type": "plus",
+                "resets_at": 1780080252,
+                "resets_in_seconds": 1591,
+            }
+
+            def __str__(self):
+                return "Error code: 429 - {'error': {'type': 'usage_limit_reached'}}"
+
+        calls = {"count": 0}
+
+        def _fake_api_call(api_kwargs):
+            calls["count"] += 1
+            raise _UsageLimitError()
+
+        agent._interruptible_api_call = _fake_api_call
+        agent._persist_session = lambda *args, **kwargs: None
+        agent._save_trajectory = lambda *args, **kwargs: None
+
+        with patch("run_agent.time.sleep", return_value=None) as sleep_mock:
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert calls["count"] == 1
+        sleep_mock.assert_not_called()
+        assert "API usage limit reached" in result["final_response"]
+        assert "1591" in result["final_response"]
+        assert "reset_hhmm=00:26" in result["final_response"]
+        assert "after 3 retries" not in result["final_response"]
 
 
 class TestConcurrentToolExecution:
