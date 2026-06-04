@@ -1429,11 +1429,19 @@ class APIServerAdapter(BasePlatformAdapter):
         if err:
             return err
         db = self._ensure_session_db()
+        limit = self._parse_nonnegative_int(request.query.get("limit"), default=200, maximum=1000)
+        offset = self._parse_nonnegative_int(request.query.get("offset"), default=0, maximum=1_000_000)
         messages = db.get_messages(session_id)
+        total = len(messages)
+        page = messages[offset:offset + limit]
         return web.json_response({
             "object": "list",
             "session_id": session_id,
-            "data": [self._message_response(m) for m in messages],
+            "data": [self._message_response(m) for m in page],
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+            "has_more": offset + len(page) < total,
         })
 
     async def _handle_fork_session(self, request: "web.Request") -> "web.Response":
@@ -3094,8 +3102,18 @@ class APIServerAdapter(BasePlatformAdapter):
             return cron_err
         try:
             include_disabled = request.query.get("include_disabled", "").lower() in {"true", "1"}
+            limit = self._parse_nonnegative_int(request.query.get("limit"), default=200, maximum=1000)
+            offset = self._parse_nonnegative_int(request.query.get("offset"), default=0, maximum=1_000_000)
             jobs = _cron_list(include_disabled=include_disabled)
-            return web.json_response({"jobs": jobs})
+            total = len(jobs)
+            page = jobs[offset:offset + limit]
+            return web.json_response({
+                "jobs": page,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "has_more": offset + len(page) < total,
+            })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
