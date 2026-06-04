@@ -1892,6 +1892,12 @@ def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypat
     monkeypatch.setattr(server, "_hermes_home", tmp_path)
     agent = types.SimpleNamespace(reasoning_config=None)
     server._sessions["sid"] = _session(agent=agent)
+    emitted = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
 
     resp_effort = server.handle_request(
         {
@@ -1902,10 +1908,25 @@ def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypat
     )
     assert resp_effort["result"]["value"] == "low"
     assert agent.reasoning_config == {"enabled": True, "effort": "low"}
+    assert emitted[-1][0] == "session.info"
+    assert emitted[-1][1] == "sid"
+    assert emitted[-1][2]["reasoning_effort"] == "low"
+
+    resp_none = server.handle_request(
+        {
+            "id": "2",
+            "method": "config.set",
+            "params": {"session_id": "sid", "key": "reasoning", "value": "none"},
+        }
+    )
+    assert resp_none["result"]["value"] == "none"
+    assert agent.reasoning_config == {"enabled": False}
+    assert emitted[-1][0] == "session.info"
+    assert emitted[-1][2]["reasoning_effort"] == "none"
 
     resp_show = server.handle_request(
         {
-            "id": "2",
+            "id": "3",
             "method": "config.set",
             "params": {"session_id": "sid", "key": "reasoning", "value": "show"},
         }
@@ -1916,7 +1937,7 @@ def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypat
 
     resp_hide = server.handle_request(
         {
-            "id": "3",
+            "id": "4",
             "method": "config.set",
             "params": {"session_id": "sid", "key": "reasoning", "value": "hide"},
         }
@@ -2899,6 +2920,19 @@ def test_session_info_includes_mcp_servers(monkeypatch):
     info = server._session_info(types.SimpleNamespace(tools=[], model=""))
 
     assert info["mcp_servers"] == fake_status
+
+
+def test_session_info_reports_reasoning_none_when_disabled(monkeypatch):
+    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "")
+    agent = types.SimpleNamespace(
+        model="qwen3-coder",
+        reasoning_config={"enabled": False},
+        tools=[],
+    )
+
+    info = server._session_info(agent)
+
+    assert info["reasoning_effort"] == "none"
 
 
 # ---------------------------------------------------------------------------

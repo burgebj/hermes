@@ -1558,6 +1558,15 @@ def _current_profile_name() -> str:
         return "default"
 
 
+def _reasoning_effort_for_session_info(agent) -> str:
+    reasoning_config = getattr(agent, "reasoning_config", None)
+    if not isinstance(reasoning_config, dict):
+        return ""
+    if reasoning_config.get("enabled") is False:
+        return "none"
+    return str(reasoning_config.get("effort", "") or "")
+
+
 # Monotonic GUI<->backend contract version. The desktop app refuses to drive a
 # backend reporting less than its required value (or none at all — a pre-GUI
 # checkout), surfacing a one-click "update to align" prompt instead of failing
@@ -1574,13 +1583,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
     cwd = _session_cwd(session)
     cfg_personality = ((_load_cfg().get("display") or {}).get("personality") or "")
     personality = (session or {}).get("personality", cfg_personality)
-    reasoning_config = getattr(agent, "reasoning_config", None)
-    reasoning_effort = ""
-    if (
-        isinstance(reasoning_config, dict)
-        and reasoning_config.get("enabled") is not False
-    ):
-        reasoning_effort = str(reasoning_config.get("effort", "") or "")
+    reasoning_effort = _reasoning_effort_for_session_info(agent)
     service_tier = getattr(agent, "service_tier", None) or ""
     # Effective approval-bypass state — the same three sources that
     # check_all_command_guards() ORs together: persistent config
@@ -5142,6 +5145,11 @@ def _(rid, params: dict) -> dict:
             _write_config_key("agent.reasoning_effort", arg)
             if session and session.get("agent") is not None:
                 session["agent"].reasoning_config = parsed
+                _emit(
+                    "session.info",
+                    params.get("session_id", ""),
+                    _session_info(session["agent"], session),
+                )
             return _ok(rid, {"key": key, "value": arg})
         except Exception as e:
             return _err(rid, 5001, str(e))
@@ -5385,7 +5393,7 @@ def _(rid, params: dict) -> dict:
     if key == "reasoning":
         cfg = _load_cfg()
         effort = str(
-            (cfg.get("agent") or {}).get("reasoning_effort", "medium") or "medium"
+            (cfg.get("agent") or {}).get("reasoning_effort", "") or ""
         )
         display = (
             "show"

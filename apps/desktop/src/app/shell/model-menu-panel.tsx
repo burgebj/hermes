@@ -17,7 +17,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
 import { getGlobalModelOptions } from '@/hermes'
-import { displayModelName, modelDisplayParts, reasoningEffortLabel } from '@/lib/model-status-label'
+import { defaultReasoningEffortLabel, displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { cn } from '@/lib/utils'
 import {
   $visibleModels,
@@ -159,7 +159,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                 const meta = isCurrent
                   ? [
                       fastControl.kind !== 'none' && fastControl.on ? 'Fast' : null,
-                      reasoningEffortLabel(currentReasoningEffort) || 'Med'
+                      defaultReasoningEffortLabel(currentReasoningEffort)
                     ]
                       .filter(Boolean)
                       .join(' ')
