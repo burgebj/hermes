@@ -925,7 +925,7 @@ class TestDialecticCadenceDefaults:
         from unittest.mock import patch, MagicMock
         from plugins.memory.honcho.client import HonchoClientConfig
 
-        defaults = dict(api_key="test-key", enabled=True, recall_mode="hybrid")
+        defaults = {"api_key": "test-key", "enabled": True, "recall_mode": "hybrid"}
         if cfg_extra:
             defaults.update(cfg_extra)
         cfg = HonchoClientConfig(**defaults)
@@ -996,7 +996,7 @@ class TestDialecticDepth:
         from unittest.mock import patch, MagicMock
         from plugins.memory.honcho.client import HonchoClientConfig
 
-        defaults = dict(api_key="test-key", enabled=True, recall_mode="hybrid")
+        defaults = {"api_key": "test-key", "enabled": True, "recall_mode": "hybrid"}
         if cfg_extra:
             defaults.update(cfg_extra)
         cfg = HonchoClientConfig(**defaults)
@@ -1303,7 +1303,7 @@ class TestSessionStartDialecticPrewarm:
         from unittest.mock import patch, MagicMock
         from plugins.memory.honcho.client import HonchoClientConfig
 
-        defaults = dict(api_key="test-key", enabled=True, recall_mode="hybrid")
+        defaults = {"api_key": "test-key", "enabled": True, "recall_mode": "hybrid"}
         if cfg_extra:
             defaults.update(cfg_extra)
         cfg = HonchoClientConfig(**defaults)
@@ -1375,7 +1375,7 @@ class TestDialecticLiveness:
         from unittest.mock import patch, MagicMock
         from plugins.memory.honcho.client import HonchoClientConfig
 
-        defaults = dict(api_key="test-key", enabled=True, recall_mode="hybrid", timeout=2.0)
+        defaults = {"api_key": "test-key", "enabled": True, "recall_mode": "hybrid", "timeout": 2.0}
         if cfg_extra:
             defaults.update(cfg_extra)
         cfg = HonchoClientConfig(**defaults)
@@ -1517,11 +1517,11 @@ class TestDialecticLifecycleSmoke:
         from unittest.mock import patch, MagicMock
         from plugins.memory.honcho.client import HonchoClientConfig
 
-        defaults = dict(
-            api_key="test-key", enabled=True, recall_mode="hybrid",
-            dialectic_reasoning_level="low", reasoning_heuristic=True,
-            reasoning_level_cap="high", dialectic_depth=1,
-        )
+        defaults = {
+            "api_key": "test-key", "enabled": True, "recall_mode": "hybrid",
+            "dialectic_reasoning_level": "low", "reasoning_heuristic": True,
+            "reasoning_level_cap": "high", "dialectic_depth": 1,
+        }
         if cfg_extra:
             defaults.update(cfg_extra)
         cfg = HonchoClientConfig(**defaults)
@@ -1675,11 +1675,11 @@ class TestReasoningHeuristic:
         from unittest.mock import patch, MagicMock
         from plugins.memory.honcho.client import HonchoClientConfig
 
-        defaults = dict(
-            api_key="test-key", enabled=True, recall_mode="hybrid",
-            dialectic_reasoning_level="low", reasoning_heuristic=True,
-            reasoning_level_cap="high",
-        )
+        defaults = {
+            "api_key": "test-key", "enabled": True, "recall_mode": "hybrid",
+            "dialectic_reasoning_level": "low", "reasoning_heuristic": True,
+            "reasoning_level_cap": "high",
+        }
         if cfg_extra:
             defaults.update(cfg_extra)
         cfg = HonchoClientConfig(**defaults)
