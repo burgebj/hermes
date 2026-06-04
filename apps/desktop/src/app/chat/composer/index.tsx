@@ -68,6 +68,8 @@ import type { ChatBarProps } from './types'
 import { UrlDialog } from './url-dialog'
 import { VoiceActivity, VoicePlaybackActivity } from './voice-activity'
 
+import { useT } from '@/i18n/useT'
+
 const COMPOSER_STACK_BREAKPOINT_PX = 320
 
 // A single editor line is ~28px (--composer-input-min-height 1.625rem + 0.5rem
@@ -81,24 +83,24 @@ const COMPOSER_FADE_BACKGROUND =
 // Resting composer placeholders. New sessions get open-ended starters; an
 // existing chat gets phrasings that read as a continuation of the thread.
 // One is picked at random per session (stable until the session changes).
-const NEW_SESSION_PLACEHOLDERS = [
-  'What are we building?',
-  'Give Hermes a task',
-  "What's on your mind?",
-  'Describe what you need',
-  'What should we tackle?',
-  'Ask anything',
-  'Start with a goal'
+const newSessionPlaceholders = (t: (key: string) => string) => [
+  t('composer.placeholder.new_session_1'),
+  t('composer.placeholder.new_session_2'),
+  t('composer.placeholder.new_session_3'),
+  t('composer.placeholder.new_session_4'),
+  t('composer.placeholder.new_session_5'),
+  t('composer.placeholder.new_session_6'),
+  t('composer.placeholder.new_session_7')
 ]
 
-const FOLLOW_UP_PLACEHOLDERS = [
-  'Send a follow-up',
-  'Add more context',
-  'Refine the request',
-  "What's next?",
-  'Keep it going',
-  'Push it further',
-  'Adjust or continue'
+const followUpPlaceholders = (t: (key: string) => string) => [
+  t('composer.placeholder.follow_up_1'),
+  t('composer.placeholder.follow_up_2'),
+  t('composer.placeholder.follow_up_3'),
+  t('composer.placeholder.follow_up_4'),
+  t('composer.placeholder.follow_up_5'),
+  t('composer.placeholder.follow_up_6'),
+  t('composer.placeholder.follow_up_7')
 ]
 
 const pickPlaceholder = (pool: readonly string[]) => pool[Math.floor(Math.random() * pool.length)]
@@ -134,6 +136,7 @@ export function ChatBar({
   onSubmit,
   onTranscribeAudio
 }: ChatBarProps) {
+  const { t } = useT()
   const aui = useAui()
   const draft = useAuiState(s => s.composer.text)
   const attachments = useStore($composerAttachments)
@@ -192,7 +195,7 @@ export function ChatBar({
   // started session (null → id, on the first send) is treated as the same
   // conversation so the placeholder doesn't visibly flip mid-stream.
   const [restingPlaceholder, setRestingPlaceholder] = useState(() =>
-    pickPlaceholder(sessionId ? FOLLOW_UP_PLACEHOLDERS : NEW_SESSION_PLACEHOLDERS)
+    pickPlaceholder(sessionId ? followUpPlaceholders(t) : newSessionPlaceholders(t))
   )
 
   const prevSessionIdRef = useRef(sessionId)
@@ -211,7 +214,7 @@ export function ChatBar({
       return
     }
 
-    setRestingPlaceholder(pickPlaceholder(sessionId ? FOLLOW_UP_PLACEHOLDERS : NEW_SESSION_PLACEHOLDERS))
+    setRestingPlaceholder(pickPlaceholder(sessionId ? followUpPlaceholders(t) : newSessionPlaceholders(t)))
   }, [sessionId])
 
   // When the bar is disabled it's because the gateway isn't open. Distinguish a
@@ -219,8 +222,8 @@ export function ChatBar({
   // restore (e.g. after the Mac slept) so the stuck state reads as recoverable.
   const placeholder = disabled
     ? gatewayState === 'closed' || gatewayState === 'error'
-      ? 'Reconnecting to Hermes…'
-      : 'Starting Hermes...'
+      ? t('composer.reconnecting')
+      : t('composer.starting')
     : restingPlaceholder
 
   const focusInput = useCallback(() => {

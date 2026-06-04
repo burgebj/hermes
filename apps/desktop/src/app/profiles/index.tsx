@@ -24,6 +24,7 @@ import {
   renameProfile,
   updateProfileSoul
 } from '@/hermes'
+import { useT } from '@/i18n/useT'
 import { AlertTriangle, Pencil, Save, Terminal, Trash2, Users } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
@@ -45,6 +46,7 @@ interface ProfilesViewProps {
 }
 
 export function ProfilesView({ onClose }: ProfilesViewProps) {
+  const { t, tf } = useT()
   const [profiles, setProfiles] = useState<null | ProfileInfo[]>(null)
   const [selectedName, setSelectedName] = useState<null | string>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -572,6 +574,7 @@ function RenameProfileDialog({
   onRename: (newName: string) => Promise<void>
   open: boolean
 }) {
+  const { t } = useT()
   const [name, setName] = useState(currentName)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<null | string>(null)
@@ -623,8 +626,7 @@ function RenameProfileDialog({
         <DialogHeader>
           <DialogTitle>Rename profile</DialogTitle>
           <DialogDescription>
-            Renaming updates the profile directory and any wrapper scripts in{' '}
-            <span className="font-mono">~/.local/bin</span>.
+            {t('profiles.rename_dialog.desc')}
           </DialogDescription>
         </DialogHeader>
 

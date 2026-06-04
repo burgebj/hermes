@@ -1,4 +1,6 @@
 import './styles.css'
+import './i18n/ru'
+import './i18n/en'
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'

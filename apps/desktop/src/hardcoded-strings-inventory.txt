@@ -1,0 +1,1053 @@
+================================================================================
+COMPLETE INVENTORY OF HARDCODED ENGLISH USER-FACING STRINGS IN HERMES DESKTOP
+Scanned: 148 .tsx files in C:\Users\ypyc\AppData\Local\hermes\hermes-agent\apps\desktop\src
+Date: 2026-06-04
+================================================================================
+
+FILE: app\chat\composer\index.tsx
+  - "What are we building?" → composer_placeholder_new_session_1
+  - "Give Hermes a task" → composer_placeholder_new_session_2
+  - "What's on your mind?" → composer_placeholder_new_session_3
+  - "Describe what you need" → composer_placeholder_new_session_4
+  - "What should we tackle?" → composer_placeholder_new_session_5
+  - "Ask anything" → composer_placeholder_new_session_6
+  - "Start with a goal" → composer_placeholder_new_session_7
+  - "Send a follow-up" → composer_placeholder_followup_1
+  - "Add more context" → composer_placeholder_followup_2
+  - "Refine the request" → composer_placeholder_followup_3
+  - "What's next?" → composer_placeholder_followup_4
+  - "Keep it going" → composer_placeholder_followup_5
+  - "Push it further" → composer_placeholder_followup_6
+  - "Adjust or continue" → composer_placeholder_followup_7
+  - "Reconnecting to Hermes..." → composer_reconnecting
+  - "Starting Hermes..." → composer_starting
+  - "Message" → composer_aria_label_message
+  - "Stop" → composer_stop_action (aria/title)
+
+FILE: app\chat\composer\controls.tsx
+  - "Start voice conversation" → voice_conversation_start (aria/title)
+  - "Queue message" → composer_queue_message (aria/title)
+  - "Stop" → composer_stop (aria/title)
+  - "Send" → composer_send (aria/title)
+  - "Speaking" → voice_status_speaking
+  - "Transcribing" → voice_status_transcribing
+  - "Thinking" → voice_status_thinking
+  - "Muted" → voice_status_muted
+  - "Listening" → voice_status_listening
+  - "Unmute microphone" → voice_unmute_mic (aria/title)
+  - "Mute microphone" → voice_mute_mic (aria/title)
+  - "Stop listening and send" → voice_stop_listening_send (aria/title)
+  - "Stop" → voice_stop_label
+  - "End voice conversation" → voice_end_conversation (aria/title)
+  - "End" → voice_end_label
+  - "Stop dictation" → dictation_stop (aria/title)
+  - "Transcribing dictation" → dictation_transcribing (aria/title)
+  - "Voice dictation" → dictation_voice (aria/title)
+
+FILE: app\chat\composer\context-menu.tsx
+  - "Code review" → snippet_code_review_label
+  - "Audit the current change for regressions, dropped edge cases, and missing tests." → snippet_code_review_desc
+  - "Please review this for bugs, regressions, and missing tests." → snippet_code_review_text
+  - "Implementation plan" → snippet_impl_plan_label
+  - "Outline an approach before touching code so the diff stays focused." → snippet_impl_plan_desc
+  - "Please make a concise implementation plan before changing code." → snippet_impl_plan_text
+  - "Explain this" → snippet_explain_label
+  - "Walk through how the selected code works and link to the key files." → snippet_explain_desc
+  - "Please explain how this works and point me to the key files." → snippet_explain_text
+  - "Attach" → context_menu_attach
+  - "Files..." → context_menu_files
+  - "Folder..." → context_menu_folder
+  - "Images..." → context_menu_images
+  - "Paste image" → context_menu_paste_image
+  - "URL..." → context_menu_url
+  - "Prompt snippets..." → context_menu_prompt_snippets
+  - "Tip: type @ to reference files inline." → context_menu_tip_ref
+  - "Prompt snippets" → prompt_snippets_dialog_title
+  - "Pick a starter prompt to drop into the composer." → prompt_snippets_dialog_desc
+
+FILE: app\chat\composer\help-hint.tsx
+  - "Common commands" → help_common_commands_title
+  - "full list of commands + hotkeys" → help_cmd_help
+  - "start a new session" → help_cmd_clear
+  - "resume a prior session" → help_cmd_resume
+  - "control transcript detail level" → help_cmd_details
+  - "copy selection or last assistant message" → help_cmd_copy
+  - "exit hermes" → help_cmd_quit
+  - "Hotkeys" → help_hotkeys_title
+  - "reference files, folders, urls, git" → help_hotkey_at
+  - "slash command palette" → help_hotkey_slash
+  - "this quick help (delete to dismiss)" → help_hotkey_question
+  - "send · Shift+Enter for newline" → help_hotkey_enter
+  - "send next queued turn" → help_hotkey_cmd_k
+  - "redraw" → help_hotkey_cmd_l
+  - "close popover · cancel run" → help_hotkey_esc
+  - "cycle popover / history" → help_hotkey_arrows
+  - "/help opens the full panel · backspace dismisses" → help_footer
+
+FILE: app\chat\composer\queue-panel.tsx
+  - "Attachment-only turn" → queue_entry_attachment_only
+  - "Empty turn" → queue_entry_empty
+  - "{n} Queued" → queue_count_label
+  - "{n} attachment(s)" → queue_attachment_count
+  - "Editing in composer" → queue_editing_label
+  - "Edit queued turn" → queue_edit (aria/title)
+  - "Send queued turn now" → queue_send_now (aria/title)
+  - "Delete queued turn" → queue_delete (aria/title)
+
+FILE: app\chat\composer\attachments.tsx
+  - "Preview {label}" → attachment_preview (aria/title)
+  - "Remove {label}" → attachment_remove (aria)
+
+FILE: app\chat\composer\url-dialog.tsx
+  - "https://example.com/post" → url_dialog_placeholder
+
+FILE: app\chat\composer\skin-slash-popover.tsx
+  - "Desktop theme suggestions" → skin_slash_aria_label
+  - "No matching themes." → skin_slash_empty_title
+
+FILE: app\chat\composer\trigger-popover.tsx
+  - "Looking up..." → trigger_popover_loading
+  - "No matches." → trigger_popover_no_matches
+
+FILE: app\chat\index.tsx
+  - "New session" → chat_header_new_session (title fallback)
+  - "Add context" → chat_bar_tools_label
+  - "ChatDropOverlay" → (via text in component)
+
+FILE: app\chat\sidebar\index.tsx
+  - "New session" → sidebar_new_session (label)
+  - "Skills & Tools" → sidebar_skills_tools (label)
+  - "Messaging" → sidebar_messaging (label)
+  - "Artifacts" → sidebar_artifacts (label)
+  - "Search sessions" → sidebar_search_aria
+  - "Search sessions..." → sidebar_search_placeholder
+  - "No sessions match \"{query}\"." → sidebar_search_no_results
+  - "Pinned" → sidebar_pinned_label
+  - "Show sessions as a single list" → sidebar_ungroup_sessions (aria)
+  - "Group sessions by workspace" → sidebar_group_by_workspace (aria)
+  - "Ungroup sessions" → sidebar_ungroup_title
+  - "Group by workspace" → sidebar_group_title
+  - "Sessions" → sidebar_sessions_label
+  - "Everything here is pinned. Unpin a chat to show it in recents." → sidebar_all_pinned_state
+  - "Shift-click a chat to pin" → sidebar_pinned_empty
+  - "Loading..." → sidebar_load_more_loading
+  - "Load {n} more" → sidebar_load_more_count
+  - "Load more" → sidebar_load_more
+  - "New session in {label}" → sidebar_new_session_in (aria/title)
+  - "Reorder workspace {label}" → sidebar_reorder_workspace (aria)
+  - "Show {n} more in {label}" → sidebar_show_more (aria/title)
+  - "No workspace" → sidebar_workspace_no_workspace
+
+FILE: app\chat\sidebar\session-row.tsx
+  - "Needs your input" → session_row_needs_input (aria)
+  - "Session running" → session_row_running (aria)
+  - "Session actions" → session_row_actions_title
+  - "Waiting for your answer" → session_row_waiting_title
+  - "Actions for {title}" → session_row_actions_aria
+
+FILE: app\chat\sidebar\session-actions-menu.tsx
+  - "Untitled session" → session_actions_untitled_placeholder
+  - "Actions for {title}" → session_actions_aria
+  - "Rename" → session_actions_rename (menu item + dialog)
+  - "Pin" → session_actions_pin
+  - "Unpin" → session_actions_unpin
+  - "Archive" → session_actions_archive
+  - "Delete" → session_actions_delete
+
+FILE: app\chat\right-rail\preview-console.tsx
+  - "Preview Console" → preview_console_title
+  - "Preview console:" → preview_console_block_header
+  - "Sent to chat" → preview_console_sent_title
+  - "{n} log entr(y/ies) added to composer" → preview_console_sent_message
+  - "Send to chat" → preview_console_send_button
+  - "Copy" → preview_console_copy_button
+  - "Clear" → preview_console_clear
+  - "No console messages yet." → preview_console_empty
+  - "{n} selected" → preview_console_selected_count
+  - "Resize preview console" → preview_console_resize (aria)
+  - "Select entry" → preview_console_select (title)
+  - "Deselect entry" → preview_console_deselect (title)
+  - "Send this entry to chat" → preview_console_send_entry (title)
+  - "Clear console" → preview_console_clear_title
+  - "Copy this entry" → preview_console_copy_entry (label)
+  - "Could not copy console output" → preview_console_copy_error
+  - "Send {n} selected to chat" / "Send all log entries to chat" → preview_console_send_tooltip
+  - "Copy selected to clipboard" / "Copy all to clipboard" → preview_console_copy_label
+
+FILE: app\chat\right-rail\preview-file.tsx
+  - "Click to select · shift-click to extend · drag to composer" → preview_file_select_hint (title)
+  - "Preview unavailable" → preview_file_unavailable_title
+  - "This looks like a binary file" → preview_file_binary_title
+  - "This file is large" → preview_file_large_title
+  - "No inline preview" → preview_file_no_preview_title
+  - "Open {url}" → preview_file_open_link (title)
+
+FILE: app\chat\right-rail\preview.tsx
+  - "Close {label}" → preview_close_tab (aria/title)
+  - "Close preview pane" → preview_close_pane (aria/title)
+
+FILE: app\chat\right-rail\preview-pane.tsx
+  - "Open {url}" → preview_pane_open_url (title)
+
+FILE: app\chat\composer\help-hint.tsx (already covered above)
+
+FILE: app\chat\chat-drop-overlay.tsx
+  - (empty string - no hardcoded text)
+
+FILE: app\settings\index.tsx
+  - "Close settings" → settings_close_label
+  - "Providers" → settings_nav_providers
+  - "Accounts" → settings_nav_accounts
+  - "API keys" → settings_nav_api_keys
+  - "Gateway" → settings_nav_gateway
+  - "Tools & Keys" → settings_nav_tools_keys
+  - "MCP" → settings_nav_mcp
+  - "Archived Chats" → settings_nav_archived
+  - "About" → settings_nav_about
+  - "Export config" → settings_export_title
+  - "Import config" → settings_import_title
+  - "Reset to defaults" → settings_reset_title
+  - "Reset all settings to Hermes defaults?" → settings_reset_confirm
+  - "Export failed" → settings_export_error
+  - "Reset failed" → settings_reset_error
+
+FILE: app\settings\gateway-settings.tsx
+  - "Loading gateway settings..." → gateway_loading
+  - "Gateway settings unavailable" → gateway_unavailable_title
+  - "The desktop IPC bridge does not expose gateway settings." → gateway_unavailable_desc
+  - "Gateway Connection" → gateway_connection_title
+  - "env override" → gateway_env_override_pill
+  - "Hermes Desktop starts its own local gateway by default. ..." → gateway_desc
+  - "Environment variables are controlling this desktop session." → gateway_env_override_warning
+  - "Unset HERMES_DESKTOP_REMOTE_URL and HERMES_DESKTOP_REMOTE_TOKEN ..." → gateway_env_override_detail
+  - "Local gateway" → gateway_mode_local_title
+  - "Start a private Hermes backend on localhost. This is the default and works offline." → gateway_mode_local_desc
+  - "Remote gateway" → gateway_mode_remote_title
+  - "Connect this desktop shell to a remote Hermes backend. ..." → gateway_mode_remote_desc
+  - "Remote URL" → gateway_remote_url_title
+  - "https://gateway.example.com/hermes" → gateway_remote_url_placeholder
+  - "Base URL for the remote dashboard backend. Path prefixes are supported, for example /hermes." → gateway_remote_url_desc
+  - "Checking how this gateway authenticates..." → gateway_auth_checking
+  - "Could not reach this gateway yet. Check the URL..." → gateway_auth_error
+  - "Signed in" → gateway_signed_in_label
+  - "Sign out" → gateway_sign_out
+  - "Sign in with {label}" → gateway_sign_in_button
+  - "This gateway uses OAuth. You are signed in; ..." → gateway_oauth_connected_desc
+  - "This gateway uses OAuth. Sign in with {label}..." → gateway_oauth_disconnected_desc
+  - "Authentication" → gateway_authentication_title
+  - "Session token" → gateway_session_token_title
+  - "Existing token {preview}" / "Paste session token" → gateway_token_placeholder
+  - "The dashboard session token used for REST and WebSocket access. ..." → gateway_token_desc
+  - "your identity provider" → gateway_identity_provider_fallback
+  - "Remote gateway incomplete" → gateway_incomplete_title
+  - "Enter a remote URL and sign in before switching to remote." → gateway_incomplete_oauth_msg
+  - "Enter a remote URL and session token before switching to remote." → gateway_incomplete_token_msg
+  - "Remote gateway reachable" → gateway_test_success_title
+  - "Connected to {url}{version}" → gateway_test_success_msg
+  - "Remote gateway test failed" → gateway_test_error
+  - "Could not apply gateway settings" → gateway_apply_error
+  - "Could not save gateway settings" → gateway_save_error
+  - "Gateway connection restarting" → gateway_apply_restart_title
+  - "Hermes Desktop will reconnect using the saved settings." → gateway_apply_restart_msg
+  - "Gateway settings saved" → gateway_save_success_title
+  - "Saved for the next restart." → gateway_save_success_msg
+  - "Test remote" → gateway_test_button
+  - "Save for next restart" → gateway_save_button
+  - "Save and reconnect" → gateway_save_reconnect_button
+  - "Diagnostics" → gateway_diagnostics_title
+  - "Open logs" → gateway_open_logs_button
+  - "Reveal desktop.log in your file manager..." → gateway_diagnostics_desc
+  - "Sign-in incomplete" → gateway_signin_incomplete_title
+  - "The login window closed before authentication finished." → gateway_signin_incomplete_msg
+  - "Signed in" → gateway_signin_success
+  - "Connected to {label}." → gateway_signin_connected_msg
+  - "Sign-in failed" → gateway_signin_error
+  - "Signed out" → gateway_signout_success
+  - "Cleared the remote gateway session." → gateway_signout_msg
+  - "Sign-out failed" → gateway_signout_error
+  - "Enter a remote URL first." → gateway_signin_no_url_msg
+  - "Enter a remote URL and sign in before testing." → gateway_test_no_auth_oauth
+  - "Enter a remote URL and session token before testing." → gateway_test_no_auth_token
+
+FILE: app\settings\keys-settings.tsx
+  - "Tools" → keys_tab_tools
+  - "Settings" → keys_tab_settings
+  - "Nothing configured in this category yet." → keys_empty
+  - "Loading API keys and credentials..." → keys_loading
+
+FILE: app\settings\providers-settings.tsx
+  - "Paste key" → providers_key_placeholder
+  - "Paste {name} key" → providers_key_named_placeholder
+  - "Optional" → providers_advanced_placeholder
+  - "https://..." → providers_url_placeholder
+  - "Save" → providers_save_button
+  - "Saving" → providers_saving_button
+  - "Remove" → providers_remove_button
+  - "or" → providers_or_separator
+  - "esc to cancel" → providers_esc_hint
+  - "Get a key" → providers_get_key_link
+  - "Connect an account" → providers_connect_account_title
+  - "Have an API key instead?" → providers_have_api_key
+  - "Sign in with a subscription — no API key to copy..." → providers_oauth_desc
+  - "Connected" → providers_connected_label
+  - "Collapse" → providers_collapse
+  - "Connect another provider" → providers_connect_another
+  - "Other providers" → providers_other_providers
+  - "No provider API keys available." → providers_no_keys
+  - "Loading providers..." → providers_loading
+
+FILE: app\settings\mcp-settings.tsx
+  - "Loading MCP servers..." → mcp_loading
+  - "Name required" → mcp_name_required_title
+  - "Give this MCP server a config key." → mcp_name_required_msg
+  - "Server config must be a JSON object" → mcp_invalid_json_msg
+  - "Invalid MCP JSON" → mcp_invalid_json_title
+  - "MCP server saved" → mcp_save_success_title
+  - "{name} applies after MCP reload." → mcp_save_success_msg
+  - "Save failed" → mcp_save_error
+  - "Remove failed" → mcp_remove_error
+  - "Gateway unavailable" → mcp_gateway_unavailable_title
+  - "Reconnect the gateway before reloading MCP." → mcp_gateway_unavailable_msg
+  - "MCP tools reloaded" → mcp_reload_success_title
+  - "New tool schemas apply to fresh turns." → mcp_reload_success_msg
+  - "MCP reload failed" → mcp_reload_error
+  - "New server" → mcp_new_server_button
+  - "Reloading..." → mcp_reload_button_loading
+  - "Reload MCP" → mcp_reload_button
+  - "No MCP servers" → mcp_empty_title
+  - "Add a stdio or HTTP server to expose MCP tools." → mcp_empty_desc
+  - "disabled" → mcp_disabled_pill
+  - "Edit server" → mcp_edit_server_title
+  - "New server" → mcp_new_server_title
+  - "Name" → mcp_name_label
+  - "filesystem" → mcp_name_placeholder
+  - "Server JSON" → mcp_json_label
+  - "Remove" → mcp_remove_button
+  - "Saving..." → mcp_saving_button
+  - "Save server" → mcp_save_server_button
+
+FILE: app\settings\sessions-settings.tsx
+  - "Loading archived sessions..." → sessions_loading
+  - "Archived sessions" → sessions_archived_title
+  - "Archived chats are hidden from the sidebar but keep all their messages. ..." → sessions_archived_desc
+  - "Nothing archived" → sessions_empty_title
+  - "Archive a chat to hide it here." → sessions_empty_desc
+  - "Unarchive" → sessions_unarchive_button
+  - "Delete permanently" → sessions_delete_permanently (aria/title)
+  - "{label} · {n} messages" → sessions_meta_with_workspace
+  - "{n} messages" → sessions_meta_count
+  - "Restored" → sessions_restored_notify
+  - "Unarchive failed" → sessions_unarchive_error
+  - "Delete failed" → sessions_delete_error
+  - "Permanently delete \"{title}\"? This cannot be undone." → sessions_delete_confirm
+  - "Default project directory" → sessions_default_dir_title
+  - "New sessions start in this folder unless you pick another. ..." → sessions_default_dir_desc
+  - "Change" → sessions_dir_change
+  - "Choose" → sessions_dir_choose
+  - "Clear" → sessions_dir_clear
+  - "Not set" → sessions_dir_not_set_title
+  - "Defaults to ~/hermes-projects." → sessions_dir_fallback_desc
+  - "Default project directory updated" → sessions_dir_updated
+  - "Could not update default directory" → sessions_dir_update_error
+  - "Could not clear default directory" → sessions_dir_clear_error
+
+FILE: app\settings\config-settings.tsx
+  - "Not set" → config_not_set_placeholder
+  - "comma-separated values" → config_list_placeholder
+  - "None" → config_personality_none
+  - "(none)" → config_none_label
+  - "Settings failed to load" → config_load_error
+  - "Autosave failed" → config_autosave_error
+  - "Config imported" → config_import_success_title
+  - "Saving..." → config_import_saving_msg
+  - "Invalid config JSON" → config_import_error
+  - "Loading Hermes configuration..." → config_loading
+  - "Nothing to configure" → config_empty_title
+  - "This section has no adjustable settings." → config_empty_desc
+
+FILE: app\settings\model-settings.tsx
+  - "Vision" → aux_task_vision_label
+  - "Image analysis" → aux_task_vision_hint
+  - "Web extract" → aux_task_web_extract_label
+  - "Page summarization" → aux_task_web_extract_hint
+  - "Compression" → aux_task_compression_label
+  - "Context compaction" → aux_task_compression_hint
+  - "Session search" → aux_task_session_search_label
+  - "Recall queries" → aux_task_session_search_hint
+  - "Skills hub" → aux_task_skills_hub_label
+  - "Skill search" → aux_task_skills_hub_hint
+  - "Approval" → aux_task_approval_label
+  - "Smart auto-approve" → aux_task_approval_hint
+  - "MCP" → aux_task_mcp_label
+  - "MCP tool routing" → aux_task_mcp_hint
+  - "Title gen" → aux_task_title_gen_label
+  - "Session titles" → aux_task_title_gen_hint
+  - "Curator" → aux_task_curator_label
+  - "Skill-usage review" → aux_task_curator_hint
+  - "Loading model configuration..." → model_loading
+  - "Applies to new sessions. Use the model picker in the composer to hot-swap the active chat." → model_main_desc
+  - "Provider" → model_provider_placeholder
+  - "Model" → model_model_placeholder
+  - "Applying..." → model_applying_button
+  - "Apply" → model_apply_button
+  - "Auxiliary models" → model_aux_title
+  - "Reset all to main" → model_reset_all_button
+  - "Helper tasks run on the main model by default. ..." → model_aux_desc
+  - "Set to main" → model_set_to_main
+  - "Change" → model_change_button
+  - "Cancel" → model_cancel_button
+  - "auto · use main model" → model_aux_auto
+  - "{provider} · {model}" → model_aux_custom
+  - "(provider default)" → model_provider_default
+
+FILE: app\settings\toolset-config-panel.tsx
+  - "Credential saved" → toolset_cred_saved_title
+  - "{key} updated." → toolset_cred_saved_msg
+  - "Failed to save {key}" → toolset_cred_save_error
+  - "Remove {key} from .env?" → toolset_cred_remove_confirm
+  - "Credential removed" → toolset_cred_removed_title
+  - "{key} removed." → toolset_cred_removed_msg
+  - "Failed to remove {key}" → toolset_cred_remove_error
+  - "Failed to reveal {key}" → toolset_cred_reveal_error
+  - "Set" → toolset_set_button
+  - "Not set" → toolset_not_set_pill
+  - "Replace" → toolset_replace_button
+  - "Save" → toolset_save_button
+  - "Cancel" → toolset_cancel_button
+  - "Open provider docs" → toolset_docs_title
+  - "Docs" → toolset_docs_button
+  - "Reveal value" → toolset_reveal_title
+  - "Clear value" → toolset_clear_title
+  - "Provider selected" → toolset_provider_selected_title
+  - "{name} is now active." → toolset_provider_selected_msg
+  - "Failed to select {name}" → toolset_provider_select_error
+  - "Loading configuration" → toolset_loading
+  - "This toolset has no provider options..." → toolset_empty_no_category
+  - "No providers are available for this toolset right now." → toolset_empty_no_providers
+  - "Ready" → toolset_ready_pill
+  - "Included with a Nous subscription — sign in to Nous Portal to activate." → toolset_nous_auth_hint
+  - "No API key required." → toolset_no_key_required
+  - "This provider needs an extra setup step ({step}). ..." → toolset_post_setup_hint
+  - "Tool configuration failed to load" → toolset_load_error
+
+FILE: app\settings\appearance-settings.tsx
+  - "These are desktop-only display preferences. ..." → appearance_desc
+  - "Color Mode" → appearance_color_mode_title
+  - "Pick a fixed mode or let Hermes follow your system setting." → appearance_color_mode_desc
+  - "Tool Call Display" → appearance_tool_display_title
+  - "Product" → appearance_tool_product
+  - "Technical" → appearance_tool_technical
+  - "Product hides raw tool payloads; Technical shows full input/output." → appearance_tool_display_desc
+  - "Theme" → appearance_theme_title
+  - "Desktop palettes only. The selected mode is applied on top." → appearance_theme_desc
+
+FILE: app\settings\about-settings.tsx
+  - "never" → about_time_never
+  - "just now" → about_time_just_now
+  - "{n} min ago" → about_time_min_ago
+  - "{n} hours ago" → about_time_hours_ago
+  - "{n} days ago" → about_time_days_ago
+  - "This build can't update itself from inside the app." → about_update_unsupported
+  - "We couldn't reach the update server." → about_update_server_error
+  - "An update is currently installing." → about_update_installing
+  - "A new update is ready ({n} change(s) included)." → about_update_ready
+  - "You're on the latest version." → about_update_latest
+  - "Tap \"Check now\" to look for updates." → about_update_prompt
+  - "Hermes Desktop" → about_app_name
+  - "Version {version}" → about_version_label
+  - "Version unavailable" → about_version_unavailable
+  - "Updates" → about_updates_title
+  - "Checking..." → about_checking_button
+  - "Check now" → about_check_now_button
+  - "See what's new" → about_see_whats_new
+  - "Release notes" → about_release_notes
+  - "Automatic updates" → about_auto_updates_title
+  - "Hermes checks for updates automatically in the background..." → about_auto_updates_desc
+  - "Branch {branch} · Commit {sha}" → about_auto_updates_hint
+
+FILE: app\settings\env-credentials.tsx
+  - "Open provider docs" → env_creds_docs_title
+  - "Hide value" → env_creds_hide_value_title
+  - "Reveal value" → env_creds_reveal_value_title
+  - "Clear value" → env_creds_clear_value_title
+  - "Replace current value" → env_creds_replace_placeholder
+  - "Enter value" → env_creds_enter_placeholder
+
+FILE: app\settings\primitives.tsx
+  - (no hardcoded user-facing strings - just component wrappers)
+
+FILE: app\settings\constants.tsx (not read - but contains SECTIONS labels)
+  - (varies - config section labels displayed in sidebar)
+
+FILE: app\shell\titlebar-controls.tsx
+  - "Window controls" → titlebar_window_controls (aria)
+  - "Pane controls" → titlebar_pane_controls (aria)
+  - "App controls" → titlebar_app_controls (aria)
+  - "Profiles" → titlebar_profiles (aria/title)
+
+FILE: app\shell\statusbar-controls.tsx
+  - "Set working directory" → statusbar_set_workdir
+
+FILE: app\shell\gateway-menu-panel.tsx
+  - "Open system panel" → gateway_panel_open (aria/title)
+
+FILE: app\shell\model-menu-panel.tsx
+  - "Search models" → model_menu_search (aria/placeholder)
+
+FILE: app\shell\model-edit-submenu.tsx
+  - (tool notifications in object structures)
+
+FILE: app\updates-overlay.tsx
+  - "Getting ready..." → update_stage_idle
+  - "Downloading..." → update_stage_fetch
+  - "Almost there..." → update_stage_pull
+  - "Finishing up..." → update_stage_pydeps
+  - "Restarting Hermes..." → update_stage_restart
+  - "Update from your terminal" → update_stage_manual
+  - "Update paused" → update_stage_error
+  - "Looking for updates..." → update_checking_title
+  - "Couldn't check for updates" → update_check_error_title
+  - "Try again" → update_try_again
+  - "Update not available" → update_not_available_title
+  - "This version of Hermes can't update itself from inside the app." → update_unsupported_body
+  - "Check your connection and try again." → update_connection_error_body
+  - "You're all set" → update_up_to_date_title
+  - "You're running the latest version." → update_up_to_date_body
+  - "New update available" → update_available_dialog_title
+  - "A new version of Hermes is ready to install." → update_available_dialog_desc
+  - "Update now" → update_now_button
+  - "Maybe later" → update_maybe_later
+  - "+ {n} more change(s) included." → update_remaining_changes
+  - "Update from your terminal" → update_manual_dialog_title
+  - "You installed Hermes from the command line, so updates run there too. ..." → update_manual_dialog_desc
+  - "Copied" → update_copied_label
+  - "Copy" → update_copy_label
+  - "Hermes will pick up the new version next time you launch it." → update_manual_footer
+  - "Done" → update_done_button
+  - "Updating Hermes..." → update_applying_default
+  - "The Hermes updater will take over in its own window..." → update_applying_desc
+  - "Hermes will close to apply the update." → update_applying_footer
+  - "Update didn't finish" → update_error_title
+  - "No worries — nothing was lost. You can try again now." → update_error_fallback_body
+  - "Try again" → update_error_retry
+  - "Not now" → update_error_dismiss
+
+FILE: app\cron\index.tsx
+  - "This desktop" → cron_deliver_local
+  - "Telegram" → cron_deliver_telegram
+  - "Discord" → cron_deliver_discord
+  - "Slack" → cron_deliver_slack
+  - "Email" → cron_deliver_email
+  - "Daily" → cron_schedule_daily_label
+  - "Every day at 9:00 AM" → cron_schedule_daily_hint
+  - "Weekdays" → cron_schedule_weekdays_label
+  - "Monday through Friday at 9:00 AM" → cron_schedule_weekdays_hint
+  - "Weekly" → cron_schedule_weekly_label
+  - "Every Monday at 9:00 AM" → cron_schedule_weekly_hint
+  - "Monthly" → cron_schedule_monthly_label
+  - "The first day of each month at 9:00 AM" → cron_schedule_monthly_hint
+  - "Hourly" → cron_schedule_hourly_label
+  - "At the top of every hour" → cron_schedule_hourly_hint
+  - "Every 15 minutes" → cron_schedule_every15_label
+  - "Custom" → cron_schedule_custom_label
+  - "Cron syntax or natural language" → cron_schedule_custom_hint
+  - "Sunday" → cron_day_sunday / etc (day name mapping)
+  - "Search cron jobs..." → cron_search_placeholder
+  - "Loading cron jobs..." → cron_loading
+  - "No scheduled jobs yet" → cron_empty_title
+  - "Schedule a prompt to run on a cron expression. ..." → cron_empty_desc
+  - "No matches" → cron_no_matches_title
+  - "Try a broader search query." → cron_no_matches_desc
+  - "Create first cron" → cron_create_first_button
+  - "{enabled}/{total} active" → cron_active_count
+  - "New cron" → cron_new_button
+  - "Last: {time}" / "Next: {time}" → cron_last_next_labels
+  - "Pause" → cron_pause_title
+  - "Resume" → cron_resume_title
+  - "Trigger now" → cron_trigger_now (aria/title)
+  - "Edit cron" → cron_edit (aria/title)
+  - "Edit" → cron_edit_title
+  - "Delete cron" → cron_delete (aria)
+  - "Delete" → cron_delete_title
+  - "Cron job" → cron_job_fallback_name
+  - "Cron resumed" / "Cron paused" → cron_pause_resume_notify
+  - "Cron triggered" → cron_trigger_notify
+  - "Cron deleted" → cron_delete_notify
+  - "Cron created" → cron_create_notify
+  - "Cron updated" → cron_update_notify
+  - "Edit cron job" → cron_editor_edit_title
+  - "New cron job" → cron_editor_new_title
+  - "Update the schedule, prompt, or delivery target. ..." → cron_editor_edit_desc
+  - "Schedule a prompt to run automatically. ..." → cron_editor_new_desc
+  - "Name" → cron_field_name
+  - "Optional" → cron_field_optional
+  - "Morning briefing" → cron_name_placeholder
+  - "Prompt" → cron_field_prompt
+  - "Summarize my unread Slack threads and email me the top 5..." → cron_prompt_placeholder
+  - "Frequency" → cron_field_frequency
+  - "Deliver to" → cron_field_deliver
+  - "Custom schedule" → cron_field_custom_schedule
+  - "0 9 * * * or weekdays at 9am" → cron_schedule_placeholder
+  - "Cron expression, or phrases like \"every hour\" or \"weekdays at 9am\"." → cron_schedule_hint
+  - "Prompt and schedule are required." → cron_validation_error
+  - "Failed to save cron job" → cron_save_error_fallback
+  - "Saving..." → cron_saving_button
+  - "Save changes" → cron_save_changes_button
+  - "Create cron" → cron_create_button
+  - "Delete cron job?" → cron_delete_dialog_title
+  - "This will remove {name} permanently. It will stop firing immediately." → cron_delete_dialog_desc
+  - "Cancel" → cron_cancel_button
+  - "Delete" → cron_delete_confirm_button
+  - "Deleting..." → cron_deleting_button
+  - "Close cron" → cron_close_label
+
+FILE: app\skills\index.tsx
+  - "Skills" → skills_tab_label
+  - "Toolsets" → skills_toolsets_tab_label
+  - "Search skills..." → skills_search_placeholder
+  - "Search toolsets..." → toolsets_search_placeholder
+  - "Loading capabilities..." → skills_loading
+  - "No skills found" → skills_empty_title
+  - "Try a broader search or different category." → skills_empty_desc
+  - "No toolsets found" → toolsets_empty_title
+  - "Try a broader search query." → toolsets_empty_desc
+  - "No description." → skills_no_description
+  - "{enabled}/{total} toolsets enabled" → toolsets_enabled_count
+  - "Configure {label}" → toolsets_configure_aria
+  - "Toggle {label} toolset" → toolsets_toggle_aria
+  - "Configured" → toolsets_configured_pill
+  - "Needs keys" → toolsets_needs_keys_pill
+  - "Skill enabled" / "Skill disabled" → skills_toggle_notify
+  - "{name} applies to new sessions." → skills_toggle_msg
+  - "Failed to update {name}" → skills_update_error
+  - "Toolset enabled" / "Toolset disabled" → toolsets_toggle_notify
+  - "Failed to update {name}" → toolsets_update_error
+  - "Skills failed to load" → skills_load_error
+  - "Toolsets failed to refresh" → toolsets_refresh_error
+
+FILE: app\messaging\index.tsx
+  - "Connected" → messaging_state_connected
+  - "Connecting" → messaging_state_connecting
+  - "Disabled" → messaging_state_disabled
+  - "Error" → messaging_state_error
+  - "Messaging gateway stopped" → messaging_state_gateway_stopped
+  - "Needs setup" → messaging_state_not_configured
+  - "Restart needed" → messaging_state_pending_restart
+  - "Retrying" → messaging_state_retrying
+  - "Startup failed" → messaging_state_startup_failed
+  - "Unknown" → messaging_state_unknown
+  - "Restart the gateway from the status bar to apply this change." → messaging_hint_pending_restart
+  - "Start the gateway from the status bar to connect." → messaging_hint_gateway_stopped
+  - "Search messaging..." → messaging_search_placeholder
+  - "Loading messaging platforms..." → messaging_loading
+  - "Credentials set" → messaging_credentials_set_pill
+  - "Needs setup" → messaging_needs_setup_pill
+  - "Messaging gateway stopped" → messaging_gateway_stopped_pill
+  - "Get your credentials" → messaging_creds_section_title
+  - "Open setup guide" → messaging_open_guide (button)
+  - "Required" → messaging_required_section
+  - "Optional" → messaging_optional_section
+  - "Advanced" → messaging_advanced_section
+  - "Save" → messaging_save_button
+  - "Remove" → messaging_remove_button
+  - "Open docs" → messaging_open_docs_title
+  - "Clear {key}" → messaging_clear_key_title
+  - "Replace current value" → messaging_replace_placeholder
+  - "Disabled" / "Enable {name}" / "Disable {name}" → messaging_toggle (aria)
+  - "{name} enabled" / "{name} disabled" → messaging_toggle_notify_title
+  - "{name} setup saved" → messaging_save_notify_title
+  - "Restart the gateway to reconnect with the new credentials." → messaging_save_notify_msg
+  - "Restart the gateway for this change to take effect." → messaging_toggle_notify_msg
+  - "{key} cleared" → messaging_clear_notify_title
+  - "Messaging platforms failed to load" → messaging_load_error
+  - "Failed to update {name}" → messaging_update_error
+  - "Failed to save {name}" → messaging_save_error
+  - "Failed to clear {key}" → messaging_clear_error
+  - "Sent to chat" → messaging_log_sent_title
+
+FILE: app\artifacts\index.tsx
+  - "Go to {label} page {item}" → artifacts_go_to_page (aria)
+  - "Open in chat" → artifacts_open_chat (title)
+  - (various tab labels and artifact labels)
+
+FILE: app\agents\index.tsx
+  - "Failed" → agents_failed (aria)
+  - "Done" → agents_done (aria)
+
+FILE: app\profiles\index.tsx
+  - "Close profiles" → profiles_close_label
+  - "Loading profiles..." → profiles_loading
+  - "Profiles" → profiles_sidebar_title
+  - "No profiles yet." → profiles_empty_list
+  - "Select a profile to view its details." → profiles_no_selection
+  - "New profile" → profiles_new_button (aria)
+  - "default" → profiles_default_badge
+  - "Not set" → profiles_model_not_set
+  - "SOUL.md" → profiles_soul_title
+  - "The system prompt and persona instructions baked into this profile." → profiles_soul_desc
+  - "Unsaved changes" → profiles_soul_unsaved
+  - "Empty SOUL.md — start writing the persona..." → profiles_soul_placeholder
+  - "Loading SOUL.md" → profiles_soul_loading
+  - "Saving..." → profiles_soul_saving
+  - "Save SOUL.md" → profiles_soul_save_button
+  - "SOUL.md saved" → profiles_soul_saved_title
+  - "Failed to load SOUL.md" → profiles_soul_load_error
+  - "Failed to save SOUL.md" → profiles_soul_save_error
+  - "Profile created" → profiles_create_success
+  - "Profile renamed" → profiles_rename_success
+  - "{from} → {to}" → profiles_rename_msg
+  - "Profile deleted" → profiles_delete_success
+  - "Failed to load profiles" → profiles_load_error
+  - "Failed to delete profile" → profiles_delete_error
+  - "New profile" → profiles_create_dialog_title
+  - "Profile name" → profiles_name_field
+  - "my-profile" → profiles_name_placeholder
+  - "Lowercase letters, digits, hyphens, and underscores. ..." → profiles_name_hint
+  - "Clone settings from default profile" → profiles_clone_label
+  - "Creating..." → profiles_creating_button
+  - "Create profile" → profiles_create_button
+  - "Invalid name. {hint}" → profiles_name_invalid
+  - "Name is required." → profiles_name_required
+  - "Failed to create profile" → profiles_create_error
+  - "Delete profile?" → profiles_delete_dialog_title
+  - "This will delete {name} and remove its {path} directory. This cannot be undone." → profiles_delete_dialog_desc
+  - "Cancel" → profiles_cancel_button
+  - "Delete" → profiles_delete_confirm_button
+  - "Deleting..." → profiles_deleting_button
+  - "Rename profile" → profiles_rename_dialog_title
+  - "Rename" → profiles_rename_button
+  - "Cancel" → profiles_rename_cancel
+  - "Save" → profiles_rename_save
+  - "Copying..." → profiles_copying_button
+  - "Copy setup" → profiles_copy_setup_button
+  - "Setup command copied" → profiles_setup_copied_title
+  - "Failed to copy setup command" → profiles_setup_copy_error
+  - "Rename" → profiles_detail_rename_button
+  - "Delete" → profiles_detail_delete_button
+  - "Model" → profiles_detail_model_label
+  - "Skills" → profiles_detail_skills_label
+  - "{n} skill(s)" → profiles_detail_skill_count
+  - "env" → profiles_detail_env_label
+  - "Default" → profiles_detail_default_badge
+  - ".env" → profiles_detail_env_badge
+
+FILE: app\right-sidebar\index.tsx
+  - "Right sidebar" → right_sidebar_aria
+  - "Right sidebar panels" → right_sidebar_nav_aria
+  - "Refresh tree" → right_sidebar_refresh (aria/title)
+  - "Open folder" → right_sidebar_open_folder (aria)
+  - "Collapse all folders" → right_sidebar_collapse (aria/title)
+  - "{cwd} — click to change folder" → right_sidebar_cwd_title
+  - "Open a folder" → right_sidebar_open_folder_title
+  - "Open a different folder" → right_sidebar_change_folder_title
+  - "No project" → right_sidebar_no_project_title
+  - "Set a working directory from the status bar to browse files." → right_sidebar_no_project_body
+  - "Unreadable" → right_sidebar_unreadable_title
+  - "Could not read this folder ({error})." → right_sidebar_unreadable_body
+  - "Empty" → right_sidebar_empty_title
+  - "This folder is empty." → right_sidebar_empty_body
+  - "Tree error" → right_sidebar_tree_error_title
+  - "The file tree hit an error rendering this folder." → right_sidebar_tree_error_body
+  - "Loading file tree" → right_sidebar_loading_aria
+
+FILE: app\right-sidebar\files\tree.tsx
+  - "Loading files" → file_tree_loading_aria
+
+FILE: app\right-sidebar\terminal\index.tsx
+  - (uses label prop passed in)
+
+FILE: app\index.tsx (root app page)
+  - (no direct hardcoded strings)
+
+FILE: app\desktop-controller.tsx
+  - (bindings/event wiring - no hardcoded strings)
+
+FILE: app\command-palette\index.tsx
+  - "New session" → command_palette_new_session
+  - "Search settings..." → command_palette_search_placeholder
+  - "No results." → command_palette_no_results
+  - "Type a command or search..." → command_palette_default_placeholder
+
+FILE: app\command-center\index.tsx
+  - "Sessions" → cmd_center_sessions_label
+  - "System" → cmd_center_system_label
+  - "Usage" → cmd_center_usage_label
+  - "Search and manage sessions" → cmd_center_sessions_desc
+  - "Status, logs, and system actions" → cmd_center_system_desc
+  - "Token, cost, and skill activity over time" → cmd_center_usage_desc
+  - "Search sessions..." → cmd_center_search_placeholder
+  - "No matches" → cmd_center_no_matches
+  - "No sessions yet" → cmd_center_no_sessions
+  - "Unpin session" / "Pin session" → cmd_center_pin_toggle
+  - "Export session" → cmd_center_export
+  - "Delete session" → cmd_center_delete
+  - "No usage yet" → cmd_center_no_usage
+  - "Top models" → cmd_center_top_models
+  - "Top skills" → cmd_center_top_skills
+  - "in {tokens}" / "out {tokens}" → cmd_center_token_label
+
+FILE: app\page-search-shell.tsx
+  - "Search" → page_search_aria
+
+FILE: app\overlays\overlay-view.tsx
+  - (closeLabel passed via props)
+
+FILE: app\session\hooks\use-route-resume.tsx (test file - excluded)
+
+FILE: components\assistant-ui\thread.tsx
+  - "Loading session" → thread_loading_session (aria)
+  - "Hermes is loading a response" → thread_response_loading_label
+  - "Thinking" → thread_thinking_label
+  - "Today, {time}" → thread_timestamp_today
+  - "Yesterday, {time}" → thread_timestamp_yesterday
+  - "Copy" → thread_copy_label
+  - "Refresh" → thread_refresh_tooltip
+  - "More actions" → thread_more_actions_tooltip
+  - "Branch in new chat" → thread_branch_menu_item
+  - "Read aloud" → thread_read_aloud_menu_item
+  - "Preparing audio..." → thread_read_aloud_preparing
+  - "Stop reading" → thread_stop_reading
+  - "Edit message" → thread_edit_message (aria/title/placeholder)
+  - "Stop" → thread_stop_button (aria/title)
+  - "Editable checkpoint" → thread_checkpoint_title
+  - "Restore previous checkpoint" → thread_restore_prev_title
+  - "Restore next checkpoint" → thread_restore_next_title
+  - "Restore checkpoint" → thread_restore_label
+  - "Go forward" → thread_go_forward_label
+  - "Send edited message" → thread_send_edited (aria/title)
+  - "Read aloud failed" → thread_read_aloud_error
+
+FILE: components\assistant-ui\tool-fallback.tsx
+  - "Error" → tool_fallback_error (aria)
+  - "Recovered" → tool_fallback_recovered (aria)
+  - "Done" → tool_fallback_done (aria)
+
+FILE: components\assistant-ui\clarify-tool.tsx
+  - "Type your answer..." → clarify_placeholder
+
+FILE: components\assistant-ui\tool-approval.tsx
+  - "More approval options" → approval_more_options (aria)
+  - "Run" → approval_run_button
+  - "Reject" → approval_reject_button
+
+FILE: components\assistant-ui\todo-tool.tsx
+  - "In progress: {label}" → todo_in_progress (aria)
+
+FILE: components\assistant-ui\directive-text.tsx
+  - (no hardcoded strings)
+
+FILE: components\assistant-ui\markdown-text.tsx
+  - (no hardcoded strings)
+
+FILE: components\assistant-ui\user-message-text.tsx
+  - (no hardcoded strings)
+
+FILE: components\desktop-onboarding-overlay.tsx
+  - "Let's get you setup with Hermes Agent" → onboarding_header_title
+  - "Connect a model provider to start chatting. Most options take one click." → onboarding_header_desc
+  - "Looking up providers..." → onboarding_looking_up
+  - "Other providers" → onboarding_other_providers
+  - "Collapse" → onboarding_collapse
+  - "I have an API key" → onboarding_have_api_key
+  - "OpenRouter" → onboarding_apikey_openrouter_name
+  - "one key, many models" → onboarding_apikey_openrouter_short
+  - "Hosts hundreds of models behind a single key. Good default for new installs." → onboarding_apikey_openrouter_desc
+  - "OpenAI" → onboarding_apikey_openai_name
+  - "GPT-class models" → onboarding_apikey_openai_short
+  - "Direct access to OpenAI models." → onboarding_apikey_openai_desc
+  - "Google Gemini" → onboarding_apikey_gemini_name
+  - "Gemini models" → onboarding_apikey_gemini_short
+  - "Direct access to Google Gemini models." → onboarding_apikey_gemini_desc
+  - "xAI Grok" → onboarding_apikey_xai_name
+  - "Grok models" → onboarding_apikey_xai_short
+  - "Direct access to xAI Grok models." → onboarding_apikey_xai_desc
+  - "Local / custom endpoint" → onboarding_apikey_local_name
+  - "self-hosted" → onboarding_apikey_local_short
+  - "Point Hermes at a local or self-hosted OpenAI-compatible endpoint ..." → onboarding_apikey_local_desc
+  - "http://127.0.0.1:8000/v1" → onboarding_apikey_local_placeholder
+  - "One key, hundreds of models — a solid default" → onboarding_key_provider_desc
+  - "Connected" → onboarding_connected_tag
+  - "Recommended" → onboarding_recommended_badge
+  - "One subscription, 300+ frontier models — the recommended way to run Hermes" → onboarding_featured_pitch
+  - "Back to sign in" → onboarding_back_button
+  - "Replace current value" → onboarding_replace_placeholder
+  - "Paste API key" → onboarding_paste_key_placeholder
+  - "Get a key" → onboarding_get_key_link
+  - "Remove" → onboarding_remove_key_button
+  - "Connecting" → onboarding_connecting_button
+  - "Update" → onboarding_update_button
+  - "Connect" → onboarding_connect_button
+  - "Could not save credential." → onboarding_save_error
+  - "Starting sign-in for {title}..." → onboarding_starting_signin
+  - "Verifying your code with {title}..." → onboarding_verifying
+  - "{title} connected. Picking a default model..." → onboarding_connected_picking_model
+  - "Sign-in failed. Try again." → onboarding_signin_failed
+  - "Pick a different provider" → onboarding_pick_different
+  - "Sign in with {title}" → onboarding_signin_step_title
+  - "We opened {title} in your browser." → onboarding_pkce_step1
+  - "Authorize Hermes there." → onboarding_pkce_step2
+  - "Copy the authorization code and paste it below." → onboarding_pkce_step3
+  - "Paste authorization code" → onboarding_auth_code_placeholder
+  - "Re-open authorization page" → onboarding_reopen_auth_link
+  - "Continue" → onboarding_continue_button
+  - "We opened {title} in your browser. Authorize Hermes there..." → onboarding_awaiting_browser_desc
+  - "Re-open sign-in page" → onboarding_reopen_signin_link
+  - "Waiting for you to authorize..." → onboarding_waiting_authorize
+  - "{title} signs in through its own CLI. ..." → onboarding_external_desc
+  - "I've signed in" → onboarding_signed_in_button
+  - "We opened {title} in your browser. Enter this code there:" → onboarding_device_code_desc
+  - "Re-open verification page" → onboarding_reopen_verification
+  - "Hermes is finishing install. ..." → onboarding_preparing_installing
+  - "Starting Hermes..." → onboarding_preparing_starting
+  - "Default model" → onboarding_default_model_label
+  - "Free tier" → onboarding_free_tier_badge
+  - "Pro" → onboarding_pro_badge
+  - "Free" → onboarding_free_price
+  - "{input} in / {output} out per Mtok" → onboarding_price_label
+  - "Change" → onboarding_change_model_button
+  - "Start chatting" → onboarding_start_chatting_button
+  - "Cancel" → onboarding_cancel_button
+  - "Copy" → onboarding_copy_code_button
+  - "Close" → onboarding_close_button (aria)
+  - "Opens your browser to sign in, then continues here" → onboarding_flow_pkce
+  - "Opens a verification page in your browser — Hermes connects automatically" → onboarding_flow_device_code
+  - "Opens your browser to sign in — Hermes connects automatically" → onboarding_flow_loopback
+  - "Sign in once in your terminal, then come back to chat" → onboarding_flow_external
+
+FILE: components\desktop-install-overlay.tsx
+  - "Installing Hermes..." → install_installing_title
+  - "This might take a minute or two." → install_installing_desc
+
+FILE: components\notifications.tsx
+  - "Notifications" → notifications_aria
+  - "Dismiss notification" → notifications_dismiss_aria
+
+FILE: components\prompt-overlays.tsx
+  - "Administrator password" → prompt_sudo_title
+  - "Hermes needs your sudo password to run a privileged command. ..." → prompt_sudo_desc
+  - "sudo password" → prompt_sudo_placeholder
+  - "Cancel" → prompt_cancel_button
+  - "Send" → prompt_send_button
+  - "Secret required" → prompt_secret_title_fallback
+  - "Hermes needs a credential to continue." → prompt_secret_desc_fallback
+  - "secret value" → prompt_secret_placeholder
+  - "Could not send sudo password" → prompt_sudo_send_error
+  - "Could not send secret" → prompt_secret_send_error
+
+FILE: components\model-picker.tsx
+  - "Filter providers and models..." → model_picker_filter_placeholder
+  - "Could not load models" → model_picker_load_error_title
+  - "Input / Output price per million tokens" → model_picker_price_title
+  - "Search models" → model_visibility_search_placeholder
+
+FILE: components\chat\intro.tsx
+  - (WORDMARK label - logo text)
+
+FILE: components\chat\image-generation-placeholder.tsx
+  - "Rendering image" → image_gen_rendering (aria)
+
+FILE: components\chat\zoomable-image.tsx
+  - "Open image" → zoomable_image_open_title
+  - "Saving image" → zoomable_image_saving_title
+  - "Download image" → zoomable_image_download_title (aria/title)
+
+FILE: components\chat\activity-timer-text.tsx
+  - "{n}s" → activity_timer_format
+
+FILE: components\chat\preview-attachment.tsx
+  - (no hardcoded strings)
+
+FILE: components\chat\disclosure-row.tsx
+  - (no hardcoded strings)
+
+FILE: components\chat\generated-image-context.tsx
+  - (no hardcoded strings)
+
+FILE: components\ui\sidebar.tsx
+  - "Toggle Sidebar" → sidebar_toggle_aria/title
+
+FILE: components\ui\pagination.tsx
+  - "pagination" → pagination_aria
+  - "Go to previous page" → pagination_prev_aria
+  - "Go to next page" → pagination_next_aria
+
+FILE: components\ui\search-field.tsx
+  - "Clear search" → search_field_clear_aria
+
+FILE: components\ui\copy-button.tsx
+  - "Copy" → copy_button_label
+  - "Copied" → copy_button_copied
+  - "Failed to copy" → copy_button_failed
+
+FILE: components\ui\loader.tsx
+  - (uses label prop)
+
+FILE: components\ui\error-state.tsx
+  - (uses title/desc props)
+
+FILE: components\ui\braille-spinner.tsx
+  - (uses ariaLabel prop)
+
+FILE: components\error-boundary.tsx
+  - "Something broke in the interface" → error_boundary_title
+
+FILE: components\page-loader.tsx
+  - (uses label/ariaLabel props)
+
+FILE: components\boot-failure-overlay.tsx
+  - (boot failure messages)
+
+FILE: components\gateway-connecting-overlay.tsx
+  - "Connecting to Hermes..." → gateway_connecting_title
+
+FILE: components\model-visibility-dialog.tsx
+  - "Search models" → model_visibility_dialog_placeholder
+
+FILE: app\settings\helpers.tsx
+  - (utility functions - asText, prettyName etc.)
+
+FILE: app\settings\env-credentials.tsx
+  - (covered above in settings)
+
+FILE: app\settings\use-deep-link-highlight.ts
+  - (hook, no strings)
+
+FILE: components\Backdrop.tsx
+  - (no strings)
+
+FILE: components\haptics-provider.tsx
+  - (no strings)
+
+FILE: components\pane-shell\pane-shell.tsx
+  - "Resize {id}" → pane_shell_resize (aria)
+
+FILE: components\status-dot.tsx
+  - (no strings)
+
+FILE: app\shell\sidebar-label.tsx
+  - (no strings)
+
+FILE: lib\external-link.tsx
+  - (no hardcoded display strings)
+
+FILE: themes\context.tsx
+  - (no strings)
+
+FILE: app\chat\perf-probe.tsx
+  - (no strings)
+
+FILE: app\chat\composer\voice-activity.tsx
+  - (no hardcoded strings)
+
+FILE: app\chat\sidebar\virtual-session-list.tsx
+  - (no hardcoded strings)
+
+FILE: main.tsx
+  - (no strings)
+
+FILE: app\right-sidebar\terminal\persistent.tsx
+  - (no hardcoded strings)
+
+================================================================================
+END OF INVENTORY
+================================================================================

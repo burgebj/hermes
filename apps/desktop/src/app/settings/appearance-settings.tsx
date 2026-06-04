@@ -11,6 +11,8 @@ import { BUILTIN_THEMES } from '@/themes/presets'
 
 import { MODE_OPTIONS } from './constants'
 import { SettingsContent } from './primitives'
+import { useT } from '@/i18n/useT'
+import { toggleLang } from '@/i18n/core'
 
 function ThemePreview({ name }: { name: string }) {
   const t = BUILTIN_THEMES[name]
@@ -67,6 +69,7 @@ function SectionHead({ title, description, control }: { title: string; descripti
 }
 
 export function AppearanceSettings() {
+  const { t, lang } = useT()
   const { themeName, mode, availableThemes, setTheme, setMode } = useTheme()
   const toolViewMode = useStore($toolViewMode)
 
@@ -74,8 +77,7 @@ export function AppearanceSettings() {
     <SettingsContent>
       <div className="grid gap-8">
         <p className="max-w-2xl text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
-          These are desktop-only display preferences. Mode controls brightness; theme controls the accent palette and
-          chat surface styling.
+          {t('appearance.desc')}
         </p>
 
         <section>
@@ -90,8 +92,8 @@ export function AppearanceSettings() {
                 value={mode}
               />
             }
-            description="Pick a fixed mode or let Hermes follow your system setting."
-            title="Color Mode"
+            description={t('appearance.color_mode.desc')}
+            title={t('appearance.color_mode.title')}
           />
         </section>
 
@@ -105,20 +107,20 @@ export function AppearanceSettings() {
                 }}
                 options={
                   [
-                    { id: 'product', label: 'Product' },
-                    { id: 'technical', label: 'Technical' }
+                    { id: 'product', label: t('appearance.tool_display.product') },
+                    { id: 'technical', label: t('appearance.tool_display.technical') }
                   ] as const
                 }
                 value={toolViewMode}
-              />
-            }
-            description="Product hides raw tool payloads; Technical shows full input/output."
-            title="Tool Call Display"
-          />
-        </section>
+                  />
+                }
+                description={t('appearance.tool_display.desc')}
+                title={t('appearance.tool_display.title')}
+                />
+                </section>
 
-        <section className="grid gap-3">
-          <SectionHead description="Desktop palettes only. The selected mode is applied on top." title="Theme" />
+                <section className="grid gap-3">
+                <SectionHead description={t('appearance.theme.desc')} title={t('appearance.theme.title')} />
           <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2 xl:grid-cols-3">
             {availableThemes.map(theme => {
               const active = themeName === theme.name
@@ -158,6 +160,22 @@ export function AppearanceSettings() {
               )
             })}
           </div>
+        </section>
+
+        <section>
+          <SectionHead
+            control={
+              <button
+                className="h-7 rounded-md border px-3 text-xs font-medium transition-colors hover:bg-accent"
+                onClick={() => toggleLang()}
+                type="button"
+              >
+                {lang === 'ru' ? 'English' : 'Русский'}
+              </button>
+            }
+            description={t('appearance.language.desc')}
+            title={t('appearance.language.title')}
+          />
         </section>
       </div>
     </SettingsContent>

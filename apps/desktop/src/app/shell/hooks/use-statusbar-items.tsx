@@ -42,6 +42,7 @@ import { $subagentsBySession, activeSubagentCount } from '@/store/subagents'
 import { $desktopVersion, $updateApply, $updateStatus, setUpdateOverlayOpen } from '@/store/updates'
 import type { StatusResponse } from '@/types/hermes'
 
+import { useT } from '@/i18n/useT'
 import { CRON_ROUTE } from '../../routes'
 import type { StatusbarItem } from '../statusbar-controls'
 
@@ -78,6 +79,7 @@ export function useStatusbarItems({
   statusSnapshot,
   toggleCommandCenter
 }: StatusbarItemsOptions) {
+  const { t, tf } = useT()
   const activeSessionId = useStore($activeSessionId)
   const yoloActive = useStore($yoloActive)
   const busy = useStore($busy)
@@ -160,13 +162,13 @@ export function useStatusbarItems({
 
   const gatewayDetail = gatewayOpen
     ? inferenceStatus?.ready
-      ? 'ready'
+      ? t('statusbar.gateway_ready')
       : inferenceStatus
-        ? 'needs setup'
-        : 'checking'
+        ? t('statusbar.gateway_needs_setup')
+        : t('statusbar.gateway_checking')
     : gatewayConnecting
-      ? 'connecting'
-      : 'offline'
+      ? t('statusbar.gateway_connecting')
+      : t('statusbar.gateway_offline')
 
   const gatewayClassName = inferenceReady
     ? undefined
@@ -179,17 +181,17 @@ export function useStatusbarItems({
     const sha = updateStatus?.currentSha?.slice(0, 7) ?? null
     const behind = updateStatus?.behind ?? 0
     const applying = updateApply.applying || updateApply.stage === 'restart'
-    const base = appVersion ? `v${appVersion}` : (sha ?? 'unknown')
+    const base = appVersion ? `v${appVersion}` : (sha ?? t('statusbar.version_unknown'))
     const behindHint = !applying && behind > 0 ? ` (+${behind})` : ''
 
     const label = applying
       ? updateApply.stage === 'restart'
-        ? `${base} · restart`
-        : `${base} · update`
+        ? tf('statusbar.version_restart', base)
+        : tf('statusbar.version_update', base)
       : `${base}${behindHint}`
 
     const tooltip = [
-      applying ? updateApply.message || 'Update in progress' : null,
+      applying ? (updateApply.message || t('statusbar.update_in_progress')) : null,
       !applying && behind > 0 && `${behind} commit${behind === 1 ? '' : 's'} behind ${updateStatus?.branch ?? '…'}`,
       appVersion && `Hermes Desktop v${appVersion}`,
       sha && `commit ${sha}`,
@@ -226,7 +228,7 @@ export function useStatusbarItems({
         icon: <Command className="size-3.5" />,
         id: 'command-center',
         onSelect: toggleCommandCenter,
-        title: commandCenterOpen ? 'Close Command Center' : 'Open Command Center',
+        title: commandCenterOpen ? t('statusbar.command_center_close') : t('statusbar.command_center_open'),
         variant: 'action'
       },
       {
@@ -234,10 +236,10 @@ export function useStatusbarItems({
         detail: gatewayDetail,
         icon: inferenceReady ? <Activity className="size-3" /> : <AlertCircle className="size-3" />,
         id: 'gateway-health',
-        label: 'Gateway',
+        label: t('statusbar.gateway'),
         menuClassName: 'w-72',
         menuContent: gatewayMenuContent,
-        title: inferenceStatus?.reason || 'Hermes inference gateway status',
+        title: inferenceStatus?.reason || t('statusbar.gateway_title'),
         variant: 'menu'
       },
       {
@@ -247,11 +249,11 @@ export function useStatusbarItems({
         ),
         detail:
           subagentsRunning > 0
-            ? `${subagentsRunning} subagent${subagentsRunning === 1 ? '' : 's'}`
+            ? tf(subagentsRunning === 1 ? 'statusbar.agents_subagents' : 'statusbar.agents_subagents_plural', subagentsRunning)
             : bgFailed > 0
-              ? `${bgFailed} failed`
+              ? tf('statusbar.agents_failed', bgFailed)
               : bgRunning > 0
-                ? `${bgRunning} running`
+                ? tf('statusbar.agents_running', bgRunning)
                 : undefined,
         icon:
           bgFailed > 0 ? (
@@ -262,16 +264,16 @@ export function useStatusbarItems({
             <Sparkles className="size-3" />
           ),
         id: 'agents',
-        label: 'Agents',
+        label: t('statusbar.agents'),
         onSelect: openAgents,
-        title: agentsOpen ? 'Close agents' : 'Open agents',
+        title: agentsOpen ? t('statusbar.agents_close') : t('statusbar.agents_open'),
         variant: 'action'
       },
       {
         icon: <Clock className="size-3" />,
         id: 'cron',
-        label: 'Cron',
-        title: 'Open cron jobs',
+        label: t('statusbar.cron'),
+        title: t('statusbar.cron_title'),
         to: CRON_ROUTE,
         variant: 'action'
       }
@@ -299,8 +301,8 @@ export function useStatusbarItems({
         hidden: !busy || !turnStartedAt,
         icon: <Loader2 className="size-3 animate-spin" />,
         id: 'running-timer',
-        label: 'Running',
-        title: 'Current turn elapsed',
+        label: t('statusbar.running'),
+        title: t('statusbar.running_title'),
         variant: 'text'
       },
       {
@@ -308,15 +310,15 @@ export function useStatusbarItems({
         hidden: !contextUsage,
         id: 'context-usage',
         label: contextUsage,
-        title: 'Context usage',
+        title: t('statusbar.context_title'),
         variant: 'text'
       },
       {
         detail: <LiveDuration since={sessionStartedAt} />,
         hidden: !sessionStartedAt,
         id: 'session-timer',
-        label: 'Session',
-        title: 'Runtime session elapsed',
+        label: t('statusbar.session'),
+        title: t('statusbar.session_title'),
         variant: 'text'
       },
       {
@@ -330,8 +332,8 @@ export function useStatusbarItems({
         id: 'yolo',
         onSelect: () => void toggleYolo(),
         title: yoloActive
-          ? 'YOLO on — auto-approving dangerous commands. Click to turn off.'
-          : 'YOLO off — click to auto-approve dangerous commands.',
+          ? t('statusbar.yolo_on')
+          : t('statusbar.yolo_off'),
         variant: 'action'
       },
       {
@@ -352,12 +354,12 @@ export function useStatusbarItems({
               menuAlign: 'end' as const,
               menuClassName: 'w-64',
               menuContent: modelMenuContent,
-              title: currentProvider ? `Model · ${currentProvider}: ${currentModel || 'none'}` : 'Switch model',
+              title: currentProvider ? tf('statusbar.model_title', currentProvider, currentModel || t('statusbar.model_none')) : t('statusbar.switch_model'),
               variant: 'menu' as const
             }
           : {
               onSelect: () => setModelPickerOpen(true),
-              title: currentProvider ? `${currentProvider} · ${currentModel || 'no model'}` : 'Open model picker',
+              title: currentProvider ? `${currentProvider} · ${currentModel || t('statusbar.model_none')}` : t('statusbar.open_model_picker'),
               variant: 'action' as const
             })
       },

@@ -1,5 +1,6 @@
 import { IconLayoutDashboard } from '@tabler/icons-react'
 
+import { useT } from '@/i18n/useT'
 import { StatusDot, type StatusTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { Activity, AlertCircle } from '@/lib/icons'
@@ -39,23 +40,24 @@ export function GatewayMenuPanel({
   onOpenSystem,
   statusSnapshot
 }: GatewayMenuPanelProps) {
+  const { t, tf } = useT()
   const gatewayOpen = gatewayState === 'open'
   const gatewayConnecting = gatewayState === 'connecting'
   const inferenceReady = gatewayOpen && inferenceStatus?.ready === true
 
   const connectionLabel = gatewayOpen
-    ? 'Connected'
+    ? t('gateway_panel.connected')
     : gatewayConnecting
-      ? 'Connecting'
+      ? t('gateway_panel.connecting')
       : prettyState(gatewayState || 'offline')
 
   const inferenceLabel = gatewayOpen
     ? inferenceStatus?.ready
-      ? 'Inference ready'
+      ? t('gateway_panel.inference_ready')
       : inferenceStatus
-        ? 'Inference not ready'
-        : 'Checking inference'
-    : 'Disconnected'
+        ? t('gateway_panel.inference_not_ready')
+        : t('gateway_panel.inference_checking')
+    : t('gateway_panel.disconnected')
 
   const platforms = Object.entries(statusSnapshot?.gateway_platforms || {}).sort(([l], [r]) => l.localeCompare(r))
   const recentLogs = logLines.slice(-5)
@@ -69,7 +71,7 @@ export function GatewayMenuPanel({
           ) : (
             <AlertCircle className={cn('size-3.5', gatewayOpen ? 'text-amber-600' : 'text-destructive')} />
           )}
-          <span className="font-medium">Gateway</span>
+          <span className="font-medium">{t('gateway_panel.gateway')}</span>
           <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <StatusDot tone={inferenceReady ? 'good' : gatewayOpen ? 'warn' : 'bad'} />
             {inferenceLabel}
@@ -77,11 +79,11 @@ export function GatewayMenuPanel({
         </div>
         <div className="flex items-center">
           <Button
-            aria-label="Open system panel"
+            aria-label={t('gateway_panel.open_system')}
             className="text-muted-foreground hover:text-foreground"
             onClick={onOpenSystem}
             size="icon-sm"
-            title="Open system panel"
+            title={t('gateway_panel.open_system')}
             variant="ghost"
           >
             <IconLayoutDashboard />
@@ -90,13 +92,13 @@ export function GatewayMenuPanel({
       </div>
 
       <div className="border-t border-border/50 px-3 py-2 text-xs text-muted-foreground">
-        <div>Connection: {connectionLabel}</div>
+        <div>{tf('gateway_panel.connection', connectionLabel)}</div>
         {inferenceStatus?.reason && <div className="mt-1 line-clamp-3">{inferenceStatus.reason}</div>}
       </div>
 
       {recentLogs.length > 0 && (
         <div className="border-t border-border/50 px-3 py-2">
-          <SectionLabel>Recent activity</SectionLabel>
+          <SectionLabel>{t('gateway_panel.recent_activity')}</SectionLabel>
           <ul className="mt-1.5 space-y-0.5">
             {recentLogs.map((line, index) => (
               <li
@@ -113,14 +115,14 @@ export function GatewayMenuPanel({
             onClick={onOpenSystem}
             type="button"
           >
-            View all logs →
+            {t('gateway_panel.view_all_logs')}
           </button>
         </div>
       )}
 
       {platforms.length > 0 && (
         <div className="border-t border-border/50 px-3 py-2">
-          <SectionLabel>Messaging platforms</SectionLabel>
+          <SectionLabel>{t('gateway_panel.messaging_platforms')}</SectionLabel>
           <ul className="mt-1.5 space-y-1">
             {platforms.map(([name, platform]) => (
               <li className="flex items-center justify-between gap-2 text-xs" key={name}>

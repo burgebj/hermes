@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { triggerHaptic } from '@/lib/haptics'
 import { Check, Copy, X } from '@/lib/icons'
+import { useT } from '@/i18n/useT'
 import { cn } from '@/lib/utils'
 
 type CopyPayload = string | (() => Promise<string> | string)
@@ -58,10 +59,10 @@ export function CopyButton({
   children,
   className,
   disabled = false,
-  errorMessage = 'Copy failed',
+  errorMessage,
   haptic = true,
   iconClassName,
-  label = 'Copy',
+  label,
   onCopied,
   onCopyError,
   preventDefault = false,
@@ -70,6 +71,7 @@ export function CopyButton({
   text,
   title
 }: CopyButtonProps) {
+  const { t } = useT()
   const [status, setStatus] = React.useState<CopyStatus>('idle')
   const resetRef = React.useRef<number | null>(null)
 
@@ -134,13 +136,15 @@ export function CopyButton({
   const Icon = status === 'copied' ? Check : status === 'error' ? X : Copy
   const icon = <Icon className={cn('size-3.5', iconClassName)} />
 
+  const resolvedLabel = label ?? t('copy_button.label')
+
   const visibleChildren =
     (showLabel ?? (appearance !== 'icon' && appearance !== 'tool-row'))
       ? status === 'copied'
-        ? 'Copied'
+        ? t('copy_button.copied')
         : status === 'error'
-          ? 'Failed'
-          : (children ?? label)
+          ? t('copy_button.failed')
+          : (children ?? resolvedLabel)
       : null
 
   const content = (
@@ -150,8 +154,8 @@ export function CopyButton({
     </>
   )
 
-  const feedbackLabel = status === 'copied' ? 'Copied' : status === 'error' ? errorMessage : (title ?? label)
-  const ariaLabel = status === 'idle' ? label : feedbackLabel
+  const feedbackLabel = status === 'copied' ? t('copy_button.copied') : status === 'error' ? errorMessage : (title ?? resolvedLabel)
+  const ariaLabel = status === 'idle' ? resolvedLabel : feedbackLabel
 
   if (appearance === 'menu-item') {
     return (

@@ -9,6 +9,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
 import { $attentionSessionIds } from '@/store/session'
 
+import { useT } from '@/i18n/useT'
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
 interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
@@ -60,9 +61,10 @@ export function SidebarSessionRow({
   ref,
   ...rest
 }: SidebarSessionRowProps) {
+  const { t, tf } = useT()
   const title = sessionTitle(session)
   const age = formatAge(session.last_active || session.started_at)
-  const handleLabel = `Reorder ${title}`
+  const handleLabel = tf('sidebar.reorder_workspace', title)
   // Subscribe per-row (the leaf) instead of drilling a set through the list —
   // the atom is tiny and rarely non-empty. True when a clarify prompt in this
   // session is waiting on the user.
@@ -174,10 +176,10 @@ export function SidebarSessionRow({
             title={title}
           >
             <Button
-              aria-label={`Actions for ${title}`}
+              aria-label={tf('session_row.actions_aria', title)}
               className="size-5 rounded-[4px] bg-transparent text-transparent transition-colors duration-100 hover:bg-(--ui-control-active-background) hover:text-foreground focus-visible:bg-(--ui-control-active-background) focus-visible:text-foreground focus-visible:ring-0 data-[state=open]:bg-(--ui-control-active-background) data-[state=open]:text-foreground group-hover:text-(--ui-text-tertiary) [&_svg]:size-3.5!"
               size="icon"
-              title="Session actions"
+              title={t('session_row.actions_title')}
               variant="ghost"
             >
               <Codicon name="ellipsis" size="0.875rem" />
@@ -198,6 +200,7 @@ function SidebarRowDot({
   needsInput?: boolean
   className?: string
 }) {
+  const { t } = useT()
   // "Needs input" wins over "working": a clarify-blocked session is technically
   // still running, but the actionable state is that it's waiting on the user.
   // Amber + steady (no ping) reads as "your turn", distinct from the accent
@@ -205,17 +208,17 @@ function SidebarRowDot({
   if (needsInput) {
     return (
       <span
-        aria-label="Needs your input"
+        aria-label={t('session_row.needs_input')}
         className={cn('quest-glow relative size-1.5 rounded-full bg-amber-500', className)}
         role="status"
-        title="Waiting for your answer"
+        title={t('session_row.waiting_title')}
       />
     )
   }
 
   return (
     <span
-      aria-label={isWorking ? 'Session running' : undefined}
+      aria-label={isWorking ? t('session_row.running') : undefined}
       className={cn(
         'rounded-full',
         isWorking

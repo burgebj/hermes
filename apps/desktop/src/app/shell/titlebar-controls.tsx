@@ -28,6 +28,8 @@ import { appViewForPath, isOverlayView, PROFILES_ROUTE } from '../routes'
 
 import { titlebarButtonClass } from './titlebar'
 
+import { useT } from '@/i18n/useT'
+
 export interface TitlebarTool {
   id: string
   label: string
@@ -52,6 +54,7 @@ interface TitlebarControlsProps extends ComponentProps<'div'> {
 }
 
 export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }: TitlebarControlsProps) {
+  const { t } = useT()
   const navigate = useNavigate()
   const location = useLocation()
   const hapticsMuted = useStore($hapticsMuted)
@@ -84,7 +87,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     {
       icon: <Codicon name="layout-sidebar-left" />,
       id: 'sidebar',
-      label: `${leftEdge.open ? 'Hide' : 'Show'} left sidebar`,
+      label: `${leftEdge.open ? t('titlebar.hide_left_sidebar') : t('titlebar.show_left_sidebar')}`,
       onSelect: () => {
         triggerHaptic('tap')
         leftEdge.toggle()
@@ -93,12 +96,12 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     {
       icon: <Codicon name="arrow-swap" />,
       id: 'flip-panes',
-      label: 'Swap sidebar sides',
+      label: t('titlebar.swap_sides'),
       onSelect: () => {
         triggerHaptic('tap')
         togglePanesFlipped()
       },
-      title: 'Swap the sessions and file browser sides'
+      title: t('titlebar.swap_sides_title')
     },
     ...leftTools
   ]
@@ -106,7 +109,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const rightSidebarTool: TitlebarTool = {
     icon: <Codicon name="layout-sidebar-right" />,
     id: 'right-sidebar',
-    label: `${rightEdge.open ? 'Hide' : 'Show'} right sidebar`,
+    label: `${rightEdge.open ? t('titlebar.hide_right_sidebar') : t('titlebar.show_right_sidebar')}`,
     onSelect: () => {
       triggerHaptic('tap')
       rightEdge.toggle()
@@ -119,13 +122,13 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       active: hapticsMuted,
       icon: <Codicon name={hapticsMuted ? 'mute' : 'unmute'} />,
       id: 'haptics',
-      label: hapticsMuted ? 'Unmute haptics' : 'Mute haptics',
+      label: hapticsMuted ? t('titlebar.unmute_haptics') : t('titlebar.mute_haptics'),
       onSelect: toggleHaptics
     },
     {
       icon: <Codicon name="settings-gear" />,
       id: 'settings',
-      label: 'Open settings',
+      label: t('titlebar.open_settings'),
       onSelect: () => {
         triggerHaptic('open')
         onOpenSettings()
@@ -149,7 +152,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   return (
     <>
       <div
-        aria-label="Window controls"
+        aria-label={t('titlebar.window_controls')}
         className="fixed left-(--titlebar-controls-left) top-(--titlebar-controls-top) z-70 flex translate-y-0.5 flex-row items-center gap-x-1 pointer-events-auto select-none [-webkit-app-region:no-drag]"
       >
         {leftToolbarTools
@@ -169,7 +172,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       */}
       {visiblePaneTools.length > 0 && (
         <div
-          aria-label="Pane controls"
+          aria-label={t('titlebar.pane_controls')}
           className="fixed top-(--titlebar-controls-top) right-[calc(var(--titlebar-tools-right)+var(--shell-preview-toolbar-gap,0))] z-70 flex flex-row items-center gap-x-1 pointer-events-auto select-none [-webkit-app-region:no-drag]"
         >
           {visiblePaneTools.map(tool => (
@@ -179,7 +182,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       )}
 
       <div
-        aria-label="App controls"
+        aria-label={t('titlebar.app_controls')}
         className="fixed right-(--titlebar-tools-right) top-(--titlebar-controls-top) z-70 flex flex-row items-center justify-end gap-x-1 pointer-events-auto select-none [-webkit-app-region:no-drag]"
       >
         {visibleSystemToolsBeforeSettings.map(tool => (
@@ -194,15 +197,16 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 }
 
 function ProfilesMenuButton({ navigate }: { navigate: ReturnType<typeof useNavigate> }) {
+  const { t } = useT()
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          aria-label="Profiles"
+          aria-label={t('titlebar.profiles')}
           className={cn(titlebarButtonClass, 'bg-transparent select-none')}
           onPointerDown={event => event.stopPropagation()}
           size="icon-titlebar"
-          title="Profiles"
+          title={t('titlebar.profiles')}
           type="button"
           variant="ghost"
         >
@@ -214,9 +218,9 @@ function ProfilesMenuButton({ navigate }: { navigate: ReturnType<typeof useNavig
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64" sideOffset={8}>
         <DropdownMenuLabel>
-          <div className="text-sm font-medium text-foreground">Profiles</div>
+          <div className="text-sm font-medium text-foreground">{t('titlebar.profiles')}</div>
           <div className="mt-1 text-xs font-normal leading-4 text-muted-foreground">
-            Advanced Hermes environments for separate personas, config, skills, and SOUL.md.
+            {t('titlebar.profiles_desc')}
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
@@ -227,7 +231,7 @@ function ProfilesMenuButton({ navigate }: { navigate: ReturnType<typeof useNavig
           }}
         >
           <Codicon name="account" size="1rem" />
-          <span>Manage profiles</span>
+          <span>{t('titlebar.manage_profiles')}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

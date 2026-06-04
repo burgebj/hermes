@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { useT } from '@/i18n/useT'
 import { renameSession } from '@/hermes'
 import { triggerHaptic } from '@/lib/haptics'
 import { exportSession } from '@/lib/session-export'
@@ -42,13 +43,14 @@ interface ItemSpec {
 }
 
 function useSessionActions({ sessionId, title, pinned = false, onPin, onArchive, onDelete }: SessionActions) {
+  const { t, tf } = useT()
   const [renameOpen, setRenameOpen] = useState(false)
 
   const items: ItemSpec[] = [
     {
       disabled: !onPin,
       icon: 'pin',
-      label: pinned ? 'Unpin' : 'Pin',
+      label: pinned ? t('session_actions.unpin') : t('session_actions.pin'),
       onSelect: () => {
         triggerHaptic('selection')
         onPin?.()
@@ -57,17 +59,17 @@ function useSessionActions({ sessionId, title, pinned = false, onPin, onArchive,
     {
       disabled: !sessionId,
       icon: 'copy',
-      label: 'Copy ID',
+      label: t('session_actions.copy_id'),
       onSelect: event => {
         event.preventDefault()
         triggerHaptic('selection')
-        void writeClipboardText(sessionId).catch(err => notifyError(err, 'Could not copy session ID'))
+        void writeClipboardText(sessionId).catch(err => notifyError(err, t('session_actions.copy_id_failed')))
       }
     },
     {
       disabled: !sessionId,
       icon: 'cloud-download',
-      label: 'Export',
+      label: t('session_actions.export'),
       onSelect: () => {
         triggerHaptic('selection')
         void exportSession(sessionId, { title })
@@ -76,7 +78,7 @@ function useSessionActions({ sessionId, title, pinned = false, onPin, onArchive,
     {
       disabled: !sessionId,
       icon: 'edit',
-      label: 'Rename',
+      label: t('session_actions.rename'),
       onSelect: () => {
         triggerHaptic('selection')
         setRenameOpen(true)
@@ -85,7 +87,7 @@ function useSessionActions({ sessionId, title, pinned = false, onPin, onArchive,
     {
       disabled: !onArchive,
       icon: 'archive',
-      label: 'Archive',
+      label: t('session_actions.archive'),
       onSelect: () => {
         triggerHaptic('selection')
         onArchive?.()
@@ -95,7 +97,7 @@ function useSessionActions({ sessionId, title, pinned = false, onPin, onArchive,
       className: 'text-destructive focus:text-destructive',
       disabled: !onDelete,
       icon: 'trash',
-      label: 'Delete',
+      label: t('session_actions.delete'),
       onSelect: () => {
         triggerHaptic('warning')
         onDelete?.()
@@ -126,6 +128,7 @@ interface SessionActionsMenuProps
 
 export function SessionActionsMenu({ children, align = 'end', sideOffset = 6, ...actions }: SessionActionsMenuProps) {
   const { renameDialog, renderItems } = useSessionActions(actions)
+  const { tf } = useT()
 
   return (
     <>
@@ -133,7 +136,7 @@ export function SessionActionsMenu({ children, align = 'end', sideOffset = 6, ..
         <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
         <DropdownMenuContent
           align={align}
-          aria-label={`Actions for ${actions.title}`}
+          aria-label={tf('session_actions.aria', actions.title)}
           className="w-40"
           sideOffset={sideOffset}
         >
@@ -151,12 +154,13 @@ interface SessionContextMenuProps extends SessionActions {
 
 export function SessionContextMenu({ children, ...actions }: SessionContextMenuProps) {
   const { renameDialog, renderItems } = useSessionActions(actions)
+  const { tf } = useT()
 
   return (
     <>
       <ContextMenu>
         <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-        <ContextMenuContent aria-label={`Actions for ${actions.title}`} className="w-40">
+        <ContextMenuContent aria-label={tf('session_actions.aria', actions.title)} className="w-40">
           {renderItems(ContextMenuItem)}
         </ContextMenuContent>
       </ContextMenu>
@@ -173,6 +177,7 @@ interface RenameSessionDialogProps {
 }
 
 function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle }: RenameSessionDialogProps) {
+  const { t } = useT()
   const [value, setValue] = useState(currentTitle)
   const [submitting, setSubmitting] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -203,10 +208,10 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle }: Re
       const result = await renameSession(sessionId, next)
       const finalTitle = result.title || next || ''
       setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, title: finalTitle || null } : s)))
-      notify({ durationMs: 2_000, kind: 'success', message: 'Renamed' })
+      notify({ durationMs: 2_000, kind: 'success', message: t('session_actions.renamed') })
       onOpenChange(false)
     } catch (err) {
-      notifyError(err, 'Rename failed')
+      notifyError(err, t('session_actions.rename_failed'))
     } finally {
       setSubmitting(false)
     }
@@ -216,8 +221,8 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle }: Re
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Rename session</DialogTitle>
-          <DialogDescription>Give this chat a memorable title. Leave empty to clear.</DialogDescription>
+          <DialogTitle>{t('session_actions.rename_title')}</DialogTitle>
+          <DialogDescription>{t('session_actions.rename_desc')}</DialogDescription>
         </DialogHeader>
         <Input
           autoFocus
@@ -231,16 +236,16 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle }: Re
               onOpenChange(false)
             }
           }}
-          placeholder="Untitled session"
+          placeholder={t('session_actions.untitled')}
           ref={inputRef}
           value={value}
         />
         <DialogFooter>
           <Button disabled={submitting} onClick={() => onOpenChange(false)} type="button" variant="ghost">
-            Cancel
+            {t('session_actions.cancel')}
           </Button>
           <Button disabled={submitting} onClick={() => void submit()} type="button">
-            Save
+            {t('session_actions.save')}
           </Button>
         </DialogFooter>
       </DialogContent>
