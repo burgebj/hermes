@@ -86,6 +86,29 @@ function boundsVisibleOnDisplays(bounds, displays) {
 }
 
 /**
+ * Largest work-area width/height across all displays, or null if none are
+ * usable. Used as a cap so a window saved on a since-disconnected larger
+ * monitor can't reopen bigger than any screen the user currently has.
+ */
+function largestWorkArea(displays) {
+  if (!Array.isArray(displays) || displays.length === 0) {
+    return null
+  }
+
+  let width = 0
+  let height = 0
+  for (const display of displays) {
+    const area = display && display.workArea
+    if (area && isFiniteNumber(area.width) && isFiniteNumber(area.height)) {
+      if (area.width > width) width = area.width
+      if (area.height > height) height = area.height
+    }
+  }
+
+  return width > 0 && height > 0 ? { width, height } : null
+}
+
+/**
  * Turn a sanitized saved state (or null) into BrowserWindow size/position
  * options. Always returns width/height; only returns x/y when the saved
  * position is still visible on a current display, so an off-screen window
@@ -95,6 +118,16 @@ function computeWindowOptions(savedState, displays) {
   const options = {
     width: savedState && isFiniteNumber(savedState.width) ? savedState.width : DEFAULT_WIDTH,
     height: savedState && isFiniteNumber(savedState.height) ? savedState.height : DEFAULT_HEIGHT
+  }
+
+  // Cap to the largest current work area (keeping MIN_* as hard floors) so a
+  // size saved on a bigger, now-disconnected monitor doesn't open larger than
+  // the screen the user actually has. Done before the visibility check so the
+  // position test uses the final dimensions.
+  const cap = largestWorkArea(displays)
+  if (cap) {
+    options.width = Math.max(MIN_WIDTH, Math.min(options.width, cap.width))
+    options.height = Math.max(MIN_HEIGHT, Math.min(options.height, cap.height))
   }
 
   if (
@@ -113,6 +146,47 @@ function computeWindowOptions(savedState, displays) {
   return options
 }
 
+/**
+ * Trailing-edge debounce: coalesce a burst of calls into a single invocation
+ * `delayMs` after the last one. On Linux, `resized`/`moved` can fire many times
+ * mid-drag, so persisting on every event means a synchronous file write per
+ * event; debouncing collapses that to one write when the drag settles.
+ *
+ * The returned function carries `.flush()` (run immediately, cancelling any
+ * pending timer — used on `close`, where the write must happen before the
+ * window is gone) and `.cancel()` (drop a pending run).
+ */
+function createTrailingDebounce(fn, delayMs) {
+  let timer = null
+
+  const debounced = (...args) => {
+    if (timer) {
+      clearTimeout(timer)
+    }
+    timer = setTimeout(() => {
+      timer = null
+      fn(...args)
+    }, delayMs)
+  }
+
+  debounced.flush = (...args) => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+    fn(...args)
+  }
+
+  debounced.cancel = () => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  return debounced
+}
+
 module.exports = {
   DEFAULT_WIDTH,
   DEFAULT_HEIGHT,
@@ -121,5 +195,7 @@ module.exports = {
   MIN_VISIBLE_PX,
   sanitizeWindowState,
   boundsVisibleOnDisplays,
-  computeWindowOptions
+  largestWorkArea,
+  computeWindowOptions,
+  createTrailingDebounce
 }

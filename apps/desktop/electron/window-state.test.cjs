@@ -19,11 +19,16 @@ const {
   MIN_HEIGHT,
   sanitizeWindowState,
   boundsVisibleOnDisplays,
-  computeWindowOptions
+  largestWorkArea,
+  computeWindowOptions,
+  createTrailingDebounce
 } = require('./window-state.cjs')
 
 // A typical single 1920x1080 monitor (work area trimmed for the taskbar).
 const PRIMARY = [{ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }]
+
+// A smaller laptop panel, e.g. after a larger external monitor was unplugged.
+const LAPTOP = [{ workArea: { x: 0, y: 0, width: 1366, height: 728 } }]
 
 // --- sanitizeWindowState ---
 
@@ -140,4 +145,93 @@ test('computeWindowOptions keeps the size but drops an off-screen position', () 
 test('computeWindowOptions restores size when only a size was saved (no position)', () => {
   const saved = sanitizeWindowState({ width: 1400, height: 900 })
   assert.deepEqual(computeWindowOptions(saved, PRIMARY), { width: 1400, height: 900 })
+})
+
+// --- largestWorkArea ---
+
+test('largestWorkArea picks the max width and height across displays', () => {
+  const displays = [
+    { workArea: { x: 0, y: 0, width: 1366, height: 728 } },
+    { workArea: { x: 1366, y: 0, width: 2560, height: 1400 } }
+  ]
+  assert.deepEqual(largestWorkArea(displays), { width: 2560, height: 1400 })
+})
+
+test('largestWorkArea returns null for no displays or garbage work areas', () => {
+  assert.equal(largestWorkArea([]), null)
+  assert.equal(largestWorkArea(null), null)
+  assert.equal(largestWorkArea([{ workArea: { width: NaN, height: 10 } }]), null)
+})
+
+// --- computeWindowOptions size clamping ---
+
+test('computeWindowOptions clamps a size larger than the only display', () => {
+  // Saved on a 2560x1440 monitor that is no longer connected; only a 1366x728
+  // laptop panel remains. The window must not open wider/taller than it.
+  const saved = sanitizeWindowState({ width: 2560, height: 1440 })
+  const opts = computeWindowOptions(saved, LAPTOP)
+  assert.equal(opts.width, 1366)
+  assert.equal(opts.height, 728)
+})
+
+test('computeWindowOptions leaves a size that fits the display untouched', () => {
+  const saved = sanitizeWindowState({ width: 1200, height: 800 })
+  assert.deepEqual(computeWindowOptions(saved, PRIMARY), { width: 1200, height: 800 })
+})
+
+test('computeWindowOptions keeps the MIN floor even on a sub-minimum display', () => {
+  const tiny = [{ workArea: { x: 0, y: 0, width: 800, height: 600 } }]
+  const saved = sanitizeWindowState({ width: 2000, height: 1500 })
+  const opts = computeWindowOptions(saved, tiny)
+  // Floor wins over a display smaller than the usable minimum.
+  assert.equal(opts.width, MIN_WIDTH)
+  assert.equal(opts.height, MIN_HEIGHT)
+})
+
+test('computeWindowOptions does not clamp when displays are unknown', () => {
+  const saved = sanitizeWindowState({ width: 2560, height: 1440 })
+  // No display info → cannot cap; preserve the saved size rather than guess.
+  assert.deepEqual(computeWindowOptions(saved, []), { width: 2560, height: 1440 })
+})
+
+// --- createTrailingDebounce ---
+
+test('createTrailingDebounce coalesces rapid calls into a single trailing run', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  const debounced = createTrailingDebounce(() => { calls += 1 }, 250)
+
+  debounced()
+  debounced()
+  debounced()
+  assert.equal(calls, 0)
+
+  t.mock.timers.tick(249)
+  assert.equal(calls, 0)
+  t.mock.timers.tick(1)
+  assert.equal(calls, 1)
+})
+
+test('createTrailingDebounce.flush runs immediately and cancels the pending run', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  const debounced = createTrailingDebounce(() => { calls += 1 }, 250)
+
+  debounced()
+  debounced.flush()
+  assert.equal(calls, 1)
+
+  t.mock.timers.tick(1000)
+  assert.equal(calls, 1) // pending timer was cancelled by flush
+})
+
+test('createTrailingDebounce.cancel drops a pending run', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  const debounced = createTrailingDebounce(() => { calls += 1 }, 250)
+
+  debounced()
+  debounced.cancel()
+  t.mock.timers.tick(1000)
+  assert.equal(calls, 0)
 })

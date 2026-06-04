@@ -32,7 +32,8 @@ const {
   MIN_WIDTH: WINDOW_MIN_WIDTH,
   MIN_HEIGHT: WINDOW_MIN_HEIGHT,
   sanitizeWindowState,
-  computeWindowOptions
+  computeWindowOptions,
+  createTrailingDebounce
 } = require('./window-state.cjs')
 const {
   authModeFromStatus,
@@ -1162,6 +1163,10 @@ function persistWindowState() {
     rememberLog(`[window-state] failed to persist: ${err?.message || err}`)
   }
 }
+
+// Coalesce bursts of resize/move events (notably on Linux, where they can fire
+// repeatedly mid-drag) into a single write once the drag settles.
+const schedulePersistWindowState = createTrailingDebounce(persistWindowState, 250)
 
 // Match the backend's source resolution but bias toward a real git checkout.
 // Dev → SOURCE_REPO_ROOT. Packaged/CLI install → ACTIVE_HERMES_ROOT.
@@ -3972,11 +3977,13 @@ function createWindow() {
   // Remember size/position/maximized so the next launch reopens where the user
   // left off. 'resized'/'moved' fire once at the end of a drag (Win/macOS);
   // 'close' is the cross-platform backstop that always captures the final state.
-  mainWindow.on('resized', persistWindowState)
-  mainWindow.on('moved', persistWindowState)
-  mainWindow.on('maximize', persistWindowState)
-  mainWindow.on('unmaximize', persistWindowState)
-  mainWindow.on('close', persistWindowState)
+  mainWindow.on('resized', schedulePersistWindowState)
+  mainWindow.on('moved', schedulePersistWindowState)
+  mainWindow.on('maximize', schedulePersistWindowState)
+  mainWindow.on('unmaximize', schedulePersistWindowState)
+  // On close, write synchronously before the window goes away (cancelling any
+  // pending debounced run so it can't fire against a destroyed window).
+  mainWindow.on('close', () => schedulePersistWindowState.flush())
 
   installPreviewShortcut(mainWindow)
   installDevToolsShortcut(mainWindow)
