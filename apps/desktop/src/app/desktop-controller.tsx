@@ -432,6 +432,7 @@ export function DesktopController() {
   })
 
   const {
+    archiveAllSessions,
     archiveSession,
     branchCurrentSession,
     createBackendSessionForSend,
@@ -622,6 +623,7 @@ export function DesktopController() {
   const sidebar = (
     <ChatSidebar
       currentView={currentView}
+      onArchiveAllSessions={() => archiveAllSessions().then(() => refreshSessions())}
       onArchiveSession={sessionId => void archiveSession(sessionId)}
       onDeleteSession={sessionId => void removeSession(sessionId)}
       onLoadMoreProfileSessions={loadMoreSessionsForProfile}

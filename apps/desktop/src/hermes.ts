@@ -166,6 +166,25 @@ export async function listAllProfileSessions(
   }
 }
 
+export function bulkArchiveSessions(
+  preserveIds: string[] = [],
+  profile?: null | string
+): Promise<{ ok: boolean; archived: number }> {
+  const body: { preserve_ids: string[]; profile?: string } = {
+    preserve_ids: Array.from(new Set(preserveIds.filter(Boolean))).slice(0, 5000)
+  }
+  const scopedProfile = profile?.trim()
+  if (scopedProfile) {
+    body.profile = scopedProfile
+  }
+
+  return window.hermesDesktop.api<{ ok: boolean; archived: number }>({
+    path: '/api/sessions/bulk-archive',
+    method: 'POST',
+    body
+  })
+}
+
 export function setSessionArchived(id: string, archived: boolean): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     path: `/api/sessions/${encodeURIComponent(id)}`,
