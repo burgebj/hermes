@@ -281,7 +281,7 @@ in
           [ "$FIXED" -eq 1 ] && echo "changed=true" || echo "changed=false"
           if [ -n "$REPORT" ]; then
             echo "report<<REPORT_EOF"
-            printf "%s" "$REPORT"
+            printf "%s\n" "$REPORT"
             echo "REPORT_EOF"
           fi
         } >> "$GITHUB_OUTPUT"
