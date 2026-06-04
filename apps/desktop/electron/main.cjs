@@ -12,6 +12,7 @@ const {
   powerMonitor,
   protocol,
   safeStorage,
+  screen,
   session,
   shell,
   systemPreferences
@@ -27,6 +28,13 @@ const { execFileSync, spawn } = require('node:child_process')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
+const {
+  MIN_WIDTH: WINDOW_MIN_WIDTH,
+  MIN_HEIGHT: WINDOW_MIN_HEIGHT,
+  sanitizeWindowState,
+  computeWindowOptions,
+  createTrailingDebounce
+} = require('./window-state.cjs')
 const {
   authModeFromStatus,
   buildGatewayWsUrl,
@@ -220,6 +228,7 @@ const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
+const DESKTOP_WINDOW_STATE_PATH = path.join(app.getPath('userData'), 'window-state.json')
 // Branch we track for self-update. The GUI work has merged to main, so this
 // tracks main. User can also override at runtime via
 // hermesDesktop.updates.setBranch().
@@ -1120,6 +1129,44 @@ function writeDesktopUpdateConfig(config) {
   fs.mkdirSync(path.dirname(DESKTOP_UPDATE_CONFIG_PATH), { recursive: true })
   writeFileAtomic(DESKTOP_UPDATE_CONFIG_PATH, JSON.stringify(config, null, 2))
 }
+
+// ─── Window size/position persistence (window-state.json) ──────────────────
+
+function readWindowState() {
+  try {
+    return sanitizeWindowState(JSON.parse(fs.readFileSync(DESKTOP_WINDOW_STATE_PATH, 'utf8')))
+  } catch {
+    return null
+  }
+}
+
+// Persist the main window's restored (non-maximized) bounds plus its maximized
+// flag. Uses getNormalBounds so a maximized window still records the size to
+// restore to when the user un-maximizes on the next launch.
+function persistWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) {
+    return
+  }
+
+  try {
+    const bounds = mainWindow.getNormalBounds()
+    const state = {
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      isMaximized: mainWindow.isMaximized()
+    }
+    fs.mkdirSync(path.dirname(DESKTOP_WINDOW_STATE_PATH), { recursive: true })
+    writeFileAtomic(DESKTOP_WINDOW_STATE_PATH, JSON.stringify(state, null, 2))
+  } catch (err) {
+    rememberLog(`[window-state] failed to persist: ${err?.message || err}`)
+  }
+}
+
+// Coalesce bursts of resize/move events (notably on Linux, where they can fire
+// repeatedly mid-drag) into a single write once the drag settles.
+const schedulePersistWindowState = createTrailingDebounce(persistWindowState, 250)
 
 // Match the backend's source resolution but bias toward a real git checkout.
 // Dev → SOURCE_REPO_ROOT. Packaged/CLI install → ACTIVE_HERMES_ROOT.
@@ -3871,11 +3918,14 @@ async function startHermes() {
 
 function createWindow() {
   const icon = getAppIconPath()
+  const savedWindowState = readWindowState()
+  const windowOptions = computeWindowOptions(savedWindowState, screen.getAllDisplays())
   mainWindow = new BrowserWindow({
-    width: 1220,
-    height: 800,
-    minWidth: 900,
-    minHeight: 620,
+    width: windowOptions.width,
+    height: windowOptions.height,
+    ...(windowOptions.x !== undefined ? { x: windowOptions.x, y: windowOptions.y } : {}),
+    minWidth: WINDOW_MIN_WIDTH,
+    minHeight: WINDOW_MIN_HEIGHT,
     title: 'Hermes',
     // Frameless title bar on every platform so the renderer can paint the
     // "hide sidebar" button (and other left-side titlebar tools) flush with
@@ -3915,10 +3965,25 @@ function createWindow() {
     }
   }
 
+  if (savedWindowState?.isMaximized) {
+    mainWindow.maximize()
+  }
+
   mainWindow.on('will-enter-full-screen', () => sendWindowStateChanged(true))
   mainWindow.on('enter-full-screen', () => sendWindowStateChanged(true))
   mainWindow.on('will-leave-full-screen', () => sendWindowStateChanged(false))
   mainWindow.on('leave-full-screen', () => sendWindowStateChanged(false))
+
+  // Remember size/position/maximized so the next launch reopens where the user
+  // left off. 'resized'/'moved' fire once at the end of a drag (Win/macOS);
+  // 'close' is the cross-platform backstop that always captures the final state.
+  mainWindow.on('resized', schedulePersistWindowState)
+  mainWindow.on('moved', schedulePersistWindowState)
+  mainWindow.on('maximize', schedulePersistWindowState)
+  mainWindow.on('unmaximize', schedulePersistWindowState)
+  // On close, write synchronously before the window goes away (cancelling any
+  // pending debounced run so it can't fire against a destroyed window).
+  mainWindow.on('close', () => schedulePersistWindowState.flush())
 
   installPreviewShortcut(mainWindow)
   installDevToolsShortcut(mainWindow)
