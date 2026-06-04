@@ -200,13 +200,28 @@ def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
     return any(pattern in cmdline for pattern in patterns)
 
 
+def _normalize_hermes_profile(profile: Optional[str]) -> Optional[str]:
+    """Canonicalize a HERMES_PROFILE value for storage and comparison.
+
+    An unset, empty, or whitespace-only value all mean "no profile" and must
+    compare equal, otherwise a stray ``HERMES_PROFILE=`` (or a value padded
+    with whitespace) would be treated as a distinct profile and could
+    spuriously refuse — or allow — a --replace takeover. Non-empty values are
+    stripped so equivalent values agree across the read and write paths.
+    """
+    if profile is None:
+        return None
+    stripped = profile.strip()
+    return stripped or None
+
+
 def _build_pid_record() -> dict:
     return {
         "pid": os.getpid(),
         "kind": _GATEWAY_KIND,
         "argv": list(sys.argv),
         "start_time": _get_process_start_time(os.getpid()),
-        "hermes_profile": os.environ.get("HERMES_PROFILE"),
+        "hermes_profile": _normalize_hermes_profile(os.environ.get("HERMES_PROFILE")),
     }
 
 
@@ -220,10 +235,15 @@ def pidfile_records_different_profile(
     ``hermes_profile`` field (e.g. written by an older gateway build) returns
     False so we preserve the prior "one HERMES_HOME, one gateway" behavior on
     upgrade. Same-profile records (including both-None) also return False.
+
+    Both sides are normalized (empty/whitespace-only treated as "no profile",
+    non-empty values stripped) so a stray ``HERMES_PROFILE=`` or whitespace
+    padding is not mistaken for a distinct profile.
     """
     if not isinstance(existing_record, dict) or "hermes_profile" not in existing_record:
         return False
-    return existing_record.get("hermes_profile") != current_profile
+    existing_profile = _normalize_hermes_profile(existing_record.get("hermes_profile"))
+    return existing_profile != _normalize_hermes_profile(current_profile)
 
 
 def _build_runtime_status_record() -> dict[str, Any]:
