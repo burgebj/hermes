@@ -968,7 +968,15 @@ class LineAdapter(BasePlatformAdapter):
 
         event_obj = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT if msg_type == "text" else MessageType.IMAGE,
+            message_type={
+                "text": MessageType.TEXT,
+                "image": MessageType.PHOTO,
+                "audio": MessageType.AUDIO,
+                "video": MessageType.VIDEO,
+                "file": MessageType.DOCUMENT,
+                "sticker": MessageType.STICKER,
+                "location": MessageType.LOCATION,
+            }.get(msg_type, MessageType.TEXT),
             source=source_obj,
             raw_message=event,
             message_id=message_id,
