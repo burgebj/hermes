@@ -149,6 +149,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "lark-oapi==1.5.3",
         "qrcode==7.4.2",
     ),
+    "platform.zulip": ("zulip==0.9.0",),
     # WeCom callback-mode adapter — parses untrusted XML POST bodies. Pulls
     # defusedxml only; aiohttp/httpx are core dependencies of every messaging
     # adapter and ship via `platform.discord` / `platform.slack` / etc.

@@ -31,6 +31,8 @@ _SLACK_TARGET_RE = re.compile(r"^\s*([CGDU][A-Z0-9]{8,})\s*$")
 _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+_ZULIP_STREAM_RE = re.compile(r"^\s*([^:#]+)(?::([^:]+))?\s*$")
+_ZULIP_DM_RE = re.compile(r"^\s*(?:private|dm):([^\s:]+)\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -351,6 +353,29 @@ def _handle_send(args):
         return json.dumps(_error(f"Send failed: {e}"))
 
 
+def _parse_zulip_target_ref(target_ref: str):
+    """Parse Zulip target: stream[:topic] or private:email / dm:email or group_dm:email,email."""
+    if not target_ref:
+        return None, None, False
+    s = target_ref.strip()
+    # DM form: private:email or dm:email
+    dm = _ZULIP_DM_RE.fullmatch(s)
+    if dm:
+        return f"dm:{dm.group(1)}", None, True
+    # group_dm form (comma list preserved in chat_id)
+    if s.lower().startswith("group_dm:"):
+        return s, None, True
+    # Stream or stream:topic (note: stream names can contain most chars except # and :)
+    m = _ZULIP_STREAM_RE.fullmatch(s)
+    if m:
+        stream = m.group(1).strip()
+        topic = (m.group(2) or "").strip() or None
+        if topic:
+            return f"{stream}:{topic}", None, True
+        return stream, None, True
+    return None, None, False
+
+
 def _parse_target_ref(platform_name: str, target_ref: str):
     """Parse a tool target into chat_id/thread_id and whether it is explicit."""
     if platform_name == "telegram":
@@ -395,6 +420,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
+    if platform_name == "zulip":
+        return _parse_zulip_target_ref(target_ref)
     if platform_name == "email":
         match = _EMAIL_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -612,6 +639,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
+    _MAX_LENGTHS[Platform.ZULIP] = 4000  # matches adapter MAX_MESSAGE_LENGTH (Zulip server default ~10000; conservative)
 
     # Check plugin registry for max_message_length
     if platform not in _MAX_LENGTHS:
