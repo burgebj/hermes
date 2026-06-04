@@ -563,3 +563,12 @@ class TestCustomProviderModelSwitch:
         # clobber it via _preserve_env_ref_templates).
         assert entry["api_key"] == "${HERMES_CRS_HENKEE_KEY}"
         assert "cr_live_secret_xyz" not in saved_text
+
+
+def test_is_custom_provider_matches_generic_and_named_custom_providers():
+    from hermes_cli.models import is_custom_provider
+
+    assert is_custom_provider("custom") is True
+    assert is_custom_provider("custom:local") is True
+    assert is_custom_provider("Custom:Local") is True
+    assert is_custom_provider("openrouter") is False

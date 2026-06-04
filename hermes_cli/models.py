@@ -1805,6 +1805,12 @@ def normalize_provider(provider: Optional[str]) -> str:
     return _PROVIDER_ALIASES.get(normalized, normalized)
 
 
+def is_custom_provider(provider: Optional[str]) -> bool:
+    """Return True for generic and named custom providers."""
+    normalized = normalize_provider(provider)
+    return normalized == "custom" or normalized.startswith("custom:")
+
+
 def provider_label(provider: Optional[str]) -> str:
     """Return a human-friendly label for a provider id or alias."""
     original = (provider or "openrouter").strip()
@@ -3469,7 +3475,7 @@ def validate_requested_model(
             "message": f"Model `{requested}` was not found in LM Studio's model listing.",
         }
 
-    if normalized == "custom" or normalized.startswith("custom:"):
+    if is_custom_provider(normalized):
         # Try probing with correct auth for the api_mode.
         if api_mode == "anthropic_messages":
             probe = probe_api_models(api_key, base_url, api_mode=api_mode)
