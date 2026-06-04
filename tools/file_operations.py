@@ -242,7 +242,13 @@ class SearchResult:
     total_count: int = 0
     truncated: bool = False
     error: Optional[str] = None
-    
+    # When a search is cut short by a resource budget (the underlying
+    # ripgrep/find/grep process hit its wall-clock limit on a huge tree), we
+    # still return the partial results collected so far instead of failing
+    # hard. ``limit_reason`` tells the model WHY the result is partial so it
+    # can narrow the path/pattern rather than retrying the same doomed query.
+    limit_reason: Optional[str] = None
+
     def to_dict(self) -> dict:
         result = {"total_count": self.total_count}
         if self.matches:
@@ -256,6 +262,8 @@ class SearchResult:
             result["counts"] = self.counts
         if self.truncated:
             result["truncated"] = True
+        if self.limit_reason:
+            result["limit_reason"] = self.limit_reason
         if self.error:
             result["error"] = self.error
         return result
@@ -680,7 +688,24 @@ class ShellFileOperations(FileOperations):
             stdout=result.get("output", ""),
             exit_code=result.get("returncode", 0)
         )
-    
+
+    # Backends surface a wall-clock timeout as exit code 124 with the partial
+    # output collected so far, plus a trailing "[Command timed out after Ns]"
+    # marker (see tools/environments/base.py). For search commands a timeout
+    # means we hit a resource budget on a large tree -- not a real failure.
+    # Rather than poison the result (the marker would otherwise be parsed as a
+    # bogus file/match line) or fail hard, we strip the marker, keep whatever
+    # partial output survived, and let callers flag the result as truncated.
+    _TIMEOUT_MARKER_RE = re.compile(r"\n?\[Command timed out after \d+s\]\s*$")
+
+    def _search_hit_budget(self, result: "ExecuteResult") -> bool:
+        """True when a search subprocess was cut short by its time budget."""
+        return result.exit_code == 124
+
+    def _strip_timeout_marker(self, stdout: str) -> str:
+        """Remove the backend's trailing timeout marker from search output."""
+        return self._TIMEOUT_MARKER_RE.sub("", stdout)
+
     def _has_command(self, cmd: str) -> bool:
         """Check if a command exists in the environment (cached)."""
         if cmd not in self._command_cache:
@@ -1910,15 +1935,19 @@ class ShellFileOperations(FileOperations):
               f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
         result = self._exec(cmd, timeout=60)
+        hit_budget = self._search_hit_budget(result)
+        stdout = self._strip_timeout_marker(result.stdout) if hit_budget else result.stdout
 
-        if not result.stdout.strip():
+        if not stdout.strip() and not hit_budget:
             # Try without -printf (BSD find compatibility -- macOS)
             cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
                         f"2>/dev/null | sort -rn{pagination_expr}"
             result = self._exec(cmd_simple, timeout=60)
+            hit_budget = self._search_hit_budget(result)
+            stdout = self._strip_timeout_marker(result.stdout) if hit_budget else result.stdout
 
         files = []
-        for line in result.stdout.strip().split('\n'):
+        for line in stdout.strip().split('\n'):
             if not line:
                 continue
             parts = line.split(' ', 1)
@@ -1946,7 +1975,9 @@ class ShellFileOperations(FileOperations):
 
         return SearchResult(
             files=files,
-            total_count=len(files)
+            total_count=len(files),
+            truncated=hit_budget,
+            limit_reason="search_timeout" if hit_budget else None,
         )
 
     def _search_files_rg(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
@@ -1972,9 +2003,11 @@ class ShellFileOperations(FileOperations):
             f"| head -n {fetch_limit}"
         )
         result = self._exec(cmd_sorted, timeout=60)
-        all_files = [f for f in result.stdout.strip().split('\n') if f]
+        hit_budget = self._search_hit_budget(result)
+        stdout = self._strip_timeout_marker(result.stdout) if hit_budget else result.stdout
+        all_files = [f for f in stdout.strip().split('\n') if f]
 
-        if not all_files:
+        if not all_files and not hit_budget:
             # --sortr may have failed on older rg; retry without it.
             cmd_plain = (
                 f"rg --files -g {self._escape_shell_arg(glob_pattern)} "
@@ -1982,14 +2015,17 @@ class ShellFileOperations(FileOperations):
                 f"| head -n {fetch_limit}"
             )
             result = self._exec(cmd_plain, timeout=60)
-            all_files = [f for f in result.stdout.strip().split('\n') if f]
+            hit_budget = self._search_hit_budget(result)
+            stdout = self._strip_timeout_marker(result.stdout) if hit_budget else result.stdout
+            all_files = [f for f in stdout.strip().split('\n') if f]
 
         page = all_files[offset:offset + limit]
 
         return SearchResult(
             files=page,
             total_count=len(all_files),
-            truncated=len(all_files) >= fetch_limit,
+            truncated=len(all_files) >= fetch_limit or hit_budget,
+            limit_reason="search_timeout" if hit_budget else None,
         )
     
     def _search_content(self, pattern: str, path: str, file_glob: Optional[str],
@@ -2040,22 +2076,33 @@ class ShellFileOperations(FileOperations):
         
         cmd = " ".join(cmd_parts)
         result = self._exec(cmd, timeout=60)
-        
-        # rg exit codes: 0=matches found, 1=no matches, 2=error
-        if result.exit_code == 2 and not result.stdout.strip():
+        hit_budget = self._search_hit_budget(result)
+        stdout = self._strip_timeout_marker(result.stdout) if hit_budget else result.stdout
+
+        # rg exit codes: 0=matches found, 1=no matches, 2=error.
+        # A budget timeout surfaces as 124 (handled as soft truncation below),
+        # so only treat a genuine rg error (2) with no output as a hard failure.
+        if result.exit_code == 2 and not stdout.strip():
             error_msg = result.stderr.strip() if hasattr(result, 'stderr') and result.stderr else "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
-        
+
+        _limit_reason = "search_timeout" if hit_budget else None
+
         # Parse results based on output mode
         if output_mode == "files_only":
-            all_files = [f for f in result.stdout.strip().split('\n') if f]
+            all_files = [f for f in stdout.strip().split('\n') if f]
             total = len(all_files)
             page = all_files[offset:offset + limit]
-            return SearchResult(files=page, total_count=total)
-        
+            return SearchResult(
+                files=page,
+                total_count=total,
+                truncated=hit_budget,
+                limit_reason=_limit_reason,
+            )
+
         elif output_mode == "count":
             counts = {}
-            for line in result.stdout.strip().split('\n'):
+            for line in stdout.strip().split('\n'):
                 if ':' in line:
                     parts = line.rsplit(':', 1)
                     if len(parts) == 2:
@@ -2063,8 +2110,13 @@ class ShellFileOperations(FileOperations):
                             counts[parts[0]] = int(parts[1])
                         except ValueError:
                             pass
-            return SearchResult(counts=counts, total_count=sum(counts.values()))
-        
+            return SearchResult(
+                counts=counts,
+                total_count=sum(counts.values()),
+                truncated=hit_budget,
+                limit_reason=_limit_reason,
+            )
+
         else:
             # Parse content matches and context lines.
             # rg match lines:   "file:lineno:content"  (colon separator)
@@ -2074,7 +2126,7 @@ class ShellFileOperations(FileOperations):
             # so naive split(":") breaks. Use regex to handle both platforms.
             _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
             matches = []
-            for line in result.stdout.strip().split('\n'):
+            for line in stdout.strip().split('\n'):
                 if not line or line == "--":
                     continue
                 
@@ -2104,7 +2156,8 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 matches=page,
                 total_count=total,
-                truncated=total > offset + limit
+                truncated=total > offset + limit or hit_budget,
+                limit_reason=_limit_reason,
             )
     
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],
@@ -2140,21 +2193,32 @@ class ShellFileOperations(FileOperations):
         
         cmd = " ".join(cmd_parts)
         result = self._exec(cmd, timeout=60)
-        
-        # grep exit codes: 0=matches found, 1=no matches, 2=error
-        if result.exit_code == 2 and not result.stdout.strip():
+        hit_budget = self._search_hit_budget(result)
+        stdout = self._strip_timeout_marker(result.stdout) if hit_budget else result.stdout
+
+        # grep exit codes: 0=matches found, 1=no matches, 2=error.
+        # A budget timeout surfaces as 124 (handled as soft truncation below),
+        # so only treat a genuine grep error (2) with no output as a failure.
+        if result.exit_code == 2 and not stdout.strip():
             error_msg = result.stderr.strip() if hasattr(result, 'stderr') and result.stderr else "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
-        
+
+        _limit_reason = "search_timeout" if hit_budget else None
+
         if output_mode == "files_only":
-            all_files = [f for f in result.stdout.strip().split('\n') if f]
+            all_files = [f for f in stdout.strip().split('\n') if f]
             total = len(all_files)
             page = all_files[offset:offset + limit]
-            return SearchResult(files=page, total_count=total)
-        
+            return SearchResult(
+                files=page,
+                total_count=total,
+                truncated=hit_budget,
+                limit_reason=_limit_reason,
+            )
+
         elif output_mode == "count":
             counts = {}
-            for line in result.stdout.strip().split('\n'):
+            for line in stdout.strip().split('\n'):
                 if ':' in line:
                     parts = line.rsplit(':', 1)
                     if len(parts) == 2:
@@ -2162,8 +2226,13 @@ class ShellFileOperations(FileOperations):
                             counts[parts[0]] = int(parts[1])
                         except ValueError:
                             pass
-            return SearchResult(counts=counts, total_count=sum(counts.values()))
-        
+            return SearchResult(
+                counts=counts,
+                total_count=sum(counts.values()),
+                truncated=hit_budget,
+                limit_reason=_limit_reason,
+            )
+
         else:
             # grep match lines:   "file:lineno:content" (colon)
             # grep context lines: "file-lineno-content"  (dash)
@@ -2172,7 +2241,7 @@ class ShellFileOperations(FileOperations):
             # so naive split(":") breaks. Use regex to handle both platforms.
             _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
             matches = []
-            for line in result.stdout.strip().split('\n'):
+            for line in stdout.strip().split('\n'):
                 if not line or line == "--":
                     continue
                 
@@ -2200,5 +2269,6 @@ class ShellFileOperations(FileOperations):
             return SearchResult(
                 matches=page,
                 total_count=total,
-                truncated=total > offset + limit
+                truncated=total > offset + limit or hit_budget,
+                limit_reason=_limit_reason,
             )
