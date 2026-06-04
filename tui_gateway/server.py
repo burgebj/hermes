@@ -1238,7 +1238,21 @@ def _persist_model_switch(result) -> None:
     if result.base_url:
         model_cfg["base_url"] = result.base_url
     else:
-        model_cfg.pop("base_url", None)
+        # Only pop base_url when the new provider is a built-in (anthropic,
+        # openai, etc.) that has a hardcoded endpoint in the resolver registry.
+        # For user-defined custom providers declared in `custom_providers:`,
+        # the user-supplied base_url IS the provider's own default and must be
+        # preserved — otherwise the resolver falls back to OpenRouter and the
+        # next agent call returns HTTP 401: Missing Authentication header.
+        # Mirrors the fix in hermes_cli/web_server.py for `/api/model/set`.
+        custom_provider_names = {
+            (entry.get("name") or "").strip().lower()
+            for entry in (cfg.get("custom_providers") or [])
+            if isinstance(entry, dict)
+        }
+        target = (result.target_provider or "").strip().lower()
+        if target not in custom_provider_names:
+            model_cfg.pop("base_url", None)
     save_config(cfg)
 
 
