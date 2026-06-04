@@ -1,7 +1,15 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 
-const { runBootstrap } = require('./bootstrap-runner.cjs')
+const {
+  cachedScriptPath,
+  installScriptRef,
+  installScriptRepositories,
+  installerRepoEnv,
+  normalizeGitHubRepository,
+  runBootstrap,
+  shouldPinCommit
+} = require('./bootstrap-runner.cjs')
 
 test('runBootstrap bails immediately when the signal is already aborted', async () => {
   const controller = new AbortController()
@@ -24,4 +32,40 @@ test('runBootstrap bails immediately when the signal is already aborted', async 
     events.some(ev => ev.type === 'failed' && /cancelled/i.test(ev.error)),
     'should emit a cancelled failure event'
   )
+})
+
+test('install script resolution honors stamped fork repository metadata', () => {
+  const stamp = {
+    commit: 'abcdef1234567890',
+    repository: 'ForkOwner/hermes-agent',
+    repoUrlHttps: 'https://github.com/ForkOwner/hermes-agent.git',
+    repoUrlSsh: 'git@github.com:ForkOwner/hermes-agent.git'
+  }
+
+  assert.deepEqual(installScriptRepositories(stamp), ['ForkOwner/hermes-agent', 'NousResearch/hermes-agent'])
+  assert.deepEqual(installerRepoEnv(stamp), {
+    HERMES_INSTALL_REPO_ARCHIVE_BASE: 'https://github.com/ForkOwner/hermes-agent',
+    HERMES_INSTALL_REPO_URL_HTTPS: 'https://github.com/ForkOwner/hermes-agent.git',
+    HERMES_INSTALL_REPO_URL_SSH: 'git@github.com:ForkOwner/hermes-agent.git'
+  })
+})
+
+test('install script resolution falls back to bootstrapRef for unpinned local builds', () => {
+  const stamp = {
+    commit: 'abcdef1234567890',
+    bootstrapRef: 'main',
+    commitPinned: false,
+    repository: 'ForkOwner/hermes-agent'
+  }
+
+  assert.equal(installScriptRef(stamp), 'main')
+  assert.equal(shouldPinCommit(stamp), false)
+  assert.match(cachedScriptPath('/tmp/hermes-home', 'fix/some-branch'), /install-fix_some-branch\.(sh|ps1)$/)
+})
+
+test('normalizes GitHub repository values from common remote forms', () => {
+  assert.equal(normalizeGitHubRepository('git@github.com:ForkOwner/hermes-agent.git'), 'ForkOwner/hermes-agent')
+  assert.equal(normalizeGitHubRepository('https://github.com/NousResearch/hermes-agent.git'), 'NousResearch/hermes-agent')
+  assert.equal(normalizeGitHubRepository('NousResearch/hermes-agent'), 'NousResearch/hermes-agent')
+  assert.equal(normalizeGitHubRepository('not github'), null)
 })
