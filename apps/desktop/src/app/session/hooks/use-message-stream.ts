@@ -16,6 +16,7 @@ import {
 import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
+import { usageFromTokenUsagePayload } from '@/lib/usage-events'
 import { setClarifyRequest } from '@/store/clarify'
 import { notify } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
@@ -705,6 +706,13 @@ export function useMessageStream({
           void queryClient.invalidateQueries({
             queryKey: explicitSid && sessionId ? ['model-options', sessionId] : ['model-options']
           })
+        }
+      } else if (event.type === 'token.usage') {
+        if (!explicitSid || isActiveEvent) {
+          const usage = usageFromTokenUsagePayload(payload)
+          if (usage) {
+            setCurrentUsage(current => ({ ...current, ...usage }))
+          }
         }
       } else if (event.type === 'message.start') {
         if (!sessionId) {

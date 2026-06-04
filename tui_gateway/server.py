@@ -396,6 +396,14 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     body = (text if text is not None else kind).strip()
     if not body:
         return
+    if kind == "token_usage":
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if isinstance(payload, dict):
+            _emit("token.usage", sid, payload)
+        return
     _emit(
         "status.update",
         sid,

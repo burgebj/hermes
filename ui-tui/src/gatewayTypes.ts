@@ -89,7 +89,12 @@ export interface ConfigVoiceConfig {
 }
 
 export interface ConfigFullResponse {
-  config?: { display?: ConfigDisplayConfig; voice?: ConfigVoiceConfig; paste_collapse_threshold?: number; paste_collapse_char_threshold?: number }
+  config?: {
+    display?: ConfigDisplayConfig
+    voice?: ConfigVoiceConfig
+    paste_collapse_threshold?: number
+    paste_collapse_char_threshold?: number
+  }
 }
 
 export interface ConfigMtimeResponse {
@@ -505,6 +510,15 @@ export interface SpawnTreeLoadResponse {
   subagents?: unknown[]
 }
 
+export interface TokenUsagePayload {
+  context_length?: number
+  context_pct?: number
+  context_tokens?: number
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+}
+
 export type GatewayEvent =
   | { payload?: { skin?: GatewaySkin }; session_id?: string; type: 'gateway.ready' }
   | { payload?: GatewaySkin; session_id?: string; type: 'skin.changed' }
@@ -526,7 +540,11 @@ export type GatewayEvent =
       type: 'gateway.start_timeout'
     }
   | { payload?: { preview?: string }; session_id?: string; type: 'gateway.protocol_error' }
-  | { payload?: { text?: string; verbose?: boolean }; session_id?: string; type: 'reasoning.delta' | 'reasoning.available' }
+  | {
+      payload?: { text?: string; verbose?: boolean }
+      session_id?: string
+      type: 'reasoning.delta' | 'reasoning.available'
+    }
   | { payload: { name?: string; preview?: string }; session_id?: string; type: 'tool.progress' }
   | { payload: { name?: string }; session_id?: string; type: 'tool.generating' }
   | {
@@ -565,6 +583,7 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.progress' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
+  | { payload?: TokenUsagePayload; session_id?: string; type: 'token.usage' }
   | {
       payload?: { reasoning?: string; rendered?: string; text?: string; usage?: Usage }
       session_id?: string
