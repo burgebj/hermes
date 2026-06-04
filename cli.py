@@ -8341,7 +8341,164 @@ class HermesCLI:
             print()
             print("  Usage: /personality <name>")
             print()
-    
+
+    def _handle_workspace_command(self, cmd: str):
+        """Handle the /workspace command — manage workspace prompts and skill links."""
+        from hermes_constants import get_hermes_home
+        from agent.workspace_resolver import (
+            resolve_workspace, _safe_dir_name, _clear_stat_cache,
+        )
+
+        parts = cmd.split(maxsplit=2)
+        subcmd = parts[1].lower() if len(parts) > 1 else "list"
+        rest = parts[2].strip() if len(parts) > 2 else ""
+
+        hermes_home = get_hermes_home()
+        workspaces_dir = hermes_home / "workspaces"
+        platforms_dir = hermes_home / "platforms"
+
+        if subcmd in ("list", ""):
+            if not workspaces_dir.exists():
+                self.console.print("  No workspaces found. Use /workspace create <name> to create one.")
+                return
+            ws_dirs = sorted(d.name for d in workspaces_dir.iterdir() if d.is_dir())
+            if not ws_dirs:
+                self.console.print("  No workspaces found. Use /workspace create <name> to create one.")
+                return
+            self.console.print("\n[bold]Workspaces[/bold]\n")
+            for ws_name in ws_dirs:
+                system_file = workspaces_dir / ws_name / "SYSTEM.md"
+                skills_dir = workspaces_dir / ws_name / "skills"
+                flags = []
+                if system_file.exists():
+                    flags.append("prompt")
+                if skills_dir.exists() and any(skills_dir.iterdir()):
+                    n = len([d for d in skills_dir.iterdir() if d.is_dir()])
+                    flags.append(f"{n} skill{'s' if n != 1 else ''}")
+                desc = f" ({', '.join(flags)})" if flags else ""
+                self.console.print(f"  • [cyan]{ws_name}[/cyan]{desc}")
+            self.console.print()
+
+        elif subcmd == "create":
+            create_parts = rest.split(None, 1)
+            if not create_parts:
+                self.console.print("Usage: [cyan]/workspace create <name> [prompt text][/cyan]")
+                return
+            ws_name = create_parts[0]
+            prompt_text = create_parts[1].strip() if len(create_parts) > 1 else ""
+            if not ws_name.replace("-", "").replace("_", "").isalnum():
+                self.console.print(f"[red]✗ Invalid workspace name '{ws_name}'. Use letters, numbers, hyphens, underscores.[/red]")
+                return
+            ws_dir = workspaces_dir / ws_name
+            if ws_dir.exists():
+                self.console.print(f"[red]✗ Workspace '{ws_name}' already exists. Use /workspace show {ws_name}[/red]")
+                return
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            system_file = ws_dir / "SYSTEM.md"
+            system_file.write_text(prompt_text + "\n" if prompt_text else f"# Workspace: {ws_name}\n", encoding="utf-8")
+            _clear_stat_cache()
+            self.console.print(f"[green]✓ Created workspace '{ws_name}'[/green]")
+            self.console.print(f"  Edit prompt: {system_file}")
+
+        elif subcmd == "show":
+            ws_name = rest.strip()
+            if not ws_name:
+                self.console.print("Usage: [cyan]/workspace show <name>[/cyan]")
+                return
+            ws_dir = workspaces_dir / ws_name
+            if not ws_dir.exists():
+                self.console.print(f"[red]✗ Workspace '{ws_name}' not found.[/red]")
+                return
+            from rich.markdown import Markdown
+            system_file = ws_dir / "SYSTEM.md"
+            self.console.print(f"\n[bold]Workspace: {ws_name}[/bold]\n")
+            if system_file.exists():
+                content = system_file.read_text(encoding="utf-8")
+                self.console.print(Markdown(content))
+            skills_dir = ws_dir / "skills"
+            if skills_dir.exists():
+                skill_list = sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
+                if skill_list:
+                    self.console.print(f"\n[bold]Skills:[/bold] {', '.join(skill_list)}")
+
+        elif subcmd == "link":
+            link_parts = rest.split()
+            if len(link_parts) < 4:
+                self.console.print("Usage: [cyan]/workspace link <platform> <chat_id> <thread_id> <workspace>[/cyan]")
+                self.console.print("   or: [cyan]/workspace link <platform> <chat_id> default <workspace>[/cyan]")
+                return
+            link_platform, link_chat_id, link_thread_id, link_ws = link_parts[:4]
+            ws_dir = workspaces_dir / link_ws
+            if not ws_dir.exists():
+                self.console.print(f"[red]✗ Workspace '{link_ws}' not found. Create it first: /workspace create {link_ws}[/red]")
+                return
+            safe_id = _safe_dir_name(link_chat_id)
+            topic_dir = platforms_dir / link_platform / safe_id
+            topic_dir.mkdir(parents=True, exist_ok=True)
+            topics_file = topic_dir / "topics.yaml"
+            import yaml as _yaml
+            data = {}
+            if topics_file.exists():
+                data = _yaml.safe_load(topics_file.read_text(encoding="utf-8")) or {}
+            topics = data.get("topics", {})
+            if isinstance(topics, list):
+                topics = {str(item.get("thread_id", "")): str(item.get("workspace", "")) for item in topics if isinstance(item, dict)}
+            topics[str(link_thread_id)] = link_ws
+            data["topics"] = topics
+            if "workspace" not in data:
+                data["workspace"] = "default"
+            topics_file.write_text(_yaml.safe_dump(data, default_flow_style=False), encoding="utf-8")
+            _clear_stat_cache()
+            self.console.print(f"[green]✓ Linked {link_platform}/{link_chat_id} topic {link_thread_id} → {link_ws}[/green]")
+
+        elif subcmd in ("remove", "unlink"):
+            if subcmd == "unlink":
+                unlink_parts = rest.split()
+                if len(unlink_parts) < 3:
+                    self.console.print("Usage: [cyan]/workspace unlink <platform> <chat_id> <thread_id>[/cyan]")
+                    return
+                u_platform, u_chat_id, u_thread_id = unlink_parts[:3]
+                safe_id = _safe_dir_name(u_chat_id)
+                topics_file = platforms_dir / u_platform / safe_id / "topics.yaml"
+                if not topics_file.exists():
+                    self.console.print(f"[red]✗ No topics.yaml found for {u_platform}/{u_chat_id}[/red]")
+                    return
+                import yaml as _yaml
+                data = _yaml.safe_load(topics_file.read_text(encoding="utf-8")) or {}
+                topics = data.get("topics", {})
+                if str(u_thread_id) not in topics:
+                    self.console.print(f"[red]✗ Thread '{u_thread_id}' not linked in {u_platform}/{u_chat_id}[/red]")
+                    return
+                del topics[str(u_thread_id)]
+                data["topics"] = topics
+                topics_file.write_text(_yaml.safe_dump(data, default_flow_style=False), encoding="utf-8")
+                _clear_stat_cache()
+                self.console.print(f"[green]✓ Unlinked thread {u_thread_id} from {u_platform}/{u_chat_id}[/green]")
+            else:
+                ws_name = rest.strip()
+                if not ws_name:
+                    self.console.print("Usage: [cyan]/workspace remove <name>[/cyan]")
+                    return
+                ws_dir = workspaces_dir / ws_name
+                if not ws_dir.exists():
+                    self.console.print(f"[red]✗ Workspace '{ws_name}' not found.[/red]")
+                    return
+                import shutil
+                shutil.rmtree(ws_dir)
+                _clear_stat_cache()
+                self.console.print(f"[green]✓ Removed workspace '{ws_name}'[/green]")
+                self.console.print("  [dim]Any topic links pointing to it are now broken — use /workspace unlink to clean up.[/dim]")
+
+        else:
+            self.console.print("\n[bold]Workspace commands[/bold]\n")
+            self.console.print("  [cyan]/workspace[/cyan] or [cyan]/workspace list[/cyan] — List all workspaces")
+            self.console.print("  [cyan]/workspace create <name> [prompt][/cyan] — Create a workspace")
+            self.console.print("  [cyan]/workspace show <name>[/cyan] — Show workspace details")
+            self.console.print("  [cyan]/workspace link <platform> <chat_id> <thread_id> <workspace>[/cyan] — Link a topic")
+            self.console.print("  [cyan]/workspace unlink <platform> <chat_id> <thread_id>[/cyan] — Unlink a topic")
+            self.console.print("  [cyan]/workspace remove <name>[/cyan] — Delete a workspace")
+            self.console.print()
+
     def _handle_cron_command(self, cmd: str):
         """Handle the /cron command to manage scheduled tasks."""
         import shlex
@@ -8905,6 +9062,8 @@ class HermesCLI:
         elif canonical == "personality":
             # Use original case (handler lowercases the personality name itself)
             self._handle_personality_command(cmd_original)
+        elif canonical == "workspace":
+            self._handle_workspace_command(cmd_original)
         elif canonical == "retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
