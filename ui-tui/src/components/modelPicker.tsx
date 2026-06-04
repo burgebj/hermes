@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { providerDisplayNames } from '../domain/providers.js'
 import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
-import type { ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.js'
+import type { FetchModelsResponse, ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.js'
 import { fuzzyRank } from '../lib/fuzzy.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
@@ -29,6 +29,12 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
   const [keyInput, setKeyInput] = useState('')
   const [keySaving, setKeySaving] = useState(false)
   const [keyError, setKeyError] = useState('')
+  // Lazy model fetch: tracks which provider slug is currently being resolved
+  // so the picker can show "fetching…" while model.fetch_models runs.
+  const [fetchingModels, setFetchingModels] = useState('')
+  // Slugs already attempted — prevents retry loops when a provider
+  // genuinely has no models or the endpoint is unreachable.
+  const [fetchedSlugs, setFetchedSlugs] = useState(new Set<string>())
   // Type-to-filter query, scoped per stage (cleared on stage change).
   const [filter, setFilter] = useState('')
 
@@ -120,6 +126,45 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
       setModelIdx(0)
     }
   }, [models.length, modelIdx])
+
+  // Lazy-fetch models when entering Stage 2 for a custom provider that
+  // has no models yet (model.options with lazy_probing=True returns
+  // skeleton rows).  When model.fetch_models returns, patch the
+  // providers array in-place so the model list re-renders.
+  useEffect(() => {
+    if (stage !== 'model' || !provider) {
+      return
+    }
+    const slug = provider.slug
+    const alreadyFetched = fetchedSlugs.has(slug)
+    const needsFetch =
+      provider.is_user_defined &&
+      (provider.models ?? []).length === 0 &&
+      !fetchingModels &&
+      !alreadyFetched
+
+    if (needsFetch) {
+      setFetchingModels(slug)
+      setFetchedSlugs(prev => new Set(prev).add(slug))
+      gw.request<FetchModelsResponse>('model.fetch_models', { slug })
+        .then(raw => {
+          const r = asRpcResult<FetchModelsResponse>(raw)
+          if (r && r.models) {
+            setProviders(prev =>
+              prev.map(p =>
+                p.slug === slug ? { ...p, models: r.models, total_models: r.total_models ?? r.models?.length ?? 0 } : p
+              )
+            )
+          }
+        })
+        .catch(() => {
+          // Silently fail — picker shows "no models listed" message
+        })
+        .finally(() => {
+          setFetchingModels('')
+        })
+    }
+  }, [stage, provider, fetchingModels, fetchedSlugs, gw])
 
   const back = () => {
     // Esc first clears an active filter on the list stages, before navigating.
@@ -596,7 +641,11 @@ export function ModelPicker({ allowPersistGlobal = true, gw, onCancel, onSelect,
         if (!row) {
           return (!allModels.length || noModelMatches) && i === 0 ? (
             <Text color={t.color.muted} key="empty" wrap="truncate-end">
-              {noModelMatches ? 'no models match filter' : 'no models listed for this provider'}
+              {fetchingModels
+                ? 'fetching models…'
+                : noModelMatches
+                  ? 'no models match filter'
+                  : 'no models listed for this provider'}
             </Text>
           ) : (
             <Text color={t.color.muted} key={`pad-${i}`} wrap="truncate-end">

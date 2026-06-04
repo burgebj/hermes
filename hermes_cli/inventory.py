@@ -117,6 +117,7 @@ def build_models_payload(
     pricing: bool = False,
     capabilities: bool = False,
     max_models: int = 50,
+    lazy_probing: bool = False,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer
     needs from a single substrate call.
@@ -149,6 +150,7 @@ def build_models_payload(
         user_providers=ctx.user_providers,
         custom_providers=ctx.custom_providers,
         max_models=max_models,
+        lazy_probing=lazy_probing,
     )
 
     if include_unconfigured:

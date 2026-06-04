@@ -7163,8 +7163,39 @@ def _(rid, params: dict) -> dict:
             pricing=True,
             capabilities=True,
             max_models=50,
+            lazy_probing=True,
         )
         return _ok(rid, payload)
+    except Exception as e:
+        return _err(rid, 5033, str(e))
+
+
+@method("model.fetch_models")
+def _(rid, params: dict) -> dict:
+    """Lazy-load the model list for a specific custom provider slug.
+
+    Params:
+        slug: provider slug (e.g. "vllm-docker", "llama.cpp-model")
+
+    Returns a dict with ``{slug, models, total_models}`` on success.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.model_switch import fetch_custom_provider_models
+
+        slug = (params.get("slug") or "").strip()
+        if not slug:
+            return _err(rid, 4001, "slug is required")
+
+        cfg = load_config()
+        result = fetch_custom_provider_models(
+            slug=slug,
+            custom_providers=cfg.get("custom_providers"),
+            user_providers=cfg.get("providers"),
+        )
+        if result is None:
+            return _err(rid, 4004, f"provider not found or /models unavailable: {slug}")
+        return _ok(rid, result)
     except Exception as e:
         return _err(rid, 5033, str(e))
 
