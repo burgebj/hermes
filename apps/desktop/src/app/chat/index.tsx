@@ -7,12 +7,13 @@ import {
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import type * as React from 'react'
-import { Suspense, useMemo, useRef } from 'react'
+import { Suspense, useCallback, useMemo, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import { Thread } from '@/components/assistant-ui/thread'
 import { Backdrop } from '@/components/Backdrop'
 import { NotificationStack } from '@/components/notifications'
+import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
@@ -36,16 +37,21 @@ import {
   $introSeed,
   $messages,
   $selectedStoredSessionId,
-  $sessions
+  $sessions,
+  sessionPinId
 } from '@/store/session'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { routeSessionId } from '../routes'
 import { titlebarHeaderBaseClass, titlebarHeaderShadowClass } from '../shell/titlebar'
 
+import { ChatDropOverlay } from './chat-drop-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
+import { requestComposerInsert } from './composer/focus'
+import { droppedFileInlineRef } from './composer/inline-refs'
 import type { ChatBarState } from './composer/types'
 import type { DroppedFile } from './hooks/use-composer-actions'
+import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -92,9 +98,17 @@ function ChatHeader({
 }: ChatHeaderProps) {
   const sessions = useStore($sessions)
   const pinnedSessionIds = useStore($pinnedSessionIds)
-  const activeStoredSession = sessions.find(session => session.id === selectedSessionId) || null
-  const title = activeStoredSession ? sessionTitle(activeStoredSession) : 'New agent'
-  const selectedIsPinned = selectedSessionId ? pinnedSessionIds.includes(selectedSessionId) : false
+  const activeStoredSession =
+    sessions.find(session => session.id === selectedSessionId || session._lineage_root_id === selectedSessionId) || null
+  const title = activeStoredSession ? sessionTitle(activeStoredSession) : 'New session'
+  // Pins live on the durable lineage-root id, but selectedSessionId is the live
+  // (tip) id — resolve through the loaded row so the menu reflects the pin
+  // state after auto-compression rotates the id.
+  const selectedIsPinned = activeStoredSession
+    ? pinnedSessionIds.includes(sessionPinId(activeStoredSession))
+    : selectedSessionId
+      ? pinnedSessionIds.includes(selectedSessionId)
+      : false
 
   return (
     <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
@@ -267,6 +281,24 @@ export function ChatView({
     onReload
   })
 
+  // Drop files anywhere in the conversation area, not just on the composer
+  // input — appending the same inline `@file:` ref chips the composer drop
+  // produces (vs. attachment cards) so both surfaces behave identically.
+  const onDropFiles = useCallback(
+    (candidates: DroppedFile[]) => {
+      const refs = candidates
+        .map(candidate => droppedFileInlineRef(candidate, currentCwd))
+        .filter((ref): ref is string => Boolean(ref))
+
+      if (refs.length) {
+        requestComposerInsert(refs.join(' '), { mode: 'inline', target: 'main' })
+      }
+    },
+    [currentCwd]
+  )
+
+  const { dragActive, dropHandlers } = useFileDropZone({ enabled: showChatBar, onDropFiles })
+
   return (
     <div
       className={cn(
@@ -284,8 +316,12 @@ export function ChatView({
       />
 
       <NotificationStack />
+      <PromptOverlays />
 
-      <div className="relative min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background) contain-[layout_paint]">
+      <div
+        className="relative min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background) contain-[layout_paint]"
+        {...dropHandlers}
+      >
         <AssistantRuntimeProvider runtime={runtime}>
           <Thread
             clampToComposer={showChatBar}
@@ -326,6 +362,7 @@ export function ChatView({
             </Suspense>
           )}
         </AssistantRuntimeProvider>
+        <ChatDropOverlay active={dragActive} />
       </div>
     </div>
   )
