@@ -126,6 +126,9 @@ class ResponsesApiTransport(ProviderTransport):
 
         _effort_clamp = {"minimal": "low"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
+        if is_codex_backend and reasoning_effort == "max":
+            # The Codex backend rejects ``max`` but accepts ``xhigh``.
+            reasoning_effort = "xhigh"
 
         response_tools = _responses_tools(tools)
         # ``tools`` MUST be omitted entirely when there are no functions to

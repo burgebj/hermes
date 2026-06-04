@@ -1239,6 +1239,14 @@ class TestReasoningEffortDefaults:
         kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
         assert kwargs["reasoning"]["effort"] == "low"
 
+    def test_codex_reasoning_max_normalizes_to_xhigh(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
+                            base_url="https://chatgpt.com/backend-api/codex")
+        agent.model = "gpt-5.5"
+        agent.reasoning_config = {"enabled": True, "effort": "max"}
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        assert kwargs["reasoning"]["effort"] == "xhigh"
+
     def test_openrouter_reasoning_config_override(self, monkeypatch):
         agent = _make_agent(monkeypatch, "openrouter")
         agent.model = "anthropic/claude-sonnet-4-20250514"

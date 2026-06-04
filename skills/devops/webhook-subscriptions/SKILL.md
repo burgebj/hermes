@@ -3,6 +3,8 @@ name: webhook-subscriptions
 description: "Webhook subscriptions: event-driven agent runs."
 version: 1.1.0
 platforms: [linux, macos, windows]
+required_environment_variables:
+  - WEBHOOK_SECRET
 metadata:
   hermes:
     tags: [webhook, events, automation, integrations, notifications, push]
@@ -40,7 +42,7 @@ platforms:
 ```
 
 ### Option 3: Environment variables
-Add to `~/.hermes/.env`:
+Add to Bitwarden Secrets Manager (preferred) or `~/.hermes/.env`:
 ```bash
 WEBHOOK_ENABLED=true
 WEBHOOK_PORT=8644
