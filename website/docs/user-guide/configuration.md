@@ -77,6 +77,36 @@ Multiple references in a single value work: `url: "${HOST}:${PORT}"`. If a refer
 
 For AI provider setup (OpenRouter, Anthropic, Copilot, custom endpoints, self-hosted LLMs, fallback models, etc.), see [AI Providers](/integrations/providers).
 
+## Session State Storage
+
+Hermes stores session history in `~/.hermes/state.db` by default. This SQLite
+backend needs no configuration and remains the recommended local setup.
+
+PostgreSQL is available for shared or long-running deployments. Install the
+optional dependency, keep the DSN in `.env`, migrate existing state, then cut over
+configuration:
+
+```bash
+pip install 'hermes-agent[postgres]'
+export HERMES_STATE_DATABASE_URL='postgresql://user:<password>@host:5432/hermes'
+hermes migrate state-postgres --apply --dsn "$HERMES_STATE_DATABASE_URL" --update-config
+```
+
+Equivalent `config.yaml` snippet:
+
+```yaml
+sessions:
+  state_backend: postgres  # sqlite | postgres
+  postgres_dsn: ${HERMES_STATE_DATABASE_URL}
+  state_db_path: ~/.hermes/state.db  # used only by sqlite
+```
+
+Run `hermes migrate state-postgres` without `--apply` first for a dry-run count.
+The apply mode backs up `state.db`, copies sessions/messages (including rewound
+inactive rows unless `--active-only` is passed), verifies counts, and then updates
+config only when `--update-config` is supplied. Restart gateways, cron workers,
+and long-running CLI sessions after changing the backend.
+
 ### Provider Timeouts
 
 You can set `providers.<id>.request_timeout_seconds` for a provider-wide request timeout, plus `providers.<id>.models.<model>.timeout_seconds` for a model-specific override. Applies to the primary turn client on every transport (OpenAI-wire, native Anthropic, Anthropic-compatible), the fallback chain, rebuilds after credential rotation, and (for OpenAI-wire) the per-request timeout kwarg — so the configured value wins over the legacy `HERMES_API_TIMEOUT` env var.

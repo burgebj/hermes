@@ -13014,7 +13014,7 @@ def main():
     # =========================================================================
     # migrate command
     # =========================================================================
-    from hermes_cli.migrate import cmd_migrate, cmd_migrate_xai
+    from hermes_cli.migrate import cmd_migrate, cmd_migrate_state_postgres, cmd_migrate_xai
 
     migrate_parser = subparsers.add_parser(
         "migrate",
@@ -13047,6 +13047,55 @@ def main():
         help="Skip the timestamped backup of config.yaml when applying",
     )
     migrate_xai.set_defaults(func=cmd_migrate_xai)
+
+    migrate_state_pg = migrate_subparsers.add_parser(
+        "state-postgres",
+        help="Copy SQLite session state into a PostgreSQL backend",
+        description=(
+            "Export the current SQLite state.db sessions/messages and import "
+            "them into an explicitly provided PostgreSQL DSN. Defaults to "
+            "dry-run; pass --apply to write target rows."
+        ),
+    )
+    migrate_state_pg.add_argument(
+        "--apply",
+        action="store_true",
+        help="Import into PostgreSQL (default: dry-run, count source rows only)",
+    )
+    migrate_state_pg.add_argument(
+        "--dsn",
+        help="PostgreSQL DSN. Defaults to the variable named by --dsn-env.",
+    )
+    migrate_state_pg.add_argument(
+        "--dsn-env",
+        default="HERMES_STATE_DATABASE_URL",
+        help="Environment variable containing the PostgreSQL DSN",
+    )
+    migrate_state_pg.add_argument(
+        "--sqlite-path",
+        help="Source SQLite state.db path (default: active Hermes home state.db)",
+    )
+    migrate_state_pg.add_argument(
+        "--replace",
+        action="store_true",
+        help="Clear target sessions/messages first if the target already has rows",
+    )
+    migrate_state_pg.add_argument(
+        "--active-only",
+        action="store_true",
+        help="Migrate only active messages (default migrates active and rewound rows)",
+    )
+    migrate_state_pg.add_argument(
+        "--update-config",
+        action="store_true",
+        help="After successful import, set sessions.state_backend=postgres in config.yaml",
+    )
+    migrate_state_pg.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip the timestamped SQLite state.db backup when applying",
+    )
+    migrate_state_pg.set_defaults(func=cmd_migrate_state_postgres)
     migrate_parser.set_defaults(func=cmd_migrate)
 
     # =========================================================================
