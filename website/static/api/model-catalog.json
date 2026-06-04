@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-06-01T08:20:18Z",
+  "updated_at": "2026-06-01T19:36:45Z",
   "metadata": {
     "source": "hermes-agent repo",
     "docs": "https://hermes-agent.nousresearch.com/docs/reference/model-catalog"
@@ -54,6 +54,10 @@
         },
         {
           "id": "x-ai/grok-4.3",
+          "description": ""
+        },
+        {
+          "id": "x-ai/grok-composer-2.5-fast",
           "description": ""
         },
         {
