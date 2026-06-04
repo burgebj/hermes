@@ -27,6 +27,7 @@ const { execFileSync, spawn } = require('node:child_process')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
+const { isRunnableUpdaterBinary, waitForUpdaterSpawn } = require('./updater-handoff.cjs')
 const {
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -1266,12 +1267,12 @@ let updateInFlight = false
 // apps/bootstrap-installer paths::copy_self_to_hermes_home). That binary owns
 // ALL repo mutation — running `hermes update` + rebuilding the desktop — so
 // the desktop never touches its own bits while running. Returns null when the
-// updater isn't staged (e.g. a dev/source run that never went through the
-// installer); callers degrade gracefully.
+// updater isn't staged or isn't launchable (e.g. a stale/broken macOS
+// hermes-setup file); callers degrade gracefully.
 function resolveUpdaterBinary() {
   const name = IS_WINDOWS ? 'hermes-setup.exe' : 'hermes-setup'
   const candidate = path.join(HERMES_HOME, name)
-  return fileExists(candidate) ? candidate : null
+  return isRunnableUpdaterBinary(candidate, { isWindows: IS_WINDOWS }) ? candidate : null
 }
 
 // applyUpdates — hand off to the installer's --update flow, then exit.
@@ -1299,7 +1300,7 @@ async function applyUpdates(opts = {}) {
       // whole update itself: `hermes update` (backend) + `hermes desktop
       // --build-only` (OS-aware GUI rebuild), then swap the running .app bundle
       // with the freshly built one and relaunch.
-      return await applyUpdatesPosixInApp(opts)
+      return await applyUpdatesPosixInApp()
     }
     if (!updater) {
       // No staged updater binary — this is a CLI-installed user (they ran
@@ -1355,6 +1356,26 @@ async function applyUpdates(opts = {}) {
       stdio: 'ignore',
       windowsHide: false
     })
+
+    try {
+      await waitForUpdaterSpawn(child)
+    } catch (err) {
+      const message = `Could not launch the staged Hermes updater: ${err.message || String(err)}`
+      rememberLog(`[updates] staged updater launch failed: ${updater} --update: ${err.message || err}`)
+
+      if (!IS_WINDOWS) {
+        emitUpdateProgress({
+          stage: 'update',
+          message: 'Staged updater failed to launch; using in-app update fallback…',
+          percent: 5
+        })
+        return await applyUpdatesPosixInApp()
+      }
+
+      emitUpdateProgress({ stage: 'error', message, error: 'updater-launch-failed' })
+      return { ok: false, error: 'updater-launch-failed', message, updater }
+    }
+
     child.unref()
 
     rememberLog(`[updates] launched updater: ${updater} ${updaterArgs.join(' ')}; exiting desktop to release venv shim`)
@@ -1423,7 +1444,7 @@ function shellQuote(value) {
 // (`hermes desktop --build-only`), then atomically swap the running .app bundle
 // with the freshly built one and relaunch. Degrades to "backend updated,
 // restart to load the new GUI" if the swap can't be performed.
-async function applyUpdatesPosixInApp(opts = {}) {
+async function applyUpdatesPosixInApp() {
   const updateRoot = resolveUpdateRoot()
   const hermes = resolveHermesCliBinary(updateRoot)
   if (!hermes) {
