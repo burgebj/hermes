@@ -1697,6 +1697,37 @@ DEFAULT_CONFIG = {
     # Never saved to sessions, logs, or trajectories.
     "prefill_messages_file": "",
 
+    # Agent profiles — named subagent configurations for delegate_task.
+    # Each profile defines a reusable subagent persona: model, toolsets,
+    # iteration budget, system prompt (inline or file), and optional
+    # delegation credential overrides. Use via:
+    #   delegate_task(goal="...", profile="explorer")
+    #   delegate_task(tasks=[{"goal": "...", "profile": "oracle"}, ...])
+    #
+    # Profile fields (all optional):
+    #   model               — LLM for this subagent (overrides delegation.model)
+    #   toolsets            — list of toolsets (intersected with parent's enabled set)
+    #   max_iterations      — per-subagent iteration cap (overrides delegation.max_iterations)
+    #   system_prompt       — inline system prompt string (highest priority)
+    #   system_prompt_file  — path to an external .md prompt file (~ expanded)
+    #   delegation          — nested overrides: provider, base_url, api_key
+    #
+    # Example:
+    #   agent_profiles:
+    #     explorer:
+    #       model: google/gemini-2.5-flash
+    #       toolsets: [file]
+    #       max_iterations: 30
+    #     oracle:
+    #       model: anthropic/claude-opus-4
+    #       system_prompt_file: ~/.hermes/profiles/oracle.md
+    #       toolsets: [file, web]
+    #     fixer:
+    #       model: meta-llama/llama-4-maverick
+    #       system_prompt: "You are a focused code repair specialist..."
+    #       toolsets: [terminal, file]
+    "agent_profiles": {},
+
     # Goals — persistent cross-turn goals (Ralph-style loop).
     # After every turn, a lightweight judge call asks the auxiliary model
     # whether the active /goal is satisfied by the assistant's last
@@ -3937,7 +3968,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
-    "sessions", "streaming",
+    "sessions", "agent_profiles", "streaming",
 }
 
 # Valid fields inside a custom_providers list entry

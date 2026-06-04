@@ -902,6 +902,48 @@ delegation:
 # =============================================================================
 # Display
 # =============================================================================
+
+# ─── Agent Profiles ─────────────────────────────────────────────────────────
+# Named subagent configurations for delegate_task.
+# Define reusable personas: model, toolsets, iteration budget, and system
+# prompt (inline or file). The LLM selects a profile by name when calling
+# delegate_task(profile="explorer") or per-task in batch mode.
+#
+# All fields are optional. Omitted fields fall back to delegation.* defaults.
+# Toolsets are intersected with the parent agent's enabled toolsets so a
+# profile can never grant tools the parent doesn't have.
+#
+# agent_profiles:
+#   explorer:
+#     model: google/gemini-2.5-flash        # cheap, fast model for exploration
+#     toolsets: [file]                       # read-only codebase access
+#     max_iterations: 30
+#     # system_prompt: "You are a codebase explorer..."  # inline prompt (optional)
+#     # system_prompt_file: ~/.hermes/profiles/explorer.md  # or external file
+#
+#   oracle:
+#     model: anthropic/claude-opus-4         # strong model for architecture decisions
+#     toolsets: [file, web]
+#     max_iterations: 50
+#     system_prompt_file: ~/.hermes/profiles/oracle.md
+#
+#   fixer:
+#     model: meta-llama/llama-4-maverick     # fast model for implementation tasks
+#     toolsets: [terminal, file]
+#     system_prompt: |
+#       You are a focused code repair specialist. Your job is to identify and
+#       fix bugs, failing tests, and broken functionality with minimal footprint.
+#
+#   wp-designer:
+#     model: anthropic/claude-sonnet-4
+#     toolsets: [file, browser]
+#     system_prompt_file: ~/.hermes/profiles/wp-designer.md
+#     delegation:
+#       provider: openrouter                 # run this profile on a different provider
+#
+# agent_profiles: {}  # default: no profiles defined
+agent_profiles: {}
+
 display:
   # Use compact banner mode (hides the ASCII-art banner, shows a single line).
   #   true:  Compact single-line banner
