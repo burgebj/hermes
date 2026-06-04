@@ -72,5 +72,9 @@ services:
     environment:
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
+      # Dashboard does not need per-profile gateway services. Skipping
+      # reconciliation avoids s6-log lock contention when both gateway
+      # and dashboard share the same bind-mounted HERMES_HOME.
+      - HERMES_SKIP_PROFILE_RECONCILE=1
     # Localhost-only. For remote access, tunnel via `ssh -L 9119:localhost:9119`.
     command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
