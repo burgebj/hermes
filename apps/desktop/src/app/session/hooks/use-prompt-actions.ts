@@ -40,7 +40,7 @@ import {
   setYoloActive
 } from '@/store/session'
 
-import type { ClientSessionState, ImageAttachResponse, SlashExecResponse } from '../../types'
+import type { ClientSessionState, FileAttachResponse, ImageAttachResponse, SlashExecResponse } from '../../types'
 
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -56,6 +56,16 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.addEventListener('error', () => reject(reader.error || new Error('Could not read recorded audio')))
     reader.readAsDataURL(blob)
   })
+}
+
+async function readAttachmentDataUrl(filePath: string): Promise<string> {
+  const reader = window.hermesDesktop?.readFileDataUrl
+
+  if (!reader) {
+    throw new Error('Desktop file bridge unavailable')
+  }
+
+  return await reader(filePath)
 }
 
 function isProviderSetupError(error: unknown) {
@@ -174,42 +184,81 @@ export function usePromptActions({
     [selectedStoredSessionIdRef, updateSessionState]
   )
 
-  const syncImageAttachmentsForSubmit = useCallback(
+  const syncAttachmentsForSubmit = useCallback(
     async (
       sessionId: string,
       attachments: ComposerAttachment[],
       options: { updateComposerAttachments?: boolean } = {}
     ) => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
-      const images = attachments.filter(attachment => attachment.kind === 'image' && attachment.path)
+      const synced: ComposerAttachment[] = []
 
-      for (const attachment of images) {
-        if (attachment.attachedSessionId === sessionId) {
+      for (const attachment of attachments) {
+        if (!attachment.path || attachment.attachedSessionId === sessionId) {
+          synced.push(attachment)
           continue
         }
 
-        const result = await requestGateway<ImageAttachResponse>('image.attach', {
-          session_id: sessionId,
-          path: attachment.path
-        })
+        if (attachment.kind === 'image') {
+          const result = await requestGateway<ImageAttachResponse>('image.attach', {
+            session_id: sessionId,
+            path: attachment.path
+          })
 
-        if (!result.attached) {
-          const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')
-          throw new Error(result.message || `Could not attach ${label}`)
-        }
+          if (!result.attached) {
+            const label = attachment.label || pathLabel(attachment.path)
+            throw new Error(result.message || `Could not attach ${label}`)
+          }
 
-        const attachedPath = result.path || attachment.path
-
-        if (updateComposerAttachments) {
-          addComposerAttachment({
+          const attachedPath = result.path || attachment.path
+          const nextAttachment = {
             ...attachment,
             id: attachment.id,
             label: attachedPath ? pathLabel(attachedPath) : attachment.label,
             path: attachedPath,
             attachedSessionId: sessionId
-          })
+          }
+
+          if (updateComposerAttachments) {
+            addComposerAttachment(nextAttachment)
+          }
+
+          synced.push(nextAttachment)
+          continue
         }
+
+        if (attachment.kind === 'file') {
+          const result = await requestGateway<FileAttachResponse>('file.attach', {
+            session_id: sessionId,
+            path: attachment.path,
+            data_url: await readAttachmentDataUrl(attachment.path),
+            name: attachment.label || pathLabel(attachment.path)
+          })
+
+          if (!result.attached || !result.ref_text) {
+            const label = attachment.label || pathLabel(attachment.path)
+            throw new Error(result.message || `Could not attach ${label}`)
+          }
+
+          const nextAttachment = {
+            ...attachment,
+            id: attachment.id,
+            refText: result.ref_text,
+            attachedSessionId: sessionId
+          }
+
+          if (updateComposerAttachments) {
+            addComposerAttachment(nextAttachment)
+          }
+
+          synced.push(nextAttachment)
+          continue
+        }
+
+        synced.push(attachment)
       }
+
+      return synced
     },
     [requestGateway]
   )
@@ -219,32 +268,21 @@ export function usePromptActions({
       const visibleText = rawText.trim()
       const usingComposerAttachments = !options?.attachments
       const attachments = options?.attachments ?? $composerAttachments.get()
-
-      const contextRefs = attachments
-        .map(a => a.refText)
-        .filter(Boolean)
-        .join('\n')
-
-      const terminalContextBlocks = terminalContextBlocksFromDraft(rawText).join('\n\n')
-      const hasImage = attachments.some(a => a.kind === 'image')
       const attachmentRefs = attachments.map(attachmentDisplayText).filter((r): r is string => Boolean(r))
 
-      const text =
-        [contextRefs, terminalContextBlocks, visibleText].filter(Boolean).join('\n\n') ||
-        (hasImage ? 'What do you see in this image?' : '')
-
-      if (!text || busyRef.current) {
+      if ((!visibleText && attachments.length === 0) || busyRef.current) {
         return false
       }
 
       const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      let optimisticAttachmentRefs = attachmentRefs
 
-      const userMessage: ChatMessage = {
+      const buildUserMessage = (): ChatMessage => ({
         id: optimisticId,
         role: 'user',
-        parts: [textPart(visibleText || (attachmentRefs.length ? '' : attachments.map(a => a.label).join(', ')))],
-        attachmentRefs
-      }
+        parts: [textPart(visibleText || (optimisticAttachmentRefs.length ? '' : attachments.map(a => a.label).join(', ')))],
+        attachmentRefs: optimisticAttachmentRefs
+      })
 
       const releaseBusy = () => {
         setMutableRef(busyRef, false)
@@ -261,12 +299,22 @@ export function usePromptActions({
             ...state,
             messages: state.messages.some(m => m.id === optimisticId)
               ? state.messages
-              : [...state.messages, userMessage],
+              : [...state.messages, buildUserMessage()],
             busy: true,
             awaitingResponse: true,
             pendingBranchGroup: null,
             sawAssistantPayload: false,
             interrupted: state.interrupted
+          }),
+          selectedStoredSessionIdRef.current
+        )
+
+      const rewriteOptimistic = (sid: string) =>
+        updateSessionState(
+          sid,
+          state => ({
+            ...state,
+            messages: state.messages.map(message => (message.id === optimisticId ? buildUserMessage() : message))
           }),
           selectedStoredSessionIdRef.current
         )
@@ -301,7 +349,7 @@ export function usePromptActions({
       if (sessionId) {
         seedOptimistic(sessionId)
       } else {
-        setMessages(current => [...current, userMessage])
+        setMessages(current => [...current, buildUserMessage()])
       }
 
       if (!sessionId) {
@@ -327,9 +375,23 @@ export function usePromptActions({
       }
 
       try {
-        await syncImageAttachmentsForSubmit(sessionId, attachments, {
+        const syncedAttachments = await syncAttachmentsForSubmit(sessionId, attachments, {
           updateComposerAttachments: usingComposerAttachments
         })
+        optimisticAttachmentRefs = syncedAttachments
+          .map(attachmentDisplayText)
+          .filter((r): r is string => Boolean(r))
+        rewriteOptimistic(sessionId)
+        const contextRefs = syncedAttachments
+          .map(a => a.refText)
+          .filter(Boolean)
+          .join('\n')
+        const terminalContextBlocks = terminalContextBlocksFromDraft(rawText).join('\n\n')
+        const hasImage = syncedAttachments.some(a => a.kind === 'image')
+        const text =
+          [contextRefs, terminalContextBlocks, visibleText].filter(Boolean).join('\n\n') ||
+          (hasImage ? 'What do you see in this image?' : '')
+
         await requestGateway('prompt.submit', { session_id: sessionId, text })
 
         if (usingComposerAttachments) {
@@ -376,7 +438,7 @@ export function usePromptActions({
       createBackendSessionForSend,
       requestGateway,
       selectedStoredSessionIdRef,
-      syncImageAttachmentsForSubmit,
+      syncAttachmentsForSubmit,
       updateSessionState
     ]
   )

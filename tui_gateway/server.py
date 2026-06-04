@@ -1,4 +1,6 @@
 import atexit
+import base64
+import binascii
 import concurrent.futures
 import contextvars
 import copy
@@ -7,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -1562,7 +1565,109 @@ def _current_profile_name() -> str:
 # backend reporting less than its required value (or none at all — a pre-GUI
 # checkout), surfacing a one-click "update to align" prompt instead of failing
 # cryptically downstream. Bump whenever the desktop's backend contract changes.
-DESKTOP_BACKEND_CONTRACT = 1
+DESKTOP_BACKEND_CONTRACT = 2
+
+
+_ATTACHMENT_REF_NEEDS_QUOTING_RE = re.compile(r"""[\s()\[\]{}<>"'`]""")
+
+
+def _format_ref_value(value: str) -> str:
+    if not value or not _ATTACHMENT_REF_NEEDS_QUOTING_RE.search(value):
+        return value
+    if "`" not in value:
+        return f"`{value}`"
+    if '"' not in value:
+        return f'"{value}"'
+    if "'" not in value:
+        return f"'{value}'"
+    return value
+
+
+def _attachment_ref_path(session: dict, target: Path) -> str:
+    workspace = Path(_session_cwd(session)).resolve()
+    try:
+        rel = target.resolve().relative_to(workspace)
+        return str(rel).replace(os.sep, "/")
+    except ValueError:
+        return str(target.resolve())
+
+
+def _decode_data_url_payload(data_url: str) -> bytes:
+    match = re.match(r"^data:(?:[^;,]+)?(?:;[^;,=]+=[^;,]+)*;base64,(.+)$", data_url, re.I)
+    if not match:
+        raise ValueError("invalid data_url payload")
+    try:
+        return base64.b64decode(match.group(1), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("invalid data_url payload") from exc
+
+
+def _desktop_attachment_dir(session: dict) -> Path:
+    root = Path(_session_cwd(session)).resolve() / ".hermes" / "desktop-attachments"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _sanitize_attachment_name(name: str) -> str:
+    candidate = Path(str(name or "").strip()).name
+    candidate = re.sub(r"[\x00-\x1f]+", "_", candidate)
+    candidate = candidate.strip().strip(".")
+    return candidate or "attachment"
+
+
+def _unique_attachment_path(root: Path, filename: str) -> Path:
+    candidate = root / filename
+    if not candidate.exists():
+        return candidate
+    stem = Path(filename).stem or "attachment"
+    suffix = Path(filename).suffix
+    counter = 2
+    while True:
+        next_candidate = root / f"{stem}-{counter}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+        counter += 1
+
+
+def _resolve_gateway_attachment_path(raw: str) -> Path | None:
+    if not raw:
+        return None
+    from cli import _detect_file_drop, _resolve_attachment_path, _split_path_input
+
+    dropped = _detect_file_drop(raw)
+    if dropped:
+        return Path(dropped["path"]).resolve()
+    path_token, _remainder = _split_path_input(raw)
+    resolved = _resolve_attachment_path(path_token)
+    return Path(resolved).resolve() if resolved is not None else None
+
+
+def _stage_session_file_attachment(
+    session: dict,
+    *,
+    raw_path: str,
+    data_url: str,
+    name: str,
+) -> tuple[Path, bool]:
+    workspace = Path(_session_cwd(session)).resolve()
+    resolved = _resolve_gateway_attachment_path(raw_path)
+    if resolved is not None:
+        try:
+            resolved.relative_to(workspace)
+            return resolved, False
+        except ValueError:
+            payload = resolved.read_bytes()
+            filename = resolved.name
+    else:
+        if not data_url:
+            raise ValueError("file not found on gateway and no data_url provided")
+        payload = _decode_data_url_payload(data_url)
+        filename = _sanitize_attachment_name(name or Path(str(raw_path or "")).name)
+
+    upload_dir = _desktop_attachment_dir(session)
+    target = _unique_attachment_path(upload_dir, _sanitize_attachment_name(filename))
+    target.write_bytes(payload)
+    return target.resolve(), True
 
 
 def _session_info(agent, session: dict | None = None) -> dict:
@@ -4628,6 +4733,36 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5027, str(e))
+
+
+@method("file.attach")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    raw = str(params.get("path", "") or "").strip()
+    data_url = str(params.get("data_url", "") or "").strip()
+    name = str(params.get("name", "") or "").strip()
+    if not raw and not data_url:
+        return _err(rid, 4015, "path or data_url required")
+    try:
+        stored_path, uploaded = _stage_session_file_attachment(
+            session, raw_path=raw, data_url=data_url, name=name
+        )
+        ref_path = _attachment_ref_path(session, stored_path)
+        return _ok(
+            rid,
+            {
+                "attached": True,
+                "name": stored_path.name,
+                "path": str(stored_path),
+                "ref_path": ref_path,
+                "ref_text": f"@file:{_format_ref_value(ref_path)}",
+                "uploaded": uploaded,
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5028, str(e))
 
 
 @method("image.detach")
