@@ -1510,7 +1510,12 @@ def _probe_credentials(agent) -> str:
     try:
         key = getattr(agent, "api_key", "") or ""
         provider = getattr(agent, "provider", "") or ""
-        if not key or key == "no-key-required":
+        base_url = getattr(agent, "base_url", "") or ""
+        # Skip warning for local GGUF endpoints — "no-key-required" is the correct value
+        # when using a custom provider without auth (local inference, Ollama, llama.cpp, etc.)
+        if key == "no-key-required":
+            return ""
+        if not key:
             return f"No API key configured for provider '{provider}'. First message will fail."
     except Exception:
         pass

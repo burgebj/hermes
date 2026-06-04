@@ -1,0 +1,15 @@
+[Unit]
+Description=Hermes Agent Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=dshelfoon
+WorkingDirectory=/home/dshelfoon/.hermes/hermes-agent
+Environment=PATH=/home/dshelfoon/.local/bin:/usr/bin:/bin
+ExecStart=/home/dshelfoon/.local/bin/hermes dashboard --host 0.0.0.0 --port 9119 --insecure
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
