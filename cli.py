@@ -8669,8 +8669,44 @@ class HermesCLI:
 
     def _handle_skills_command(self, cmd: str):
         """Handle /skills slash command — delegates to hermes_cli.skills_hub."""
+        # Intercept write-approval review subcommands first (pending/approve/
+        # reject/diff/mode); everything else goes to the skills hub.
+        parts = cmd.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+        if args and args[0].lower() in {"pending", "approve", "apply", "reject",
+                                        "deny", "drop", "diff", "mode"}:
+            from hermes_cli.write_approval_commands import handle_pending_subcommand
+            from tools import write_approval as wa
+            out = handle_pending_subcommand(
+                wa.SKILLS, args,
+                set_mode_fn=lambda m: self._save_write_mode("skills", m),
+            )
+            if out is not None:
+                print(out)
+                return
         from hermes_cli.skills_hub import handle_skills_slash
         handle_skills_slash(cmd, ChatConsole())
+
+    def _handle_memory_command(self, cmd: str):
+        """Handle /memory slash command — pending review + write-mode control."""
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        parts = cmd.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+        store = getattr(self.agent, "_memory_store", None) if getattr(self, "agent", None) else None
+        out = handle_pending_subcommand(
+            wa.MEMORY, args,
+            memory_store=store,
+            set_mode_fn=lambda m: self._save_write_mode("memory", m),
+        )
+        if out is None:
+            out = (f"Unknown /memory subcommand. "
+                   f"Use: pending, approve <id>, reject <id>, mode <on|off|approve>.")
+        print(out)
+
+    def _save_write_mode(self, subsystem: str, mode: str):
+        """Persist <subsystem>.write_mode to config (for /memory|/skills mode)."""
+        save_config_value(f"{subsystem}.write_mode", mode)
 
     def _show_gateway_status(self):
         """Show status of the gateway and connected messaging platforms."""
@@ -8984,6 +9020,8 @@ class HermesCLI:
         elif canonical == "skills":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._handle_skills_command(cmd_original)
+        elif canonical == "memory":
+            self._handle_memory_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
         elif canonical == "status":
