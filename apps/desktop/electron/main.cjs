@@ -29,6 +29,11 @@ const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const {
+  INSTALL_STAMP_SCHEMA_VERSION,
+  localBuildUpdateBlock,
+  normalizeInstallStampPayload
+} = require('./install-stamp.cjs')
+const {
   authModeFromStatus,
   buildGatewayWsUrl,
   buildGatewayWsUrlWithTicket,
@@ -121,7 +126,6 @@ const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 // Schema:
 //   { schemaVersion: 1, commit, branch, repository, bootstrapRef, commitPinned,
 //     repoUrlHttps, repoUrlSsh, builtAt, dirty, source }
-const INSTALL_STAMP_SCHEMA_VERSION = 1
 function loadInstallStamp() {
   // Try packaged location first (resources/install-stamp.json), then the
   // dev/local build output (apps/desktop/build/install-stamp.json) so
@@ -135,22 +139,14 @@ function loadInstallStamp() {
     try {
       const raw = fs.readFileSync(p, 'utf8')
       const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object' && typeof parsed.commit === 'string' && parsed.commit.length >= 7) {
-        if (parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
-          console.warn(
-            `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
-          )
-          continue
-        }
-        return Object.freeze({
-          schemaVersion: parsed.schemaVersion,
-          commit: parsed.commit,
-          branch: parsed.branch || null,
-          builtAt: parsed.builtAt || null,
-          dirty: Boolean(parsed.dirty),
-          source: parsed.source || null,
-          path: p
-        })
+      const stamp = normalizeInstallStampPayload(parsed, INSTALL_STAMP_SCHEMA_VERSION)
+      if (stamp) {
+        return Object.freeze({ ...stamp, path: p })
+      }
+      if (parsed && typeof parsed === 'object' && parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
+        console.warn(
+          `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
+        )
       }
     } catch {
       // Either ENOENT or malformed JSON; try the next candidate
@@ -1380,6 +1376,14 @@ async function applyUpdates(opts = {}) {
   updateInFlight = true
 
   try {
+    const localUpdateBlock = localBuildUpdateBlock(INSTALL_STAMP)
+    if (localUpdateBlock) {
+      const updateRoot = resolveUpdateRoot()
+      rememberLog(`[updates] ${localUpdateBlock.reason}: ${localUpdateBlock.message}`)
+      emitUpdateProgress({ stage: 'manual', message: localUpdateBlock.message, percent: null })
+      return { ...localUpdateBlock, hermesRoot: updateRoot }
+    }
+
     const updater = resolveUpdaterBinary()
     if (!updater && !IS_WINDOWS) {
       // macOS/Linux drag-install: no staged Tauri hermes-setup. Unlike Windows
