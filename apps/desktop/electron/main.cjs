@@ -5431,15 +5431,23 @@ ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
 })
 ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
 
-ipcMain.handle('hermes:updates:check', async () =>
-  checkUpdates().catch(error => ({
-    supported: true,
-    branch: readDesktopUpdateConfig().branch,
-    error: 'check-failed',
-    message: error?.message || String(error),
-    fetchedAt: Date.now()
-  }))
-)
+ipcMain.handle('hermes:updates:check', async () => {
+  try {
+    const result = await checkUpdates()
+    rememberLog(`[updates] check result: supported=${result.supported} behind=${result.behind} error=${result.error || 'none'} message=${(result.message || '').slice(0, 100)}`)
+    return result
+  } catch (error) {
+    const msg = error?.message || String(error)
+    rememberLog(`[updates] check threw: ${msg}`)
+    return {
+      supported: true,
+      branch: readDesktopUpdateConfig().branch,
+      error: 'check-failed',
+      message: msg,
+      fetchedAt: Date.now()
+    }
+  }
+})
 
 ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
   applyUpdates(payload || {}).catch(error => ({
