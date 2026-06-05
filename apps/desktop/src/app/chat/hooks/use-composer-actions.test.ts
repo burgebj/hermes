@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { imageAttachRequestForAttachment } from '@/lib/chat-runtime'
 import { $composerAttachments, clearComposerAttachments } from '@/store/composer'
 
 import { useComposerActions } from './use-composer-actions'
@@ -47,5 +48,45 @@ describe('useComposerActions', () => {
       path: '/home/alice/.config/Hermes/composer-images/paste.png'
     })
     expect(attachment?.previewUrl).toBe('data:image/png;base64,AQID')
+  })
+
+  it('keeps pasted image bytes on Electron saved-path attachments for remote gateway upload', async () => {
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: {
+        readFileDataUrl: vi.fn(async () => 'data:image/png;base64,AQID'),
+        saveClipboardImage: vi.fn(async () => 'C:\\Users\\alice\\AppData\\Roaming\\Hermes\\composer-images\\paste.png')
+      }
+    })
+
+    const { result } = renderHook(() =>
+      useComposerActions({
+        activeSessionId: 'sid',
+        currentCwd: '/work',
+        requestGateway: vi.fn()
+      })
+    )
+
+    await act(async () => {
+      await result.current.pasteClipboardImage()
+    })
+
+    const attachment = $composerAttachments.get()[0]
+
+    expect(attachment).toMatchObject({
+      contentBase64: 'AQID',
+      filename: 'paste.png',
+      kind: 'image',
+      path: 'C:\\Users\\alice\\AppData\\Roaming\\Hermes\\composer-images\\paste.png',
+      previewUrl: 'data:image/png;base64,AQID'
+    })
+    expect(imageAttachRequestForAttachment('sid', attachment!)).toEqual({
+      method: 'image.attach_bytes',
+      params: {
+        content_base64: 'AQID',
+        filename: 'paste.png',
+        session_id: 'sid'
+      }
+    })
   })
 })

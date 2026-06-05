@@ -42,6 +42,23 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
+function imageContentBase64FromDataUrl(dataUrl: string): string | undefined {
+  const separatorIndex = dataUrl.indexOf(',')
+
+  if (separatorIndex < 0) {
+    return undefined
+  }
+
+  const header = dataUrl.slice(0, separatorIndex).toLowerCase()
+  const contentBase64 = dataUrl.slice(separatorIndex + 1).trim()
+
+  if (!header.startsWith('data:image/') || !header.endsWith(';base64') || !contentBase64) {
+    return undefined
+  }
+
+  return contentBase64
+}
+
 function isImagePath(filePath: string): boolean {
   return IMAGE_EXTENSION_PATTERN.test(filePath)
 }
@@ -305,7 +322,12 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
       const previewUrl = await window.hermesDesktop?.readFileDataUrl(filePath)
 
       if (previewUrl) {
-        addComposerAttachment({ ...baseAttachment, previewUrl })
+        addComposerAttachment({
+          ...baseAttachment,
+          contentBase64: imageContentBase64FromDataUrl(previewUrl),
+          filename: pathLabel(filePath),
+          previewUrl
+        })
       }
 
       return true
