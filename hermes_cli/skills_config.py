@@ -45,6 +45,11 @@ def save_disabled_skills(config: dict, disabled: Set[str], platform: Optional[st
         config["skills"].setdefault("platform_disabled", {})
         config["skills"]["platform_disabled"][platform] = sorted(disabled)
     save_config(config)
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+    except Exception:
+        pass
 
 
 # ─── Skill Discovery ─────────────────────────────────────────────────────────

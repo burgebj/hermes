@@ -10089,15 +10089,16 @@ class GatewayRunner:
 
         # Fire plugin on_session_finalize hook (session boundary)
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "on_session_finalize",
-                session_id=_old_sid,
-                platform=source.platform.value if source.platform else "",
-                reason="new_session",
-                old_session_id=_old_sid,
-                new_session_id=new_entry.session_id if new_entry else None,
-            )
+            if _old_sid:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _invoke_hook(
+                    "on_session_finalize",
+                    session_id=_old_sid,
+                    platform=source.platform.value if source.platform else "",
+                    reason="new_session",
+                    old_session_id=_old_sid,
+                    new_session_id=new_entry.session_id if new_entry else None,
+                )
         except Exception:
             pass
 

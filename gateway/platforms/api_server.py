@@ -57,6 +57,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     is_network_accessible,
+    IMAGE_CACHE_DIR,
 )
 
 logger = logging.getLogger(__name__)
@@ -4122,6 +4123,11 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+
+            # Serve cached images via HTTP
+            if IMAGE_CACHE_DIR:
+                self._app.router.add_static("/images/", str(IMAGE_CACHE_DIR), show_index=False)
+
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)
@@ -4194,6 +4200,14 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._runner.setup()
             self._site = web.TCPSite(self._runner, self._host, self._port)
             await self._site.start()
+
+            # Auto-inject image serving base URL if not explicitly set, so the image
+            # generation tool knows how to rewrite local paths for API clients.
+            if not os.getenv("IMAGE_SERVE_BASE_URL"):
+                # If binding to all interfaces, default to loopback for the URL;
+                # otherwise use the configured host.
+                serving_host = "127.0.0.1" if self._host == "0.0.0.0" else self._host
+                os.environ["IMAGE_SERVE_BASE_URL"] = f"http://{serving_host}:{self._port}"
 
             self._mark_connected()
             logger.info(

@@ -2074,6 +2074,21 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Resolve task-level endpoint overrides. Default to top-level resolved creds.
+            t_provider = t.get("provider") or creds["provider"]
+            t_base_url = t.get("base_url") or creds["base_url"]
+            t_api_key = t.get("api_key") or creds["api_key"]
+            t_api_mode = creds.get("api_mode")
+
+            # Heuristic api_mode detection for per-task base_url overrides
+            if t.get("base_url"):
+                base_lower = str(t["base_url"]).lower()
+                if "api.anthropic.com" in base_lower or "api.kimi.com/coding" in base_lower:
+                    t_api_mode = "anthropic_messages"
+                elif "chatgpt.com" in base_lower and "/backend-api/codex" in base_lower:
+                    t_api_mode = "codex_responses"
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2083,10 +2098,10 @@ def delegate_task(
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=t_provider,
+                override_base_url=t_base_url,
+                override_api_key=t_api_key,
+                override_api_mode=t_api_mode,
                 override_acp_command=t.get("acp_command")
                 or acp_command
                 or creds.get("command"),
@@ -2759,6 +2774,18 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Per-task base_url override (e.g. 'https://openrouter.ai/api/v1').",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Per-task provider override (e.g. 'anthropic', 'openai', 'openrouter').",
+                        },
+                        "api_key": {
+                            "type": "string",
+                            "description": "Per-task api_key override. Use this only if the sub-task requires a different credential pool.",
                         },
                     },
                     "required": ["goal"],
