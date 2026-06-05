@@ -1566,6 +1566,22 @@ def _compress_session_history(
             return 0, usage
         session["history"] = compressed
         session["history_version"] = history_version + 1
+    # Write compressed messages to the NEW DB session so they survive
+    # restarts.  _compress_context rotates agent.session_id (ends old
+    # session, creates new one) — the DB must contain the compressed
+    # transcript for that new session.  Without this, the compressed
+    # content lives only in memory and is lost on exit.  (data loss — #39704)
+    _new_sid = getattr(agent, "session_id", None)
+    if _new_sid:
+        _db = _get_db()
+        if _db:
+            try:
+                _db.replace_messages(_new_sid, compressed)
+            except Exception as _werr:
+                logger.warning(
+                    "session.compress: replace_messages failed for "
+                    "new session %s: %s", _new_sid, _werr,
+                )
     usage = _get_usage(agent)
     return len(history) - len(compressed), usage
 

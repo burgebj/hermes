@@ -629,6 +629,21 @@ export function usePromptActions({
           return
         }
 
+        if (normalizedName === 'compress') {
+          try {
+            const result = await requestGateway<{ output?: string }>('session.compress', {
+              session_id: sessionId,
+              focus_topic: arg || ''
+            })
+
+            renderSlashOutput(result?.output || 'Compression complete.')
+          } catch (err) {
+            renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
+          }
+
+          return
+        }
+
         if (!isDesktopSlashCommand(name)) {
           renderSlashOutput(desktopSlashUnavailableMessage(name) || `/${name} is not available in the desktop app.`)
 

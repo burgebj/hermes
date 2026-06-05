@@ -1292,7 +1292,8 @@ class SessionStore:
             try:
                 self._db.replace_messages(session_id, messages)
             except Exception as e:
-                logger.debug("Failed to rewrite transcript in DB: %s", e)
+                logger.warning("Failed to rewrite transcript in DB (session=%s, msgs=%d): %s",
+                              session_id, len(messages), e)
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
