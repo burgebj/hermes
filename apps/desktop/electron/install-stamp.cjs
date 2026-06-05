@@ -29,8 +29,10 @@ function normalizeInstallStampPayload(payload, expectedSchemaVersion = INSTALL_S
 
 function isLocalProtectedInstallStamp(installStamp) {
   if (!installStamp || installStamp.source !== 'local') return false
-  if (installStamp.commitPinned === false) return true
-  return Boolean(installStamp.repository && installStamp.repository !== DEFAULT_GITHUB_REPOSITORY)
+  if (installStamp.commitPinned === true && installStamp.repository === DEFAULT_GITHUB_REPOSITORY) {
+    return false
+  }
+  return true
 }
 
 function localBuildUpdateBlock(installStamp, env = process.env) {

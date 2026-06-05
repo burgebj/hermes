@@ -53,6 +53,20 @@ test('blocks automatic updates for local unpinned desktop bundles', () => {
   assert.match(block.message, /Automatic self-update is paused/)
 })
 
+test('blocks automatic updates for local stamps without pin metadata', () => {
+  const stamp = normalizeInstallStampPayload({
+    schemaVersion: 1,
+    commit: 'abcdef1234567890',
+    branch: 'local/dev',
+    source: 'local'
+  })
+
+  assert.equal(isLocalProtectedInstallStamp(stamp), true)
+  const block = localBuildUpdateBlock(stamp, {})
+  assert.equal(block.manual, true)
+  assert.equal(block.reason, 'local-build-install')
+})
+
 test('blocks automatic updates for local fork-pinned desktop bundles', () => {
   const stamp = normalizeInstallStampPayload({
     schemaVersion: 1,
