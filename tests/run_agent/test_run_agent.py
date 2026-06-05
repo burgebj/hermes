@@ -2539,6 +2539,59 @@ class TestConcurrentToolExecution:
         assert post_call[1]["error_type"] is None
         assert isinstance(post_call[1]["duration_ms"], int)
 
+    def test_invoke_tool_model_switch_emits_post_tool_hook(self, agent, monkeypatch):
+        """Concurrent-path model_switch branch must fire the post-tool-call hook.
+
+        Why: The model_switch elif in invoke_tool previously returned the raw
+        _model_switch_tool() result without wrapping it in _finish_agent_tool(),
+        silently dropping the telemetry event on the concurrent execution path.
+        Every peer branch (todo, session_search, memory, clarify, delegate_task)
+        wraps; this test pins model_switch to the same contract.
+        What: Patches model_switch_tool to return a canned JSON string, invokes
+        via _invoke_tool (which calls agent.agent_runtime_helpers.invoke_tool),
+        and asserts _emit_post_tool_call_hook fires exactly once with the
+        expected tool_name and tool_call_id.
+        Test: Assert hook_calls contains exactly one post_tool_call entry with
+        tool_name='model_switch' and the supplied tool_call_id.
+        """
+        hook_calls = []
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda hook_name, **kwargs: hook_calls.append((hook_name, kwargs)) or [],
+        )
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+
+        switch_result = '{"old_model":"m1","new_model":"m2","scope":"session","applied_at":"next_turn"}'
+        with patch(
+            "tools.model_switch_tool.model_switch_tool",
+            return_value=switch_result,
+        ) as mock_ms:
+            result = agent._invoke_tool(
+                "model_switch",
+                {"slug": "gpt-4o", "reason": "test", "scope": "session"},
+                "task-ms-1",
+                tool_call_id="ms-call-1",
+            )
+
+        mock_ms.assert_called_once()
+        assert result == switch_result
+
+        post_calls = [c for c in hook_calls if c[0] == "post_tool_call"]
+        assert len(post_calls) == 1, (
+            f"Expected exactly 1 post_tool_call hook for model_switch on the "
+            f"concurrent invoke_tool path; got {len(post_calls)}: {post_calls!r}"
+        )
+        post = post_calls[0][1]
+        assert post["tool_name"] == "model_switch"
+        assert post["tool_call_id"] == "ms-call-1"
+        assert post["status"] == "ok"
+        assert post["error_type"] is None
+        assert isinstance(post["duration_ms"], int)
+
     def test_invoke_tool_blocked_returns_error_and_skips_execution(self, agent, monkeypatch):
         """_invoke_tool should return error JSON when a plugin blocks the tool."""
         monkeypatch.setattr(
