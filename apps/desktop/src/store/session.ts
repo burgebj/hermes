@@ -100,6 +100,10 @@ export const $currentFastMode = atom(false)
 export const $yoloActive = atom(false)
 export const $currentCwd = atom(getRememberedWorkspaceCwd())
 export const $currentBranch = atom('')
+// When true, the next backend session is created inside a fresh git worktree of
+// $currentCwd (set by the sidebar's "new session in a worktree" fork icon).
+// Consumed and reset by the create-session path.
+export const $pendingWorktree = atom(false)
 export const $currentUsage = atom<UsageStats>({
   calls: 0,
   input: 0,
@@ -144,6 +148,7 @@ export const setCurrentCwd = (next: Updater<string>) => {
 }
 
 export const setCurrentBranch = (next: Updater<string>) => updateAtom($currentBranch, next)
+export const setPendingWorktree = (next: Updater<boolean>) => updateAtom($pendingWorktree, next)
 export const setCurrentUsage = (next: Updater<UsageStats>) => updateAtom($currentUsage, next)
 export const setSessionStartedAt = (next: Updater<number | null>) => updateAtom($sessionStartedAt, next)
 export const setTurnStartedAt = (next: Updater<number | null>) => updateAtom($turnStartedAt, next)

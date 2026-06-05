@@ -16,6 +16,7 @@ import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalize
 import {
   $currentCwd,
   $messages,
+  $pendingWorktree,
   $sessions,
   $yoloActive,
   getRememberedWorkspaceCwd,
@@ -35,6 +36,7 @@ import {
   setFreshDraftReady,
   setIntroSeed,
   setMessages,
+  setPendingWorktree,
   setSelectedStoredSessionId,
   setSessions,
   setSessionStartedAt,
@@ -311,6 +313,8 @@ export function useSessionActions({
       // New chats inherit the current workspace.
       setCurrentCwd(getRememberedWorkspaceCwd())
       setCurrentBranch('')
+      // A plain new-chat draft is never a worktree session; clear any stale arm.
+      setPendingWorktree(false)
       clearComposerDraft()
       clearComposerAttachments()
       setFreshDraftReady(true)
@@ -331,7 +335,17 @@ export function useSessionActions({
         // so single-profile users are unaffected).
         await ensureGatewayProfile($newChatProfile.get())
         const cwd = $currentCwd.get().trim() || getRememberedWorkspaceCwd()
-        const created = await requestGateway<SessionCreateResponse>('session.create', { cols: 96, ...(cwd && { cwd }) })
+        // The fork icon arms a one-shot worktree request; consume + reset it so
+        // a later plain new-chat doesn't accidentally inherit it.
+        const worktree = $pendingWorktree.get()
+        if (worktree) {
+          setPendingWorktree(false)
+        }
+        const created = await requestGateway<SessionCreateResponse>('session.create', {
+          cols: 96,
+          ...(cwd && { cwd }),
+          ...(worktree && cwd ? { worktree: true } : {})
+        })
         const stored = created.stored_session_id ?? null
 
         if (

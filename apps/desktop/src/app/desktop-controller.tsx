@@ -47,6 +47,7 @@ import {
   setCurrentModel,
   setCurrentProvider,
   setMessages,
+  setPendingWorktree,
   setSessionProfileTotals,
   setSessions,
   setSessionsLoading,
@@ -548,6 +549,23 @@ export function DesktopController() {
     [requestGateway, startFreshSessionDraft]
   )
 
+  const startSessionInWorktree = useCallback(
+    (path: null | string) => {
+      const target = path?.trim()
+
+      if (!target) {
+        return
+      }
+
+      // Same as a workspace new-session, but arm the one-shot worktree flag so
+      // the backend creates the session inside a fresh git worktree of this
+      // repo. startFreshSessionDraft() clears the flag, so arm it afterwards.
+      startSessionInWorkspace(target)
+      setPendingWorktree(true)
+    },
+    [startSessionInWorkspace]
+  )
+
   const handleSkinCommand = useSkinCommand()
 
   const { cancelRun, editMessage, handleThreadMessagesChange, reloadFromMessage, submitText, transcribeVoiceAudio } =
@@ -628,7 +646,9 @@ export function DesktopController() {
       onLoadMoreSessions={loadMoreSessions}
       onNavigate={selectSidebarItem}
       onNewSessionInWorkspace={startSessionInWorkspace}
+      onNewSessionWorktree={startSessionInWorktree}
       onResumeSession={sessionId => navigate(sessionRoute(sessionId))}
+      requestGateway={requestGateway}
     />
   )
 

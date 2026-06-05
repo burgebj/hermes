@@ -265,6 +265,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_error TEXT,
     rewind_count INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    worktree_path TEXT,
+    worktree_branch TEXT,
+    worktree_repo_root TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -1487,6 +1490,33 @@ class SessionDB:
             cursor = conn.execute(
                 "UPDATE sessions SET archived = ? WHERE id = ?",
                 (1 if archived else 0, session_id),
+            )
+            return cursor.rowcount
+        rowcount = self._execute_write(_do)
+        return rowcount > 0
+
+    def set_session_worktree(
+        self,
+        session_id: str,
+        worktree_path: Optional[str],
+        worktree_branch: Optional[str] = None,
+        worktree_repo_root: Optional[str] = None,
+    ) -> bool:
+        """Record (or clear) the git worktree owned by a session.
+
+        Desktop "new session in a worktree" creates a throwaway git worktree and
+        runs the session inside it. We stamp the worktree path/branch/repo-root
+        on the row so the archive handler can find and remove the worktree later
+        — even across a backend restart, when the in-memory session map is gone.
+
+        Pass ``worktree_path=None`` to clear the mapping (e.g. after cleanup).
+        Returns True when a row was updated.
+        """
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE sessions SET worktree_path = ?, worktree_branch = ?, "
+                "worktree_repo_root = ? WHERE id = ?",
+                (worktree_path, worktree_branch, worktree_repo_root, session_id),
             )
             return cursor.rowcount
         rowcount = self._execute_write(_do)

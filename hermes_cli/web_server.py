@@ -5265,6 +5265,58 @@ class SessionRename(BaseModel):
     profile: Optional[str] = None
 
 
+def _cleanup_session_worktree(db, sid: str) -> Optional[bool]:
+    """Remove the git worktree owned by a session, honoring the unpushed guard.
+
+    Returns:
+      * ``None``  — the session had no worktree (nothing to do).
+      * ``False`` — the worktree was removed.
+      * ``True``  — the worktree was *preserved* because its branch has commits
+                    not reachable from any remote (the unpushed-commits guard in
+                    ``_cleanup_worktree`` declined to delete it).
+
+    On removal, the worktree mapping is cleared from the session row so a repeat
+    archive is a no-op. Best-effort: never raises into the request handler.
+    """
+    try:
+        row = db.get_session(sid)
+    except Exception:
+        return None
+    if not row:
+        return None
+    wt_path = row.get("worktree_path")
+    if not wt_path:
+        return None
+
+    info = {
+        "path": wt_path,
+        "branch": row.get("worktree_branch"),
+        "repo_root": row.get("worktree_repo_root"),
+    }
+    try:
+        from cli import _cleanup_worktree
+    except Exception:
+        _log.debug("worktree cleanup helper unavailable", exc_info=True)
+        return None
+
+    try:
+        _cleanup_worktree(info)
+    except Exception:
+        _log.debug("worktree cleanup failed for session %s", sid, exc_info=True)
+        return None
+
+    # _cleanup_worktree preserves worktrees with unpushed commits. Probe the
+    # filesystem to learn what actually happened: gone → removed (clear the
+    # mapping); still present → preserved (keep the mapping so we can retry).
+    still_present = os.path.isdir(wt_path)
+    if not still_present:
+        try:
+            db.set_session_worktree(sid, None)
+        except Exception:
+            _log.debug("failed to clear worktree mapping for %s", sid, exc_info=True)
+    return still_present
+
+
 @app.patch("/api/sessions/{session_id}")
 async def rename_session_endpoint(session_id: str, body: SessionRename):
     """Update a session: rename (or clear its title) and/or archive it.
@@ -5294,6 +5346,14 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
         result = {"ok": True, "title": db.get_session_title(sid) or ""}
         if body.archived is not None:
             result["archived"] = bool(body.archived)
+            # Archiving a session reclaims its git worktree (created via the
+            # desktop "new session in a worktree" fork icon). _cleanup_worktree
+            # keeps the unpushed-commits guard, so a worktree whose branch has
+            # commits not on any remote is preserved rather than destroyed.
+            if body.archived:
+                preserved = _cleanup_session_worktree(db, sid)
+                if preserved is not None:
+                    result["worktree_preserved"] = preserved
         return result
     finally:
         db.close()

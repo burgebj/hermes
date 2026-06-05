@@ -684,6 +684,29 @@ def _git_branch_for_cwd(cwd: str) -> str:
         return ""
 
 
+def _git_is_repo(cwd: str) -> bool:
+    """Return True when *cwd* is inside a git working tree.
+
+    Used to gate the desktop sidebar's "new session in a worktree" affordance:
+    the fork icon only appears for workspaces that are real git repos. Unlike a
+    branch-name probe, this is unambiguous for a freshly-`git init`-ed repo with
+    no commits yet (which has no current branch).
+    """
+    if not cwd:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
 def _session_cwd(session: dict | None) -> str:
     if session and session.get("cwd"):
         return str(session["cwd"])
@@ -733,6 +756,81 @@ def _ensure_session_db_row(session: dict) -> None:
         )
     except Exception:
         logger.debug("failed to persist desktop session row", exc_info=True)
+
+
+def _create_session_worktree(session: dict, repo_cwd: str) -> dict | None:
+    """Create a git worktree for a desktop "new session in a worktree" request.
+
+    Reuses the same worktree machinery as ``hermes --worktree --tui`` (defined in
+    ``cli.py``). On success:
+      * a fresh worktree is created under ``<repo>/.worktrees/hermes-<id>`` on a
+        ``hermes/hermes-<id>`` branch,
+      * ``session["cwd"]`` is repointed at the worktree (so the agent + all its
+        tools run inside it),
+      * ``session["worktree"]`` holds the ``{path, branch, repo_root}`` metadata,
+      * the session's DB row is persisted **eagerly** (unlike normal drafts) and
+        stamped with the worktree mapping, so the archive handler can find and
+        remove the worktree later — even after a backend restart.
+
+    Returns the worktree info dict, or ``None`` if *repo_cwd* is not a git repo
+    or worktree creation failed (caller falls back to the plain workspace cwd).
+    """
+    if not repo_cwd or not _git_is_repo(repo_cwd):
+        return None
+    try:
+        from cli import _setup_worktree
+    except Exception:
+        logger.warning("worktree helpers unavailable; falling back to plain cwd", exc_info=True)
+        return None
+
+    try:
+        # Resolve the repo root for the requested workspace explicitly (rather
+        # than relying on the gateway's process CWD) so the worktree is created
+        # against the folder the user actually picked.
+        result = subprocess.run(
+            ["git", "-C", repo_cwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        repo_root = result.stdout.strip() if result.returncode == 0 else None
+        if not repo_root:
+            return None
+        wt_info = _setup_worktree(repo_root=repo_root)
+    except Exception:
+        logger.warning("failed to create session worktree", exc_info=True)
+        return None
+
+    if not wt_info or not wt_info.get("path"):
+        return None
+
+    session["cwd"] = wt_info["path"]
+    session["explicit_cwd"] = True
+    session["worktree"] = wt_info
+    _register_session_cwd(session)
+
+    # A worktree is an explicit, heavy action (unlike a blank draft), so persist
+    # the row eagerly and stamp the worktree mapping. create_session is
+    # INSERT-OR-IGNORE, so the later lazy create + the AIAgent's own insert
+    # remain no-ops.
+    key = session.get("session_key")
+    db = _get_db()
+    if key and db is not None:
+        try:
+            db.create_session(
+                key,
+                source="tui",
+                model=_resolve_model(),
+                cwd=wt_info["path"],
+            )
+            db.set_session_worktree(
+                key,
+                wt_info["path"],
+                wt_info.get("branch"),
+                wt_info.get("repo_root"),
+            )
+        except Exception:
+            logger.debug("failed to persist worktree session row", exc_info=True)
+
+    return wt_info
 
 
 def _set_session_cwd(session: dict, cwd: str) -> str:
@@ -2796,6 +2894,19 @@ def _inflight_snapshot(session: dict) -> dict | None:
 # ── Methods: session ─────────────────────────────────────────────────
 
 
+@method("git.is_repo")
+def _(rid, params: dict) -> dict:
+    """Report whether a directory is a git repository.
+
+    Desktop sidebar uses this to gate the per-workspace "new session in a
+    worktree" fork icon — it only renders for workspaces that are real repos.
+    Accepts an explicit ``cwd`` (a workspace path); falls back to the session /
+    launch directory resolution used elsewhere.
+    """
+    cwd = _completion_cwd(params)
+    return _ok(rid, {"cwd": cwd, "is_repo": _git_is_repo(cwd)})
+
+
 @method("session.create")
 def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
@@ -2844,10 +2955,17 @@ def _(rid, params: dict) -> dict:
         "transport": current_transport() or _stdio_transport,
     }
     _register_session_cwd(_sessions[sid])
-    # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop
-    # launch (and every "New agent" / draft) opens a session here just to paint
-    # the composer, so eagerly creating a row left an "Untitled" empty session
-    # behind for every launch the user never typed into. The row is now created
+
+    # "New session in a worktree" (desktop sidebar fork icon): when the client
+    # asks for a worktree and the chosen workspace is a git repo, create an
+    # isolated worktree and run the session inside it. On failure we fall back to
+    # the plain workspace cwd (the helper returns None and logs).
+    worktree_info = None
+    if bool(params.get("worktree")) and explicit_cwd:
+        worktree_info = _create_session_worktree(
+            _sessions[sid], os.path.abspath(os.path.expanduser(raw_cwd))
+        )
+    # NOTE: for non-worktree sessions we intentionally do NOT persist a DB row
     # lazily on the first prompt (see _ensure_session_db_row + prompt.submit),
     # and the AIAgent's own INSERT-OR-IGNORE persists it on the first turn too.
 
@@ -2878,6 +2996,8 @@ def _(rid, params: dict) -> dict:
                 "cwd": _sessions[sid]["cwd"],
                 "branch": _git_branch_for_cwd(_sessions[sid]["cwd"]),
                 "lazy": True,
+                "worktree": bool(worktree_info),
+                "worktree_path": worktree_info["path"] if worktree_info else None,
                 "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                 "profile_name": _current_profile_name(),
             },
