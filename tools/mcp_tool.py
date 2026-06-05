@@ -1066,7 +1066,7 @@ class SamplingHandler:
             response = await asyncio.wait_for(
                 asyncio.to_thread(_sync_call), timeout=self.timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.metrics["errors"] += 1
             return self._error(
                 f"Sampling LLM call timed out after {self.timeout}s "
@@ -1954,7 +1954,7 @@ class MCPServerTask:
         if self._task and not self._task.done():
             try:
                 await asyncio.wait_for(self._task, timeout=10)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "MCP server '%s' shutdown timed out, cancelling task",
                     self.name,

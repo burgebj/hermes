@@ -3906,7 +3906,7 @@ class APIServerAdapter(BasePlatformAdapter):
             while True:
                 try:
                     event = await asyncio.wait_for(q.get(), timeout=30.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     await response.write(b": keepalive\n\n")
                     continue
                 if event is None:
@@ -4041,7 +4041,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # slow/unresponsive interrupt can't hang this handler.
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "[api_server] stop for run %s timed out after 5s; "
                     "agent may still be finishing the current step",

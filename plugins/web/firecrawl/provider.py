@@ -491,7 +491,7 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                         ),
                         timeout=60,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("Firecrawl scrape timed out for %s", url)
                     results.append(
                         {

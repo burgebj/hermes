@@ -1324,7 +1324,7 @@ class WeComAdapter(BasePlatformAdapter):
                     prepared["final_type"],
                     upload_result["media_id"],
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return SendResult(success=False, error="Timeout sending media to WeCom")
         except Exception as exc:
             logger.error("[%s] Failed to send media %s: %s", self.name, media_source, exc)
@@ -1388,7 +1388,7 @@ class WeComAdapter(BasePlatformAdapter):
                         "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
                     },
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return SendResult(success=False, error="Timeout sending message to WeCom")
         except Exception as exc:
             logger.error("[%s] Send failed: %s", self.name, exc)

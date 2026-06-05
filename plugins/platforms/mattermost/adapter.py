@@ -450,7 +450,7 @@ class MattermostAdapter(BasePlatformAdapter):
                     file_data = await resp.read()
                     ct = resp.content_type or "application/octet-stream"
                     break
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 if attempt < 2:
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue

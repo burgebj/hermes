@@ -2290,7 +2290,7 @@ class GatewayRunner:
                 await adapter.disconnect()
             else:
                 await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
                 timeout,
@@ -2340,7 +2340,7 @@ class GatewayRunner:
             return await adapter.connect()
         try:
             return await asyncio.wait_for(adapter.connect(), timeout=timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TimeoutError(
                 f"{platform.value} connect timed out after {timeout:g}s"
             ) from exc
@@ -8341,7 +8341,7 @@ class GatewayRunner:
                                 from agent.redact import redact_sensitive_text
                                 output = redact_sensitive_text(output)
                             return output if output else "Command returned no output."
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             return "Quick command timed out (30s)."
                         except Exception as e:
                             return f"Quick command error: {e}"
@@ -16866,7 +16866,7 @@ class GatewayRunner:
             if stream_task:
                 try:
                     await asyncio.wait_for(stream_task, timeout=5.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError):
                     stream_task.cancel()
 
         _elapsed = time.time() - _start
@@ -18933,7 +18933,7 @@ class GatewayRunner:
                     if _sc and stream_task:
                         try:
                             await asyncio.wait_for(stream_task, timeout=5.0)
-                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                        except (TimeoutError, asyncio.CancelledError):
                             stream_task.cancel()
                             try:
                                 await stream_task
@@ -19072,7 +19072,7 @@ class GatewayRunner:
                 else:
                     try:
                         await asyncio.wait_for(stream_task, timeout=5.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                    except (TimeoutError, asyncio.CancelledError):
                         stream_task.cancel()
                         try:
                             await stream_task

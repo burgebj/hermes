@@ -2743,7 +2743,7 @@ class DispatchMiddleware(InboundMiddleware):
             while True:
                 try:
                     dispatch_fn = await asyncio.wait_for(queue.get(), timeout=_IDLE_TIMEOUT)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 logger.debug(
                     "[%s] Group queue: dispatching for %s (remaining=%d)",
@@ -2939,7 +2939,7 @@ class ConnectionManager:
 
             return True
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("[%s] Connection timed out", adapter.name)
             await self._cleanup_ws()
             adapter._release_platform_lock()
@@ -3045,7 +3045,7 @@ class ConnectionManager:
                         logger.error("[%s] BIND_ACK missing connectId", adapter.name)
                         return False
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("[%s] AUTH_BIND timeout", adapter.name)
             return False
         except Exception as exc:
@@ -3095,7 +3095,7 @@ class ConnectionManager:
                     try:
                         await asyncio.wait_for(pong_future, timeout=10.0)
                         self._consecutive_hb_timeouts = 0
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         self._pending_acks.pop(msg_id, None)
                         self._consecutive_hb_timeouts += 1
                         logger.warning(
@@ -3344,7 +3344,7 @@ class ConnectionManager:
             await self._ws.send(encoded_conn_msg)
             result = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise
         except Exception:
             raise
@@ -3431,7 +3431,7 @@ class ConnectionManager:
                 )
                 return True
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("[%s] Reconnect attempt %d timed out", adapter.name, attempt + 1)
             except Exception as exc:
                 logger.warning(
@@ -3757,7 +3757,7 @@ class GroupQueryService:
             if biz_data and isinstance(biz_data, bytes):
                 return decode_query_group_info_rsp(biz_data)
             return {"group_code": group_code}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[%s] query_group_info timeout: group=%s", adapter.name, group_code)
             return None
         except Exception as exc:
@@ -3794,7 +3794,7 @@ class GroupQueryService:
             if result and result.get("members"):
                 adapter._member_cache[group_code] = (time.time(), result["members"])
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[%s] get_group_member_list timeout: group=%s", adapter.name, group_code)
             return None
         except Exception as exc:
@@ -4380,7 +4380,7 @@ class MessageSender:
         try:
             response = await adapter._connection.send_biz_request(encoded, req_id=req_id)
             return {"success": True, "msg_key": response.get("msg_id", "")}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"success": False, "error": f"Request timeout after {DEFAULT_SEND_TIMEOUT}s"}
         except Exception as exc:
             return {"success": False, "error": str(exc)}

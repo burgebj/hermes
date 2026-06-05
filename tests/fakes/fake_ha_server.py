@@ -224,7 +224,7 @@ class FakeHAServer:
                         "type": "event",
                         "event": event_data,
                     })
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
         except (ConnectionResetError, asyncio.CancelledError):
             pass

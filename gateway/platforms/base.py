@@ -3076,7 +3076,7 @@ class BasePlatformAdapter(ABC):
                             self.send_typing(chat_id, metadata=metadata),
                             timeout=_send_typing_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Slow network — abandon this tick, keep the loop
                         # on schedule so the next send_typing fires fresh.
                         pass
@@ -3676,7 +3676,7 @@ class BasePlatformAdapter(ABC):
                 await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
             except asyncio.CancelledError:
                 pass
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "[%s] Cancelled task for %s did not exit within 5s; "
                     "unblocking dispatch and letting the task unwind in the background",
@@ -4049,7 +4049,7 @@ class BasePlatformAdapter(ABC):
             typing_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(typing_task), timeout=0.5)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 # Cancellation cleanup must not block adapter shutdown.  The
                 # typing task is already cancelled; if the parent task is also
                 # cancelling, let this message-processing task unwind now.
@@ -4583,7 +4583,7 @@ class BasePlatformAdapter(ABC):
                     ),
                     timeout=5.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "[%s] %d background task(s) did not exit within 5s; "
                     "releasing tracking and letting them unwind in the background",

@@ -431,7 +431,7 @@ async def _get_updates(
             token=token,
             timeout_ms=timeout_ms,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
 
 
@@ -1061,7 +1061,7 @@ async def qr_login(
                     endpoint=f"{EP_GET_QR_STATUS}?qrcode={qrcode_value}",
                     timeout_ms=QR_TIMEOUT_MS,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await asyncio.sleep(1)
                 continue
             except Exception as exc:

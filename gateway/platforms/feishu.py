@@ -1716,7 +1716,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 logger.debug("[Feishu] Waiting for websocket thread to exit (timeout=10s)")
                 await asyncio.wait_for(asyncio.shield(ws_future), timeout=10.0)
                 logger.debug("[Feishu] Websocket thread exited cleanly")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("[Feishu] Websocket thread did not exit within 10s - may be stuck")
             except asyncio.CancelledError:
                 logger.debug("[Feishu] Websocket thread cancelled during disconnect")
@@ -3305,7 +3305,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 request.read(),
                 timeout=_FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[Feishu] Webhook body read timed out after %ds from %s", _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS, remote_ip)
             self._record_webhook_anomaly(remote_ip, "408")
             return web.Response(status=408, text="Request Timeout")

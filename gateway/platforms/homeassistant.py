@@ -432,7 +432,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
                             body = await resp.text()
                             return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return SendResult(success=False, error="Timeout sending notification to HA")
         except Exception as e:
             return SendResult(success=False, error=str(e))

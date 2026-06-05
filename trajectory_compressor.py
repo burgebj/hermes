@@ -1081,7 +1081,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                             description=f"[dim]✅ {compressed_count} compressed | ⏭️ {skipped_count} skipped | ⏱️ {timeout_count} timeout | 🔄 {api_calls} API calls | ⚡ {in_flight} in-flight[/dim]"
                         )
                 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self.logger.warning(f"Timeout processing entry from {file_path}:{entry_idx} (>{self.config.per_trajectory_timeout}s)")
                     
                     async with progress_lock:

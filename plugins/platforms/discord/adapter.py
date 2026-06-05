@@ -758,7 +758,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not adapter_self._ready_event.is_set():
                     try:
                         await asyncio.wait_for(adapter_self._ready_event.wait(), timeout=30.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
 
                 # Dedup: Discord RESUME replays events after reconnects (#4777)
@@ -893,7 +893,7 @@ class DiscordAdapter(BasePlatformAdapter):
             self._running = True
             return True
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("[%s] Timeout waiting for connection to Discord", self.name, exc_info=True)
             self._release_platform_lock()
             return False
@@ -1159,7 +1159,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 summary["created"],
                 summary["deleted"],
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[%s] Slash command sync timed out — Discord rate-limit bucket "
                 "may be saturated; will retry on next reconnect",
@@ -2016,7 +2016,7 @@ class DiscordAdapter(BasePlatformAdapter):
             vc.play(source, after=_after)
             try:
                 await asyncio.wait_for(done.wait(), timeout=self.PLAYBACK_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Voice playback timed out after %ds", self.PLAYBACK_TIMEOUT)
                 vc.stop()
             self._reset_voice_timeout(guild_id)

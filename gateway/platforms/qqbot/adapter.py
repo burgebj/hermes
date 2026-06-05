@@ -2121,7 +2121,7 @@ class QQAdapter(BasePlatformAdapter):
                     stderr[:200].decode(errors="replace"),
                 )
                 return None
-        except (asyncio.TimeoutError, FileNotFoundError) as exc:
+        except (TimeoutError, FileNotFoundError) as exc:
             logger.warning("[%s] ffmpeg conversion error: %s", self._log_tag, exc)
             return None
 

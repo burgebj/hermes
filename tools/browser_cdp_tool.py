@@ -387,7 +387,7 @@ def browser_cdp(
         result = _run_async(
             _cdp_call(endpoint, method, call_params, target_id, safe_timeout)
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         return tool_error(
             f"CDP call timed out after {safe_timeout}s: {exc}",
             method=method,

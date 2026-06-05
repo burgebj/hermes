@@ -920,7 +920,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._supervisor_task.cancel()
             try:
                 await asyncio.wait_for(self._supervisor_task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
         if self._streaming_pull_future is not None:
             try:
@@ -2283,7 +2283,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     self._typing_card_inflight[chat_id].wait(),
                     timeout=5.0,
                 )
-            except (asyncio.TimeoutError, KeyError):
+            except (TimeoutError, KeyError):
                 pass
             return
 
@@ -3224,7 +3224,7 @@ async def _standalone_send(
             asyncio.to_thread(creds.refresh, _GoogleAuthRequest()),
             timeout=10.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"error": "Google Chat standalone send: token refresh timed out"}
     except asyncio.CancelledError:
         raise

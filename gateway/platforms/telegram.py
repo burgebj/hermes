@@ -3663,7 +3663,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     "[%s] gmail-triage callback failed: verb=%s arg=%s rc=%s stderr=%s",
                     self.name, verb, arg, proc.returncode, stderr_text,
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             label = f"❌ {verb} timed out"
             logger.error("[%s] gmail-triage callback timed out: verb=%s arg=%s", self.name, verb, arg)
         except Exception as exc:
