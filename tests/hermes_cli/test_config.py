@@ -991,3 +991,77 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
+
+
+class TestPlatformToolsetsPreservedDuringV25ToV26Migration:
+    """Regression test for issue #38798.
+
+    The v25→v26 migration must not corrupt or wipe a user's custom
+    ``platform_toolsets`` configuration.  Any existing per-platform toolset
+    list must survive the migration unchanged.
+    """
+
+    def test_custom_platform_toolsets_survive_v25_to_v26_migration(self, tmp_path):
+        """A config with custom platform_toolsets on v25 must keep every
+        toolset entry intact after migrating to the latest version (#38798)."""
+        config_path = tmp_path / "config.yaml"
+        original_toolsets = {
+            "cli": ["web", "memory", "terminal"],
+            "telegram": ["web", "kanban"],
+            "discord": ["web"],
+        }
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": 25,
+                    "platform_toolsets": original_toolsets,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        # Every platform key and every toolset string must be preserved verbatim.
+        assert raw["platform_toolsets"]["cli"] == original_toolsets["cli"]
+        assert raw["platform_toolsets"]["telegram"] == original_toolsets["telegram"]
+        assert raw["platform_toolsets"]["discord"] == original_toolsets["discord"]
+
+    def test_platform_toolsets_absent_stays_absent_after_v25_to_v26(self, tmp_path):
+        """A v25 config with no platform_toolsets must not have one injected
+        by the migration — it is seeded lazily by tools_config.py instead."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"_config_version": 25}),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        # platform_toolsets must not be force-written by the migration.
+        assert "platform_toolsets" not in raw
+
+    def test_single_platform_toolsets_entry_preserved(self, tmp_path):
+        """Simpler real-world case: a user who only has cli configured."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": 25,
+                    "platform_toolsets": {"cli": ["hermes-cli", "memory"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert raw["platform_toolsets"]["cli"] == ["hermes-cli", "memory"]
