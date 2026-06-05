@@ -10,22 +10,30 @@ import os
 import re
 import stat
 import sys
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from plugins.memory.hindsight import (
     HindsightMemoryProvider,
     RECALL_SCHEMA,
     REFLECT_SCHEMA,
     RETAIN_SCHEMA,
+    _HINDSIGHT_DEPENDENCY,
+    _HINDSIGHT_DISTRIBUTION,
     _load_config,
     _build_embedded_profile_env,
     _normalize_retain_tags,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
 )
+from tools.lazy_deps import LAZY_DEPS
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +159,26 @@ def test_normalize_retain_tags_accepts_csv_and_dedupes():
 def test_normalize_retain_tags_accepts_json_array_string():
     value = json.dumps(["agent:fakeassistantname", "source_system:hermes-agent"])
     assert _normalize_retain_tags(value) == ["agent:fakeassistantname", "source_system:hermes-agent"]
+
+
+def test_hindsight_dependency_metadata_installs_embedded_runtime():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    hindsight_extra = pyproject["project"]["optional-dependencies"]["hindsight"]
+
+    manifest = yaml.safe_load(
+        (ROOT / "plugins" / "memory" / "hindsight" / "plugin.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest_deps = manifest["pip_dependencies"]
+
+    assert hindsight_extra == ["hindsight-all>=0.7.2"]
+    assert manifest_deps == hindsight_extra
+    assert LAZY_DEPS["memory.hindsight"] == tuple(hindsight_extra)
+    assert _HINDSIGHT_DEPENDENCY == hindsight_extra[0]
+    assert _HINDSIGHT_DISTRIBUTION == "hindsight-all"
+    assert "hindsight-client==0.6.1" not in hindsight_extra
+    assert "hindsight-client==0.6.1" not in manifest_deps
 
 
 # ---------------------------------------------------------------------------
