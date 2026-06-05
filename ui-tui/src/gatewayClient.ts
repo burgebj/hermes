@@ -84,7 +84,7 @@ const asWireText = (raw: unknown): string | null => {
   }
 
   if (ArrayBuffer.isView(raw)) {
-    return _wireDecoder.decode(raw)
+    return _wireDecoder.decode(raw.buffer)
   }
 
   return null

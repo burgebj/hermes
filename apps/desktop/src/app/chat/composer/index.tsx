@@ -1035,8 +1035,16 @@ export function ChatBar({
   }, [activeQueueSessionKey, editingQueuedPrompt, queueEdit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitDraft = () => {
+    const trimmedDraft = draft.trim()
+
     if (queueEdit) {
       exitQueuedEdit('save')
+    } else if (trimmedDraft && SLASH_COMMAND_RE.test(trimmedDraft) && !attachments.length) {
+      // Slash commands are dispatched immediately (via onSubmit →
+      // executeSlashCommand), never queued — even when busy.
+      triggerHaptic('submit')
+      clearDraft()
+      void onSubmit(trimmedDraft)
     } else if (busy) {
       // Slash commands should execute immediately even while the agent is
       // busy — they're client-side operations (/yolo, /skin, /new, /help,
@@ -1064,7 +1072,7 @@ export function ChatBar({
       }
     } else if (!hasComposerPayload && queuedPrompts.length > 0) {
       void drainNextQueued()
-    } else if (draft.trim() || attachments.length > 0) {
+    } else if (trimmedDraft || attachments.length > 0) {
       const submitted = draft
       triggerHaptic('submit')
       clearDraft()

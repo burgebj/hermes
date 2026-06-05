@@ -21,7 +21,7 @@ let
 
   # Single npm deps fetch from the workspace root lockfile.
   # All workspace packages share this derivation.
-  npmDepsHash = "sha256-T9UtpXgBCl/GywDZyrvG4a69RkV8oD6p1UOT7GPgAS0=";
+  npmDepsHash = "sha256-FGd6EWIG2jBy6BvR/VhGBv2d/OGIqQ9GAHjWc4n8Q1w=";
 
   npmDeps = pkgs.fetchNpmDeps {
     inherit src;
@@ -53,7 +53,7 @@ in
     {
       folder, # repo-relative folder with package.json, e.g. "ui-tui"
       attr, # flake package attr, e.g. "tui"
-      pname, # e.g. "hermes-tui"
+      ...
     }:
     let
       # No sourceRoot — the workspace root (with the single package-lock.json)

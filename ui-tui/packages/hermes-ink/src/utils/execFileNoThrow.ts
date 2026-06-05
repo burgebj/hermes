@@ -1,4 +1,4 @@
-import { spawn } from 'child_process'
+import { spawn, SpawnOptionsWithStdioTuple } from 'child_process'
 type ExecFileOptions = {
   input?: string
   timeout?: number
@@ -28,18 +28,18 @@ export function execFileNoThrow(
   error?: string
 }> {
   return new Promise(resolve => {
-    // When resolveOnExit is true, ignore stdout/stderr so the daemon
-    // doesn't inherit those pipe FDs — prevents handle leaks that can
-    // keep the parent process alive. No output data is collected in
-    // this mode; both stdout and stderr will be empty strings.
-    const stdioConfig = options.resolveOnExit
-      ? ['pipe', 'ignore', 'ignore'] as const
-      : 'pipe' as const
 
     const child = spawn(file, args, {
       cwd: options.useCwd ? process.cwd() : undefined,
       env: options.env,
-      stdio: stdioConfig
+
+      // When resolveOnExit is true, ignore stdout/stderr so the daemon
+      // doesn't inherit those pipe FDs — prevents handle leaks that can
+      // keep the parent process alive. No output data is collected in
+      // this mode; both stdout and stderr will be empty strings.
+      stdio: options.resolveOnExit
+        ? ['pipe', 'ignore', 'ignore']
+        : 'pipe'
     })
 
     let stdout = ''
