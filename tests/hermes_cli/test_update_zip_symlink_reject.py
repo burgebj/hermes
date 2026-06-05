@@ -1,4 +1,4 @@
-"""Regression: _update_via_zip must reject ZIP members with symlink mode.
+"""Regression: _update_files_via_zip must reject ZIP members with symlink mode.
 
 A symlink member in a downloaded update ZIP would let an attacker who can
 serve / MITM the update mirror plant a symlink that extractall() then
@@ -32,7 +32,7 @@ def _build_normal_zip(zip_path: str) -> None:
         zf.writestr("hermes-agent-main/README.md", "ok\n")
 
 
-def test_update_via_zip_rejects_symlink_member(tmp_path, monkeypatch):
+def test_update_files_via_zip_rejects_symlink_member(tmp_path, monkeypatch):
     """A symlink member in the update ZIP must raise before extractall."""
     zip_path = tmp_path / "evil.zip"
     _build_zip_with_symlink_member(
@@ -41,12 +41,12 @@ def test_update_via_zip_rejects_symlink_member(tmp_path, monkeypatch):
         target="/etc/passwd",
     )
 
-    from hermes_cli.main import _update_via_zip
+    from hermes_cli.main import _update_files_via_zip
 
     args = type("Args", (), {})()
 
     # Patch urlretrieve to "download" our pre-built malicious ZIP into the
-    # _update_via_zip tempdir. Capture the tempdir so we can prove no
+    # _update_files_via_zip tempdir. Capture the tempdir so we can prove no
     # extraction happened.
     captured = {}
     original_mkdtemp = tempfile.mkdtemp
@@ -64,11 +64,11 @@ def test_update_via_zip_rejects_symlink_member(tmp_path, monkeypatch):
 
     with patch("tempfile.mkdtemp", side_effect=capturing_mkdtemp), \
          patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve):
-        # _update_via_zip catches ValueError, prints the message, and exits 1.
+        # _update_files_via_zip catches ValueError, prints the message, and exits 1.
         # That's the contract: a malicious ZIP must fail the update, not
         # silently materialize a symlink.
         with pytest.raises(SystemExit) as exc_info:
-            _update_via_zip(args)
+            _update_files_via_zip(args)
         assert exc_info.value.code == 1
 
     # Belt: confirm extractall never produced the link.
@@ -80,7 +80,7 @@ def test_update_via_zip_rejects_symlink_member(tmp_path, monkeypatch):
         )
 
 
-def test_update_via_zip_accepts_normal_member(tmp_path, monkeypatch, capsys):
+def test_update_files_via_zip_accepts_normal_member(tmp_path, monkeypatch, capsys):
     """A ZIP with only regular file members must extract without raising.
 
     Sanity check that the symlink reject didn't break the happy path.  We
@@ -118,7 +118,7 @@ def test_update_via_zip_accepts_normal_member(tmp_path, monkeypatch, capsys):
          patch("subprocess.check_call"):
         fake_run.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         try:
-            hermes_main._update_via_zip(args)
+            hermes_main._update_files_via_zip(args)
         except SystemExit:
             pass
 

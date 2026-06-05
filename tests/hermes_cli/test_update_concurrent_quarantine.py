@@ -19,6 +19,23 @@ import pytest
 from hermes_cli import main as cli_main
 
 
+@pytest.fixture(autouse=True)
+def _inline_post_pull():
+    """Run post-pull in-process instead of re-execing a fresh interpreter.
+
+    cmd_update() is now a two-phase flow: phase 1 downloads code, then
+    _reexec_for_post_pull() replaces the process (os.execvp on POSIX) to run
+    phase 2 under the freshly-downloaded code.  That hard process replacement
+    would nuke the pytest process mid-test.  Patch the re-exec to call
+    _cmd_update_post_pull() directly so the whole flow stays in-process.
+    """
+    def _inline(args, gateway_mode):
+        cli_main._cmd_update_post_pull(args, gateway_mode=gateway_mode)
+
+    with patch.object(cli_main, "_reexec_for_post_pull", side_effect=_inline):
+        yield
+
+
 # Tests in this module either exercise the REAL _detect_concurrent_hermes_instances
 # helper (and need the autouse stub in tests/hermes_cli/conftest.py disabled),
 # or supply their own explicit return value via patch.object. Mark the whole
@@ -511,8 +528,8 @@ def test_cmd_update_force_bypasses_concurrent_check(_winp, tmp_path):
 
     detect = MagicMock(return_value=[(9, "hermes.exe")])
 
-    # Short-circuit out of _cmd_update_impl via a sentinel raise immediately
-    # AFTER the gate. _run_pre_update_backup is the first call after the gate.
+    # Short-circuit out of _cmd_update_pull_new_version via a sentinel raise
+    # immediately AFTER the gate. _run_pre_update_backup is the first call after the gate.
     sentinel = RuntimeError("reached post-gate body")
     with patch.object(
         cli_main, "_venv_scripts_dir", return_value=scripts_dir

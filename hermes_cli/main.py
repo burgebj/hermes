@@ -7908,197 +7908,15 @@ def _kill_stale_dashboard_processes(
 _warn_stale_dashboard_processes = _kill_stale_dashboard_processes
 
 
-def _update_via_zip(args):
-    """Update Hermes Agent by downloading a ZIP archive.
+def _update_files_via_zip(args):
+    """Back-compat alias for ``_download_and_extract_zip``.
 
-    Used on Windows when git file I/O is broken (antivirus, NTFS filter
-    drivers causing 'Invalid argument' errors on file creation).
+    The original ``_update_files_via_zip`` monolith has been split:
+    download/extraction → ``_download_and_extract_zip`` (phase 1),
+    post-extraction steps → ``_cmd_update_post_pull`` (phase 2, after re-exec).
+    This wrapper preserves the import path for existing test suites.
     """
-    import tempfile
-    import zipfile
-    from urllib.request import urlretrieve
-
-    # The ZIP fallback exists for Windows git-file-I/O breakage. It pulls a
-    # static archive from GitHub, which is fine for the default "main"
-    # channel but would silently ignore --branch and update from main even
-    # if the user asked for something else — exactly the silent-divergence
-    # bug --branch was added to prevent. Refuse to proceed in that case
-    # rather than lie.
-    branch = _resolve_update_branch(args)
-    if branch != "main":
-        print(
-            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
-            "update path."
-        )
-        print(
-            "  This path runs when git file I/O is broken on the system. "
-            "Either resolve the git-side breakage (typically an antivirus "
-            "or NTFS filter holding files open) and rerun `hermes update "
-            f"--branch {branch}`, or update against main with `hermes update`."
-        )
-        sys.exit(1)
-    zip_url = (
-        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
-    )
-
-    print("→ Downloading latest version...")
-    tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
-    try:
-        zip_path = os.path.join(tmp_dir, f"hermes-agent-{branch}.zip")
-        urlretrieve(zip_url, zip_path)
-
-        print("→ Extracting...")
-        import stat as _stat
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            # Validate paths to prevent zip-slip (path traversal) AND reject
-            # symlink members. A GitHub source ZIP for hermes-agent itself
-            # should never contain symlinks — they'd point outside the
-            # extracted tree and let an attacker who can compromise the
-            # update mirror plant arbitrary files via the update path.
-            tmp_dir_real = os.path.realpath(tmp_dir)
-            for member in zf.infolist():
-                member_path = os.path.realpath(os.path.join(tmp_dir, member.filename))
-                if (
-                    not member_path.startswith(tmp_dir_real + os.sep)
-                    and member_path != tmp_dir_real
-                ):
-                    raise ValueError(
-                        f"Zip-slip detected: {member.filename} escapes extraction directory"
-                    )
-                # Unix mode lives in the upper 16 bits of external_attr;
-                # mask to the file-type bits.
-                mode = (member.external_attr >> 16) & 0o170000
-                if _stat.S_ISLNK(mode):
-                    raise ValueError(
-                        f"ZIP contains unsupported symlink member: {member.filename}"
-                    )
-            zf.extractall(tmp_dir)
-
-        # GitHub ZIPs extract to hermes-agent-<branch>/
-        extracted = os.path.join(tmp_dir, f"hermes-agent-{branch}")
-        if not os.path.isdir(extracted):
-            # Try to find it
-            for d in os.listdir(tmp_dir):
-                candidate = os.path.join(tmp_dir, d)
-                if os.path.isdir(candidate) and d != "__MACOSX":
-                    extracted = candidate
-                    break
-
-        # Copy updated files over existing installation, preserving venv/node_modules/.git
-        preserve = {"venv", "node_modules", ".git", ".env"}
-        update_count = 0
-        for item in os.listdir(extracted):
-            if item in preserve:
-                continue
-            src = os.path.join(extracted, item)
-            dst = os.path.join(str(PROJECT_ROOT), item)
-            if os.path.isdir(src):
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
-            update_count += 1
-
-        print(f"✓ Updated {update_count} items from ZIP")
-
-    except Exception as e:
-        print(f"✗ ZIP update failed: {e}")
-        sys.exit(1)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    # Clear stale bytecode after ZIP extraction
-    removed = _clear_bytecode_cache(PROJECT_ROOT)
-    if removed:
-        print(
-            f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
-        )
-
-    # Reinstall Python dependencies. Prefer .[all], but if one optional extra
-    # breaks on this machine, keep base deps and reinstall the remaining extras
-    # individually so update does not silently strip working capabilities.
-    print("→ Updating Python dependencies...")
-
-    from hermes_cli.managed_uv import ensure_uv, rebuild_venv, update_managed_uv
-
-    # Keep managed uv current — runs `uv self update` if we already have one.
-    update_managed_uv()
-
-    uv_bin, fresh_bootstrap = ensure_uv()
-    # First-time managed uv install on an existing checkout: the old venv
-    # may point to a Python without FTS5.  Rebuild it so the new managed
-    # uv provides a fresh interpreter with FTS5 guaranteed.
-    if fresh_bootstrap and uv_bin:
-        if not rebuild_venv(uv_bin, PROJECT_ROOT / "venv"):
-            raise RuntimeError(
-                "venv rebuild failed; aborting update before dependency install"
-            )
-
-    pip_cmd = [sys.executable, "-m", "pip"]
-    if not uv_bin:
-        uv_bin = _ensure_uv_for_termux(pip_cmd)
-    if uv_bin:
-        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-        if _is_termux_env(uv_env):
-            uv_env.pop("PYTHONPATH", None)
-            uv_env.pop("PYTHONHOME", None)
-        _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
-    else:
-        # Use sys.executable to explicitly call the venv's pip module,
-        # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
-        # Some environments lose pip inside the venv; bootstrap it back with
-        # ensurepip before trying the editable install.
-        try:
-            subprocess.run(
-                pip_cmd + ["--version"],
-                cwd=PROJECT_ROOT,
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError:
-            subprocess.run(
-                [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
-                cwd=PROJECT_ROOT,
-                check=True,
-            )
-        _install_python_dependencies_with_optional_fallback(pip_cmd)
-
-    _update_node_dependencies()
-    _build_web_ui(PROJECT_ROOT / "web")
-
-    # Sync skills
-    try:
-        from tools.skills_sync import sync_skills
-
-        print("→ Syncing bundled skills...")
-        result = sync_skills(quiet=True)
-        if result["copied"]:
-            print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
-        if result.get("updated"):
-            print(
-                f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
-            )
-        if result.get("user_modified"):
-            print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
-        if result.get("cleaned"):
-            print(f"  − {len(result['cleaned'])} removed from manifest")
-        if not result["copied"] and not result.get("updated"):
-            print("  ✓ Skills are up to date")
-    except Exception:
-        pass
-
-    print()
-    print("✓ Update complete!")
-    try:
-        _print_curator_first_run_notice()
-    except Exception as e:
-        logger.debug("Curator first-run notice failed: %s", e)
-    try:
-        _print_curator_recent_run_notice()
-    except Exception as e:
-        logger.debug("Curator recent-run notice failed: %s", e)
-    _kill_stale_dashboard_processes()
+    return _download_and_extract_zip(args)
 
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
@@ -8686,49 +8504,6 @@ def _venv_scripts_dir() -> Path | None:
         return None
     scripts = venv_dir / ("Scripts" if _is_windows() else "bin")
     return scripts if scripts.is_dir() else None
-
-
-def _wait_for_interpreter_venv_ready(*, timeout: float = 15.0) -> bool:
-    """Ensure the venv hosting ``sys.executable`` has an intact ``pyvenv.cfg``.
-
-    During ``hermes update`` the managed-uv path can rebuild the project venv
-    (``rebuild_venv`` → ``shutil.rmtree`` + ``uv venv``) before the
-    desktop-rebuild and profile-skills-sync steps run. Both of those steps
-    spawn a child process with ``sys.executable``. If they fire while the venv
-    is mid-rewrite, the interpreter launcher finds the venv directory but no
-    ``pyvenv.cfg`` yet and aborts with the bare stderr line
-    ``No pyvenv.cfg file`` — surfacing as a spurious "Desktop build failed" /
-    "sync failed" on an update that otherwise succeeded.
-
-    A venv's ``pyvenv.cfg`` sits one level up from the interpreter's ``bin`` /
-    ``Scripts`` dir. If ``sys.executable`` is NOT a venv interpreter (no
-    sibling marker dir, e.g. a system Python on PATH), there is nothing to
-    wait for and we return True immediately. Otherwise we poll briefly for the
-    marker to (re)appear — the rewrite window is short — and return whether
-    it's present. Best-effort: never raises, callers proceed regardless.
-    """
-    try:
-        exe = Path(sys.executable).resolve()
-    except Exception:
-        return True
-
-    venv_dir = exe.parent.parent  # .../venv/{bin,Scripts}/python -> .../venv
-    bin_dir = venv_dir / ("Scripts" if _is_windows() else "bin")
-    if not bin_dir.is_dir():
-        # Not a venv-hosted interpreter — pyvenv.cfg is irrelevant.
-        return True
-
-    cfg = venv_dir / "pyvenv.cfg"
-    if cfg.is_file():
-        return True
-
-    deadline = _time.monotonic() + max(0.0, timeout)
-    while _time.monotonic() < deadline:
-        if cfg.is_file():
-            return True
-        _time.sleep(0.25)
-    return cfg.is_file()
-
 
 def _hermes_exe_shims(scripts_dir: Path) -> list[Path]:
     """Entry-point shims that uv may try to rewrite during ``pip install -e .``.
@@ -9446,31 +9221,6 @@ def _install_psutil_android_compat(
             env=env,
         )
 
-
-def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
-    """Best-effort uv bootstrap on Termux for faster update installs.
-
-    The normal path (``ensure_uv()`` in managed_uv) installs the managed
-    standalone uv into ``$HERMES_HOME/bin/uv``, but on Termux the official
-    installer may not work (glibc vs bionic).  Fall back to ``pip install uv``
-    which gets a Termux-compatible binary.
-    """
-    from hermes_cli.managed_uv import resolve_uv
-
-    existing = resolve_uv()
-    if existing:
-        return existing
-    if not _is_termux_env():
-        return None
-    try:
-        print("  → Termux detected: trying to install uv for faster dependency updates...")
-        subprocess.run(pip_cmd + ["install", "uv"], cwd=PROJECT_ROOT, check=False)
-    except Exception:
-        pass
-    # After pip install, check managed path first, then PATH
-    return resolve_uv() or shutil.which("uv")
-
-
 def _update_node_dependencies() -> None:
     npm = shutil.which("npm")
     if not npm:
@@ -10064,15 +9814,21 @@ def _discard_lockfile_churn(git_cmd, repo_root):
 def cmd_update(args):
     """Update Hermes Agent to the latest version.
 
-    Thin wrapper around ``_cmd_update_impl``: installs hangup protection,
-    runs the update, then restores stdio on the way out (even on
-    ``sys.exit`` or unhandled exceptions).
+    Two-phase update:
+    1. ``_cmd_update_pull_new_version`` — download new code (git pull / ZIP).
+    2. ``_reexec_for_post_pull`` — replace this process with a fresh Python
+       running ``--post-pull``, which dispatches to ``_cmd_update_post_pull``
+       (pip install, node deps, skills sync, config migration, gateway restart).
+
+    The re-exec ensures post-pull steps run under the freshly-downloaded code
+    with no stale ``sys.modules`` or cached bytecode.
     """
     from hermes_cli.config import (
         detect_install_method,
         format_docker_update_message,
         is_managed,
         managed_error,
+        recommended_update_command_for_method,
     )
 
     if is_managed():
@@ -10092,11 +9848,37 @@ def cmd_update(args):
     if getattr(args, "check", False):
         # --check honors --branch so the "any new commits?" answer matches
         # what a subsequent `hermes update --branch=<x>` would actually pull.
+        # --check never mutates the install, so it's safe to run before the
+        # pip apply-path guard below — _cmd_update_check has its own pip /
+        # PyPI handling (check_via_pypi + --branch-ignored warning).
         branch = _resolve_update_branch(args)
         _cmd_update_check(
             branch=branch,
             branch_explicit=bool(getattr(args, "branch", None)),
         )
+        return
+
+    # Pip-installed hermes can't ``git pull`` or extract a ZIP over itself
+    # — the package is managed by pip/uv/pipx.  Error with guidance
+    # matching the managed-install pattern.
+    if detect_install_method(PROJECT_ROOT) == "pip":
+        method = detect_install_method(PROJECT_ROOT)
+        cmd = recommended_update_command_for_method(method)
+        print("✗ Cannot self-update: Hermes was installed via pip.")
+        print(f"  Run: {cmd}")
+        print("  Or reinstall from source: https://docs.hermes-agent.com/install")
+        sys.exit(1)
+
+    # --- Post-pull re-entry path ---
+    # When ``--post-pull`` is set, we've already been re-execed by
+    # ``_reexec_for_post_pull``.  Skip straight to phase 2.
+    if getattr(args, "post_pull", False):
+        gateway_mode = getattr(args, "gateway", False)
+        _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
+        try:
+            _cmd_update_post_pull(args, gateway_mode=gateway_mode)
+        finally:
+            _finalize_update_output(_update_io_state)
         return
 
     gateway_mode = getattr(args, "gateway", False)
@@ -10106,75 +9888,190 @@ def cmd_update(args):
     # _install_hangup_protection for rationale.
     _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
     try:
-        _cmd_update_impl(args, gateway_mode=gateway_mode)
+        code_updated = _cmd_update_pull_new_version(args, gateway_mode=gateway_mode)
+        if code_updated:
+            _reexec_for_post_pull(args, gateway_mode=gateway_mode)
+            # On POSIX, os.execvp replaces us — we never reach here.
+            # On Windows, subprocess.run + sys.exit already exited.
     finally:
         _finalize_update_output(_update_io_state)
 
 
-def _cmd_update_pip(args):
-    """Update Hermes via pip (for PyPI installs)."""
-    from hermes_cli import __version__
-    from hermes_cli.config import is_uv_tool_install
+# _cmd_update_pip and _cmd_update_impl removed — replaced by the two-phase
+# _cmd_update_pull_new_version + _cmd_update_post_pull split.
+# Pip installs now error in cmd_update() with guidance, same as managed installs.
 
-    print(f"→ Current version: {__version__}")
-    print("→ Checking PyPI for updates...")
 
-    from hermes_cli.managed_uv import ensure_uv, update_managed_uv
 
-    # Keep managed uv current before using it.
-    update_managed_uv()
 
-    uv, _fresh_bootstrap = ensure_uv()
-    in_venv = sys.prefix != sys.base_prefix
-    # pipx-managed installs live under .../pipx/venvs/<name>/...
-    pipx_managed = "pipx" in sys.prefix.split(os.sep)
-    pipx = shutil.which("pipx") if pipx_managed else None
+def _reexec_for_post_pull(args, gateway_mode: bool):
+    """Replace this process with a fresh Python running ``--post-pull``.
 
-    # Only the ``uv pip install`` path inside a venv needs VIRTUAL_ENV
-    # exported (uv refuses to install without it when the launcher shim
-    # didn't activate the venv). ``uv tool upgrade`` / ``pipx upgrade``
-    # operate on a named environment and ignore VIRTUAL_ENV, so we don't
-    # set it for them.
-    export_virtualenv = False
+    After phase 1 (``_cmd_update_pull_new_version``) has downloaded new code
+    onto disk, we need a clean interpreter with no stale ``sys.modules`` to
+    run the post-pull steps.  This function replaces the current process:
 
-    if is_uv_tool_install():
-        if not uv:
-            print("✗ Detected a uv-tool install but managed uv install failed.")
-            print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
-            sys.exit(1)
-        cmd = [uv, "tool", "upgrade", "hermes-agent"]
-    elif pipx_managed and pipx:
-        # pipx owns its own venv; ``pipx upgrade`` is the only correct path.
-        # Matches scripts/auto-update.sh, which already uses pipx upgrade.
-        cmd = [pipx, "upgrade", "hermes-agent"]
-    elif uv:
-        cmd = [uv, "pip", "install", "--upgrade", "hermes-agent"]
-        if in_venv:
-            # Launcher shim runs the venv interpreter but doesn't export
-            # VIRTUAL_ENV; without it uv errors "No virtual environment found".
-            export_virtualenv = True
-        else:
-            # Outside any venv, ``--system`` lets uv target the active
-            # interpreter, matching pip's default behaviour.
-            cmd.insert(3, "--system")
+    - **POSIX**: ``os.execvp`` — true exec, same PID, fresh interpreter.
+    - **Windows**: ``subprocess.run`` + ``sys.exit`` — relay pattern.
+      ``os.execvp`` on Windows is ``_execv`` internally (spawn + exit),
+      which changes the PID.  The bootstrap installer watches the original
+      PID via ``run_streamed()`` and would see exit-0 before post-pull
+      finishes.  The relay keeps the parent alive until the child
+      completes, so the installer sees the real exit code.
+
+    All original CLI flags (``--gateway``, ``--yes``, ``--branch``, etc.)
+    are preserved via ``sys.argv``.  ``--post-pull`` is appended so the
+    fresh process dispatches to ``_cmd_update_post_pull``.
+    """
+    import argparse as _argparse
+
+    argv = list(sys.argv)
+    argv.append("--post-pull")
+
+    # Forward the pre-update snapshot ID across the exec boundary so the
+    # cron-safety-net restore in phase 2 can reference it.
+    snapshot_id = getattr(args, "_pre_update_snapshot_id", None)
+    if snapshot_id:
+        argv.extend(["--pre-update-snapshot", snapshot_id])
+
+    exec_argv = [sys.executable, "-m", "hermes_cli.main"] + argv
+
+    if sys.platform == "win32":
+        # Windows relay: parent stays alive until child finishes so the
+        # bootstrap installer (update.rs run_streamed) sees the correct
+        # exit code via child.wait().  stdout/stderr FDs are inherited,
+        # so output streams continue seamlessly.
+        result = subprocess.run(exec_argv)
+        sys.exit(result.returncode)
     else:
-        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"]
+        # POSIX true exec — same PID, clean interpreter, no stale modules.
+        os.execvp(sys.executable, exec_argv)
 
-    print(f"→ Running: {' '.join(cmd)}")
-    run_kwargs = {}
-    if export_virtualenv:
-        run_kwargs["env"] = {**os.environ, "VIRTUAL_ENV": sys.prefix}
-    result = subprocess.run(cmd, **run_kwargs)
-    if result.returncode != 0:
-        print("✗ Update failed")
+
+def _download_and_extract_zip(args) -> bool:
+    """Download a ZIP archive and extract updated files over the install.
+
+    Stripped-down version of the old ``_update_files_via_zip``: only
+    downloads + extracts + clears bytecode.  Returns ``True`` when new
+    code was written to disk (signalling that a re-exec is needed).
+    Post-extraction steps (pip install, node deps, skills sync, etc.)
+    are handled by ``_cmd_update_post_pull``.
+
+    Used on Windows when git file I/O is broken (antivirus, NTFS filter
+    drivers causing 'Invalid argument' errors on file creation).
+    """
+    import tempfile
+    import zipfile
+    from urllib.request import urlretrieve
+
+    # The ZIP fallback exists for Windows git-file-I/O breakage. It pulls a
+    # static archive from GitHub, which is fine for the default "main"
+    # channel but would silently ignore --branch and update from main even
+    # if the user asked for something else — exactly the silent-divergence
+    # bug --branch was added to prevent. Refuse to proceed in that case
+    # rather than lie.
+    branch = _resolve_update_branch(args)
+    if branch != "main":
+        print(
+            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
+            "update path."
+        )
+        print(
+            "  This path runs when git file I/O is broken on the system. "
+            "Either resolve the git-side breakage (typically an antivirus "
+            "or NTFS filter holding files open) and rerun `hermes update "
+            f"--branch {branch}`, or update against main with `hermes update`."
+        )
         sys.exit(1)
+    zip_url = (
+        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
+    )
 
-    print("✓ Update complete! Restart hermes to use the new version.")
+    print("→ Downloading latest version...")
+    tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
+    try:
+        zip_path = os.path.join(tmp_dir, f"hermes-agent-{branch}.zip")
+        urlretrieve(zip_url, zip_path)
+
+        print("→ Extracting...")
+        import stat as _stat
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            # Validate paths to prevent zip-slip (path traversal) AND reject
+            # symlink members. A GitHub source ZIP for hermes-agent itself
+            # should never contain symlinks — they'd point outside the
+            # extracted tree and let an attacker who can compromise the
+            # update mirror plant arbitrary files via the update path.
+            tmp_dir_real = os.path.realpath(tmp_dir)
+            for member in zf.infolist():
+                member_path = os.path.realpath(os.path.join(tmp_dir, member.filename))
+                if (
+                    not member_path.startswith(tmp_dir_real + os.sep)
+                    and member_path != tmp_dir_real
+                ):
+                    raise ValueError(
+                        f"Zip-slip detected: {member.filename} escapes extraction directory"
+                    )
+                # Unix mode lives in the upper 16 bits of external_attr;
+                # mask to the file-type bits.
+                mode = (member.external_attr >> 16) & 0o170000
+                if _stat.S_ISLNK(mode):
+                    raise ValueError(
+                        f"ZIP contains unsupported symlink member: {member.filename}"
+                    )
+            zf.extractall(tmp_dir)
+
+        # GitHub ZIPs extract to hermes-agent-<branch>/
+        extracted = os.path.join(tmp_dir, f"hermes-agent-{branch}")
+        if not os.path.isdir(extracted):
+            # Try to find it
+            for d in os.listdir(tmp_dir):
+                candidate = os.path.join(tmp_dir, d)
+                if os.path.isdir(candidate) and d != "__MACOSX__":
+                    extracted = candidate
+                    break
+
+        # Copy updated files over existing installation, preserving venv/node_modules/.git
+        preserve = {"venv", "node_modules", ".git", ".env"}
+        update_count = 0
+        for item in os.listdir(extracted):
+            if item in preserve:
+                continue
+            src = os.path.join(extracted, item)
+            dst = os.path.join(str(PROJECT_ROOT), item)
+            if os.path.isdir(src):
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            update_count += 1
+
+        print(f"✓ Updated {update_count} items from ZIP")
+
+    except Exception as e:
+        print(f"✗ ZIP update failed: {e}")
+        sys.exit(1)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Clear stale bytecode after ZIP extraction
+    removed = _clear_bytecode_cache(PROJECT_ROOT)
+    if removed:
+        print(
+            f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
+        )
+
+    return True
 
 
-def _cmd_update_impl(args, gateway_mode: bool):
-    """Body of ``cmd_update`` — kept separate so the wrapper can always
-    restore stdio even on ``sys.exit``."""
+def _cmd_update_pull_new_version(args, gateway_mode: bool) -> bool:
+    """Phase 1 of ``hermes update``: download new code onto disk.
+
+    Returns ``True`` if new code was written (signalling the caller should
+    re-exec into ``_cmd_update_post_pull``).  Returns ``False`` when the
+    install is already up to date (no re-exec needed).
+    """
     # In gateway mode, use file-based IPC for prompts instead of stdin
     gw_input_fn = (
         (lambda prompt, default="": _gateway_prompt(prompt, default))
@@ -10204,23 +10101,18 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
-    use_zip_update = False
     git_dir = PROJECT_ROOT / ".git"
 
     if not git_dir.exists():
         if sys.platform == "win32":
-            use_zip_update = True
-        else:
-            from hermes_cli.config import detect_install_method
-            method = detect_install_method(PROJECT_ROOT)
-            if method == "pip":
-                _cmd_update_pip(args)
-                return
-            print("✗ Not a git repository. Please reinstall:")
-            print(
-                "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
-            )
-            sys.exit(1)
+            return _download_and_extract_zip(args)
+
+        # Non-Windows without .git — can't self-update.
+        print("✗ Not a git repository. Please reinstall:")
+        print(
+            "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
+        )
+        sys.exit(1)
 
     # On Windows, git can fail with "unable to write loose object file: Invalid argument"
     # due to filesystem atomicity issues. Set the recommended workaround.
@@ -10276,11 +10168,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print("⚠ Updating from fork:")
         print(f"  {origin_url}")
         print()
-
-    if use_zip_update:
-        # ZIP-based update for Windows when git is broken
-        _update_via_zip(args)
-        return
 
     # Fetch and pull
     try:
@@ -10429,16 +10316,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     check=False,
                 )
             print("✓ Already up to date!")
-            return
+            return False
 
         print(f"→ Found {commit_count} new commit(s)")
 
         # Snapshot critical state (state.db, config, pairing JSONs, etc.)
         # before pulling so a user can recover if something goes wrong.
-        # Issue #15733 reported missing pairing data after an update; even
-        # though `git pull` can't touch $HERMES_HOME, this is cheap
-        # belt-and-suspenders insurance and gives the user something to
-        # restore from via `/snapshot list` / `/snapshot restore <id>`.
         pre_update_snapshot_id = None
         try:
             from hermes_cli.backup import create_quick_snapshot
@@ -10449,6 +10332,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
         except Exception as exc:
             # Never let a snapshot failure block an update.
             logger.debug("Pre-update snapshot failed: %s", exc)
+
+        # Stash snapshot ID on args so _reexec_for_post_pull can forward it.
+        args._pre_update_snapshot_id = pre_update_snapshot_id
 
         print("→ Pulling updates...")
         update_succeeded = False
@@ -10562,639 +10448,711 @@ def _cmd_update_impl(args, gateway_mode: bool):
         if is_fork and branch == "main":
             _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
 
-        # Reinstall Python dependencies. Prefer .[all], but if one optional extra
-        # breaks on this machine, keep base deps and reinstall the remaining extras
-        # individually so update does not silently strip working capabilities.
-        print("→ Updating Python dependencies...")
-        from hermes_cli.managed_uv import ensure_uv, rebuild_venv, update_managed_uv
-
-        # Keep managed uv current — runs `uv self update` if we already have one.
-        update_managed_uv()
-
-        uv_bin, fresh_bootstrap = ensure_uv()
-        # First-time managed uv install on an existing checkout: the old venv
-        # may point to a Python without FTS5.  Rebuild it so the new managed
-        # uv provides a fresh interpreter with FTS5 guaranteed.
-        if fresh_bootstrap and uv_bin:
-            if not rebuild_venv(uv_bin, PROJECT_ROOT / "venv"):
-                raise RuntimeError(
-                    "venv rebuild failed; aborting update before dependency install"
-                )
-
-        pip_cmd = [sys.executable, "-m", "pip"]
-        if not uv_bin:
-            uv_bin = _ensure_uv_for_termux(pip_cmd)
-        install_group = "all"
-
-        if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-            if _is_termux_env(uv_env):
-                uv_env.pop("PYTHONPATH", None)
-                uv_env.pop("PYTHONHOME", None)
-                install_group = "termux-all"
-                print("  → Termux detected: using uv + curated termux-all optional profile...")
-            if _is_termux_env(uv_env) and _is_android_python():
-                print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
-                _install_psutil_android_compat([uv_bin, "pip"], env=uv_env)
-            _install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env, group=install_group
-            )
-        else:
-            # Use sys.executable to explicitly call the venv's pip module,
-            # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
-            # Some environments lose pip inside the venv; bootstrap it back with
-            # ensurepip before trying the editable install.
-            pip_cmd = [sys.executable, "-m", "pip"]
-            try:
-                subprocess.run(
-                    pip_cmd + ["--version"],
-                    cwd=PROJECT_ROOT,
-                    check=True,
-                    capture_output=True,
-                )
-            except subprocess.CalledProcessError:
-                subprocess.run(
-                    [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
-                    cwd=PROJECT_ROOT,
-                    check=True,
-                )
-            if _is_termux_env():
-                install_group = "termux-all"
-                print("  → Termux detected: using curated termux-all optional profile...")
-            if _is_termux_env() and _is_android_python():
-                print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
-                _install_psutil_android_compat(pip_cmd)
-            _install_python_dependencies_with_optional_fallback(pip_cmd, group=install_group)
-
-        _refresh_active_lazy_features()
-
-        _update_node_dependencies()
-        _build_web_ui(PROJECT_ROOT / "web")
-
-        # Rebuild the desktop app if the source tree changed since the last
-        # build.  ``hermes desktop --build-only`` uses the content-hash stamp
-        # internally, so this is effectively a no-op when nothing changed.
-        # Only bother if the user has a desktop app installed (indicated by
-        # an existing packaged executable or desktop dist); people who have
-        # never run ``hermes desktop`` shouldn't be forced into a full
-        # Electron build by ``hermes update``.
-        desktop_dir = PROJECT_ROOT / "apps" / "desktop"
-        has_desktop_app = _desktop_packaged_executable(desktop_dir) is not None or _desktop_dist_exists(desktop_dir)
-        if (desktop_dir / "package.json").exists() and shutil.which("npm") and has_desktop_app:
-            print("→ Checking if desktop app needs rebuilding...")
-            # The Python-dependency step above may have rebuilt the venv that
-            # hosts sys.executable. Wait for its pyvenv.cfg to settle before
-            # spawning, or the child interpreter aborts with "No pyvenv.cfg
-            # file" and the rebuild spuriously "fails" on a successful update.
-            _wait_for_interpreter_venv_ready()
-            _desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
-            # Stream the build output live (long Electron builds otherwise
-            # look hung). On the rare nonzero exit, retry once after waiting
-            # again for the venv — this covers a still-settling rebuild window
-            # the first wait didn't fully catch.
-            build_result = subprocess.run(_desktop_build_cmd, cwd=PROJECT_ROOT, check=False)
-            if build_result.returncode != 0 and _wait_for_interpreter_venv_ready():
-                build_result = subprocess.run(_desktop_build_cmd, cwd=PROJECT_ROOT, check=False)
-            if build_result.returncode != 0:
-                print("  ⚠ Desktop build failed (non-fatal; run `hermes desktop` to retry)")
-
         print()
         print("✓ Code updated!")
 
-        # After git pull, source files on disk are newer than cached Python
-        # modules in this process.  Reload hermes_constants so that any lazy
-        # import executed below (skills sync, gateway restart) sees new
-        # attributes like display_hermes_home() added since the last release.
-        try:
-            import importlib
-            import hermes_constants as _hc
+        # New code is on disk — caller should re-exec for post-pull.
+        return True
 
-            importlib.reload(_hc)
-        except Exception:
-            pass  # non-fatal — worst case a lazy import fails gracefully
-
-        # Sync bundled skills (copies new, updates changed, respects user deletions)
-        try:
-            from tools.skills_sync import sync_skills
-
+    except subprocess.CalledProcessError as e:
+        if sys.platform == "win32":
+            print(f"⚠ Git update failed: {e}")
+            print("→ Falling back to ZIP download...")
             print()
-            print("→ Syncing bundled skills...")
-            result = sync_skills(quiet=True)
-            if result["copied"]:
-                print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
-            if result.get("updated"):
-                print(
-                    f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
-                )
-            if result.get("user_modified"):
-                print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
-            if result.get("cleaned"):
-                print(f"  − {len(result['cleaned'])} removed from manifest")
-            if not result["copied"] and not result.get("updated"):
-                print("  ✓ Skills are up to date")
-        except Exception as e:
-            logger.debug("Skills sync during update failed: %s", e)
+            return _download_and_extract_zip(args)
+        else:
+            print(f"✗ Update failed: {e}")
+            sys.exit(1)
 
-        # Sync bundled skills to all profiles (including the active one).
-        # seed_profile_skills() uses subprocess with an explicit HERMES_HOME so
-        # it is not affected by sync_skills()'s module-level HERMES_HOME cache,
-        # which means the active profile is reliably synced regardless of whether
-        # the caller's HERMES_HOME env var points at the default or a named profile.
+
+def _cmd_update_post_pull(args, gateway_mode: bool):
+    """Phase 2 of ``hermes update``: post-pull steps under fresh Python.
+
+    Entered via ``--post-pull`` after ``_reexec_for_post_pull`` replaces
+    the process.  Runs with a clean ``sys.modules`` so imports pick up the
+    newly-downloaded code.  Steps are identical regardless of whether code
+    arrived via git pull or ZIP extraction.
+    """
+    assume_yes = bool(getattr(args, "yes", False))
+    pre_update_snapshot_id = getattr(args, "pre_update_snapshot", None)
+
+    # Reinstall Python dependencies. Prefer .[all], but if one optional extra
+    # breaks on this machine, keep base deps and reinstall the remaining extras
+    # individually so update does not silently strip working capabilities.
+    print("→ Updating Python dependencies...")
+
+    # Check that the running interpreter meets our minimum — abort early
+    # with a clear message instead of silently proceeding into a broken
+    # dependency install that will fail with cryptic C-extension errors.
+    py_major, py_minor = sys.version_info[:2]
+    if py_major < 3 or (py_major == 3 and py_minor < 11):
+        print(f"✗ Python {py_major}.{py_minor} is too old for Hermes Agent.")
+        print("  Hermes requires Python >= 3.11 (and < 3.14).")
+        print("  Recreate your venv with a compatible interpreter, then re-run `hermes update`.")
+        sys.exit(1)
+    if py_major == 3 and py_minor >= 14:
+        print(f"✗ Python {py_major}.{py_minor} is too new for Hermes Agent.")
+        print("  Hermes requires Python < 3.14 (>= 3.11).")
+        print("  Some Rust-backed dependencies lack wheels for this version.")
+        print("  Recreate your venv with Python 3.11–3.13, then re-run `hermes update`.")
+        sys.exit(1)
+
+    from hermes_cli.managed_uv import ensure_uv, update_managed_uv
+
+    # Keep managed uv current — runs `uv self update` if we already have one.
+    update_managed_uv()
+
+    uv_bin = ensure_uv()
+    install_group = "all"
+
+    if uv_bin:
+        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+        if _is_termux_env(uv_env):
+            uv_env.pop("PYTHONPATH", None)
+            uv_env.pop("PYTHONHOME", None)
+            install_group = "termux-all"
+            print("  → Termux detected: using uv + curated termux-all optional profile...")
+        if _is_termux_env(uv_env) and _is_android_python():
+            print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
+            _install_psutil_android_compat([uv_bin, "pip"], env=uv_env)
+        _install_python_dependencies_with_optional_fallback(
+            [uv_bin, "pip"], env=uv_env, group=install_group
+        )
+    else:
+        # Use sys.executable to explicitly call the venv's pip module,
+        # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
+        # Some environments lose pip inside the venv; bootstrap it back with
+        # ensurepip before trying the editable install.
+        pip_cmd = [sys.executable, "-m", "pip"]
         try:
-            from hermes_cli.profiles import (
-                list_profiles,
-                seed_profile_skills,
+            subprocess.run(
+                pip_cmd + ["--version"],
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
             )
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+                cwd=PROJECT_ROOT,
+                check=True,
+            )
+        if _is_termux_env():
+            install_group = "termux-all"
+            print("  → Termux detected: using curated termux-all optional profile...")
+        if _is_termux_env() and _is_android_python():
+            print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
+            _install_psutil_android_compat(pip_cmd)
+        _install_python_dependencies_with_optional_fallback(pip_cmd, group=install_group)
 
-            all_profiles = list_profiles()
-            if all_profiles:
-                print()
-                print("→ Syncing bundled skills to all profiles...")
-                # seed_profile_skills spawns sys.executable; if the venv was
-                # just rebuilt above, wait for pyvenv.cfg before the loop so
-                # the children don't abort with "No pyvenv.cfg file".
-                _wait_for_interpreter_venv_ready()
-                for p in all_profiles:
-                    try:
-                        r = seed_profile_skills(p.path, quiet=True)
-                        if r and r.get("skipped_opt_out"):
-                            status = "opted out (--no-skills)"
-                        elif r:
-                            copied = len(r.get("copied", []))
-                            updated = len(r.get("updated", []))
-                            modified = len(r.get("user_modified", []))
-                            parts = []
-                            if copied:
-                                parts.append(f"+{copied} new")
-                            if updated:
-                                parts.append(f"↑{updated} updated")
-                            if modified:
-                                parts.append(f"~{modified} user-modified")
-                            status = ", ".join(parts) if parts else "up to date"
-                        else:
-                            status = "sync failed"
-                        print(f"  {p.name}: {status}")
-                    except Exception as pe:
-                        print(f"  {p.name}: error ({pe})")
-        except Exception:
-            pass  # profiles module not available or no profiles
+    _refresh_active_lazy_features()
 
-        # Sync Honcho host blocks to all profiles
-        try:
-            from plugins.memory.honcho.cli import sync_honcho_profiles_quiet
+    _update_node_dependencies()
+    _build_web_ui(PROJECT_ROOT / "web")
 
-            synced = sync_honcho_profiles_quiet()
-            if synced:
-                print(f"\n-> Honcho: synced {synced} profile(s)")
-        except Exception:
-            pass  # honcho plugin not installed or not configured
+    # Rebuild the desktop app if the source tree changed since the last
+    # build.  ``hermes desktop --build-only`` uses the content-hash stamp
+    # internally, so this is effectively a no-op when nothing changed.
+    # Only bother if the user has a desktop app installed (indicated by
+    # an existing packaged executable or desktop dist); people who have
+    # never run ``hermes desktop`` shouldn't be forced into a full
+    # Electron build by ``hermes update``.
+    desktop_dir = PROJECT_ROOT / "apps" / "desktop"
+    has_desktop_app = _desktop_packaged_executable(desktop_dir) is not None or _desktop_dist_exists(desktop_dir)
+    if (desktop_dir / "package.json").exists() and shutil.which("npm") and has_desktop_app:
+        print("→ Checking if desktop app needs rebuilding...")
+        _desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
+        # Stream the build output live (long Electron builds otherwise
+        # look hung). On the rare nonzero exit, retry once after waiting
+        # again for the venv — this covers a still-settling rebuild window
+        # the first wait didn't fully catch.
+        build_result = subprocess.run(_desktop_build_cmd, cwd=PROJECT_ROOT, check=False)
+        if build_result.returncode != 0 :
+            build_result = subprocess.run(_desktop_build_cmd, cwd=PROJECT_ROOT, check=False)
+        if build_result.returncode != 0:
+            print("  ⚠ Desktop build failed (non-fatal; run `hermes desktop` to retry)")
 
-        # Check for config migrations
+    print()
+    print("✓ Code updated!")
+
+    # After git pull, source files on disk are newer than cached Python
+    # modules in this process.  Reload hermes_constants so that any lazy
+    # import executed below (skills sync, gateway restart) sees new
+    # attributes like display_hermes_home() added since the last release.
+    try:
+        import importlib
+        import hermes_constants as _hc
+
+        importlib.reload(_hc)
+    except Exception:
+        pass  # non-fatal — worst case a lazy import fails gracefully
+
+    # Sync bundled skills (copies new, updates changed, respects user deletions)
+    try:
+        from tools.skills_sync import sync_skills
+
         print()
-        print("→ Checking configuration for new options...")
-
-        from hermes_cli.config import (
-            get_missing_env_vars,
-            get_missing_config_fields,
-            check_config_version,
-            migrate_config,
-        )
-
-        missing_env = get_missing_env_vars(required_only=True)
-        missing_config = get_missing_config_fields()
-        current_ver, latest_ver = check_config_version()
-
-        has_new_options = bool(missing_env or missing_config)
-        version_bump_only = (
-            not has_new_options and current_ver < latest_ver
-        )
-        needs_migration = has_new_options or current_ver < latest_ver
-
-        if version_bump_only:
-            # Nothing for the user to fill in — only the config format version
-            # changed (new defaults already merge in transparently). Asking
-            # "configure new options now?" here is misleading: saying yes just
-            # bumps the version and looks like a no-op (issue: ScottFive /
-            # Tt2021). Apply it silently and say what actually happened.
-            print()
+        print("→ Syncing bundled skills...")
+        result = sync_skills(quiet=True)
+        if result["copied"]:
+            print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
+        if result.get("updated"):
             print(
-                f"  ℹ Updating config format (v{current_ver} → v{latest_ver})…"
+                f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
             )
-            try:
-                migrate_config(interactive=False, quiet=True)
-                print("  ✓ Config format updated (no new settings to configure)")
-            except Exception as _mig_err:
-                print(f"  ⚠️  Config format update failed: {_mig_err}")
-                print("     Run 'hermes config migrate' to retry.")
-        elif needs_migration:
+        if result.get("user_modified"):
+            print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
+        if result.get("cleaned"):
+            print(f"  − {len(result['cleaned'])} removed from manifest")
+        if not result["copied"] and not result.get("updated"):
+            print("  ✓ Skills are up to date")
+    except Exception as e:
+        logger.debug("Skills sync during update failed: %s", e)
+
+    # Sync bundled skills to all profiles (including the active one).
+    # seed_profile_skills() uses subprocess with an explicit HERMES_HOME so
+    # it is not affected by sync_skills()'s module-level HERMES_HOME cache,
+    # which means the active profile is reliably synced regardless of whether
+    # the caller's HERMES_HOME env var points at the default or a named profile.
+    try:
+        from hermes_cli.profiles import (
+            list_profiles,
+            seed_profile_skills,
+        )
+
+        all_profiles = list_profiles()
+        if all_profiles:
             print()
-            # Show WHAT changed, not just a count, so the user can make an
-            # informed yes/no decision (previously the prompt named nothing).
-            def _print_items(items, label, key, fallback_key=None):
-                if not items:
-                    return
-                print(f"  {label}:")
-                shown = items[:8]
-                for it in shown:
-                    if isinstance(it, dict):
-                        name = it.get(key) or (fallback_key and it.get(fallback_key)) or "?"
-                        desc = (it.get("description") or "").strip()
+            print("→ Syncing bundled skills to all profiles...")
+            for p in all_profiles:
+                try:
+                    r = seed_profile_skills(p.path, quiet=True)
+                    if r and r.get("skipped_opt_out"):
+                        status = "opted out (--no-skills)"
+                    elif r:
+                        copied = len(r.get("copied", []))
+                        updated = len(r.get("updated", []))
+                        modified = len(r.get("user_modified", []))
+                        parts = []
+                        if copied:
+                            parts.append(f"+{copied} new")
+                        if updated:
+                            parts.append(f"↑{updated} updated")
+                        if modified:
+                            parts.append(f"~{modified} user-modified")
+                        status = ", ".join(parts) if parts else "up to date"
                     else:
-                        # Defensive: some callers/mocks pass bare name strings.
-                        name = str(it)
-                        desc = ""
-                    if desc:
-                        print(f"      • {name} — {desc}")
-                    else:
-                        print(f"      • {name}")
+                        status = "sync failed"
+                    print(f"  {p.name}: {status}")
+                except Exception as pe:
+                    print(f"  {p.name}: error ({pe})")
+    except Exception:
+        pass  # profiles module not available or no profiles
+
+    # Sync Honcho host blocks to all profiles
+    try:
+        from plugins.memory.honcho.cli import sync_honcho_profiles_quiet
+
+        synced = sync_honcho_profiles_quiet()
+        if synced:
+            print(f"\n-> Honcho: synced {synced} profile(s)")
+    except Exception:
+        pass  # honcho plugin not installed or not configured
+
+    # Check for config migrations
+    print()
+    print("→ Checking configuration for new options...")
+
+    from hermes_cli.config import (
+        get_missing_env_vars,
+        get_missing_config_fields,
+        check_config_version,
+        migrate_config,
+    )
+
+    missing_env = get_missing_env_vars(required_only=True)
+    missing_config = get_missing_config_fields()
+    current_ver, latest_ver = check_config_version()
+
+    has_new_options = bool(missing_env or missing_config)
+    version_bump_only = (
+        not has_new_options and current_ver < latest_ver
+    )
+    needs_migration = has_new_options or current_ver < latest_ver
+
+    if version_bump_only:
+        # Nothing for the user to fill in — only the config format version
+        # changed (new defaults already merge in transparently). Asking
+        # "configure new options now?" here is misleading: saying yes just
+        # bumps the version and looks like a no-op (issue: ScottFive /
+        # Tt2021). Apply it silently and say what actually happened.
+        print()
+        print(
+            f"  ℹ Updating config format (v{current_ver} → v{latest_ver})…"
+        )
+        try:
+            migrate_config(interactive=False, quiet=True)
+            print("  ✓ Config format updated (no new settings to configure)")
+        except Exception as _mig_err:
+            print(f"  ⚠️  Config format update failed: {_mig_err}")
+            print("     Run 'hermes config migrate' to retry.")
+    elif needs_migration:
+        print()
+        # Show WHAT changed, not just a count, so the user can make an
+        # informed yes/no decision (previously the prompt named nothing).
+        def _print_items(items, label, key, fallback_key=None):
+            if not items:
+                return
+            print(f"  {label}:")
+            shown = items[:8]
+            for it in shown:
+                if isinstance(it, dict):
+                    name = it.get(key) or (fallback_key and it.get(fallback_key)) or "?"
+                    desc = (it.get("description") or "").strip()
+                else:
+                    # Defensive: some callers/mocks pass bare name strings.
+                    name = str(it)
+                    desc = ""
+                if desc:
+                    print(f"      • {name} — {desc}")
+                else:
+                    print(f"      • {name}")
                 extra = len(items) - len(shown)
                 if extra > 0:
                     print(f"      … and {extra} more")
 
-            if missing_env:
-                print(
-                    f"  ⚠️  {len(missing_env)} new required setting(s) need configuration"
-                )
-                _print_items(missing_env, "New settings", "name")
-            if missing_config:
-                print(f"  ℹ️  {len(missing_config)} new config option(s) available")
-                _print_items(missing_config, "New options", "key")
+        if missing_env:
+            print(
+                f"  ⚠️  {len(missing_env)} new required setting(s) need configuration"
+            )
+            _print_items(missing_env, "New settings", "name")
+        if missing_config:
+            print(f"  ℹ️  {len(missing_config)} new config option(s) available")
+            _print_items(missing_config, "New options", "key")
 
-            print()
-            if assume_yes:
-                print(
-                    "  ℹ --yes: auto-applying config migration (skipping API-key prompts)."
+        print()
+        if assume_yes:
+            print(
+                "  ℹ --yes: auto-applying config migration (skipping API-key prompts)."
+            )
+            response = "y"
+        elif gateway_mode:
+            response = (
+                _gateway_prompt(
+                    "Would you like to configure new options now? [Y/n]", "n"
                 )
-                response = "y"
-            elif gateway_mode:
+                .strip()
+                .lower()
+            )
+        elif not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print("  ℹ Non-interactive session — applying safe config migrations.")
+            response = "auto"
+        else:
+            try:
                 response = (
-                    _gateway_prompt(
-                        "Would you like to configure new options now? [Y/n]", "n"
-                    )
+                    input("Would you like to configure them now? [Y/n]: ")
                     .strip()
                     .lower()
                 )
-            elif not (sys.stdin.isatty() and sys.stdout.isatty()):
-                print("  ℹ Non-interactive session — applying safe config migrations.")
-                response = "auto"
-            else:
-                try:
-                    response = (
-                        input("Would you like to configure them now? [Y/n]: ")
-                        .strip()
-                        .lower()
-                    )
-                except EOFError:
-                    response = "n"
+            except EOFError:
+                response = "n"
 
-            if response in {"", "y", "yes", "auto"}:
-                print()
-                # Gateway mode, --yes, and non-interactive update contexts
-                # (dashboard / web server actions) cannot prompt for API keys.
-                # Still run the non-interactive migration pass before restarting
-                # so new default config fields and version bumps are written
-                # before the freshly updated gateway validates config at startup.
-                interactive_migration = not (
-                    gateway_mode or assume_yes or response == "auto"
-                )
-                results = migrate_config(interactive=interactive_migration, quiet=False)
-
-                if results["env_added"] or results["config_added"]:
-                    print()
-                    print("✓ Configuration updated!")
-                if (gateway_mode or assume_yes or response == "auto") and missing_env:
-                    print("  ℹ API keys require manual entry: hermes config migrate")
-            else:
-                print()
-                print("Skipped. Run 'hermes config migrate' later to configure.")
-        else:
-            print("  ✓ Configuration is up to date")
-
-        # Safety net: config-version migrations have been observed to leave
-        # cron/jobs.json valid-but-empty, silently dropping every scheduled
-        # job (issue #34600). If the live file is now empty while the
-        # pre-update snapshot held jobs, restore it and warn loudly.
-        try:
-            from hermes_cli.backup import restore_cron_jobs_if_emptied
-
-            cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
-            if cron_restore:
-                print()
-                print(
-                    "  ⚠️  cron/jobs.json was emptied during this update — "
-                    f"restored {cron_restore['job_count']} job(s) from "
-                    f"pre-update snapshot {cron_restore['snapshot_id']}."
-                )
-        except Exception as exc:
-            # Never let the cron safety net break an otherwise-good update.
-            logger.debug("Cron jobs auto-restore check failed: %s", exc)
-
-        print()
-        print("✓ Update complete!")
-
-        # Curator first-run heads-up. Only prints when curator is enabled AND
-        # has never run — i.e. the window where the ticker would otherwise
-        # have fired against a fresh skill library. Kept silent on steady
-        # state so we don't nag.
-        try:
-            _print_curator_first_run_notice()
-        except Exception as e:
-            logger.debug("Curator first-run notice failed: %s", e)
-
-        # Most-recent curator run notice — show-once per run. Surfaces the
-        # rename map (`old-name → umbrella`) on the high-attention update
-        # surface so users learn about consolidations without having to
-        # check `hermes curator status`. Self-stamps after printing so it
-        # never repeats for the same run.
-        try:
-            _print_curator_recent_run_notice()
-        except Exception as e:
-            logger.debug("Curator recent-run notice failed: %s", e)
-
-        # Repair RHEL-family root installs where /usr/local/bin isn't on PATH
-        # for non-login interactive shells.  No-op on every other platform.
-        try:
-            _ensure_fhs_path_guard()
-        except Exception as e:
-            logger.debug("FHS PATH guard check failed: %s", e)
-
-        # Refresh the cua-driver binary used by the Computer Use toolset.
-        # The upstream installer is gated on macOS and on the binary already
-        # being on PATH, so this is a no-op for users who don't have it.
-        # Tying the refresh to ``hermes update`` gives users a predictable
-        # cadence (matches when they pull new agent code) without adding
-        # startup latency or a per-launch GitHub API call.
-        try:
-            if sys.platform == "darwin" and shutil.which("cua-driver"):
-                from hermes_cli.tools_config import install_cua_driver
-
-                print()
-                print("→ Refreshing cua-driver (Computer Use)...")
-                install_cua_driver(upgrade=True)
-        except Exception as e:
-            logger.debug("cua-driver refresh failed: %s", e)
-
-        # Write exit code *before* the gateway restart attempt.
-        # When running as ``hermes update --gateway`` (spawned by the gateway's
-        # /update command), this process lives inside the gateway's systemd
-        # cgroup.  A graceful SIGUSR1 restart keeps the drain loop alive long
-        # enough for the exit-code marker to be written below, but the
-        # fallback ``systemctl restart`` path (see below) kills everything in
-        # the cgroup (KillMode=mixed → SIGKILL to remaining processes),
-        # including us and the wrapping bash shell.  The shell never reaches
-        # its ``printf $status > .update_exit_code`` epilogue, so the
-        # exit-code marker file would never be created.  The new gateway's
-        # update watcher would then poll for 30 minutes and send a spurious
-        # timeout message.
-        #
-        # Writing the marker here — after git pull + pip install succeed but
-        # before we attempt the restart — ensures the new gateway sees it
-        # regardless of how we die.
-        if gateway_mode:
-            _exit_code_path = get_hermes_home() / ".update_exit_code"
-            try:
-                _exit_code_path.write_text("0")
-            except OSError:
-                pass
-
-        # Auto-restart ALL gateways after update.
-        # The code update (git pull) is shared across all profiles, so every
-        # running gateway needs restarting to pick up the new code.
-        try:
-            from hermes_cli.gateway import (
-                is_macos,
-                supports_systemd_services,
-                _ensure_user_systemd_env,
-                find_gateway_pids,
-                find_profile_gateway_processes,
-                launch_detached_profile_gateway_restart,
-                _get_service_pids,
-                _graceful_restart_via_sigusr1,
-                _wait_for_gateway_exit,
+        if response in {"", "y", "yes", "auto"}:
+            print()
+            # Gateway mode, --yes, and non-interactive update contexts
+            # (dashboard / web server actions) cannot prompt for API keys.
+            # Still run the non-interactive migration pass before restarting
+            # so new default config fields and version bumps are written
+            # before the freshly updated gateway validates config at startup.
+            interactive_migration = not (
+                gateway_mode or assume_yes or response == "auto"
             )
-            import signal as _signal
+            results = migrate_config(interactive=interactive_migration, quiet=False)
 
-            def _wait_for_service_active(
-                scope_cmd_: list,
-                svc_name_: str,
-                timeout: float = 10.0,
-            ) -> bool:
-                """Poll ``systemctl is-active`` until the unit reports active.
+            if results["env_added"] or results["config_added"]:
+                print()
+                print("✓ Configuration updated!")
+            if (gateway_mode or assume_yes or response == "auto") and missing_env:
+                print("  ℹ API keys require manual entry: hermes config migrate")
+        else:
+            print()
+            print("Skipped. Run 'hermes config migrate' later to configure.")
+    else:
+        print("  ✓ Configuration is up to date")
 
-                systemd's Stopped -> Started transition after a graceful exit
-                (or a hard restart) is not instantaneous; a one-shot check
-                races that window and falsely reports the unit as down.
-                Poll every 0.5s up to ``timeout`` seconds before giving up.
-                """
-                deadline = _time.monotonic() + max(timeout, 0.5)
-                while True:
-                    try:
-                        _verify = subprocess.run(
-                            scope_cmd_ + ["is-active", svc_name_],
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
-                        if _verify.stdout.strip() == "active":
-                            return True
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        pass
-                    if _time.monotonic() >= deadline:
-                        return False
-                    _time.sleep(0.5)
+    # Safety net: config-version migrations have been observed to leave
+    # cron/jobs.json valid-but-empty, silently dropping every scheduled
+    # job (issue #34600). If the live file is now empty while the
+    # pre-update snapshot held jobs, restore it and warn loudly.
+    try:
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
 
-            def _service_restart_sec(
-                scope_cmd_: list,
-                svc_name_: str,
-                default: float = 0.0,
-            ) -> float:
-                """Read the unit's ``RestartUSec`` (RestartSec) in seconds.
+        cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
+        if cron_restore:
+            print()
+            print(
+                "  ⚠️  cron/jobs.json was emptied during this update — "
+                f"restored {cron_restore['job_count']} job(s) from "
+                f"pre-update snapshot {cron_restore['snapshot_id']}."
+            )
+    except Exception as exc:
+        # Never let the cron safety net break an otherwise-good update.
+        logger.debug("Cron jobs auto-restore check failed: %s", exc)
 
-                After a graceful exit-75, systemd waits ``RestartSec`` before
-                respawning the unit.  Callers that poll for ``is-active``
-                must use a timeout >= ``RestartSec`` + transition slack, or
-                they'll give up *during* the cooldown window and wrongly
-                conclude the unit didn't relaunch.
-                """
+    print()
+    print("✓ Update complete!")
+
+    # Curator first-run heads-up. Only prints when curator is enabled AND
+    # has never run — i.e. the window where the ticker would otherwise
+    # have fired against a fresh skill library. Kept silent on steady
+    # state so we don't nag.
+    try:
+        _print_curator_first_run_notice()
+    except Exception as e:
+        logger.debug("Curator first-run notice failed: %s", e)
+
+    # Most-recent curator run notice — show-once per run. Surfaces the
+    # rename map (`old-name → umbrella`) on the high-attention update
+    # surface so users learn about consolidations without having to
+    # check `hermes curator status`. Self-stamps after printing so it
+    # never repeats for the same run.
+    try:
+        _print_curator_recent_run_notice()
+    except Exception as e:
+        logger.debug("Curator recent-run notice failed: %s", e)
+
+    # Repair RHEL-family root installs where /usr/local/bin isn't on PATH
+    # for non-login interactive shells.  No-op on every other platform.
+    try:
+        _ensure_fhs_path_guard()
+    except Exception as e:
+        logger.debug("FHS PATH guard check failed: %s", e)
+
+    # Refresh the cua-driver binary used by the Computer Use toolset.
+    # The upstream installer is gated on macOS and on the binary already
+    # being on PATH, so this is a no-op for users who don't have it.
+    # Tying the refresh to ``hermes update`` gives users a predictable
+    # cadence (matches when they pull new agent code) without adding
+    # startup latency or a per-launch GitHub API call.
+    try:
+        if sys.platform == "darwin" and shutil.which("cua-driver"):
+            from hermes_cli.tools_config import install_cua_driver
+
+            print()
+            print("→ Refreshing cua-driver (Computer Use)...")
+            install_cua_driver(upgrade=True)
+    except Exception as e:
+        logger.debug("cua-driver refresh failed: %s", e)
+
+    # Write exit code *before* the gateway restart attempt.
+    # When running as ``hermes update --gateway`` (spawned by the gateway's
+    # /update command), this process lives inside the gateway's systemd
+    # cgroup.  A graceful SIGUSR1 restart keeps the drain loop alive long
+    # enough for the exit-code marker to be written below, but the
+    # fallback ``systemctl restart`` path (see below) kills everything in
+    # the cgroup (KillMode=mixed → SIGKILL to remaining processes),
+    # including us and the wrapping bash shell.  The shell never reaches
+    # its ``printf $status > .update_exit_code`` epilogue, so the
+    # exit-code marker file would never be created.  The new gateway's
+    # update watcher would then poll for 30 minutes and send a spurious
+    # timeout message.
+    #
+    # Writing the marker here — after git pull + pip install succeed but
+    # before we attempt the restart — ensures the new gateway sees it
+    # regardless of how we die.
+    if gateway_mode:
+        _exit_code_path = get_hermes_home() / ".update_exit_code"
+        try:
+            _exit_code_path.write_text("0")
+        except OSError:
+            pass
+
+    # Auto-restart ALL gateways after update.
+    # The code update (git pull) is shared across all profiles, so every
+    # running gateway needs restarting to pick up the new code.
+    try:
+        from hermes_cli.gateway import (
+            is_macos,
+            supports_systemd_services,
+            _ensure_user_systemd_env,
+            find_gateway_pids,
+            find_profile_gateway_processes,
+            launch_detached_profile_gateway_restart,
+            _get_service_pids,
+            _graceful_restart_via_sigusr1,
+            _wait_for_gateway_exit,
+        )
+        import signal as _signal
+
+        def _wait_for_service_active(
+            scope_cmd_: list,
+            svc_name_: str,
+            timeout: float = 10.0,
+        ) -> bool:
+            """Poll ``systemctl is-active`` until the unit reports active.
+
+            systemd's Stopped -> Started transition after a graceful exit
+            (or a hard restart) is not instantaneous; a one-shot check
+            races that window and falsely reports the unit as down.
+            Poll every 0.5s up to ``timeout`` seconds before giving up.
+            """
+            deadline = _time.monotonic() + max(timeout, 0.5)
+            while True:
                 try:
-                    _show = subprocess.run(
-                        scope_cmd_
-                        + [
-                            "show",
-                            svc_name_,
-                            "--property=RestartUSec",
-                            "--value",
-                        ],
+                    _verify = subprocess.run(
+                        scope_cmd_ + ["is-active", svc_name_],
                         capture_output=True,
                         text=True,
                         timeout=5,
                     )
+                    if _verify.stdout.strip() == "active":
+                        return True
                 except (FileNotFoundError, subprocess.TimeoutExpired):
-                    return default
-                raw = (_show.stdout or "").strip()
-                # systemd emits values like "30s", "100ms", "1min 30s", or
-                # "infinity".  Parse conservatively; on any miss return default.
-                if not raw or raw == "infinity":
-                    return default
-                total = 0.0
-                matched = False
-                for part in raw.split():
-                    for _suf, _mult in (
-                        ("ms", 0.001),
-                        ("us", 0.000001),
-                        ("min", 60.0),
-                        ("s", 1.0),
-                    ):
-                        if part.endswith(_suf):
-                            try:
-                                total += float(part[: -len(_suf)]) * _mult
-                                matched = True
-                            except ValueError:
-                                pass
-                            break
-                return total if matched else default
+                    pass
+                if _time.monotonic() >= deadline:
+                    return False
+                _time.sleep(0.5)
 
-            # Drain budget for graceful SIGUSR1 restarts.  The gateway drains
-            # for up to ``agent.restart_drain_timeout`` (default 60s) before
-            # exiting with code 75; we wait slightly longer so the drain
-            # completes before we fall back to a hard restart.  On older
-            # systemd units without SIGUSR1 wiring this wait just times out
-            # and we fall back to ``systemctl restart`` (the old behaviour).
+        def _service_restart_sec(
+            scope_cmd_: list,
+            svc_name_: str,
+            default: float = 0.0,
+        ) -> float:
+            """Read the unit's ``RestartUSec`` (RestartSec) in seconds.
+
+            After a graceful exit-75, systemd waits ``RestartSec`` before
+            respawning the unit.  Callers that poll for ``is-active``
+            must use a timeout >= ``RestartSec`` + transition slack, or
+            they'll give up *during* the cooldown window and wrongly
+            conclude the unit didn't relaunch.
+            """
             try:
-                from hermes_constants import (
-                    DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT as _DEFAULT_DRAIN,
+                _show = subprocess.run(
+                    scope_cmd_
+                    + [
+                        "show",
+                        svc_name_,
+                        "--property=RestartUSec",
+                        "--value",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
-            except Exception:
-                _DEFAULT_DRAIN = 60.0
-            _cfg_drain = None
-            try:
-                from hermes_cli.config import load_config
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return default
+            raw = (_show.stdout or "").strip()
+            # systemd emits values like "30s", "100ms", "1min 30s", or
+            # "infinity".  Parse conservatively; on any miss return default.
+            if not raw or raw == "infinity":
+                return default
+            total = 0.0
+            matched = False
+            for part in raw.split():
+                for _suf, _mult in (
+                    ("ms", 0.001),
+                    ("us", 0.000001),
+                    ("min", 60.0),
+                    ("s", 1.0),
+                ):
+                    if part.endswith(_suf):
+                        try:
+                            total += float(part[: -len(_suf)]) * _mult
+                            matched = True
+                        except ValueError:
+                            pass
+                        break
+            return total if matched else default
 
-                _cfg_agent = load_config().get("agent") or {}
-                _cfg_drain = _cfg_agent.get("restart_drain_timeout")
+        # Drain budget for graceful SIGUSR1 restarts.  The gateway drains
+        # for up to ``agent.restart_drain_timeout`` (default 60s) before
+        # exiting with code 75; we wait slightly longer so the drain
+        # completes before we fall back to a hard restart.  On older
+        # systemd units without SIGUSR1 wiring this wait just times out
+        # and we fall back to ``systemctl restart`` (the old behaviour).
+        try:
+            from hermes_constants import (
+                DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT as _DEFAULT_DRAIN,
+            )
+        except Exception:
+            _DEFAULT_DRAIN = 60.0
+        _cfg_drain = None
+        try:
+            from hermes_cli.config import load_config
+
+            _cfg_agent = load_config().get("agent") or {}
+            _cfg_drain = _cfg_agent.get("restart_drain_timeout")
+        except Exception:
+            pass
+        try:
+            _drain_budget = (
+                float(_cfg_drain)
+                if _cfg_drain is not None
+                else float(_DEFAULT_DRAIN)
+            )
+        except (TypeError, ValueError):
+            _drain_budget = float(_DEFAULT_DRAIN)
+        # Add a 15s margin so the drain loop + final exit finish before
+        # we escalate to ``systemctl restart`` / SIGTERM.
+        _drain_budget = max(_drain_budget, 30.0) + 15.0
+
+        restarted_services = []
+        killed_pids = set()
+        relaunched_profiles = []
+
+        # --- Systemd services (Linux) ---
+        # Discover all hermes-gateway* units (default + profiles)
+        if supports_systemd_services():
+            try:
+                _ensure_user_systemd_env()
             except Exception:
                 pass
-            try:
-                _drain_budget = (
-                    float(_cfg_drain)
-                    if _cfg_drain is not None
-                    else float(_DEFAULT_DRAIN)
-                )
-            except (TypeError, ValueError):
-                _drain_budget = float(_DEFAULT_DRAIN)
-            # Add a 15s margin so the drain loop + final exit finish before
-            # we escalate to ``systemctl restart`` / SIGTERM.
-            _drain_budget = max(_drain_budget, 30.0) + 15.0
 
-            restarted_services = []
-            killed_pids = set()
-            relaunched_profiles = []
-
-            # --- Systemd services (Linux) ---
-            # Discover all hermes-gateway* units (default + profiles)
-            if supports_systemd_services():
+            for scope, scope_cmd in [
+                ("user", ["systemctl", "--user"]),
+                ("system", ["systemctl"]),
+            ]:
                 try:
-                    _ensure_user_systemd_env()
-                except Exception:
-                    pass
-
-                for scope, scope_cmd in [
-                    ("user", ["systemctl", "--user"]),
-                    ("system", ["systemctl"]),
-                ]:
-                    try:
-                        result = subprocess.run(
-                            scope_cmd
-                            + [
-                                "list-units",
-                                "hermes-gateway*",
-                                "--plain",
-                                "--no-legend",
-                                "--no-pager",
-                            ],
+                    result = subprocess.run(
+                        scope_cmd
+                        + [
+                            "list-units",
+                            "hermes-gateway*",
+                            "--plain",
+                            "--no-legend",
+                            "--no-pager",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    for line in result.stdout.strip().splitlines():
+                        parts = line.split()
+                        if not parts:
+                            continue
+                        unit = parts[
+                            0
+                        ]  # e.g. hermes-gateway.service or hermes-gateway-coder.service
+                        if not unit.endswith(".service"):
+                            continue
+                        svc_name = unit.removesuffix(".service")
+                        # Check if active
+                        check = subprocess.run(
+                            scope_cmd + ["is-active", svc_name],
                             capture_output=True,
                             text=True,
-                            timeout=10,
+                            timeout=5,
                         )
-                        for line in result.stdout.strip().splitlines():
-                            parts = line.split()
-                            if not parts:
-                                continue
-                            unit = parts[
-                                0
-                            ]  # e.g. hermes-gateway.service or hermes-gateway-coder.service
-                            if not unit.endswith(".service"):
-                                continue
-                            svc_name = unit.removesuffix(".service")
-                            # Check if active
-                            check = subprocess.run(
-                                scope_cmd + ["is-active", svc_name],
+                        if check.stdout.strip() != "active":
+                            continue
+
+                        # Prefer a graceful SIGUSR1 restart so in-flight
+                        # agent runs drain instead of being SIGKILLed.
+                        # The gateway's SIGUSR1 handler calls
+                        # request_restart(via_service=True) → drain →
+                        # exit; systemd's Restart=always respawns the unit.
+                        _main_pid = 0
+                        try:
+                            _show = subprocess.run(
+                                scope_cmd
+                                + [
+                                    "show",
+                                    svc_name,
+                                    "--property=MainPID",
+                                    "--value",
+                                ],
                                 capture_output=True,
                                 text=True,
                                 timeout=5,
                             )
-                            if check.stdout.strip() != "active":
-                                continue
-
-                            # Prefer a graceful SIGUSR1 restart so in-flight
-                            # agent runs drain instead of being SIGKILLed.
-                            # The gateway's SIGUSR1 handler calls
-                            # request_restart(via_service=True) → drain →
-                            # exit; systemd's Restart=always respawns the unit.
+                            _main_pid = int((_show.stdout or "").strip() or 0)
+                        except (
+                            ValueError,
+                            subprocess.TimeoutExpired,
+                            FileNotFoundError,
+                        ):
                             _main_pid = 0
-                            try:
-                                _show = subprocess.run(
-                                    scope_cmd
-                                    + [
-                                        "show",
-                                        svc_name,
-                                        "--property=MainPID",
-                                        "--value",
-                                    ],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=5,
-                                )
-                                _main_pid = int((_show.stdout or "").strip() or 0)
-                            except (
-                                ValueError,
-                                subprocess.TimeoutExpired,
-                                FileNotFoundError,
+
+                        _graceful_ok = False
+                        if _main_pid > 0:
+                            print(
+                                f"  → {svc_name}: draining (up to {int(_drain_budget)}s)..."
+                            )
+                            _graceful_ok = _graceful_restart_via_sigusr1(
+                                _main_pid,
+                                drain_timeout=_drain_budget,
+                            )
+
+                        if _graceful_ok:
+                            # Gateway exited after a planned restart.
+                            subprocess.run(
+                                scope_cmd + ["reset-failed", svc_name],
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                            )
+                            subprocess.run(
+                                scope_cmd + ["start", svc_name],
+                                capture_output=True,
+                                text=True,
+                                timeout=15,
+                            )
+                            # Short poll
+                            if _wait_for_service_active(
+                                scope_cmd,
+                                svc_name,
+                                timeout=10.0,
                             ):
-                                _main_pid = 0
+                                restarted_services.append(svc_name)
+                                continue
+                            # Fall back to passive poll
+                            _restart_sec = _service_restart_sec(
+                                scope_cmd,
+                                svc_name,
+                                default=0.0,
+                            )
+                            _post_drain_timeout = max(
+                                10.0,
+                                _restart_sec + 10.0,
+                            )
+                            if _wait_for_service_active(
+                                scope_cmd,
+                                svc_name,
+                                timeout=_post_drain_timeout,
+                            ):
+                                restarted_services.append(svc_name)
+                                continue
+                            # Process exited but wasn't respawned
+                            print(
+                                f"  ⚠ {svc_name} drained but didn't relaunch — forcing restart"
+                            )
 
-                            _graceful_ok = False
-                            if _main_pid > 0:
+                        # Fallback: blunt systemctl restart.
+                        subprocess.run(
+                            scope_cmd + ["reset-failed", svc_name],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        restart = subprocess.run(
+                            scope_cmd + ["restart", svc_name],
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
+                        )
+                        if restart.returncode == 0:
+                            # Verify the service actually survived the restart.
+                            if _wait_for_service_active(
+                                scope_cmd,
+                                svc_name,
+                                timeout=10.0,
+                            ):
+                                restarted_services.append(svc_name)
+                            else:
+                                # Retry once
                                 print(
-                                    f"  → {svc_name}: draining (up to {int(_drain_budget)}s)..."
+                                    f"  ⚠ {svc_name} died after restart, retrying..."
                                 )
-                                _graceful_ok = _graceful_restart_via_sigusr1(
-                                    _main_pid,
-                                    drain_timeout=_drain_budget,
-                                )
-
-                            if _graceful_ok:
-                                # Gateway exited after a planned restart.
-                                # ``Restart=always`` means systemd WILL respawn
-                                # the unit — but only after
-                                # ``RestartSec`` (default 60s on our unit
-                                # file). That 60s wait is a crash-loop guard,
-                                # and is the right default when the gateway
-                                # dies unexpectedly. For a voluntary restart
-                                # on update, it's dead time the user watches.
-                                #
-                                # Shortcut it: ``reset-failed`` + ``start``
-                                # skips RestartSec entirely (we're manually
-                                # initiating the unit, not waiting for
-                                # systemd's auto-restart logic). Takes about
-                                # as long as the process takes to come up
-                                # (~1-3s on a warm box).
-                                #
-                                # If the unit is already active because
-                                # RestartSec elapsed while we were draining,
-                                # ``start`` is a no-op and we fall through to
-                                # the poll below. Either way we collapse the
-                                # 60s+ delay to a ~5s one.
                                 subprocess.run(
                                     scope_cmd + ["reset-failed", svc_name],
                                     capture_output=True,
@@ -11202,334 +11160,185 @@ def _cmd_update_impl(args, gateway_mode: bool):
                                     timeout=10,
                                 )
                                 subprocess.run(
-                                    scope_cmd + ["start", svc_name],
+                                    scope_cmd + ["restart", svc_name],
                                     capture_output=True,
                                     text=True,
                                     timeout=15,
                                 )
-                                # Short poll: the gateway should be up within
-                                # a few seconds now that we bypassed
-                                # RestartSec. Fall back to the longer
-                                # RestartSec + slack budget ONLY if the
-                                # explicit start failed and we need to rely
-                                # on systemd's auto-restart.
                                 if _wait_for_service_active(
                                     scope_cmd,
                                     svc_name,
                                     timeout=10.0,
                                 ):
                                     restarted_services.append(svc_name)
-                                    continue
-                                # Explicit start didn't take. Fall back to
-                                # the original passive poll (systemd's
-                                # auto-restart WILL fire after RestartSec
-                                # regardless).
-                                _restart_sec = _service_restart_sec(
-                                    scope_cmd,
-                                    svc_name,
-                                    default=0.0,
-                                )
-                                _post_drain_timeout = max(
-                                    10.0,
-                                    _restart_sec + 10.0,
-                                )
-                                if _wait_for_service_active(
-                                    scope_cmd,
-                                    svc_name,
-                                    timeout=_post_drain_timeout,
-                                ):
-                                    restarted_services.append(svc_name)
-                                    continue
-                                # Process exited but wasn't respawned (older
-                                # unit without Restart=on-failure or
-                                # RestartForceExitStatus=75).  Fall through
-                                # to systemctl start/restart.
-                                print(
-                                    f"  ⚠ {svc_name} drained but didn't relaunch — forcing restart"
-                                )
-
-                            # Fallback: blunt systemctl restart.  This is
-                            # what the old code always did; we get here only
-                            # when the graceful path failed (unit missing
-                            # SIGUSR1 wiring, drain exceeded the budget,
-                            # restart-policy mismatch).
-                            #
-                            # Always `reset-failed` first.  If systemd's own
-                            # auto-restart attempts already parked the unit
-                            # in a failed state (transient CHDIR / OOM /
-                            # filesystem race after our drain + exit-75),
-                            # a plain `systemctl restart` can wedge against
-                            # the RestartSec backoff and leave the unit
-                            # dead.  Clearing the failed state first makes
-                            # the restart idempotent.  Mirrors the recovery
-                            # path in `hermes gateway restart`
-                            # (`systemd_restart()`) as of PR #20949.
-                            subprocess.run(
-                                scope_cmd + ["reset-failed", svc_name],
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
-                            )
-                            restart = subprocess.run(
-                                scope_cmd + ["restart", svc_name],
-                                capture_output=True,
-                                text=True,
-                                timeout=15,
-                            )
-                            if restart.returncode == 0:
-                                # Verify the service actually survived the
-                                # restart.  systemctl restart returns 0 even
-                                # if the new process crashes immediately.
-                                if _wait_for_service_active(
-                                    scope_cmd,
-                                    svc_name,
-                                    timeout=10.0,
-                                ):
-                                    restarted_services.append(svc_name)
+                                    print(f"  ✓ {svc_name} recovered on retry")
                                 else:
-                                    # Retry once — transient startup failures
-                                    # (stale module cache, import race) often
-                                    # resolve on the second attempt.  Again
-                                    # clear any failed state first so the
-                                    # retry isn't blocked by the previous
-                                    # crash.
+                                    _scope_flag = "--user " if scope == "user" else ""
                                     print(
-                                        f"  ⚠ {svc_name} died after restart, retrying..."
+                                        f"  ✗ {svc_name} failed to stay running after restart.\n"
+                                        f"    Check logs: journalctl {_scope_flag}-u {svc_name} --since '2 min ago'\n"
+                                        f"    Recover manually:\n"
+                                        f"      systemctl {_scope_flag}reset-failed {svc_name}\n"
+                                        f"      systemctl {_scope_flag}restart {svc_name}"
                                     )
-                                    subprocess.run(
-                                        scope_cmd + ["reset-failed", svc_name],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                    )
-                                    subprocess.run(
-                                        scope_cmd + ["restart", svc_name],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=15,
-                                    )
-                                    if _wait_for_service_active(
-                                        scope_cmd,
-                                        svc_name,
-                                        timeout=10.0,
-                                    ):
-                                        restarted_services.append(svc_name)
-                                        print(f"  ✓ {svc_name} recovered on retry")
-                                    else:
-                                        _scope_flag = "--user " if scope == "user" else ""
-                                        print(
-                                            f"  ✗ {svc_name} failed to stay running after restart.\n"
-                                            f"    Check logs: journalctl {_scope_flag}-u {svc_name} --since '2 min ago'\n"
-                                            f"    Recover manually:\n"
-                                            f"      systemctl {_scope_flag}reset-failed {svc_name}\n"
-                                            f"      systemctl {_scope_flag}restart {svc_name}"
-                                        )
-                            else:
-                                print(
-                                    f"  ⚠ Failed to restart {svc_name}: {restart.stderr.strip()}"
-                                )
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        pass
-
-            # --- Launchd services (macOS) ---
-            if is_macos():
-                try:
-                    from hermes_cli.gateway import (
-                        launchd_restart,
-                        get_launchd_label,
-                        get_launchd_plist_path,
-                    )
-
-                    plist_path = get_launchd_plist_path()
-                    if plist_path.exists():
-                        check = subprocess.run(
-                            ["launchctl", "list", get_launchd_label()],
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
-                        if check.returncode == 0:
-                            try:
-                                launchd_restart()
-                                restarted_services.append(get_launchd_label())
-                            except subprocess.CalledProcessError as e:
-                                stderr = (getattr(e, "stderr", "") or "").strip()
-                                print(f"  ⚠ Gateway restart failed: {stderr}")
-                except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
+                        else:
+                            print(
+                                f"  ⚠ Failed to restart {svc_name}: {restart.stderr.strip()}"
+                            )
+                except (FileNotFoundError, subprocess.TimeoutExpired):
                     pass
 
-            # --- Manual (non-service) gateways ---
-            # Kill any remaining gateway processes not managed by a service.
-            # Exclude PIDs that belong to just-restarted services so we don't
-            # immediately kill the process that systemd/launchd just spawned.
-            service_pids = _get_service_pids()
-            manual_pids = find_gateway_pids(
-                exclude_pids=service_pids, all_profiles=True
-            )
-            profile_processes = {
-                proc.pid: proc
-                for proc in find_profile_gateway_processes(exclude_pids=service_pids)
-                if proc.pid in manual_pids
-            }
-            for pid, proc in profile_processes.items():
-                if not launch_detached_profile_gateway_restart(proc.profile, pid):
-                    continue
-                # Prefer a graceful SIGUSR1 drain so in-flight agent runs
-                # finish before the watcher respawns the gateway.  If the
-                # gateway doesn't support SIGUSR1 or doesn't exit within
-                # the drain budget, fall back to SIGTERM — the watcher
-                # still sees the exit and relaunches either way.
-                drained = _graceful_restart_via_sigusr1(
-                    pid,
-                    drain_timeout=_drain_budget,
+        # --- Launchd services (macOS) ---
+        if is_macos():
+            try:
+                from hermes_cli.gateway import (
+                    launchd_restart,
+                    get_launchd_label,
+                    get_launchd_plist_path,
                 )
-                if not drained:
-                    try:
-                        os.kill(pid, _signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-                # Wait for the old process to fully exit before the watcher
-                # spawns the new gateway.  Telegram holds the previous
-                # getUpdates long-poll session open on its servers for up to
-                # ~30s after the client disconnects.  If the new gateway
-                # connects before that window expires it receives a 409
-                # Conflict, which _handle_polling_conflict() recovers from
-                # via back-off retries — but a brief wait here reduces the
-                # chance of hitting that path at all, especially on fast
-                # machines where the watcher loop restarts in < 1s.
-                # We wait up to 5s for the process to exit (the OS-level
-                # close, not the Telegram server-side expiry), then let the
-                # watcher take over.  The Telegram adapter's retry logic
-                # handles any remaining 409s if the server session is still
-                # live when the new gateway polls.
-                _wait_for_gateway_exit(timeout=5.0, force_after=None)
-                killed_pids.add(pid)
-                relaunched_profiles.append(proc.profile)
 
-            for pid in manual_pids:
-                if pid in profile_processes:
-                    continue
-                try:
-                    os.kill(pid, _signal.SIGTERM)
-                    killed_pids.add(pid)
-                except (ProcessLookupError, PermissionError):
-                    pass
-
-            if restarted_services or killed_pids:
-                print()
-                for svc in restarted_services:
-                    print(f"  ✓ Restarted {svc}")
-                if relaunched_profiles:
-                    names = ", ".join(relaunched_profiles)
-                    print(f"  ✓ Restarting manual gateway profile(s): {names}")
-                unmapped_count = len(killed_pids) - len(relaunched_profiles)
-                if unmapped_count:
-                    print(f"  → Stopped {unmapped_count} manual gateway process(es)")
-                    print("    Restart manually: hermes gateway run")
-                    if unmapped_count > 1:
-                        print(
-                            "    (or: hermes -p <profile> gateway run  for each profile)"
-                        )
-
-            if not restarted_services and not killed_pids:
-                # No gateways were running — nothing to do
+                plist_path = get_launchd_plist_path()
+                if plist_path.exists():
+                    check = subprocess.run(
+                        ["launchctl", "list", get_launchd_label()],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if check.returncode == 0:
+                        try:
+                            launchd_restart()
+                            restarted_services.append(get_launchd_label())
+                        except subprocess.CalledProcessError as e:
+                            stderr = (getattr(e, "stderr", "") or "").strip()
+                            print(f"  ⚠ Gateway restart failed: {stderr}")
+            except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
                 pass
 
-            # --- Post-restart survivor sweep -----------------------------
-            # Issue #17648: some gateways ignore SIGTERM (stuck drain,
-            # blocked I/O, PID dead but zombie).  The detached profile
-            # watchers wait 120s for the old PID to exit — if it never
-            # does, no respawn happens and the user keeps hitting
-            # ImportError against a stale sys.modules.  Give the
-            # graceful paths a brief window to complete, then SIGKILL
-            # any remaining pre-update PIDs so the watcher / service
-            # manager can relaunch with fresh code.
-            try:
-                _time.sleep(3.0)
-                _service_pids_after = _get_service_pids()
-                _surviving = find_gateway_pids(
-                    exclude_pids=_service_pids_after,
-                    all_profiles=True,
-                )
-                # Scope to PIDs we already tried to kill during this
-                # update (killed_pids).  Anything new is a gateway that
-                # started AFTER our restart attempt — respecting user
-                # intent, we don't kill those.
-                _stuck = [pid for pid in _surviving if pid in killed_pids]
-                if _stuck:
-                    print()
-                    print(
-                        f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
-                    )
-                    from gateway.status import terminate_pid as _terminate_pid
-                    for pid in _stuck:
-                        try:
-                            # Routes through taskkill /T /F on Windows,
-                            # SIGKILL on POSIX — _signal.SIGKILL doesn't
-                            # exist on Windows so the old raw os.kill call
-                            # used to crash the entire update path.
-                            _terminate_pid(pid, force=True)
-                        except (ProcessLookupError, PermissionError, OSError):
-                            pass
-                    # Give the OS a beat to reap the processes so the
-                    # watchers see them exit and respawn.
-                    _time.sleep(1.5)
-            except Exception as _sweep_exc:
-                logger.debug("Post-restart survivor sweep failed: %s", _sweep_exc)
-
-        except Exception as e:
-            logger.debug("Gateway restart during update failed: %s", e)
-
-        # Warn if legacy Hermes gateway unit files are still installed.
-        # When both hermes.service (from a pre-rename install) and the
-        # current hermes-gateway.service are enabled, they SIGTERM-fight
-        # for the same bot token (see PR #11909). Flagging here means
-        # every `hermes update` surfaces the issue until the user migrates.
-        try:
-            from hermes_cli.gateway import (
-                has_legacy_hermes_units,
-                _find_legacy_hermes_units,
-                supports_systemd_services,
+        # --- Manual (non-service) gateways ---
+        # Kill any remaining gateway processes not managed by a service.
+        # Exclude PIDs that belong to just-restarted services so we don't
+        # immediately kill the process that systemd/launchd just spawned.
+        service_pids = _get_service_pids()
+        manual_pids = find_gateway_pids(
+            exclude_pids=service_pids, all_profiles=True
+        )
+        profile_processes = {
+            proc.pid: proc
+            for proc in find_profile_gateway_processes(exclude_pids=service_pids)
+            if proc.pid in manual_pids
+        }
+        for pid, proc in profile_processes.items():
+            if not launch_detached_profile_gateway_restart(proc.profile, pid):
+                continue
+            # Prefer a graceful SIGUSR1 drain so in-flight agent runs
+            # finish before the watcher respawns the gateway.
+            drained = _graceful_restart_via_sigusr1(
+                pid,
+                drain_timeout=_drain_budget,
             )
+            if not drained:
+                try:
+                    os.kill(pid, _signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            # Wait for the old process to fully exit before the watcher
+            # spawns the new gateway.
+            _wait_for_gateway_exit(timeout=5.0, force_after=None)
+            killed_pids.add(pid)
+            relaunched_profiles.append(proc.profile)
 
-            if supports_systemd_services() and has_legacy_hermes_units():
-                print()
-                print("⚠ Legacy Hermes gateway unit(s) detected:")
-                for name, path, is_sys in _find_legacy_hermes_units():
-                    scope = "system" if is_sys else "user"
-                    print(f"    {path}  ({scope} scope)")
-                print()
-                print("  These pre-rename units (hermes.service) fight the current")
-                print("  hermes-gateway.service for the bot token and cause SIGTERM")
-                print("  flap loops. Remove them with:")
-                print()
-                print("    hermes gateway migrate-legacy")
-                print()
-                print("  (add `sudo` if any are in system scope)")
-        except Exception as e:
-            logger.debug("Legacy unit check during update failed: %s", e)
+        for pid in manual_pids:
+            if pid in profile_processes:
+                continue
+            try:
+                os.kill(pid, _signal.SIGTERM)
+                killed_pids.add(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
 
-        # Kill stale dashboard processes — the dashboard has no service
-        # manager, so leaving it alive after a code update produces a
-        # silent frontend/backend mismatch.  We can't auto-restart it
-        # (no saved launch args) but we can stop it, and a hint is
-        # printed for the user to re-launch.
-        _kill_stale_dashboard_processes()
-
-        print()
-        print("Tip: You can now select a provider and model:")
-        print("  hermes model              # Select provider and model")
-
-    except subprocess.CalledProcessError as e:
-        if sys.platform == "win32":
-            print(f"⚠ Git update failed: {e}")
-            print("→ Falling back to ZIP download...")
+        if restarted_services or killed_pids:
             print()
-            _update_via_zip(args)
-        else:
-            print(f"✗ Update failed: {e}")
-            sys.exit(1)
+            for svc in restarted_services:
+                print(f"  ✓ Restarted {svc}")
+            if relaunched_profiles:
+                names = ", ".join(relaunched_profiles)
+                print(f"  ✓ Restarting manual gateway profile(s): {names}")
+            unmapped_count = len(killed_pids) - len(relaunched_profiles)
+            if unmapped_count:
+                print(f"  → Stopped {unmapped_count} manual gateway process(es)")
+                print("    Restart manually: hermes gateway run")
+                if unmapped_count > 1:
+                    print(
+                        "    (or: hermes -p <profile> gateway run  for each profile)"
+                    )
 
+        if not restarted_services and not killed_pids:
+            # No gateways were running — nothing to do
+            pass
+
+        # --- Post-restart survivor sweep -----------------------------
+        try:
+            _time.sleep(3.0)
+            _service_pids_after = _get_service_pids()
+            _surviving = find_gateway_pids(
+                exclude_pids=_service_pids_after,
+                all_profiles=True,
+            )
+            # Scope to PIDs we already tried to kill during this
+            # update (killed_pids).  Anything new is a gateway that
+            # started AFTER our restart attempt.
+            _stuck = [pid for pid in _surviving if pid in killed_pids]
+            if _stuck:
+                print()
+                print(
+                    f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
+                )
+                from gateway.status import terminate_pid as _terminate_pid
+                for pid in _stuck:
+                    try:
+                        _terminate_pid(pid, force=True)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                # Give the OS a beat to reap the processes.
+                _time.sleep(1.5)
+        except Exception as _sweep_exc:
+            logger.debug("Post-restart survivor sweep failed: %s", _sweep_exc)
+
+    except Exception as e:
+        logger.debug("Gateway restart during update failed: %s", e)
+
+    # Warn if legacy Hermes gateway unit files are still installed.
+    try:
+        from hermes_cli.gateway import (
+            has_legacy_hermes_units,
+            _find_legacy_hermes_units,
+            supports_systemd_services,
+        )
+
+        if supports_systemd_services() and has_legacy_hermes_units():
+            print()
+            print("⚠ Legacy Hermes gateway unit(s) detected:")
+            for name, path, is_sys in _find_legacy_hermes_units():
+                scope = "system" if is_sys else "user"
+                print(f"    {path}  ({scope} scope)")
+            print()
+            print("  These pre-rename units (hermes.service) fight the current")
+            print("  hermes-gateway.service for the bot token and cause SIGTERM")
+            print("  flap loops. Remove them with:")
+            print()
+            print("    hermes gateway migrate-legacy")
+            print()
+            print("  (add `sudo` if any are in system scope)")
+    except Exception as e:
+        logger.debug("Legacy unit check during update failed: %s", e)
+
+    # Kill stale dashboard processes
+    _kill_stale_dashboard_processes()
+
+    print()
+    print("Tip: You can now select a provider and model:")
+    print("  hermes model              # Select provider and model")
 
 def _coalesce_session_name_args(argv: list) -> list:
     """Join unquoted multi-word session names after -c/--continue and -r/--resume.
@@ -15341,6 +15150,18 @@ Examples:
         action="store_true",
         default=False,
         help="Windows: proceed with the update even when another hermes.exe is detected. The concurrent process will likely cause WinError 32 warnings and may leave a reboot-deferred .exe replacement.",
+    )
+    update_parser.add_argument(
+        "--post-pull",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,  # internal: re-exec picks up here after code download
+    )
+    update_parser.add_argument(
+        "--pre-update-snapshot",
+        default=None,
+        metavar="ID",
+        help=argparse.SUPPRESS,  # internal: carries snapshot ID across re-exec
     )
     update_parser.set_defaults(func=cmd_update)
 

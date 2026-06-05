@@ -1047,6 +1047,25 @@ function Install-Repository {
                 $null = & git -c windows.appendAtomically=false status --short 2>&1
                 $statusOk = ($LASTEXITCODE -eq 0)
 
+                # Verify the configured remote is reachable and is a valid git
+                # repo.  `git ls-remote --exit-code` exits non-zero if the URL
+                # is unreachable, returns no refs (empty/non-git repo), or the
+                # transport fails.  We cap the wait with a timeout so a dead
+                # network doesn't stall the installer indefinitely.
+                $remoteOk = $false
+                if ($revParseOk -and $statusOk) {
+                    $global:LASTEXITCODE = 0
+                    $remoteUrl = & git remote get-url origin 2>&1
+                    if ($LASTEXITCODE -eq 0 -and $remoteUrl) {
+                        $global:LASTEXITCODE = 0
+                        $null = & git -c http.connectTimeout=10 `
+                                      -c http.lowSpeedLimit=0 `
+                                      -c http.lowSpeedTime=15 `
+                                      ls-remote --exit-code --heads origin 2>&1
+                        $remoteOk = ($LASTEXITCODE -eq 0)
+                    }
+                }
+
                 if ($revParseOk -and $statusOk) {
                     $repoValid = $true
                 }

@@ -60,58 +60,57 @@ def _patch_managed_uv(request):
 
     def _fake_ensure_uv():
         path = shutil.which("uv")
-        return (path, False)  # never freshly bootstrapped in tests
+        return path  # Optional[str] — no more tuple
 
     def _fake_update_managed_uv():
         return None  # never actually self-update in tests
 
-    def _fake_rebuild_venv(*args, **kwargs):
-        return True  # no-op in tests
-
     with patch("hermes_cli.managed_uv.resolve_uv", side_effect=_fake_resolve_uv), \
          patch("hermes_cli.managed_uv.ensure_uv", side_effect=_fake_ensure_uv), \
-         patch("hermes_cli.managed_uv.update_managed_uv", side_effect=_fake_update_managed_uv), \
-         patch("hermes_cli.managed_uv.rebuild_venv", side_effect=_fake_rebuild_venv):
+         patch("hermes_cli.managed_uv.update_managed_uv", side_effect=_fake_update_managed_uv):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _inline_post_pull():
+    """Run post-pull in-process instead of re-execing a fresh interpreter.
+
+    cmd_update() is now a two-phase flow: phase 1 downloads code, then
+    _reexec_for_post_pull() replaces the process (os.execvp on POSIX) to run
+    phase 2 under the freshly-downloaded code. That hard process replacement
+    would nuke the pytest process mid-test. Patch the re-exec to call
+    _cmd_update_post_pull() directly so the whole flow stays in-process —
+    preserving the old "one cmd_update() call exercises everything" behavior
+    these tests rely on (npm deps, config migration, skill sync, etc.).
+    """
+    from hermes_cli import main as hm
+
+    def _inline(args, gateway_mode):
+        hm._cmd_update_post_pull(args, gateway_mode=gateway_mode)
+
+    with patch.object(hm, "_reexec_for_post_pull", side_effect=_inline):
         yield
 
 
 class TestCmdUpdatePip:
-    """Regression tests for pip-install update flows."""
+    """Pip-installed Hermes can't self-update — it errors with guidance.
 
-    @patch("shutil.which", return_value="/usr/bin/uv")
-    @patch("subprocess.run")
-    def test_update_pip_exports_virtualenv_from_sys_prefix(
-        self, mock_run, _mock_which, mock_args, monkeypatch
-    ):
-        from hermes_cli import main as hm
+    The old git-checkout self-update logic (_cmd_update_pip: uv tool upgrade /
+    uv pip install / pipx upgrade) was removed. A pip/uv/pipx install is
+    managed by its package manager, so ``hermes update`` now refuses with the
+    recommended command instead of trying to mutate a managed install.
+    """
 
-        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-        monkeypatch.setattr(hm.sys, "prefix", "/tmp/hermes-launcher-venv")
-        monkeypatch.setattr(hm.sys, "base_prefix", "/usr")
+    @patch("hermes_cli.config.detect_install_method", return_value="pip")
+    def test_pip_install_errors_with_guidance(self, _mock_method, mock_args, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(mock_args)
+        assert exc_info.value.code == 1
 
-        hm._cmd_update_pip(mock_args)
+        out = capsys.readouterr().out
+        assert "Cannot self-update" in out
+        assert "pip" in out.lower()
 
-        assert mock_run.call_count == 1
-        assert mock_run.call_args.args[0] == ["/usr/bin/uv", "pip", "install", "--upgrade", "hermes-agent"]
-        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"] == "/tmp/hermes-launcher-venv"
-
-    @patch("shutil.which", return_value="/usr/bin/uv")
-    @patch("subprocess.run")
-    def test_update_pip_does_not_export_virtualenv_for_system_python(
-        self, mock_run, _mock_which, mock_args, monkeypatch
-    ):
-        from hermes_cli import main as hm
-
-        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-        monkeypatch.setattr(hm.sys, "prefix", "/usr")
-        monkeypatch.setattr(hm.sys, "base_prefix", "/usr")
-
-        hm._cmd_update_pip(mock_args)
-
-        assert mock_run.call_count == 1
-        assert "env" not in mock_run.call_args.kwargs
 
 
 class TestCmdUpdateBranchFallback:
@@ -783,11 +782,11 @@ class TestCmdUpdateZipBranchRefusal:
     """
 
     def test_zip_fallback_refuses_non_main_branch(self, capsys):
-        from hermes_cli.main import _update_via_zip
+        from hermes_cli.main import _update_files_via_zip
 
         args = SimpleNamespace(branch="bb/gui")
         with pytest.raises(SystemExit) as exc_info:
-            _update_via_zip(args)
+            _update_files_via_zip(args)
         assert exc_info.value.code == 1
 
         out = capsys.readouterr().out
