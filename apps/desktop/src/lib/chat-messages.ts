@@ -205,12 +205,19 @@ export function appendAssistantTextPart(parts: ChatMessagePart[], delta: string)
 
 export function appendReasoningPart(parts: ChatMessagePart[], delta: string): ChatMessagePart[] {
   const next = [...parts]
-  const last = next.at(-1)
 
-  if (last?.type === 'reasoning') {
-    next[next.length - 1] = { ...last, text: `${last.text}${delta}` }
+  // Find the last reasoning part in the array regardless of what part
+  // types sit between — mid-thought tool execution inserts tool-call
+  // parts that should not split one continuous reasoning sentence into
+  // separate "Thinking" blocks.
+  for (let i = next.length - 1; i >= 0; i--) {
+    const entry = next[i]
 
-    return next
+    if (entry?.type === 'reasoning') {
+      next[i] = { ...entry, text: `${entry.text}${delta}` }
+
+      return next
+    }
   }
 
   next.push(reasoningPart(delta))
