@@ -22,6 +22,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
 import { KbdGroup } from '@/components/ui/kbd'
 import { SearchField } from '@/components/ui/search-field'
 import {
@@ -217,6 +225,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNavigate: (item: SidebarNavItem) => void
   onLoadMoreSessions: () => void
   onLoadMoreProfileSessions?: (profile: string) => Promise<void> | void
+  onArchiveAllSessions: () => Promise<void> | void
   onResumeSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => void
   onArchiveSession: (sessionId: string) => void
@@ -228,6 +237,7 @@ export function ChatSidebar({
   onNavigate,
   onLoadMoreSessions,
   onLoadMoreProfileSessions,
+  onArchiveAllSessions,
   onResumeSession,
   onDeleteSession,
   onArchiveSession,
@@ -260,6 +270,8 @@ export function ChatSidebar({
   const [serverMatches, setServerMatches] = useState<SessionSearchResult[]>([])
   const [newSessionKbdFlash, setNewSessionKbdFlash] = useState(false)
   const [profileLoadMorePending, setProfileLoadMorePending] = useState<Record<string, boolean>>({})
+  const [archiveAllOpen, setArchiveAllOpen] = useState(false)
+  const [archiveAllSubmitting, setArchiveAllSubmitting] = useState(false)
   const trimmedQuery = searchQuery.trim()
 
   // Flash the ⌘N hint full-opacity (no transition) for the press, so hitting
@@ -487,6 +499,7 @@ export function ChatSidebar({
   const remainingSessionCount = Math.max(0, knownSessionTotal - loadedSessionCount)
 
   const recentsMeta = countLabel(agentSessions.length, knownSessionTotal)
+  const archiveAllDisabled = sessionsLoading || agentSessions.length === 0 || archiveAllSubmitting
 
   const handlePinnedDragEnd = ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) {
@@ -541,6 +554,67 @@ export function ChatSidebar({
 
     setAgentOrderIds(arrayMove(agentSessions, oldIdx, newIdx).map(s => s.id))
   }
+
+  const handleArchiveAll = async () => {
+    if (archiveAllSubmitting) {
+      return
+    }
+
+    setArchiveAllSubmitting(true)
+
+    try {
+      await onArchiveAllSessions()
+      setArchiveAllOpen(false)
+    } catch {
+      // The caller owns the error toast/rollback; keep the dialog open.
+    } finally {
+      setArchiveAllSubmitting(false)
+    }
+  }
+
+  const sessionsHeaderAction =
+    agentSessions.length > 0 ? (
+      <div className="flex items-center gap-0.5">
+        <Tip label="Archive all sessions">
+          <Button
+            aria-label="Archive all unpinned sessions"
+            className="text-(--ui-text-tertiary) opacity-70 hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100"
+            disabled={archiveAllDisabled}
+            onClick={event => {
+              event.stopPropagation()
+              setSidebarRecentsOpen(true)
+              setArchiveAllOpen(true)
+            }}
+            size="icon-xs"
+            variant="ghost"
+          >
+            <Codicon name={archiveAllSubmitting ? 'loading' : 'archive'} size="0.75rem" spinning={archiveAllSubmitting} />
+          </Button>
+        </Tip>
+        <div className="grid size-6 shrink-0 place-items-center">
+          {!showAllProfiles ? (
+            <Tip label={agentsGrouped ? 'Ungroup sessions' : 'Group by workspace'}>
+              <Button
+                aria-label={agentsGrouped ? 'Show sessions as a single list' : 'Group sessions by workspace'}
+                className={cn(
+                  'text-(--ui-text-tertiary) opacity-70 hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100',
+                  agentsGrouped && 'bg-(--ui-control-active-background) text-foreground opacity-100'
+                )}
+                onClick={event => {
+                  event.stopPropagation()
+                  setSidebarRecentsOpen(true)
+                  setSidebarAgentsGrouped(!agentsGrouped)
+                }}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <Codicon name={agentsGrouped ? 'list-unordered' : 'root-folder'} size="0.75rem" />
+              </Button>
+            </Tip>
+          ) : null}
+        </div>
+      </div>
+    ) : null
 
   return (
     <Sidebar
@@ -694,36 +768,7 @@ export function ChatSidebar({
             }
             forceEmptyState={showSessionSkeletons}
             groups={showAllProfiles ? profileGroups : agentsGrouped ? agentGroups : undefined}
-            headerAction={
-              // Always reserve the icon-xs (size-6) slot so the header keeps the
-              // same height whether or not the toggle renders — otherwise the
-              // "Sessions" label jumps when switching to the ALL-profiles view.
-              // Grouping operates on unpinned recents; if everything is pinned
-              // the toggle does nothing, and it's irrelevant in the ALL-profiles
-              // view (always grouped by profile), so hide the button (not the slot).
-              <div className="grid size-6 shrink-0 place-items-center">
-                {!showAllProfiles && agentSessions.length > 0 ? (
-                  <Tip label={agentsGrouped ? 'Ungroup sessions' : 'Group by workspace'}>
-                    <Button
-                      aria-label={agentsGrouped ? 'Show sessions as a single list' : 'Group sessions by workspace'}
-                      className={cn(
-                        'text-(--ui-text-tertiary) opacity-70 hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100',
-                        agentsGrouped && 'bg-(--ui-control-active-background) text-foreground opacity-100'
-                      )}
-                      onClick={event => {
-                        event.stopPropagation()
-                        setSidebarRecentsOpen(true)
-                        setSidebarAgentsGrouped(!agentsGrouped)
-                      }}
-                      size="icon-xs"
-                      variant="ghost"
-                    >
-                      <Codicon name={agentsGrouped ? 'list-unordered' : 'root-folder'} size="0.75rem" />
-                    </Button>
-                  </Tip>
-                ) : null}
-              </div>
-            }
+            headerAction={sessionsHeaderAction}
             label="Sessions"
             labelMeta={recentsMeta}
             onArchiveSession={onArchiveSession}
@@ -750,7 +795,49 @@ export function ChatSidebar({
           </div>
         )}
       </SidebarContent>
+      <ArchiveAllSessionsDialog
+        count={knownSessionTotal}
+        onConfirm={handleArchiveAll}
+        onOpenChange={setArchiveAllOpen}
+        open={archiveAllOpen}
+        submitting={archiveAllSubmitting}
+      />
     </Sidebar>
+  )
+}
+
+interface ArchiveAllSessionsDialogProps {
+  count: number
+  open: boolean
+  onConfirm: () => void | Promise<void>
+  onOpenChange: (open: boolean) => void
+  submitting: boolean
+}
+
+function ArchiveAllSessionsDialog({ count, open, onConfirm, onOpenChange, submitting }: ArchiveAllSessionsDialogProps) {
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Archive all sessions</DialogTitle>
+          <DialogDescription>
+            Archive unpinned sessions from the sidebar. Pinned chats, the current chat, and running sessions stay
+            visible.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-control-background) px-3 py-2 text-xs text-(--ui-text-secondary)">
+          {count > 0 ? `${count} visible session${count === 1 ? '' : 's'} will be checked.` : 'No sessions to archive.'}
+        </div>
+        <DialogFooter>
+          <Button disabled={submitting} onClick={() => onOpenChange(false)} type="button" variant="ghost">
+            Cancel
+          </Button>
+          <Button disabled={submitting} onClick={() => void onConfirm()} type="button" variant="destructive">
+            {submitting ? 'Archiving...' : 'Archive all'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

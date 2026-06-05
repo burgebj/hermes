@@ -2,7 +2,7 @@ import type { MutableRefObject } from 'react'
 import { useCallback, useRef } from 'react'
 import type { NavigateFunction } from 'react-router-dom'
 
-import { deleteSession, getSessionMessages, setSessionArchived } from '@/hermes'
+import { bulkArchiveSessions, deleteSession, getSessionMessages, setSessionArchived } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
@@ -12,11 +12,19 @@ import { clearQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
-import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $newChatProfile,
+  $profileScope,
+  ensureGatewayProfile,
+  normalizeProfileKey
+} from '@/store/profile'
 import {
   $currentCwd,
   $messages,
   $sessions,
+  $sessionsTotal,
+  $workingSessionIds,
   $yoloActive,
   getRememberedWorkspaceCwd,
   sessionPinId,
@@ -838,7 +846,53 @@ export function useSessionActions({
     [selectedStoredSessionId, startFreshSessionDraft]
   )
 
+  const archiveAllSessions = useCallback(async () => {
+    clearNotifications()
+
+    const previousSessions = $sessions.get()
+    const previousTotal = $sessionsTotal.get()
+    const preserveIds = new Set<string>([...$pinnedSessionIds.get(), ...$workingSessionIds.get()])
+
+    if (selectedStoredSessionId) {
+      preserveIds.add(selectedStoredSessionId)
+    }
+
+    if (activeSessionId) {
+      preserveIds.add(activeSessionId)
+    }
+
+    for (const session of previousSessions) {
+      if (session.id === selectedStoredSessionId || session.id === activeSessionId) {
+        preserveIds.add(sessionPinId(session))
+      }
+    }
+
+    const shouldPreserve = (session: SessionInfo) =>
+      preserveIds.has(session.id) || (session._lineage_root_id != null && preserveIds.has(session._lineage_root_id))
+
+    const keptSessions = previousSessions.filter(shouldPreserve)
+    setSessions(keptSessions)
+    setSessionsTotal(keptSessions.length)
+
+    try {
+      const result = await bulkArchiveSessions([...preserveIds], $profileScope.get())
+      notify({
+        durationMs: 2_500,
+        kind: 'success',
+        message: result.archived === 1 ? 'Archived 1 session' : `Archived ${result.archived} sessions`
+      })
+
+      return result
+    } catch (err) {
+      setSessions(previousSessions)
+      setSessionsTotal(previousTotal)
+      notifyError(err, 'Archive all failed')
+      throw err
+    }
+  }, [activeSessionId, selectedStoredSessionId])
+
   return {
+    archiveAllSessions,
     archiveSession,
     branchCurrentSession,
     closeSettings,
