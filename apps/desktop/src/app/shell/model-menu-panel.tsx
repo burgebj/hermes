@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
-import { getGlobalModelOptions } from '@/hermes'
+import { getGlobalModelOptions, MODEL_OPTIONS_TIMEOUT_MS } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { displayModelName, modelDisplayParts, reasoningEffortLabel } from '@/lib/model-status-label'
 import { cn } from '@/lib/utils'
@@ -68,7 +68,11 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
     queryKey: ['model-options', activeSessionId || 'global'],
     queryFn: (): Promise<ModelOptionsResponse> => {
       if (gateway && activeSessionId) {
-        return gateway.request<ModelOptionsResponse>('model.options', { session_id: activeSessionId })
+        return gateway.request<ModelOptionsResponse>(
+          'model.options',
+          { session_id: activeSessionId },
+          MODEL_OPTIONS_TIMEOUT_MS
+        )
       }
 
       return getGlobalModelOptions()

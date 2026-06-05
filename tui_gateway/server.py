@@ -136,6 +136,49 @@ _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
+_MODEL_OPTIONS_CACHE_TTL_SECONDS = 300.0
+_MODEL_OPTIONS_CACHE: dict[tuple, tuple[float, dict]] = {}
+_MODEL_OPTIONS_CACHE_LOCK = threading.Lock()
+
+
+def _model_options_file_stamp() -> tuple[tuple[str, int], ...]:
+    stamps: list[tuple[str, int]] = []
+    for name in ("config.yaml", ".env"):
+        path = Path(_hermes_home) / name
+        try:
+            stamps.append((str(path), path.stat().st_mtime_ns))
+        except OSError:
+            stamps.append((str(path), 0))
+    return tuple(stamps)
+
+
+def _clear_model_options_cache() -> None:
+    with _MODEL_OPTIONS_CACHE_LOCK:
+        _MODEL_OPTIONS_CACHE.clear()
+
+
+def _cached_model_options_payload(ctx, **kwargs) -> dict:
+    from hermes_cli.inventory import build_models_payload
+
+    key = (
+        _model_options_file_stamp(),
+        getattr(ctx, "current_provider", ""),
+        getattr(ctx, "current_model", ""),
+        getattr(ctx, "current_base_url", ""),
+        tuple(sorted(kwargs.items())),
+    )
+    now = time.monotonic()
+    with _MODEL_OPTIONS_CACHE_LOCK:
+        cached = _MODEL_OPTIONS_CACHE.get(key)
+        if cached and now - cached[0] < _MODEL_OPTIONS_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached[1])
+
+    payload = build_models_payload(ctx, **kwargs)
+    with _MODEL_OPTIONS_CACHE_LOCK:
+        _MODEL_OPTIONS_CACHE[key] = (now, copy.deepcopy(payload))
+    return payload
+
+
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -7108,7 +7151,7 @@ def _(rid, params: dict) -> dict:
 @method("model.options")
 def _(rid, params: dict) -> dict:
     try:
-        from hermes_cli.inventory import build_models_payload, load_picker_context
+        from hermes_cli.inventory import load_picker_context
 
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
@@ -7131,7 +7174,7 @@ def _(rid, params: dict) -> dict:
         # Curated model lists are preserved — list_authenticated_providers
         # populates `models` from the curated catalog, not provider_model_ids
         # (which would pull non-agentic models like TTS/embeddings/etc.).
-        payload = build_models_payload(
+        payload = _cached_model_options_payload(
             ctx,
             include_unconfigured=True,
             picker_hints=True,
@@ -7159,7 +7202,7 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
         from hermes_cli.config import is_managed, save_env_value
-        from hermes_cli.inventory import build_models_payload, load_picker_context
+        from hermes_cli.inventory import load_picker_context
 
         slug = (params.get("slug") or "").strip()
         api_key = (params.get("api_key") or "").strip()
@@ -7185,6 +7228,7 @@ def _(rid, params: dict) -> dict:
         # Save the key to ~/.hermes/.env
         env_var = pconfig.api_key_env_vars[0]
         save_env_value(env_var, api_key)
+        _clear_model_options_cache()
         # Also set in current process so the refreshed inventory sees it.
         import os
 
@@ -7203,7 +7247,7 @@ def _(rid, params: dict) -> dict:
             ),
             current_base_url=getattr(agent, "base_url", "") if agent else "",
         )
-        payload = build_models_payload(
+        payload = _cached_model_options_payload(
             ctx, picker_hints=True, max_models=50,
         )
         provider_data = next(
