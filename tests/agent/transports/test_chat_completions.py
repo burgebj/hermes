@@ -859,8 +859,6 @@ class TestChatCompletionsCacheStats:
         r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens_details=details))
         result = transport.extract_cache_stats(r)
         assert result == {"cached_tokens": 500, "creation_tokens": 100}
-
-
 class TestChatCompletionsGeminiNativeExtraBodyStrip:
     """Profile extra_body (e.g. Nous portal tags) must not reach a native
     Gemini endpoint — Google's REST API rejects unknown fields with HTTP 400.
@@ -909,3 +907,111 @@ class TestChatCompletionsGeminiNativeExtraBodyStrip:
         )
         eb = kw.get("extra_body")
         assert eb and "tags" in eb
+
+
+class TestHermesOutboundMetadata:
+    """extra_body.hermes opt-in orchestration hints."""
+
+    def test_default_off_profile_path(self, transport):
+        """No extra_body.hermes emitted when flag is absent (default off)."""
+        from providers import get_provider_profile
+        profile = get_provider_profile("openrouter")
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs, provider_profile=profile,
+        )
+        assert "hermes" not in (kw.get("extra_body") or {})
+
+    def test_default_off_legacy_path(self, transport):
+        """No extra_body.hermes emitted on the legacy (unregistered provider) path."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(model="gpt-4o", messages=msgs)
+        assert "hermes" not in (kw.get("extra_body") or {})
+
+    def test_all_fields_profile_path(self, transport):
+        """When enabled with all five fields, they appear correctly in extra_body.hermes."""
+        from providers import get_provider_profile
+        profile = get_provider_profile("openrouter")
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs, provider_profile=profile,
+            hermes_outbound_metadata=True,
+            session_id="sess-abc",
+            hermes_gateway_platform="matrix",
+            hermes_chat_id="!room:example.org",
+            hermes_user_id="@alice:example.org",
+            hermes_command_origin="user",
+        )
+        h = kw["extra_body"]["hermes"]
+        assert h["session_id"] == "sess-abc"
+        assert h["gateway_platform"] == "matrix"
+        assert h["chat_id"] == "!room:example.org"
+        assert h["user_id"] == "@alice:example.org"
+        assert h["command_origin"] == "user"
+
+    def test_all_fields_legacy_path(self, transport):
+        """Legacy path also emits extra_body.hermes when enabled."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs,
+            hermes_outbound_metadata=True,
+            session_id="sess-xyz",
+            hermes_gateway_platform="discord",
+            hermes_chat_id="12345",
+            hermes_user_id="67890",
+            hermes_command_origin="scheduled",
+        )
+        h = kw["extra_body"]["hermes"]
+        assert h["session_id"] == "sess-xyz"
+        assert h["gateway_platform"] == "discord"
+        assert h["chat_id"] == "12345"
+        assert h["user_id"] == "67890"
+        assert h["command_origin"] == "scheduled"
+
+    def test_none_fields_omitted(self, transport):
+        """Fields whose value is None are omitted so strict servers stay compatible."""
+        from providers import get_provider_profile
+        profile = get_provider_profile("openrouter")
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs, provider_profile=profile,
+            hermes_outbound_metadata=True,
+            session_id="sess-123",
+            # hermes_gateway_platform, hermes_chat_id, hermes_user_id,
+            # hermes_command_origin all absent → omitted from output
+        )
+        h = kw["extra_body"]["hermes"]
+        assert h == {"session_id": "sess-123"}
+        assert "gateway_platform" not in h
+        assert "chat_id" not in h
+        assert "user_id" not in h
+        assert "command_origin" not in h
+
+    def test_no_hermes_block_when_all_none(self, transport):
+        """If all values are None, extra_body.hermes is not emitted at all."""
+        from providers import get_provider_profile
+        profile = get_provider_profile("openrouter")
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs, provider_profile=profile,
+            hermes_outbound_metadata=True,
+            # all fields absent
+        )
+        assert "hermes" not in (kw.get("extra_body") or {})
+
+    def test_coexists_with_other_extra_body_fields(self, transport):
+        """extra_body.hermes doesn't clobber existing extra_body entries."""
+        from providers import get_provider_profile
+        profile = get_provider_profile("openrouter")
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs, provider_profile=profile,
+            provider_preferences={"only": ["openai"]},
+            hermes_outbound_metadata=True,
+            session_id="s1",
+            hermes_gateway_platform="telegram",
+        )
+        eb = kw["extra_body"]
+        assert eb["provider"] == {"only": ["openai"]}
+        assert eb["hermes"]["session_id"] == "s1"
+        assert eb["hermes"]["gateway_platform"] == "telegram"
