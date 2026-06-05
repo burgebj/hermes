@@ -4271,6 +4271,17 @@ def _client_cache_key(
     is_vision: bool = False,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
+    if provider == "auto":
+        if not runtime.get("provider") and _RUNTIME_MAIN_PROVIDER:
+            runtime["provider"] = _RUNTIME_MAIN_PROVIDER
+        if not runtime.get("model") and _RUNTIME_MAIN_MODEL:
+            runtime["model"] = _RUNTIME_MAIN_MODEL
+        if not runtime.get("base_url") and _RUNTIME_MAIN_BASE_URL:
+            runtime["base_url"] = _RUNTIME_MAIN_BASE_URL
+        if not runtime.get("api_key") and _RUNTIME_MAIN_API_KEY:
+            runtime["api_key"] = _RUNTIME_MAIN_API_KEY
+        if not runtime.get("api_mode") and _RUNTIME_MAIN_API_MODE:
+            runtime["api_mode"] = _RUNTIME_MAIN_API_MODE
     runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
     return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, pool_hint)

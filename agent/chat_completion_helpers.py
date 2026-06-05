@@ -103,6 +103,16 @@ def estimate_request_context_tokens(api_payload: Any) -> int:
     return _chars(api_payload) // 4
 
 
+def _gateway_local_stream_policy(agent) -> dict[str, Any]:
+    """Return gateway-only local stream failover policy for this agent."""
+    cfg = getattr(agent, "_gateway_local_failover", None)
+    if not isinstance(cfg, dict) or not cfg.get("enabled"):
+        return {}
+    if not (getattr(agent, "base_url", None) and is_local_endpoint(agent.base_url)):
+        return {}
+    return cfg
+
+
 def _is_openai_codex_backend(agent) -> bool:
     base_url_lower = str(getattr(agent, "_base_url_lower", "") or "")
     base_url_hostname = str(getattr(agent, "_base_url_hostname", "") or "")
@@ -1140,6 +1150,17 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
+        try:
+            from agent.auxiliary_client import set_runtime_main
+            set_runtime_main(
+                fb_provider,
+                fb_model,
+                base_url=fb_base_url,
+                api_key=agent.api_key if isinstance(agent.api_key, str) else "",
+                api_mode=fb_api_mode,
+            )
+        except Exception:
+            pass
 
         # Clear the credential pool when the fallback provider doesn't match
         # the pool's provider.  The pool was seeded for the primary provider;
@@ -1662,6 +1683,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # poll loop uses this to detect stale connections that keep receiving
     # SSE keep-alive pings but no actual data.
     last_chunk_time = {"t": time.time()}
+    first_stream_chunk_seen = {"yes": False}
+    gateway_stream_policy = _gateway_local_stream_policy(agent)
 
     def _fire_first_delta():
         if not first_delta_fired["done"] and on_first_delta:
@@ -1721,6 +1744,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # Reset stale-stream timer so the detector measures from this
         # attempt's start, not a previous attempt's last chunk.
         last_chunk_time["t"] = time.time()
+        first_stream_chunk_seen["yes"] = False
         agent._touch_activity("waiting for provider response (streaming)")
         # Initialize per-attempt stream diagnostics so the retry block can
         # reach for them after the stream dies.  Lives on
@@ -1757,6 +1781,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         usage_obj = None
         for chunk in stream:
             last_chunk_time["t"] = time.time()
+            first_stream_chunk_seen["yes"] = True
             agent._touch_activity("receiving stream response")
 
             # Update per-attempt diagnostic counters.  Best-effort —
@@ -1970,6 +1995,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
         # Reset stale-stream timer for this attempt
         last_chunk_time["t"] = time.time()
+        first_stream_chunk_seen["yes"] = False
         # Per-attempt diagnostic dict for the retry block to consume.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
@@ -1993,6 +2019,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # actively arriving (the chat_completions path
                 # already does this at the top of its chunk loop).
                 last_chunk_time["t"] = time.time()
+                first_stream_chunk_seen["yes"] = True
                 agent._touch_activity("receiving stream response")
 
                 # Update per-attempt diagnostic counters (best-effort).
@@ -2044,6 +2071,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         import httpx as _httpx
 
         _max_stream_retries = int(os.getenv("HERMES_STREAM_RETRIES", 2))
+        _gateway_max_primary_retries = gateway_stream_policy.get("max_primary_retries")
+        if isinstance(_gateway_max_primary_retries, int) and _gateway_max_primary_retries > 0:
+            _max_stream_retries = min(
+                _max_stream_retries,
+                max(0, _gateway_max_primary_retries - 1),
+            )
 
         try:
             for _stream_attempt in range(_max_stream_retries + 1):
@@ -2313,6 +2346,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         else:
             _stream_stale_timeout = _stream_stale_timeout_base
 
+    _gateway_no_first_chunk_timeout = gateway_stream_policy.get(
+        "no_first_chunk_timeout_seconds"
+    )
+    _gateway_stale_chunk_timeout = gateway_stream_policy.get(
+        "stale_chunk_timeout_seconds"
+    )
+
     t = threading.Thread(target=_call, daemon=True)
     t.start()
     _last_heartbeat = time.time()
@@ -2340,12 +2380,31 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # but delivering no real chunks.  Kill the client so the
         # inner retry loop can start a fresh connection.
         _stale_elapsed = time.time() - last_chunk_time["t"]
-        if _stale_elapsed > _stream_stale_timeout:
+        _effective_stream_timeout = _stream_stale_timeout
+        _stream_timeout_phase = "stale stream"
+        if gateway_stream_policy:
+            if (
+                not first_stream_chunk_seen["yes"]
+                and isinstance(_gateway_no_first_chunk_timeout, (int, float))
+                and _gateway_no_first_chunk_timeout > 0
+            ):
+                _effective_stream_timeout = float(_gateway_no_first_chunk_timeout)
+                _stream_timeout_phase = "no first stream chunk"
+            elif (
+                first_stream_chunk_seen["yes"]
+                and isinstance(_gateway_stale_chunk_timeout, (int, float))
+                and _gateway_stale_chunk_timeout > 0
+            ):
+                _effective_stream_timeout = float(_gateway_stale_chunk_timeout)
+                _stream_timeout_phase = "stale stream chunk"
+
+        if _stale_elapsed > _effective_stream_timeout:
             _est_ctx = estimate_request_context_tokens(api_kwargs)
             logger.warning(
-                "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "
+                "%s for %.0fs (threshold %.0fs). "
                 "model=%s context=~%s tokens. Killing connection.",
-                _stale_elapsed, _stream_stale_timeout,
+                _stream_timeout_phase,
+                _stale_elapsed, _effective_stream_timeout,
                 api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
             )
             agent._buffer_status(

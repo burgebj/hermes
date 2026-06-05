@@ -515,6 +515,263 @@ async def test_session_hygiene_warns_user_when_compression_aborts(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_session_hygiene_auto_resets_configured_platform_after_abort(
+    monkeypatch, tmp_path
+):
+    """Configured messaging platforms should rotate after hygiene aborts.
+
+    This keeps chatty Telegram sessions from repeatedly replaying the same
+    oversized transcript when the compression model cannot summarize it.
+    """
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    class FakeCompressAgentWithSummaryFailure:
+        last_instance = None
+
+        def __init__(self, **kwargs):
+            self.model = kwargs.get("model")
+            self.session_id = kwargs.get("session_id", "fake-session")
+            self._print_fn = None
+            self.shutdown_memory_provider = MagicMock()
+            self.close = MagicMock()
+            self.context_compressor = SimpleNamespace(
+                _last_compress_aborted=True,
+                _last_summary_fallback_used=False,
+                _last_summary_dropped_count=0,
+                _last_summary_error="context too large for compression model",
+            )
+            type(self).last_instance = self
+
+        def _compress_context(self, messages, *_args, **_kwargs):
+            return (messages, None)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeCompressAgentWithSummaryFailure
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "compression:\n"
+        "  enabled: true\n"
+        "  hygiene_hard_message_limit: 4\n"
+        "  hygiene_auto_reset_on_abort_platforms:\n"
+        "    - telegram\n"
+    )
+
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+
+    adapter = HygieneCaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    old_entry = SessionEntry(
+        session_key="agent:main:telegram:private:12345",
+        session_id="sess-old",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="private",
+    )
+    new_entry = SessionEntry(
+        session_key="agent:main:telegram:private:12345",
+        session_id="sess-new",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="private",
+    )
+    runner.session_store = MagicMock()
+    runner.session_store._entries = {old_entry.session_key: old_entry}
+    runner.session_store.get_or_create_session.return_value = old_entry
+    runner.session_store.reset_session.return_value = new_entry
+    runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner.session_store._save = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._queued_events = {}
+    runner._session_model_overrides = {}
+    runner._session_reasoning_overrides = {}
+    runner._session_db = None
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._evict_cached_agent = MagicMock()
+    runner._cleanup_agent_resources = MagicMock()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 100,
+    )
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "795544298")
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="12345",
+            chat_type="private",
+            user_id="12345",
+        ),
+        message_id="1",
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "ok"
+    runner.session_store.reset_session.assert_called_once_with(old_entry.session_key)
+    assert runner._run_agent.await_args.kwargs["history"] == []
+    warning_messages = [
+        s for s in adapter.sent if "rotated this chat to a fresh Hermes session" in s["content"]
+    ]
+    assert len(warning_messages) == 1
+    runner._cleanup_agent_resources.assert_called_with(
+        FakeCompressAgentWithSummaryFailure.last_instance
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_hygiene_auto_resets_telegram_at_configured_message_limit(
+    monkeypatch, tmp_path
+):
+    """Opt-in messaging platforms can rotate before attempting compression.
+
+    Telegram DMs are often casual, long-lived chats. Once a transcript has
+    already become pathological, replaying it into the compression path can be
+    the failure mode. The message-limit auto-reset starts a fresh session and
+    handles the current message without the oversized history.
+    """
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    class FakeCompressAgent:
+        last_instance = None
+
+        def __init__(self, **_kwargs):
+            type(self).last_instance = self
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeCompressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "compression:\n"
+        "  enabled: true\n"
+        "  hygiene_auto_reset_message_limit: 4\n"
+        "  hygiene_auto_reset_message_limit_platforms:\n"
+        "    - telegram\n"
+    )
+
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+
+    adapter = HygieneCaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    old_entry = SessionEntry(
+        session_key="agent:main:telegram:private:12345",
+        session_id="sess-old",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="private",
+    )
+    new_entry = SessionEntry(
+        session_key="agent:main:telegram:private:12345",
+        session_id="sess-new",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="private",
+    )
+    runner.session_store = MagicMock()
+    runner.session_store._entries = {old_entry.session_key: old_entry}
+    runner.session_store.get_or_create_session.return_value = old_entry
+    runner.session_store.reset_session.return_value = new_entry
+    runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner.session_store._save = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._queued_events = {}
+    runner._session_model_overrides = {}
+    runner._session_reasoning_overrides = {}
+    runner._session_db = None
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._evict_cached_agent = MagicMock()
+    runner._cleanup_agent_resources = MagicMock()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 1_000_000,
+    )
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="12345",
+            chat_type="private",
+            user_id="12345",
+        ),
+        message_id="1",
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "ok"
+    runner.session_store.reset_session.assert_called_once_with(old_entry.session_key)
+    assert runner._run_agent.await_args.kwargs["history"] == []
+    assert FakeCompressAgent.last_instance is None
+    notices = [
+        s for s in adapter.sent if "rotated it to a fresh Hermes session" in s["content"]
+    ]
+    assert len(notices) == 1
+
+
+@pytest.mark.asyncio
 async def test_session_hygiene_informs_user_when_aux_model_fails_but_recovers(monkeypatch, tmp_path):
     """When the user's configured ``auxiliary.compression.model`` errors out
     and we recover via the main model, compression succeeds but the user's

@@ -161,6 +161,56 @@ class TestResolveAutoMainFirst:
         assert mock_resolve.call_args.args[0] == "anthropic"
         assert mock_resolve.call_args.args[1] == "runtime-model"
 
+    def test_auto_cache_key_tracks_runtime_global_fallback(self):
+        """Auto auxiliary cache must not pair a fallback provider with a stale model."""
+        from agent import auxiliary_client as mod
+
+        local_client = MagicMock()
+        local_client.base_url = "http://127.0.0.1:8000/v1"
+        fallback_client = MagicMock()
+        fallback_client.base_url = "https://openrouter.ai/api/v1/"
+
+        def _resolve(provider, model, *args, **kwargs):
+            if provider == "auto" and mod._RUNTIME_MAIN_PROVIDER == "omlx":
+                return local_client, mod._RUNTIME_MAIN_MODEL
+            if provider == "auto" and mod._RUNTIME_MAIN_PROVIDER == "openrouter":
+                return fallback_client, mod._RUNTIME_MAIN_MODEL
+            return None, None
+
+        mod.shutdown_cached_clients()
+        mod.clear_runtime_main()
+        try:
+            with patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                side_effect=_resolve,
+            ) as mock_resolve:
+                mod.set_runtime_main(
+                    "omlx",
+                    "qwen3-4b-instruct-2507-4bit",
+                    base_url="http://127.0.0.1:8000/v1",
+                    api_key="local",
+                    api_mode="chat_completions",
+                )
+                client, model = mod._get_cached_client("auto")
+                assert client is local_client
+                assert model == "qwen3-4b-instruct-2507-4bit"
+
+                mod.set_runtime_main(
+                    "openrouter",
+                    "deepseek/deepseek-v4-pro",
+                    base_url="https://openrouter.ai/api/v1/",
+                    api_key="or-key",
+                    api_mode="chat_completions",
+                )
+                client, model = mod._get_cached_client("auto")
+
+            assert client is fallback_client
+            assert model == "deepseek/deepseek-v4-pro"
+            assert mock_resolve.call_count == 2
+        finally:
+            mod.shutdown_cached_clients()
+            mod.clear_runtime_main()
+
 
 # ── Vision — resolve_vision_provider_client ─────────────────────────────────
 

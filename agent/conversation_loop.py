@@ -48,6 +48,7 @@ from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
     get_context_length_from_provider_error,
+    is_local_endpoint,
     parse_available_output_tokens_from_error,
     save_context_length,
 )
@@ -62,6 +63,42 @@ from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _gateway_local_failover_policy(agent: Any) -> dict[str, Any]:
+    cfg = getattr(agent, "_gateway_local_failover", None)
+    if not isinstance(cfg, dict) or not cfg.get("enabled"):
+        return {}
+    if not (getattr(agent, "base_url", None) and is_local_endpoint(agent.base_url)):
+        return {}
+    return cfg
+
+
+def _iter_error_chain(error: BaseException):
+    seen: set[int] = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+
+def _gateway_stream_error_matches(error: BaseException, patterns: Any) -> bool:
+    if isinstance(patterns, str):
+        patterns = (patterns,)
+    normalized_patterns = tuple(
+        str(pattern).strip().lower()
+        for pattern in (patterns or ())
+        if str(pattern).strip()
+    )
+    if not normalized_patterns:
+        return False
+    haystack_parts: list[str] = []
+    for item in _iter_error_chain(error):
+        haystack_parts.append(type(item).__name__.lower())
+        haystack_parts.append(str(item).lower())
+    haystack = " ".join(haystack_parts)
+    return any(pattern in haystack for pattern in normalized_patterns)
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
@@ -2858,6 +2895,40 @@ def run_conversation(
                             )
                         else:
                             agent._buffer_status("⚠️ Rate limited — switching to fallback provider...")
+                        if agent._try_activate_fallback(reason=classified.reason):
+                            retry_count = 0
+                            compression_attempts = 0
+                            primary_recovery_attempted = False
+                            continue
+
+                gateway_failover_policy = _gateway_local_failover_policy(agent)
+                if (
+                    gateway_failover_policy
+                    and classified.reason == FailoverReason.timeout
+                    and agent._has_pending_fallback()
+                ):
+                    _stream_error_match = _gateway_stream_error_matches(
+                        api_error,
+                        gateway_failover_policy.get("failover_on_stream_errors"),
+                    )
+                    _max_gateway_primary_retries = gateway_failover_policy.get(
+                        "max_primary_retries"
+                    )
+                    _primary_retries_exhausted = (
+                        isinstance(_max_gateway_primary_retries, int)
+                        and _max_gateway_primary_retries > 0
+                        and retry_count >= _max_gateway_primary_retries
+                    )
+                    if _stream_error_match or _primary_retries_exhausted:
+                        reason_text = (
+                            "stream transport error"
+                            if _stream_error_match
+                            else f"{_max_gateway_primary_retries} local retry"
+                        )
+                        agent._buffer_status(
+                            "⚠️ Local gateway model stalled or disconnected "
+                            f"({reason_text}) — switching to fallback provider..."
+                        )
                         if agent._try_activate_fallback(reason=classified.reason):
                             retry_count = 0
                             compression_attempts = 0

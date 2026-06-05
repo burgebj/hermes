@@ -1122,6 +1122,9 @@ DEFAULT_CONFIG = {
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
         "hygiene_hard_message_limit": 400,  # gateway session-hygiene force-compress threshold by message count
+        "hygiene_auto_reset_message_limit": 0,  # opt-in gateway auto-/new threshold by message count; 0 disables
+        "hygiene_auto_reset_message_limit_platforms": [],  # gateway platforms allowed to auto-/new at the message limit
+        "hygiene_auto_reset_on_abort_platforms": [],  # gateway platforms that should auto-/new if hygiene compression aborts
         "protect_first_n": 3,         # non-system head messages always preserved
                                       # verbatim, in ADDITION to the system prompt
                                       # (which is always implicitly protected). Set to
@@ -2138,6 +2141,21 @@ DEFAULT_CONFIG = {
     # Gateway settings — control how messaging platforms (Telegram, Discord,
     # Slack, etc.) deliver agent-produced files as native attachments.
     "gateway": {
+        "agent": {
+            "model_override": {
+                "enabled": False,
+                "provider": "",
+                "model": "",
+                "fallback_providers": [],
+            },
+            "local_failover": {
+                "enabled": False,
+                "no_first_chunk_timeout_seconds": 0,
+                "stale_chunk_timeout_seconds": 0,
+                "max_primary_retries": 0,
+                "failover_on_stream_errors": [],
+            },
+        },
         # When false (default), any file path the agent emits is delivered
         # as a native attachment as long as it isn't under the credential /
         # system-path denylist (/etc, /proc, ~/.ssh, ~/.aws, ~/.hermes/.env,

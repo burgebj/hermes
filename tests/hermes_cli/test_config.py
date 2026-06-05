@@ -73,6 +73,23 @@ class TestLoadConfigDefaults:
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
 
+    def test_gateway_agent_stage1_defaults_are_disabled(self):
+        agent_cfg = DEFAULT_CONFIG["gateway"]["agent"]
+
+        assert agent_cfg["model_override"] == {
+            "enabled": False,
+            "provider": "",
+            "model": "",
+            "fallback_providers": [],
+        }
+        assert agent_cfg["local_failover"] == {
+            "enabled": False,
+            "no_first_chunk_timeout_seconds": 0,
+            "stale_chunk_timeout_seconds": 0,
+            "max_primary_retries": 0,
+            "failover_on_stream_errors": [],
+        }
+
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"

@@ -792,6 +792,12 @@ def test_oneshot_distinguishes_disabled_mcp_from_unknown(monkeypatch, capsys):
     assert "mcp-off" in err
 
 
+def test_oneshot_uses_inline_mcp_discovery(main_mod):
+    args = Namespace(command=None, oneshot="hello", tui=False)
+
+    assert main_mod._should_background_mcp_startup(args) is False
+
+
 def test_oneshot_wires_session_db_for_recall(monkeypatch):
     """hermes -z bypasses HermesCLI, but recall still needs SessionDB."""
     from hermes_cli.oneshot import _run_agent

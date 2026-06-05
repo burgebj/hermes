@@ -12551,6 +12551,11 @@ def _command_has_dedicated_mcp_startup(args) -> bool:
 def _should_background_mcp_startup(args) -> bool:
     if _is_tui_chat_launch(args):
         return False
+    if getattr(args, "oneshot", None):
+        # One-shot snapshots tools immediately inside run_oneshot().  If MCP
+        # discovery is still in the background, configured MCP toolsets can
+        # appear empty for the whole run.
+        return False
     return args.command in {None, "chat", "rl"}
 
 

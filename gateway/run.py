@@ -66,6 +66,10 @@ _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+_YOUTUBE_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/(?:\S+)",
+    re.IGNORECASE,
+)
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not Telegram chat
@@ -85,6 +89,35 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+def _telegram_runtime_context_prompt(user_config: dict) -> str:
+    """Return fresh Telegram-only runtime context for one agent turn."""
+    cfg = user_config if isinstance(user_config, dict) else {}
+    tz_name = str(cfg.get("timezone") or "").strip()
+    now = None
+    timezone_label = tz_name or "server-local"
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            logger.warning(
+                "Invalid timezone configured for Telegram runtime context: %s",
+                tz_name,
+            )
+    if now is None:
+        now = datetime.now().astimezone()
+
+    return (
+        "<runtime_context>\n"
+        f"Current date/time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+        f"Timezone: {timezone_label}\n"
+        "For simple Telegram time/date questions, use this runtime context; "
+        "do not call terminal just to determine the current time or date.\n"
+        "</runtime_context>"
+    )
 
 _GATEWAY_PROVIDER_ERROR_RE = re.compile(
     r"("  # infrastructure/provider error preambles, not ordinary assistant prose
@@ -1285,6 +1318,132 @@ def _try_resolve_fallback_provider() -> dict | None:
     except Exception:
         pass
     return None
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _gateway_agent_config(user_config: Optional[dict]) -> dict:
+    cfg = user_config if isinstance(user_config, dict) else {}
+    gateway_cfg = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+    agent_cfg = gateway_cfg.get("agent") if isinstance(gateway_cfg.get("agent"), dict) else {}
+    return agent_cfg if isinstance(agent_cfg, dict) else {}
+
+
+def _gateway_model_override_config(user_config: Optional[dict]) -> dict:
+    agent_cfg = _gateway_agent_config(user_config)
+    override_cfg = agent_cfg.get("model_override")
+    return override_cfg if isinstance(override_cfg, dict) else {}
+
+
+def _gateway_local_failover_config(user_config: Optional[dict]) -> dict:
+    agent_cfg = _gateway_agent_config(user_config)
+    failover_cfg = agent_cfg.get("local_failover")
+    return failover_cfg if isinstance(failover_cfg, dict) else {}
+
+
+def _compression_auto_reset_on_abort_platforms(user_config: Optional[dict]) -> set[str]:
+    cfg = user_config if isinstance(user_config, dict) else {}
+    comp_cfg = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
+    raw = comp_cfg.get("hygiene_auto_reset_on_abort_platforms") or []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",")]
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {str(item).strip().lower() for item in raw if str(item).strip()}
+
+
+def _compression_auto_reset_message_limit_config(
+    user_config: Optional[dict],
+) -> tuple[int, set[str]]:
+    """Return the opt-in gateway session auto-reset limit and platforms.
+
+    ``hygiene_hard_message_limit`` preserves the historical behavior: attempt
+    compression first. This separate opt-in is for chatty messaging surfaces
+    where a very long transcript is itself a reliability smell, and rotating
+    before agent startup is safer than trying to replay/compress the whole
+    session again.
+    """
+    cfg = user_config if isinstance(user_config, dict) else {}
+    comp_cfg = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
+
+    try:
+        limit = int(comp_cfg.get("hygiene_auto_reset_message_limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return 0, set()
+
+    raw = comp_cfg.get("hygiene_auto_reset_message_limit_platforms") or []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",")]
+    if not isinstance(raw, (list, tuple, set)):
+        return 0, set()
+    platforms = {str(item).strip().lower() for item in raw if str(item).strip()}
+    if not platforms:
+        return 0, set()
+    return limit, platforms
+
+
+def _transient_auto_skills_for_event(event) -> list[str]:
+    """Return turn-scoped skills to inject for matching gateway messages."""
+    text = str(getattr(event, "text", "") or "")
+    if _YOUTUBE_URL_RE.search(text):
+        return ["youtube-content"]
+    return []
+
+
+def _resolve_gateway_override_runtime(
+    override_cfg: dict,
+    runtime_kwargs: dict,
+) -> tuple[str | None, dict | None]:
+    """Resolve a gateway-only model/provider override without mutating globals."""
+    if not bool(override_cfg.get("enabled")):
+        return None, None
+    provider = str(override_cfg.get("provider") or "").strip()
+    model = str(override_cfg.get("model") or "").strip()
+    if not provider or not model:
+        return None, None
+
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    explicit_api_key = override_cfg.get("api_key")
+    if not explicit_api_key:
+        key_env = str(
+            override_cfg.get("key_env") or override_cfg.get("api_key_env") or ""
+        ).strip()
+        if key_env:
+            explicit_api_key = os.getenv(key_env, "").strip() or None
+
+    runtime = resolve_runtime_provider(
+        requested=provider,
+        explicit_base_url=override_cfg.get("base_url"),
+        explicit_api_key=explicit_api_key,
+    )
+    resolved_runtime = {
+        **runtime_kwargs,
+        "api_key": runtime.get("api_key"),
+        "base_url": runtime.get("base_url"),
+        "provider": runtime.get("provider"),
+        "api_mode": runtime.get("api_mode"),
+        "command": runtime.get("command"),
+        "args": list(runtime.get("args") or []),
+        "credential_pool": runtime.get("credential_pool"),
+    }
+    return model, resolved_runtime
 
 
 def _build_media_placeholder(event) -> str:
@@ -2698,7 +2857,13 @@ class GatewayRunner:
 
         return model, runtime_kwargs
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def _resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        user_config: Optional[dict] = None,
+    ) -> dict:
         """Build the effective model/runtime config for a single turn.
 
         Always uses the session's primary model/provider.  If `/fast` is
@@ -2718,9 +2883,64 @@ class GatewayRunner:
             "credential_pool": runtime_kwargs.get("credential_pool"),
             "max_tokens": runtime_kwargs.get("max_tokens"),
         }
+        fallback_model = getattr(self, "_fallback_model", None)
+
+        override_cfg = _gateway_model_override_config(user_config)
+        if bool(override_cfg.get("enabled")):
+            try:
+                override_model, override_runtime = _resolve_gateway_override_runtime(
+                    override_cfg,
+                    runtime,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Gateway model override failed; using default runtime. error=%s",
+                    exc,
+                )
+                override_model, override_runtime = None, None
+            if override_model and override_runtime:
+                model = override_model
+                runtime = override_runtime
+                override_fallbacks = get_fallback_chain(
+                    {"fallback_providers": override_cfg.get("fallback_providers")}
+                )
+                if override_fallbacks:
+                    fallback_model = override_fallbacks
+                logger.info(
+                    "Gateway model override active: provider=%s model=%s",
+                    runtime.get("provider"),
+                    model,
+                )
+
+        local_failover_cfg = _gateway_local_failover_config(user_config)
+        gateway_local_failover: dict = {"enabled": False}
+        if bool(local_failover_cfg.get("enabled")):
+            stream_errors = local_failover_cfg.get("failover_on_stream_errors")
+            if isinstance(stream_errors, str):
+                stream_errors = [stream_errors]
+            normalized_errors = [
+                str(item).strip().lower()
+                for item in (stream_errors or [])
+                if str(item).strip()
+            ]
+            gateway_local_failover = {
+                "enabled": True,
+                "no_first_chunk_timeout_seconds": _coerce_positive_float(
+                    local_failover_cfg.get("no_first_chunk_timeout_seconds")
+                ),
+                "stale_chunk_timeout_seconds": _coerce_positive_float(
+                    local_failover_cfg.get("stale_chunk_timeout_seconds")
+                ),
+                "max_primary_retries": _coerce_positive_int(
+                    local_failover_cfg.get("max_primary_retries")
+                ),
+                "failover_on_stream_errors": tuple(normalized_errors),
+            }
         route = {
             "model": model,
             "runtime": runtime,
+            "fallback_model": fallback_model,
+            "gateway_local_failover": gateway_local_failover,
             "signature": (
                 model,
                 runtime["provider"],
@@ -2728,6 +2948,15 @@ class GatewayRunner:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                tuple(
+                    (key, tuple(value) if isinstance(value, list) else value)
+                    for key, value in sorted(gateway_local_failover.items())
+                ),
+                tuple(
+                    (f.get("provider"), f.get("model"))
+                    for f in (fallback_model or [])
+                    if isinstance(f, dict)
+                ),
             ),
         }
 
@@ -9032,12 +9261,20 @@ class GatewayRunner:
             session_entry.auto_reset_reason = None
 
         # Auto-load skill(s) for topic/channel bindings (Telegram DM Topics,
-        # Discord channel_skill_bindings).  Supports a single name or ordered list.
-        # Only inject on NEW sessions — ongoing conversations already have the
-        # skill content in their conversation history from the first message.
+        # Discord channel_skill_bindings) and turn-scoped URL triggers.
+        # Bound skills inject only on new sessions because ongoing
+        # conversations already have their payload in history. Transient
+        # triggers inject on every matching turn so a long-lived Telegram DM
+        # can still handle a YouTube URL without the user remembering /new.
         _auto = getattr(event, "auto_skill", None)
-        if _is_new_session and _auto:
-            _skill_names = [_auto] if isinstance(_auto, str) else list(_auto)
+        _bound_skill_names = [_auto] if isinstance(_auto, str) else list(_auto or [])
+        _transient_skill_names = _transient_auto_skills_for_event(event)
+        _skill_names = []
+        if _is_new_session:
+            _skill_names.extend(_bound_skill_names)
+        _skill_names.extend(_transient_skill_names)
+        _skill_names = list(dict.fromkeys(_skill_names))
+        if _skill_names:
             try:
                 from agent.skill_commands import _load_skill_payload, _build_skill_message
                 _combined_parts: list[str] = []
@@ -9108,6 +9345,9 @@ class GatewayRunner:
             _hyg_base_url = None
             _hyg_api_key = None
             _hyg_data = {}
+            _hyg_auto_reset_on_abort_platforms: set[str] = set()
+            _hyg_auto_reset_message_limit = 0
+            _hyg_auto_reset_message_limit_platforms: set[str] = set()
             try:
                 _hyg_data = _load_gateway_config()
                 if _hyg_data:
@@ -9145,6 +9385,13 @@ class GatewayRunner:
                                     _hyg_hard_msg_limit = _parsed
                             except (TypeError, ValueError):
                                 pass
+                        _hyg_auto_reset_on_abort_platforms = (
+                            _compression_auto_reset_on_abort_platforms(_hyg_data)
+                        )
+                        (
+                            _hyg_auto_reset_message_limit,
+                            _hyg_auto_reset_message_limit_platforms,
+                        ) = _compression_auto_reset_message_limit_config(_hyg_data)
 
                 try:
                     _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
@@ -9220,6 +9467,64 @@ class GatewayRunner:
                     # 85% * 1.4 = 119% of context — which exceeds the model's limit
                     # and prevented hygiene from ever firing for ~200K models (GLM-5).
 
+                _platform_value = (
+                    source.platform.value
+                    if getattr(source, "platform", None)
+                    else ""
+                ).lower()
+                _auto_reset_by_message_limit = (
+                    bool(session_key)
+                    and _platform_value in _hyg_auto_reset_message_limit_platforms
+                    and _hyg_auto_reset_message_limit > 0
+                    and _msg_count >= _hyg_auto_reset_message_limit
+                )
+                if _auto_reset_by_message_limit:
+                    logger.info(
+                        "Session hygiene: %s messages exceeds auto-reset limit "
+                        "%s for platform=%s — rotating before agent startup",
+                        _msg_count,
+                        _hyg_auto_reset_message_limit,
+                        _platform_value,
+                    )
+                    _hyg_meta = self._thread_metadata_for_source(
+                        source, self._reply_anchor_for_event(event)
+                    )
+                    try:
+                        _adapter = self.adapters.get(source.platform)
+                        if _adapter and source.chat_id:
+                            await _adapter.send(
+                                source.chat_id,
+                                (
+                                    "🔄 This chat had grown large enough to risk "
+                                    "slow or unreliable replies, so I rotated it "
+                                    "to a fresh Hermes session and will handle "
+                                    "your current message without the oversized "
+                                    "history."
+                                ),
+                                metadata=_hyg_meta,
+                            )
+                    except Exception as _werr:
+                        logger.warning(
+                            "Failed to deliver hygiene auto-reset notice to user: %s",
+                            _werr,
+                        )
+
+                    _new_entry = await self._auto_reset_session_boundary(
+                        session_key=session_key,
+                        source=source,
+                        reason="hygiene_message_limit",
+                    )
+                    if _new_entry is not None:
+                        session_entry = _new_entry
+                        history = []
+                        context_prompt += (
+                            "\n\n[System note: The previous Telegram session "
+                            "was automatically rotated because the gateway "
+                            "transcript exceeded the configured hygiene "
+                            "message limit. Treat the current user message as "
+                            "the start of a fresh conversation.]"
+                        )
+
                 # Hard safety valve: force compression if message count is
                 # extreme, regardless of token estimates.  This breaks the
                 # death spiral where API disconnects prevent token data
@@ -9235,7 +9540,7 @@ class GatewayRunner:
                     or _msg_count >= _HARD_MSG_LIMIT
                 )
 
-                if _needs_compress:
+                if _needs_compress and not _auto_reset_by_message_limit:
                     logger.info(
                         "Session hygiene: %s messages, ~%s tokens (%s) — auto-compressing "
                         "(threshold: %s%% of %s = %s tokens)",
@@ -9335,14 +9640,32 @@ class GatewayRunner:
                                     _comp = getattr(_hyg_agent, "context_compressor", None)
                                     if _comp is not None and getattr(_comp, "_last_compress_aborted", False):
                                         _err = getattr(_comp, "_last_summary_error", None) or "unknown error"
-                                        _warn_msg = (
-                                            "⚠️ Context compression aborted "
-                                            f"({_err}). No messages were dropped — "
-                                            "conversation is unchanged. Run /compress "
-                                            "to retry, /reset for a clean session, or "
-                                            "check your auxiliary.compression model "
-                                            "configuration."
+                                        _platform_value = (
+                                            source.platform.value
+                                            if getattr(source, "platform", None)
+                                            else ""
+                                        ).lower()
+                                        _auto_reset_after_abort = (
+                                            _platform_value
+                                            and _platform_value in _hyg_auto_reset_on_abort_platforms
                                         )
+                                        if _auto_reset_after_abort and session_key:
+                                            _warn_msg = (
+                                                "⚠️ Context compression aborted "
+                                                f"({_err}). No messages were dropped. "
+                                                "I rotated this chat to a fresh Hermes "
+                                                "session and will handle your current "
+                                                "message without the oversized history."
+                                            )
+                                        else:
+                                            _warn_msg = (
+                                                "⚠️ Context compression aborted "
+                                                f"({_err}). No messages were dropped — "
+                                                "conversation is unchanged. Run /compress "
+                                                "to retry, /reset for a clean session, or "
+                                                "check your auxiliary.compression model "
+                                                "configuration."
+                                            )
                                         try:
                                             _adapter = self.adapters.get(source.platform)
                                             if _adapter and source.chat_id:
@@ -9352,6 +9675,24 @@ class GatewayRunner:
                                                 "Failed to deliver compression-failure warning to user: %s",
                                                 _werr,
                                             )
+                                        if _auto_reset_after_abort and session_key:
+                                            _new_entry = await self._auto_reset_session_boundary(
+                                                session_key=session_key,
+                                                source=source,
+                                                reason="hygiene_compression_abort",
+                                            )
+                                            if _new_entry is not None:
+                                                session_entry = _new_entry
+                                                history = []
+                                                context_prompt += (
+                                                    "\n\n[System note: The previous "
+                                                    "Telegram session was automatically "
+                                                    "rotated because gateway session "
+                                                    "hygiene could not compress its "
+                                                    "oversized transcript. Treat the "
+                                                    "current user message as the start "
+                                                    "of a fresh conversation.]"
+                                                )
                                     # Separately: if the user's CONFIGURED aux
                                     # model failed and we recovered by falling
                                     # back to the main model, tell them — a
@@ -9999,12 +10340,26 @@ class GatewayRunner:
             except Exception:
                 pass
 
-        # Resolve runtime credentials for probing
+        # Resolve runtime credentials for probing.  Gateway slash-command
+        # status should report the same gateway-wide model override that
+        # normal Telegram/Slack/etc. turns use, rather than the global CLI
+        # default.
         try:
             runtime = _resolve_runtime_agent_kwargs()
             provider = provider or runtime.get("provider")
             base_url = base_url or runtime.get("base_url")
             api_key = runtime.get("api_key")
+            override_cfg = _gateway_model_override_config(data)
+            if bool(override_cfg.get("enabled")):
+                override_model, override_runtime = _resolve_gateway_override_runtime(
+                    override_cfg,
+                    runtime,
+                )
+                if override_model and override_runtime:
+                    model = override_model
+                    provider = override_runtime.get("provider") or provider
+                    base_url = override_runtime.get("base_url") or base_url
+                    api_key = override_runtime.get("api_key") or api_key
         except Exception:
             pass
 
@@ -10211,6 +10566,92 @@ class GatewayRunner:
         if session_info:
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
         return EphemeralReply(f"{header}{_tip_line}")
+
+    async def _auto_reset_session_boundary(
+        self,
+        *,
+        session_key: str,
+        source: SessionSource,
+        reason: str,
+    ) -> Optional["SessionEntry"]:
+        """Rotate a gateway session without treating the user's message as a command."""
+        self._invalidate_session_run_generation(session_key, reason=reason)
+
+        old_entry = self.session_store._entries.get(session_key)
+
+        _cache_lock = getattr(self, "_agent_cache_lock", None)
+        if _cache_lock is not None:
+            with _cache_lock:
+                _cached = self._agent_cache.get(session_key)
+                _old_agent = _cached[0] if isinstance(_cached, tuple) else _cached if _cached else None
+            if _old_agent is not None:
+                self._cleanup_agent_resources(_old_agent)
+        self._evict_cached_agent(session_key)
+
+        _qe = getattr(self, "_queued_events", None)
+        if _qe is not None:
+            _qe.pop(session_key, None)
+
+        try:
+            from tools.env_passthrough import clear_env_passthrough
+            clear_env_passthrough()
+        except Exception:
+            pass
+
+        try:
+            from tools.credential_files import clear_credential_files
+            clear_credential_files()
+        except Exception:
+            pass
+
+        new_entry = self.session_store.reset_session(session_key)
+
+        self._session_model_overrides.pop(session_key, None)
+        self._set_session_reasoning_override(session_key, None)
+        if hasattr(self, "_pending_model_notes"):
+            self._pending_model_notes.pop(session_key, None)
+        self._clear_session_boundary_security_state(session_key)
+
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _old_sid = old_entry.session_id if old_entry else None
+            _invoke_hook(
+                "on_session_finalize",
+                session_id=_old_sid,
+                platform=source.platform.value if source.platform else "",
+            )
+        except Exception:
+            pass
+
+        await self.hooks.emit("session:end", {
+            "platform": source.platform.value if source.platform else "",
+            "user_id": source.user_id,
+            "session_key": session_key,
+        })
+        await self.hooks.emit("session:reset", {
+            "platform": source.platform.value if source.platform else "",
+            "user_id": source.user_id,
+            "session_key": session_key,
+        })
+
+        if self._is_telegram_topic_lane(source) and new_entry is not None:
+            try:
+                self._record_telegram_topic_binding(source, new_entry)
+            except Exception:
+                logger.debug("Failed to rebind Telegram topic after automatic reset", exc_info=True)
+
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _new_sid = new_entry.session_id if new_entry else None
+            _invoke_hook(
+                "on_session_reset",
+                session_id=_new_sid,
+                platform=source.platform.value if source.platform else "",
+            )
+        except Exception:
+            pass
+
+        return new_entry
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show active profile name and home directory."""
@@ -12628,7 +13069,12 @@ class GatewayRunner:
             reasoning_config = self._resolve_session_reasoning_config(source=source)
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
-            turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                prompt,
+                model,
+                runtime_kwargs,
+                user_config=user_config,
+            )
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
@@ -12675,7 +13121,7 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=turn_route.get("fallback_model", self._fallback_model),
                 )
                 try:
                     return agent.run_conversation(
@@ -16116,8 +16562,13 @@ class GatewayRunner:
         ("compression", "threshold"),
         ("compression", "target_ratio"),
         ("compression", "protect_last_n"),
+        ("compression", "hygiene_hard_message_limit"),
+        ("compression", "hygiene_auto_reset_message_limit"),
+        ("compression", "hygiene_auto_reset_message_limit_platforms"),
+        ("compression", "hygiene_auto_reset_on_abort_platforms"),
         ("agent", "disabled_toolsets"),
         ("memory", "provider"),
+        ("gateway", "agent"),
     )
 
     _HONCHO_CACHE_BUSTING_KEYS = (
@@ -17700,6 +18151,16 @@ class GatewayRunner:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
             if self._ephemeral_system_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
+            stable_ephemeral = combined_ephemeral
+            turn_runtime_context = (
+                _telegram_runtime_context_prompt(user_config)
+                if platform_key == "telegram"
+                else ""
+            )
+            if turn_runtime_context:
+                combined_ephemeral = (
+                    combined_ephemeral + "\n\n" + turn_runtime_context
+                ).strip()
 
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart). Keep config.yaml authoritative for
@@ -17835,7 +18296,12 @@ class GatewayRunner:
                     log_message="interim_assistant_callback scheduling error",
                 )
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                message,
+                model,
+                runtime_kwargs,
+                user_config=user_config,
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -17844,7 +18310,7 @@ class GatewayRunner:
                 turn_route["model"],
                 turn_route["runtime"],
                 enabled_toolsets,
-                combined_ephemeral,
+                stable_ephemeral,
                 cache_keys=self._extract_cache_busting_config(user_config),
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
@@ -17857,6 +18323,7 @@ class GatewayRunner:
                     cached = _cache.get(session_key)
                     if cached and cached[1] == _sig:
                         agent = cached[0]
+                        agent.ephemeral_system_prompt = combined_ephemeral or None
                         # Refresh LRU order so the cap enforcement evicts
                         # truly-oldest entries, not the one we just used.
                         if hasattr(_cache, "move_to_end"):
@@ -17899,7 +18366,7 @@ class GatewayRunner:
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=turn_route.get("fallback_model", self._fallback_model),
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
@@ -17922,6 +18389,12 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
+            agent._gateway_local_failover = turn_route.get("gateway_local_failover") or {"enabled": False}
+            turn_fallback = turn_route.get("fallback_model", self._fallback_model)
+            if turn_fallback is not None:
+                agent._fallback_chain = list(turn_fallback or [])
+                agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
+                agent._fallback_index = 0
 
             _bg_review_release = threading.Event()
             _bg_review_pending: list[str] = []

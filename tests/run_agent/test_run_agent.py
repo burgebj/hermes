@@ -3676,6 +3676,64 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "Fallback answer."
 
+    def test_gateway_local_stream_error_triggers_fast_fallback(self, agent):
+        """Gateway-local stream transport errors use fallback before max retries."""
+        import httpx
+        from agent.error_classifier import FailoverReason
+
+        self._setup_agent(agent)
+        agent.base_url = "http://127.0.0.1:8020/v1"
+        agent.provider = "omlx"
+        agent.model = "qwen3-4b-instruct-2507-4bit"
+        agent.stream_delta_callback = lambda text: None
+        agent._fallback_chain = [
+            {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}
+        ]
+        agent._fallback_index = 0
+        agent._fallback_activated = False
+        agent._gateway_local_failover = {
+            "enabled": True,
+            "no_first_chunk_timeout_seconds": 20,
+            "stale_chunk_timeout_seconds": 30,
+            "max_primary_retries": 1,
+            "failover_on_stream_errors": (
+                "remoteprotocolerror",
+                "incomplete chunked read",
+            ),
+        }
+
+        fallback_reasons = []
+
+        def _mock_fallback(reason=None):
+            fallback_reasons.append(reason)
+            agent._fallback_index = 1
+            agent._fallback_activated = True
+            agent.model = "deepseek/deepseek-v4-pro"
+            agent.provider = "openrouter"
+            agent.base_url = "https://openrouter.ai/api/v1"
+            return True
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                side_effect=[
+                    httpx.RemoteProtocolError("incomplete chunked read"),
+                    _mock_response(content="Fallback answer.", finish_reason="stop"),
+                ],
+            ) as mock_stream,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_try_activate_fallback", side_effect=_mock_fallback),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert fallback_reasons == [FailoverReason.timeout]
+        assert mock_stream.call_count == 2
+        assert result["completed"] is True
+        assert result["final_response"] == "Fallback answer."
+
     def test_empty_response_fallback_also_empty_returns_empty(self, agent):
         """If fallback also returns empty, final response is (empty)."""
         self._setup_agent(agent)

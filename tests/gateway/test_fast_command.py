@@ -18,9 +18,12 @@ from gateway.session import SessionSource
 class _CapturingAgent:
     last_init = None
     last_run = None
+    instances = []
 
     def __init__(self, *args, **kwargs):
         type(self).last_init = dict(kwargs)
+        type(self).instances.append(self)
+        self.ephemeral_system_prompt = kwargs.get("ephemeral_system_prompt")
         self.tools = []
 
     def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
@@ -29,6 +32,7 @@ class _CapturingAgent:
             "conversation_history": conversation_history,
             "task_id": task_id,
             "persist_user_message": persist_user_message,
+            "ephemeral_system_prompt": self.ephemeral_system_prompt,
         }
         return {
             "final_response": "ok",
@@ -83,6 +87,18 @@ def _make_event(text: str) -> MessageEvent:
     return MessageEvent(text=text, source=_make_source(), message_id="m1")
 
 
+def test_transient_auto_skills_detects_youtube_urls():
+    event = _make_event("check this https://youtube.com/shorts/11K3tGgFnJs")
+
+    assert gateway_run._transient_auto_skills_for_event(event) == ["youtube-content"]
+
+
+def test_transient_auto_skills_ignores_regular_chat():
+    event = _make_event("just chatting about something")
+
+    assert gateway_run._transient_auto_skills_for_event(event) == []
+
+
 def test_turn_route_injects_priority_processing_without_changing_runtime():
     runner = _make_runner()
     runner._service_tier = "priority"
@@ -119,6 +135,196 @@ def test_turn_route_skips_priority_processing_for_unsupported_models():
     route = gateway_run.GatewayRunner._resolve_turn_agent_config(runner, "hi", "gpt-5.3-codex", runtime_kwargs)
 
     assert route["request_overrides"] == {}
+
+
+def test_gateway_model_override_uses_scoped_primary_and_fallback(monkeypatch):
+    runner = _make_runner()
+    runner._service_tier = None
+    runner._fallback_model = [
+        {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}
+    ]
+    runtime_kwargs = {
+        "api_key": "primary-key",
+        "base_url": "http://127.0.0.1:8020/v1",
+        "provider": "omlx",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": "primary-pool",
+    }
+
+    def _fake_resolve_runtime_provider(**kwargs):
+        assert kwargs["requested"] == "omlx"
+        return {
+            "api_key": "override-key",
+            "base_url": "http://127.0.0.1:8020/v1",
+            "provider": "omlx",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        _fake_resolve_runtime_provider,
+    )
+
+    route = gateway_run.GatewayRunner._resolve_turn_agent_config(
+        runner,
+        "hi",
+        "qwen3-30b-a3b-instruct-2507-4bit",
+        runtime_kwargs,
+        user_config={
+            "gateway": {
+                "agent": {
+                    "model_override": {
+                        "enabled": True,
+                        "provider": "omlx",
+                        "model": "qwen3-4b-instruct-2507-4bit",
+                        "fallback_providers": [
+                            {
+                                "provider": "openrouter",
+                                "model": "deepseek/deepseek-v4-pro",
+                            }
+                        ],
+                    },
+                    "local_failover": {
+                        "enabled": True,
+                        "no_first_chunk_timeout_seconds": 20,
+                        "stale_chunk_timeout_seconds": 30,
+                        "max_primary_retries": 1,
+                        "failover_on_stream_errors": [
+                            "RemoteProtocolError",
+                            "incomplete chunked read",
+                        ],
+                    },
+                }
+            }
+        },
+    )
+
+    assert route["model"] == "qwen3-4b-instruct-2507-4bit"
+    assert route["runtime"]["provider"] == "omlx"
+    assert route["runtime"]["credential_pool"] is None
+    assert route["fallback_model"] == [
+        {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}
+    ]
+    assert route["gateway_local_failover"] == {
+        "enabled": True,
+        "no_first_chunk_timeout_seconds": 20.0,
+        "stale_chunk_timeout_seconds": 30.0,
+        "max_primary_retries": 1,
+        "failover_on_stream_errors": (
+            "remoteprotocolerror",
+            "incomplete chunked read",
+        ),
+    }
+
+
+def test_gateway_model_override_defaults_off_keep_global_route():
+    runner = _make_runner()
+    runner._service_tier = None
+    runner._fallback_model = [
+        {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}
+    ]
+    runtime_kwargs = {
+        "api_key": "primary-key",
+        "base_url": "http://127.0.0.1:8020/v1",
+        "provider": "omlx",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": "primary-pool",
+    }
+
+    route = gateway_run.GatewayRunner._resolve_turn_agent_config(
+        runner,
+        "hi",
+        "qwen3-30b-a3b-instruct-2507-4bit",
+        runtime_kwargs,
+        user_config={},
+    )
+
+    assert route["model"] == "qwen3-30b-a3b-instruct-2507-4bit"
+    assert route["runtime"]["provider"] == "omlx"
+    assert route["runtime"]["credential_pool"] == "primary-pool"
+    assert route["fallback_model"] == [
+        {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}
+    ]
+    assert route["gateway_local_failover"] == {"enabled": False}
+
+
+def test_session_info_reports_gateway_model_override(monkeypatch):
+    runner = _make_runner()
+
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "qwen3-30b-a3b-instruct-2507-4bit")
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "model": {
+                "provider": "omlx",
+                "default": "qwen3-30b-a3b-instruct-2507-4bit",
+            },
+            "gateway": {
+                "agent": {
+                    "model_override": {
+                        "enabled": True,
+                        "provider": "openrouter",
+                        "model": "deepseek/deepseek-v4-flash",
+                        "fallback_providers": [
+                            {
+                                "provider": "openrouter",
+                                "model": "deepseek/deepseek-v4-pro",
+                            }
+                        ],
+                    }
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "api_key": "global-key",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "provider": "omlx",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        },
+    )
+
+    def _fake_resolve_runtime_provider(**kwargs):
+        assert kwargs["requested"] == "openrouter"
+        return {
+            "api_key": "override-key",
+            "base_url": "https://openrouter.ai/api/v1",
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        _fake_resolve_runtime_provider,
+    )
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *args, **kwargs: 128000,
+    )
+
+    info = gateway_run.GatewayRunner._format_session_info(runner)
+
+    assert "deepseek/deepseek-v4-flash" in info
+    assert "Provider: openrouter" in info
+    assert "qwen3-30b-a3b-instruct-2507-4bit" not in info
+    assert "Endpoint: http://127.0.0.1:8000/v1" not in info
 
 
 @pytest.mark.asyncio
@@ -185,3 +391,102 @@ async def test_run_agent_passes_priority_processing_to_gateway_agent(monkeypatch
     assert result["final_response"] == "ok"
     assert _CapturingAgent.last_init["service_tier"] == "priority"
     assert _CapturingAgent.last_init["request_overrides"] == {"service_tier": "priority"}
+
+
+@pytest.mark.asyncio
+async def test_run_agent_injects_telegram_runtime_time_context(monkeypatch, tmp_path):
+    _install_fake_agent(monkeypatch)
+    runner = _make_runner()
+
+    (tmp_path / "config.yaml").write_text("timezone: America/Chicago\n", encoding="utf-8")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"timezone": "America/Chicago"},
+    )
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+        },
+    )
+
+    import hermes_cli.tools_config as tools_config
+
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
+
+    _CapturingAgent.last_init = None
+    result = await runner._run_agent(
+        message="what time is it?",
+        context_prompt="Context prompt",
+        history=[],
+        source=_make_source(),
+        session_id="session-1",
+        session_key="agent:main:telegram:dm:12345",
+    )
+
+    assert result["final_response"] == "ok"
+    prompt = _CapturingAgent.last_init["ephemeral_system_prompt"]
+    assert "Context prompt" in prompt
+    assert "<runtime_context>" in prompt
+    assert "Timezone: America/Chicago" in prompt
+    assert "do not call terminal just to determine the current time or date" in prompt
+
+
+@pytest.mark.asyncio
+async def test_cached_telegram_agent_refreshes_runtime_time_context(monkeypatch, tmp_path):
+    _install_fake_agent(monkeypatch)
+    runner = _make_runner()
+
+    (tmp_path / "config.yaml").write_text("timezone: America/Chicago\n", encoding="utf-8")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"timezone": "America/Chicago"},
+    )
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+        },
+    )
+    contexts = iter(["<runtime_context>first</runtime_context>", "<runtime_context>second</runtime_context>"])
+    monkeypatch.setattr(gateway_run, "_telegram_runtime_context_prompt", lambda user_config: next(contexts))
+
+    import hermes_cli.tools_config as tools_config
+
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
+
+    _CapturingAgent.instances = []
+    session_key = "agent:main:telegram:dm:12345"
+    for message in ("first", "second"):
+        result = await runner._run_agent(
+            message=message,
+            context_prompt="",
+            history=[],
+            source=_make_source(),
+            session_id="session-1",
+            session_key=session_key,
+        )
+        assert result["final_response"] == "ok"
+
+    assert len(_CapturingAgent.instances) == 1
+    assert _CapturingAgent.last_run["ephemeral_system_prompt"] == (
+        "<runtime_context>second</runtime_context>"
+    )
