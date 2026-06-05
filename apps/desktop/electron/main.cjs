@@ -29,6 +29,11 @@ const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const {
+  INSTALL_STAMP_SCHEMA_VERSION,
+  localBuildUpdateBlock,
+  normalizeInstallStampPayload
+} = require('./install-stamp.cjs')
+const {
   authModeFromStatus,
   buildGatewayWsUrl,
   buildGatewayWsUrlWithTicket,
@@ -123,8 +128,8 @@ const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 // build hasn't been invoked, or schema mismatch). Callers must handle null.
 //
 // Schema:
-//   { schemaVersion: 1, commit, branch, builtAt, dirty, source }
-const INSTALL_STAMP_SCHEMA_VERSION = 1
+//   { schemaVersion: 1, commit, branch, repository, bootstrapRef, commitPinned,
+//     repoUrlHttps, repoUrlSsh, builtAt, dirty, source }
 function loadInstallStamp() {
   // Try packaged location first (resources/install-stamp.json), then the
   // dev/local build output (apps/desktop/build/install-stamp.json) so
@@ -138,22 +143,14 @@ function loadInstallStamp() {
     try {
       const raw = fs.readFileSync(p, 'utf8')
       const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object' && typeof parsed.commit === 'string' && parsed.commit.length >= 7) {
-        if (parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
-          console.warn(
-            `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
-          )
-          continue
-        }
-        return Object.freeze({
-          schemaVersion: parsed.schemaVersion,
-          commit: parsed.commit,
-          branch: parsed.branch || null,
-          builtAt: parsed.builtAt || null,
-          dirty: Boolean(parsed.dirty),
-          source: parsed.source || null,
-          path: p
-        })
+      const stamp = normalizeInstallStampPayload(parsed, INSTALL_STAMP_SCHEMA_VERSION)
+      if (stamp) {
+        return Object.freeze({ ...stamp, path: p })
+      }
+      if (parsed && typeof parsed === 'object' && parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
+        console.warn(
+          `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
+        )
       }
     } catch {
       // Either ENOENT or malformed JSON; try the next candidate
@@ -1195,6 +1192,30 @@ function runGit(args, options = {}) {
 
 const firstLine = text => (text || '').split('\n').find(Boolean) || ''
 
+function splitTrackingRef(ref) {
+  const value = String(ref || '').trim()
+  const slash = value.indexOf('/')
+  if (slash <= 0 || slash === value.length - 1) {
+    return null
+  }
+
+  return {
+    branch: value.slice(slash + 1),
+    ref: value,
+    remote: value.slice(0, slash)
+  }
+}
+
+async function resolveCurrentTrackingRef(updateRoot) {
+  const result = await runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], {
+    cwd: updateRoot
+  })
+  if (result.code !== 0) {
+    return null
+  }
+  return splitTrackingRef(firstLine(result.stdout))
+}
+
 function emitUpdateProgress(payload) {
   const merged = { stage: 'idle', message: '', percent: null, error: null, ...payload, at: Date.now() }
   rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
@@ -1209,22 +1230,51 @@ function emitUpdateProgress(payload) {
 // installed clients. Read-only ls-remote probe; only flips on a definitive
 // "ref absent" (exit 2), never on a transient network error, so a flaky
 // connection can't strand a user on the wrong branch.
-async function resolveHealedBranch(updateRoot, branch) {
+async function resolveHealedBranch(updateRoot, branch, remote = 'origin') {
   if (!branch || branch === 'main') {
     return branch || 'main'
   }
 
-  const probe = await runGit(['ls-remote', '--exit-code', '--heads', 'origin', branch], { cwd: updateRoot })
+  const probe = await runGit(['ls-remote', '--exit-code', '--heads', remote, branch], { cwd: updateRoot })
   if (probe.code !== 2) {
     return branch
   }
 
-  rememberLog(`[updates] origin/${branch} is gone (merged?); falling back to main`)
+  rememberLog(`[updates] ${remote}/${branch} is gone (merged?); falling back to main`)
   const config = readDesktopUpdateConfig()
   if (config.branch !== 'main') {
     writeDesktopUpdateConfig({ ...config, branch: 'main' })
   }
   return 'main'
+}
+
+async function resolveUpdateTarget(updateRoot, configuredBranch) {
+  const branch = configuredBranch || DEFAULT_UPDATE_BRANCH
+  const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
+  const currentBranch = firstLine(head.stdout).trim()
+  const tracking = await resolveCurrentTrackingRef(updateRoot)
+
+  if (
+    tracking &&
+    (!branch || branch === DEFAULT_UPDATE_BRANCH || currentBranch === branch || tracking.branch === branch)
+  ) {
+    return {
+      branch: tracking.branch,
+      currentBranch,
+      label: tracking.ref,
+      ref: tracking.ref,
+      remote: tracking.remote
+    }
+  }
+
+  const healedBranch = await resolveHealedBranch(updateRoot, branch)
+  return {
+    branch: healedBranch,
+    currentBranch,
+    label: healedBranch,
+    ref: `origin/${healedBranch}`,
+    remote: 'origin'
+  }
 }
 
 async function checkUpdates() {
@@ -1241,8 +1291,9 @@ async function checkUpdates() {
     }
   }
 
-  branch = await resolveHealedBranch(updateRoot, branch)
-  const fetched = await runGit(['fetch', '--quiet', 'origin', branch], { cwd: updateRoot })
+  const target = await resolveUpdateTarget(updateRoot, branch)
+  branch = target.label
+  const fetched = await runGit(['fetch', '--quiet', target.remote, target.branch], { cwd: updateRoot })
   if (fetched.code !== 0) {
     return {
       supported: true,
@@ -1255,21 +1306,20 @@ async function checkUpdates() {
   }
 
   const git = args => runGit(args, { cwd: updateRoot }).then(r => r.stdout.trim())
-  const [currentSha, targetSha, countStr, dirtyStr, currentBranch] = await Promise.all([
+  const [currentSha, targetSha, countStr, dirtyStr] = await Promise.all([
     git(['rev-parse', 'HEAD']),
-    git(['rev-parse', `origin/${branch}`]),
-    git(['rev-list', `HEAD..origin/${branch}`, '--count']),
-    git(['status', '--porcelain']),
-    git(['rev-parse', '--abbrev-ref', 'HEAD'])
+    git(['rev-parse', target.ref]),
+    git(['rev-list', `HEAD..${target.ref}`, '--count']),
+    git(['status', '--porcelain'])
   ])
 
   const behind = Number.parseInt(countStr, 10) || 0
-  const commits = behind > 0 ? await readCommitLog(updateRoot, branch) : []
+  const commits = behind > 0 ? await readCommitLog(updateRoot, target.ref) : []
 
   return {
     supported: true,
     branch,
-    currentBranch,
+    currentBranch: target.currentBranch,
     behind,
     currentSha,
     targetSha,
@@ -1280,11 +1330,11 @@ async function checkUpdates() {
   }
 }
 
-async function readCommitLog(cwd, branch) {
+async function readCommitLog(cwd, targetRef) {
   const SEP = '\x1f'
   const REC = '\x1e'
   const { stdout } = await runGit(
-    ['log', `HEAD..origin/${branch}`, `--pretty=format:%H${SEP}%s${SEP}%an${SEP}%at${REC}`, '-n', '40'],
+    ['log', `HEAD..${targetRef}`, `--pretty=format:%H${SEP}%s${SEP}%an${SEP}%at${REC}`, '-n', '40'],
     { cwd }
   )
 
@@ -1435,6 +1485,14 @@ async function applyUpdates(opts = {}) {
   updateInFlight = true
 
   try {
+    const localUpdateBlock = localBuildUpdateBlock(INSTALL_STAMP)
+    if (localUpdateBlock) {
+      const updateRoot = resolveUpdateRoot()
+      rememberLog(`[updates] ${localUpdateBlock.reason}: ${localUpdateBlock.message}`)
+      emitUpdateProgress({ stage: 'manual', message: localUpdateBlock.message, percent: null })
+      return { ...localUpdateBlock, hermesRoot: updateRoot }
+    }
+
     const updater = resolveUpdaterBinary()
     if (!updater && !IS_WINDOWS) {
       // macOS/Linux drag-install: no staged Tauri hermes-setup. Unlike Windows
@@ -1755,6 +1813,11 @@ function isBootstrapComplete() {
   return isHermesSourceRoot(ACTIVE_HERMES_ROOT) && fileExists(getVenvPython(VENV_ROOT))
 }
 
+function hasRunnableActiveInstall() {
+  const venvPython = getVenvPython(VENV_ROOT)
+  return isHermesSourceRoot(ACTIVE_HERMES_ROOT) && fileExists(venvPython) && canImportHermesCli(venvPython)
+}
+
 function writeBootstrapMarker(payload) {
   fs.mkdirSync(path.dirname(BOOTSTRAP_COMPLETE_MARKER), { recursive: true })
   const merged = {
@@ -1915,6 +1978,13 @@ function resolveHermesBackend(dashboardArgs) {
   //    to spawning hermes. Updates flow through the in-app update path
   //    (applyUpdates -> git pull) or `hermes update` from the CLI.
   if (isBootstrapComplete()) {
+    return createActiveBackend(dashboardArgs)
+  }
+
+  if (hasRunnableActiveInstall()) {
+    rememberLog(
+      `Using existing Hermes install at ${ACTIVE_HERMES_ROOT}: venv imports hermes_cli even though bootstrap marker is missing.`
+    )
     return createActiveBackend(dashboardArgs)
   }
 
