@@ -177,10 +177,19 @@ def _repo_name_from_url(url: str) -> str:
     return name
 
 
+def _manifest_file(plugin_dir: Path) -> Optional[Path]:
+    """Return the plugin manifest path if the directory contains one."""
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest_file = plugin_dir / filename
+        if manifest_file.exists():
+            return manifest_file
+    return None
+
+
 def _read_manifest(plugin_dir: Path) -> dict:
-    """Read plugin.yaml and return the parsed dict, or empty dict."""
-    manifest_file = plugin_dir / "plugin.yaml"
-    if not manifest_file.exists():
+    """Read plugin.yaml/plugin.yml and return the parsed dict, or empty dict."""
+    manifest_file = _manifest_file(plugin_dir)
+    if manifest_file is None:
         return {}
     try:
         import yaml
@@ -188,7 +197,7 @@ def _read_manifest(plugin_dir: Path) -> dict:
         with open(manifest_file, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except Exception as e:
-        logger.warning("Failed to read plugin.yaml in %s: %s", plugin_dir, e)
+        logger.warning("Failed to read %s in %s: %s", manifest_file.name, plugin_dir, e)
         return {}
 
 
@@ -649,29 +658,76 @@ def _save_enabled_set(enabled: set) -> None:
     save_config(config)
 
 
+def _manifest_name(plugin_dir: Path) -> Optional[str]:
+    """Return the manifest ``name`` value for a plugin directory if present."""
+    manifest_name = _read_manifest(plugin_dir).get("name")
+    return manifest_name if isinstance(manifest_name, str) and manifest_name else None
+
+
+def _resolve_plugin_config_key(name: str) -> Optional[str]:
+    """Resolve a CLI/dashboard plugin argument to the key used by list/status."""
+    # Installed user plugins: directory name wins first so users can refer to
+    # the clone path, but config stores the manifest/list name when available.
+    user_dir = _plugins_dir()
+    if user_dir.is_dir():
+        candidate = user_dir / name
+        if candidate.is_dir():
+            return _manifest_name(candidate) or name
+        for child in user_dir.iterdir():
+            if not child.is_dir():
+                continue
+            manifest_name = _manifest_name(child)
+            if manifest_name == name:
+                return manifest_name
+
+    # Bundled plugins: keep the same directory-name flexibility while also
+    # accepting manifest names when they differ from the on-disk directory.
+    from hermes_cli.plugins import get_bundled_plugins_dir
+    repo_plugins = get_bundled_plugins_dir()
+    if repo_plugins.is_dir():
+        candidate = repo_plugins / name
+        if candidate.is_dir() and _manifest_file(candidate):
+            return _manifest_name(candidate) or name
+        for child in repo_plugins.iterdir():
+            if not child.is_dir():
+                continue
+            manifest_name = _manifest_name(child)
+            if manifest_name == name:
+                return manifest_name
+
+    return None
+
+
 def cmd_enable(name: str) -> None:
     """Add a plugin to the enabled allow-list (and remove it from disabled)."""
     from rich.console import Console
 
     console = Console()
     # Discover the plugin — check installed (user) AND bundled.
-    if not _plugin_exists(name):
+    plugin_key = _resolve_plugin_config_key(name)
+    if plugin_key is None:
         console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
         sys.exit(1)
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
+    aliases = {name, plugin_key}
 
-    if name in enabled and name not in disabled:
-        console.print(f"[dim]Plugin '{name}' is already enabled.[/dim]")
+    if (
+        plugin_key in enabled
+        and aliases.isdisjoint(disabled)
+        and (name == plugin_key or name not in enabled)
+    ):
+        console.print(f"[dim]Plugin '{plugin_key}' is already enabled.[/dim]")
         return
 
-    enabled.add(name)
-    disabled.discard(name)
+    enabled.difference_update(aliases)
+    enabled.add(plugin_key)
+    disabled.difference_update(aliases)
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
     console.print(
-        f"[green]✓[/green] Plugin [bold]{name}[/bold] enabled. "
+        f"[green]✓[/green] Plugin [bold]{plugin_key}[/bold] enabled. "
         "Takes effect on next session."
     )
 
@@ -681,51 +737,37 @@ def cmd_disable(name: str) -> None:
     from rich.console import Console
 
     console = Console()
-    if not _plugin_exists(name):
+    plugin_key = _resolve_plugin_config_key(name)
+    if plugin_key is None:
         console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
         sys.exit(1)
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
+    aliases = {name, plugin_key}
 
-    if name not in enabled and name in disabled:
-        console.print(f"[dim]Plugin '{name}' is already disabled.[/dim]")
+    if (
+        aliases.isdisjoint(enabled)
+        and plugin_key in disabled
+        and (name == plugin_key or name not in disabled)
+    ):
+        console.print(f"[dim]Plugin '{plugin_key}' is already disabled.[/dim]")
         return
 
-    enabled.discard(name)
-    disabled.add(name)
+    enabled.difference_update(aliases)
+    disabled.difference_update(aliases)
+    disabled.add(plugin_key)
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
     console.print(
-        f"[yellow]\u2298[/yellow] Plugin [bold]{name}[/bold] disabled. "
+        f"[yellow]\u2298[/yellow] Plugin [bold]{plugin_key}[/bold] disabled. "
         "Takes effect on next session."
     )
 
 
 def _plugin_exists(name: str) -> bool:
     """Return True if a plugin with *name* is installed (user) or bundled."""
-    # Installed: directory name or manifest name match in user plugins dir
-    user_dir = _plugins_dir()
-    if user_dir.is_dir():
-        if (user_dir / name).is_dir():
-            return True
-        for child in user_dir.iterdir():
-            if not child.is_dir():
-                continue
-            manifest = _read_manifest(child)
-            if manifest.get("name") == name:
-                return True
-    # Bundled: <repo>/plugins/<name>/ (or HERMES_BUNDLED_PLUGINS on Nix).
-    from hermes_cli.plugins import get_bundled_plugins_dir
-    repo_plugins = get_bundled_plugins_dir()
-    if repo_plugins.is_dir():
-        candidate = repo_plugins / name
-        if candidate.is_dir() and (
-            (candidate / "plugin.yaml").exists()
-            or (candidate / "plugin.yml").exists()
-        ):
-            return True
-    return False
+    return _resolve_plugin_config_key(name) is not None
 
 
 def _discover_all_plugins() -> list:
@@ -1495,8 +1537,14 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
         for base in (get_bundled_plugins_dir(), _plugins_dir()):
             if not base.is_dir():
                 continue
-            candidate = base / name
-            if candidate.is_dir():
+            candidates = []
+            direct = base / name
+            if direct.is_dir():
+                candidates.append(direct)
+            for child in base.iterdir():
+                if child.is_dir() and child not in candidates and _manifest_name(child) == name:
+                    candidates.append(child)
+            for candidate in candidates:
                 manifest = _read_manifest(candidate)
                 for tool_name in manifest.get("provides_tools") or []:
                     entry = registry.get_entry(tool_name)
@@ -1552,31 +1600,43 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     For plugins that provide tools (toolsets), also toggles the toolset in
     ``platform_toolsets`` so the agent actually sees the tools in sessions.
     """
-    if not _plugin_exists(name):
+    plugin_key = _resolve_plugin_config_key(name)
+    if plugin_key is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
 
     en = _get_enabled_set()
     dis = _get_disabled_set()
+    aliases = {name, plugin_key}
 
     if enabled:
-        if name in en and name not in dis:
-            return {"ok": True, "name": name, "unchanged": True}
-        en.add(name)
-        dis.discard(name)
+        if (
+            plugin_key in en
+            and aliases.isdisjoint(dis)
+            and (name == plugin_key or name not in en)
+        ):
+            return {"ok": True, "name": plugin_key, "unchanged": True}
+        en.difference_update(aliases)
+        en.add(plugin_key)
+        dis.difference_update(aliases)
         _save_enabled_set(en)
         _save_disabled_set(dis)
-        _toggle_plugin_toolset(name, enable=True)
-        return {"ok": True, "name": name, "unchanged": False}
+        _toggle_plugin_toolset(plugin_key, enable=True)
+        return {"ok": True, "name": plugin_key, "unchanged": False}
 
-    if name not in en and name in dis:
-        return {"ok": True, "name": name, "unchanged": True}
+    if (
+        aliases.isdisjoint(en)
+        and plugin_key in dis
+        and (name == plugin_key or name not in dis)
+    ):
+        return {"ok": True, "name": plugin_key, "unchanged": True}
 
-    en.discard(name)
-    dis.add(name)
+    en.difference_update(aliases)
+    dis.difference_update(aliases)
+    dis.add(plugin_key)
     _save_enabled_set(en)
     _save_disabled_set(dis)
-    _toggle_plugin_toolset(name, enable=False)
-    return {"ok": True, "name": name, "unchanged": False}
+    _toggle_plugin_toolset(plugin_key, enable=False)
+    return {"ok": True, "name": plugin_key, "unchanged": False}
 
 
 def _user_installed_plugin_dir(name: str) -> Optional[Path]:
