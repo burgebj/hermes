@@ -1,4 +1,5 @@
 import type { Unstable_TriggerItem } from '@assistant-ui/core'
+import { useEffect, useRef } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { cn } from '@/lib/utils'
@@ -60,6 +61,11 @@ export function ComposerTriggerPopover({
   onPick,
   placement = 'top'
 }: ComposerTriggerPopoverProps) {
+  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
+
+  useEffect(() => {
+    itemRefs.current.get(activeIndex)?.scrollIntoView({ block: 'nearest' })
+  }, [activeIndex])
   return (
     <div
       className={placement === 'bottom' ? COMPLETION_DRAWER_BELOW_CLASS : COMPLETION_DRAWER_CLASS}
@@ -94,6 +100,10 @@ export function ComposerTriggerPopover({
               key={item.id}
               onClick={() => onPick(item)}
               onMouseEnter={() => onHover(index)}
+              ref={el => {
+                if (el) itemRefs.current.set(index, el)
+                else itemRefs.current.delete(index)
+              }}
               type="button"
             >
               <span className="grid size-3.5 shrink-0 place-items-center text-(--ui-text-tertiary)">
