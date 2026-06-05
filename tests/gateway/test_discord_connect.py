@@ -280,6 +280,41 @@ async def test_connect_releases_token_lock_on_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_connect_ready_wait_uses_gateway_platform_connect_timeout(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    monkeypatch.setenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "90")
+    monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
+
+    intents = SimpleNamespace(message_content=False, dm_messages=False, guild_messages=False, members=False, voice_states=False)
+    monkeypatch.setattr(discord_platform.Intents, "default", lambda: intents)
+    monkeypatch.setattr(
+        discord_platform.commands,
+        "Bot",
+        lambda **kwargs: FakeBot(
+            intents=kwargs["intents"],
+            proxy=kwargs.get("proxy"),
+            allowed_mentions=kwargs.get("allowed_mentions"),
+        ),
+    )
+
+    seen_timeouts = []
+
+    async def fake_wait_for(awaitable, timeout):
+        seen_timeouts.append(timeout)
+        awaitable.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(discord_platform.asyncio, "wait_for", fake_wait_for)
+
+    ok = await adapter.connect()
+
+    assert ok is False
+    assert seen_timeouts == [90.0]
+
+
+@pytest.mark.asyncio
 async def test_connect_does_not_wait_for_slash_sync(monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 
