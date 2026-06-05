@@ -290,6 +290,109 @@ def test_sess_found(server):
     assert err is None
 
 
+# ── session cwd overrides ─────────────────────────────────────────────
+
+
+class _NoopTimer:
+    def __init__(self, *_args, **_kwargs):
+        self.daemon = False
+
+    def start(self):
+        pass
+
+
+def test_session_create_without_explicit_cwd_skips_terminal_override(server, monkeypatch):
+    calls = []
+    terminal_tool = types.SimpleNamespace(
+        register_task_env_overrides=lambda key, overrides: calls.append((key, overrides))
+    )
+
+    monkeypatch.setattr(server.threading, "Timer", _NoopTimer)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+
+    with patch.dict(sys.modules, {"tools.terminal_tool": terminal_tool}):
+        resp = server.handle_request({
+            "id": "create-no-cwd",
+            "method": "session.create",
+            "params": {"cols": 80},
+        })
+
+    assert "error" not in resp
+    sid = resp["result"]["session_id"]
+    assert server._sessions[sid]["explicit_cwd"] is False
+    assert calls == []
+
+
+def test_session_create_with_explicit_cwd_registers_terminal_override(server, monkeypatch, tmp_path):
+    calls = []
+    terminal_tool = types.SimpleNamespace(
+        register_task_env_overrides=lambda key, overrides: calls.append((key, overrides))
+    )
+
+    monkeypatch.setattr(server.threading, "Timer", _NoopTimer)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+
+    with patch.dict(sys.modules, {"tools.terminal_tool": terminal_tool}):
+        resp = server.handle_request({
+            "id": "create-cwd",
+            "method": "session.create",
+            "params": {"cols": 80, "cwd": str(tmp_path)},
+        })
+
+    assert "error" not in resp
+    assert calls == [(resp["result"]["stored_session_id"], {"cwd": str(tmp_path)})]
+
+
+def test_init_session_keeps_persisted_cwd_without_terminal_override(server, monkeypatch, tmp_path):
+    calls = []
+    terminal_tool = types.SimpleNamespace(
+        register_task_env_overrides=lambda key, overrides: calls.append((key, overrides))
+    )
+
+    class _DB:
+        def get_session(self, _key):
+            return {"cwd": str(tmp_path)}
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_SlashWorker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_start_notification_poller", lambda _sid, _session: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {})
+
+    with patch.dict(sys.modules, {"tools.terminal_tool": terminal_tool}):
+        server._init_session("sid-persisted", "session-key", MagicMock(), [], cols=80)
+
+    assert server._sessions["sid-persisted"]["cwd"] == str(tmp_path)
+    assert server._sessions["sid-persisted"]["explicit_cwd"] is False
+    assert calls == []
+
+
+def test_set_session_cwd_registers_terminal_override(server, monkeypatch, tmp_path):
+    calls = []
+    updated = []
+    terminal_tool = types.SimpleNamespace(
+        cleanup_vm=lambda _key: None,
+        register_task_env_overrides=lambda key, overrides: calls.append((key, overrides)),
+    )
+
+    class _DB:
+        def update_session_cwd(self, key, cwd):
+            updated.append((key, cwd))
+
+    session = {"cwd": "/old", "explicit_cwd": False, "session_key": "session-key"}
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    with patch.dict(sys.modules, {"tools.terminal_tool": terminal_tool}):
+        cwd = server._set_session_cwd(session, str(tmp_path))
+
+    assert cwd == str(tmp_path)
+    assert session["explicit_cwd"] is True
+    assert calls == [("session-key", {"cwd": str(tmp_path)})]
+    assert updated == [("session-key", str(tmp_path))]
+
+
 # ── session.resume payload ────────────────────────────────────────────
 
 
