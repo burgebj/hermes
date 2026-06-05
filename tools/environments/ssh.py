@@ -101,7 +101,7 @@ class SSHEnvironment(BaseEnvironment):
         cmd = self._build_ssh_command()
         cmd.append("echo 'SSH connection established'")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip()
                 raise RuntimeError(f"SSH connection failed: {error_msg}")
@@ -151,7 +151,7 @@ class SSHEnvironment(BaseEnvironment):
         if self.key_path:
             scp_cmd.extend(["-i", self.key_path])
         scp_cmd.extend([host_path, f"{self.user}@{self.host}:{remote_path}"])
-        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"scp failed: {result.stderr.strip()}")
 
@@ -174,7 +174,7 @@ class SSHEnvironment(BaseEnvironment):
         if parents:
             cmd = self._build_ssh_command()
             cmd.append(quoted_mkdir_command(parents))
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             if result.returncode != 0:
                 raise RuntimeError(f"remote mkdir failed: {result.stderr.strip()}")
 
@@ -217,7 +217,7 @@ class SSHEnvironment(BaseEnvironment):
             ssh_cmd.append(f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}")
 
             tar_proc = subprocess.Popen(
-                tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL
             )
             try:
                 ssh_proc = subprocess.Popen(
@@ -269,7 +269,7 @@ class SSHEnvironment(BaseEnvironment):
         ssh_cmd = self._build_ssh_command()
         ssh_cmd.append(f"tar cf - -C / {shlex.quote(rel_base)}")
         with open(dest, "wb") as f:
-            result = subprocess.run(ssh_cmd, stdout=f, stderr=subprocess.PIPE, timeout=120)
+            result = subprocess.run(ssh_cmd, stdout=f, stderr=subprocess.PIPE, timeout=120, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"SSH bulk download failed: {result.stderr.decode(errors='replace').strip()}")
 

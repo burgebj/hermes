@@ -338,6 +338,34 @@ export class GatewayClient extends EventEmitter {
     this.proc = spawn(python, ['-m', 'tui_gateway.entry'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
     this.lifecycle(`[lifecycle] spawned gateway child ${describeChild(this.proc)} python=${python} cwd=${cwd}`)
 
+    // DEBUG: trace pipe lifecycle to diagnose silent stdin EOF
+    const stdinW = this.proc.stdin!
+    const stdoutR = this.proc.stdout!
+    const stderrR = this.proc.stderr!
+    const self = this
+    stdinW.on('close', () => self.lifecycle(`[debug] stdin writable CLOSED ${describeChild(self.proc)} writableLength=${stdinW.writableLength} destroyed=${stdinW.destroyed}`))
+    stdinW.on('error', (e: Error) => self.lifecycle(`[debug] stdin writable ERROR ${describeChild(self.proc)}: ${e.message}`))
+    stdinW.on('finish', () => self.lifecycle(`[debug] stdin writable FINISH (all data flushed) ${describeChild(self.proc)}`))
+    stdinW.on('pipe', () => self.lifecycle(`[debug] stdin writable PIPE event ${describeChild(self.proc)}`))
+    stdinW.on('unpipe', () => self.lifecycle(`[debug] stdin writable UNPIPE event ${describeChild(self.proc)}`))
+    stdoutR.on('close', () => self.lifecycle(`[debug] stdout readable CLOSED ${describeChild(self.proc)} readableLength=${stdoutR.readableLength} destroyed=${stdoutR.destroyed}`))
+    stdoutR.on('error', (e: Error) => self.lifecycle(`[debug] stdout readable ERROR ${describeChild(self.proc)}: ${e.message}`))
+    stdoutR.on('end', () => self.lifecycle(`[debug] stdout readable END (child stopped writing) ${describeChild(self.proc)}`))
+    stderrR.on('close', () => self.lifecycle(`[debug] stderr readable CLOSED ${describeChild(self.proc)}`))
+
+    // Wrap stdin.write to catch write failures before they propagate
+    const origWrite = stdinW.write.bind(stdinW) as (...a: any[]) => any
+    let writeSeq = 0
+    const debugWrite = (...args: any[]) => {
+      const seq = ++writeSeq
+      const result = origWrite(...args)
+      if (!result) {
+        self.lifecycle(`[debug] stdin write#${seq} returned false (backpressure) ${describeChild(self.proc)}`)
+      }
+      return result
+    }
+    stdinW.write = debugWrite as typeof stdinW.write
+
     this.stdoutRl = createInterface({ input: this.proc.stdout! })
     this.stdoutRl.on('line', raw => {
       try {
@@ -684,7 +712,14 @@ export class GatewayClient extends EventEmitter {
       return this.requestOverWebSocket<T>(method, params)
     }
 
-    if (!this.proc?.stdin || this.proc.killed || this.proc.exitCode !== null) {
+    const _hasProc = !!this.proc
+    const _hasStdin = !!this.proc?.stdin
+    const _killed = this.proc?.killed ?? false
+    const _exitCode = this.proc?.exitCode
+    const _guardFires = !_hasStdin || _killed || _exitCode !== null
+
+    if (_guardFires) {
+      this.lifecycle(`[debug] request() guard FIRED method=${method} hasProc=${_hasProc} hasStdin=${_hasStdin} killed=${_killed} exitCode=${_exitCode ?? 'null'}`)
       this.start()
     }
 
@@ -698,7 +733,6 @@ export class GatewayClient extends EventEmitter {
       const timeout = setTimeout(this.onTimeout, REQUEST_TIMEOUT_MS, id)
 
       timeout.unref?.()
-
       this.pending.set(id, {
         id,
         method,
@@ -708,8 +742,12 @@ export class GatewayClient extends EventEmitter {
       })
 
       try {
-        this.proc!.stdin!.write(JSON.stringify({ id, jsonrpc: '2.0', method, params }) + '\n')
+        const _writeResult = this.proc!.stdin!.write(JSON.stringify({ id, jsonrpc: '2.0', method, params }) + '\n')
+        if (!_writeResult) {
+          this.lifecycle(`[debug] request() write returned false (backpressure) method=${method} id=${id}`)
+        }
       } catch (e) {
+        this.lifecycle(`[debug] request() write THREW method=${method} id=${id} error=${e instanceof Error ? e.message : String(e)}`)
         const pending = this.pending.get(id)
 
         if (pending) {

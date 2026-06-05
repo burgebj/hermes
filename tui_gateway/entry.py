@@ -192,6 +192,87 @@ def _log_exit(reason: str) -> None:
     print(f"[gateway-exit] {reason}", file=sys.stderr, flush=True)
 
 
+def _log_stdin_eof_diagnostic(trigger: str, extra: str = "") -> None:
+    """Capture diagnostic state at the exact moment stdin returns EOF.
+
+    The stdin EOF crash is the hardest to diagnose because the child exits
+    cleanly (exitCode=0) with no traceback — the ``for raw in sys.stdin``
+    loop simply ends.  This function captures everything we can observe at
+    that moment: thread states, open file descriptors, stdin pipe info,
+    active subprocesses, and the main thread's stack trace.
+    """
+    import threading as _diag_threading
+
+    lines: list[str] = []
+    lines.append(f"\n=== stdin EOF diagnostic · {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    lines.append(f"trigger: {trigger}")
+    if extra:
+        lines.append(f"extra: {extra}")
+
+    # Thread snapshot
+    threads = _diag_threading.enumerate()
+    lines.append(f"threads ({len(threads)}):")
+    for t in threads:
+        lines.append(f"  {t.name} (id={t.ident}, daemon={t.daemon}, alive={t.is_alive()})")
+
+    # Open fd count
+    try:
+        fds = os.listdir("/proc/self/fd")
+        lines.append(f"open fds: {len(fds)}")
+    except Exception:
+        lines.append("open fds: unavailable")
+
+    # Stdin pipe info
+    try:
+        with open("/proc/self/fdinfo/0") as f:
+            info = f.read().strip()
+        lines.append(f"stdin fdinfo: {info}")
+    except Exception as e:
+        lines.append(f"stdin fdinfo: error ({e})")
+
+    try:
+        link = os.readlink("/proc/self/fd/0")
+        lines.append(f"stdin fd link: {link}")
+    except Exception as e:
+        lines.append(f"stdin fd link: error ({e})")
+
+    # Check if stdin is still readable via select
+    try:
+        import select
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+        lines.append(f"stdin select(readable): {bool(readable)}")
+    except Exception as e:
+        lines.append(f"stdin select: error ({e})")
+
+    # Check raw fd 0 directly
+    try:
+        raw_fd_status = os.fstat(0)
+        lines.append(f"stdin fstat: mode={oct(raw_fd_status.st_mode)} ino={raw_fd_status.st_ino}")
+    except Exception as e:
+        lines.append(f"stdin fstat: error ({e})")
+
+    # Main thread stack trace
+    import traceback as _diag_traceback
+    lines.append("main thread stack:")
+    for line in _diag_traceback.format_stack():
+        lines.append(f"  {line.rstrip()}")
+
+    # Write to crash log
+    try:
+        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+    # Also print to stderr
+    for line in lines:
+        print(line, file=sys.stderr, flush=True)
+
+    # Now log the normal exit
+    _log_exit("stdin EOF (TUI closed the command pipe)")
+
+
 def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
     """Briefly block until background MCP discovery finishes, up to ``timeout``.
 
@@ -271,10 +352,27 @@ def main():
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)
 
-    for raw in sys.stdin:
+    _diag_count = 0
+    while True:
+        try:
+            raw = sys.stdin.readline()
+        except (OSError, ValueError) as _read_err:
+            _log_stdin_eof_diagnostic("readline exception", extra=f"error={_read_err}")
+            break
+
+        if raw == "":
+            _log_stdin_eof_diagnostic("readline returned empty string (EOF)")
+            break
+
+        if raw is None:
+            _log_stdin_eof_diagnostic("readline returned None")
+            break
+
         line = raw.strip()
         if not line:
             continue
+
+        _diag_count += 1
 
         try:
             req = json.loads(line)
@@ -290,8 +388,6 @@ def main():
             if not write_json(resp):
                 _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")
                 sys.exit(0)
-
-    _log_exit("stdin EOF (TUI closed the command pipe)")
 
 
 if __name__ == "__main__":
