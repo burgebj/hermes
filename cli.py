@@ -3253,7 +3253,30 @@ class HermesCLI:
                 self.max_turns = 90
         else:
             self.max_turns = 90
-        
+
+        # max_tokens (output cap): read from model section of config.yaml.
+        # Priority: HERMES_MAX_TOKENS env var > model.max_tokens in config > None (model default).
+        # When None, ChatCompletionsTransport uses provider-specific defaults where available,
+        # and omits the parameter otherwise (relying on the server default).
+        _env_max_tokens = os.getenv("HERMES_MAX_TOKENS")
+        _cfg_max_tokens = CLI_CONFIG.get("model", {})
+        if isinstance(_cfg_max_tokens, dict):
+            _cfg_max_tokens = _cfg_max_tokens.get("max_tokens")
+        else:
+            _cfg_max_tokens = None
+        if _env_max_tokens is not None:
+            try:
+                self.max_tokens = int(_env_max_tokens)
+            except ValueError:
+                self.max_tokens = None
+        elif _cfg_max_tokens is not None:
+            try:
+                self.max_tokens = int(_cfg_max_tokens)
+            except (TypeError, ValueError):
+                self.max_tokens = None
+        else:
+            self.max_tokens = None
+
         # Parse and validate toolsets
         self.enabled_toolsets = toolsets
         self.disabled_toolsets = CLI_CONFIG["agent"].get("disabled_toolsets") or []
@@ -5177,6 +5200,7 @@ class HermesCLI:
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config,
                 service_tier=self.service_tier,
+                max_tokens=self.max_tokens,
                 request_overrides=request_overrides,
                 providers_allowed=self._providers_only,
                 providers_ignored=self._providers_ignore,
@@ -9293,6 +9317,7 @@ class HermesCLI:
                     session_db=self._session_db,
                     reasoning_config=self.reasoning_config,
                     service_tier=self.service_tier,
+                    max_tokens=self.max_tokens,
                     request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=self._providers_only,
                     providers_ignored=self._providers_ignore,

@@ -1208,7 +1208,34 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
+        "max_tokens": _resolve_config_max_tokens(),
     }
+
+
+def _resolve_config_max_tokens() -> "int | None":
+    """Read ``model.max_tokens`` from config.yaml (or HERMES_MAX_TOKENS env var).
+
+    Priority: HERMES_MAX_TOKENS env var > model.max_tokens in config.yaml > None.
+    Returns None when unset so ChatCompletionsTransport uses provider defaults.
+    This is called by _resolve_runtime_agent_kwargs() so all six AIAgent
+    construction sites in the gateway pick up the user-configured output cap.
+    """
+    env_val = os.getenv("HERMES_MAX_TOKENS")
+    if env_val is not None:
+        try:
+            return int(env_val)
+        except ValueError:
+            return None
+    try:
+        cfg = _load_gateway_config()
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, dict):
+            raw = model_cfg.get("max_tokens")
+            if raw is not None:
+                return int(raw)
+    except Exception:
+        pass
+    return None
 
 
 def _try_resolve_fallback_provider() -> dict | None:
@@ -2693,6 +2720,7 @@ class GatewayRunner:
             "command": runtime_kwargs.get("command"),
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
+            "max_tokens": runtime_kwargs.get("max_tokens"),
         }
         route = {
             "model": model,
