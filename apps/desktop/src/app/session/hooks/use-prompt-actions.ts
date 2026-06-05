@@ -631,6 +631,7 @@ export function usePromptActions({
 
         if (normalizedName === 'compress') {
           try {
+            renderSlashOutput('🗜️ Compressing…')
             const result = await requestGateway<{ output?: string }>('session.compress', {
               session_id: sessionId,
               focus_topic: arg || ''
