@@ -66,7 +66,8 @@ import {
   placeCaretEnd,
   refChipElement,
   renderComposerContents,
-  RICH_INPUT_SLOT
+  RICH_INPUT_SLOT,
+  syncComposerDraft
 } from './rich-editor'
 import { SkinSlashPopover } from './skin-slash-popover'
 import { detectTrigger, extractClipboardImageBlobs, textBeforeCaret, type TriggerState } from './text-utils'
@@ -134,6 +135,8 @@ export function ChatBar({
   const composerSurfaceRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
   const draftRef = useRef(draft)
+  const pendingComposerTextFrameRef = useRef<number | null>(null)
+  const pendingComposerTextRef = useRef<string | null>(null)
   const previousBusyRef = useRef(busy)
   const drainingQueueRef = useRef(false)
   // Set when the user explicitly interrupts the running turn via the Stop
@@ -219,6 +222,46 @@ export function ChatBar({
     setFocusRequestId(id => id + 1)
   }, [])
 
+  const cancelPendingComposerTextCommit = useCallback(() => {
+    if (pendingComposerTextFrameRef.current !== null) {
+      window.cancelAnimationFrame(pendingComposerTextFrameRef.current)
+      pendingComposerTextFrameRef.current = null
+    }
+
+    pendingComposerTextRef.current = null
+  }, [])
+
+  const commitComposerText = useCallback(
+    (text: string, mode: 'deferred' | 'immediate' = 'immediate') => {
+      if (mode === 'immediate') {
+        cancelPendingComposerTextCommit()
+        aui.composer().setText(text)
+
+        return
+      }
+
+      pendingComposerTextRef.current = text
+
+      if (pendingComposerTextFrameRef.current !== null) {
+        return
+      }
+
+      pendingComposerTextFrameRef.current = window.requestAnimationFrame(() => {
+        const next = pendingComposerTextRef.current
+
+        pendingComposerTextFrameRef.current = null
+        pendingComposerTextRef.current = null
+
+        if (next !== null) {
+          aui.composer().setText(next)
+        }
+      })
+    },
+    [aui, cancelPendingComposerTextCommit]
+  )
+
+  useEffect(() => cancelPendingComposerTextCommit, [cancelPendingComposerTextCommit])
+
   const appendExternalText = useCallback(
     (text: string, mode: ComposerInsertMode) => {
       const value = text.trim()
@@ -232,7 +275,7 @@ export function ChatBar({
       const next = `${base}${sep}${value}`
 
       draftRef.current = next
-      aui.composer().setText(next)
+      commitComposerText(next)
 
       const editor = editorRef.current
 
@@ -243,7 +286,7 @@ export function ChatBar({
 
       setFocusRequestId(id => id + 1)
     },
-    [aui]
+    [commitComposerText]
   )
 
   useEffect(() => {
@@ -284,9 +327,14 @@ export function ChatBar({
   // matters when the draft is submitted; we now call it from the submit
   // path instead.
   useEffect(() => {
-    draftRef.current = draft
-
     const editor = editorRef.current
+    const editorFocused = editor && document.activeElement === editor
+
+    if (editorFocused) {
+      return
+    }
+
+    draftRef.current = draft
 
     if (editor && document.activeElement !== editor && composerPlainText(editor) !== draft) {
       renderComposerContents(editor, draft)
@@ -400,7 +448,7 @@ export function ChatBar({
     const nextDraft = `${currentDraft}${sep}${text}`
 
     draftRef.current = nextDraft
-    aui.composer().setText(nextDraft)
+    commitComposerText(nextDraft)
 
     // Push the new text into the contentEditable editor directly. Setting the
     // assistant-ui composer state alone is not enough: the draft→editor sync
@@ -433,7 +481,7 @@ export function ChatBar({
     }
 
     draftRef.current = nextDraft
-    aui.composer().setText(nextDraft)
+    commitComposerText(nextDraft)
     requestMainFocus()
 
     return true
@@ -454,7 +502,7 @@ export function ChatBar({
 
   const selectSkinSlashCommand = (command: string) => {
     draftRef.current = command
-    aui.composer().setText(command)
+    commitComposerText(command)
     requestMainFocus()
   }
 
@@ -497,7 +545,7 @@ export function ChatBar({
     document.execCommand('insertText', false, pastedText)
     const nextDraft = composerPlainText(event.currentTarget)
     draftRef.current = nextDraft
-    aui.composer().setText(nextDraft)
+    commitComposerText(nextDraft)
   }
 
   const [trigger, setTrigger] = useState<TriggerState | null>(null)
@@ -549,6 +597,17 @@ export function ChatBar({
     }
   }, [trigger])
 
+  const syncDraftFromEditor = useCallback(
+    (editor: HTMLElement | null = editorRef.current, mode: 'deferred' | 'immediate' = 'immediate') => {
+      const nextDraft = syncComposerDraft(editor, draftRef.current, text => commitComposerText(text, mode))
+
+      draftRef.current = nextDraft
+
+      return nextDraft
+    },
+    [commitComposerText]
+  )
+
   const handleEditorInput = (event: FormEvent<HTMLDivElement>) => {
     // During IME composition the DOM contains uncommitted preedit text
     // mixed with real content.  Skip state writes — compositionend will
@@ -563,12 +622,7 @@ export function ChatBar({
       editor.replaceChildren()
     }
 
-    const nextDraft = composerPlainText(editor)
-
-    if (nextDraft !== draftRef.current) {
-      draftRef.current = nextDraft
-      aui.composer().setText(nextDraft)
-    }
+    syncDraftFromEditor(editor, 'deferred')
 
     window.setTimeout(refreshTrigger, 0)
   }
@@ -612,7 +666,7 @@ export function ChatBar({
 
     const finish = () => {
       draftRef.current = composerPlainText(editor)
-      aui.composer().setText(draftRef.current)
+      commitComposerText(draftRef.current)
       requestMainFocus()
       starter ? window.setTimeout(refreshTrigger, 0) : closeTrigger()
     }
@@ -717,12 +771,6 @@ export function ChatBar({
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-
-      if (!busy && !hasComposerPayload && queuedPrompts.length > 0) {
-        void drainNextQueued()
-
-        return
-      }
 
       submitDraft()
     }
@@ -853,17 +901,17 @@ export function ChatBar({
   }
 
   const clearDraft = useCallback(() => {
-    aui.composer().setText('')
+    commitComposerText('')
     draftRef.current = ''
 
     if (editorRef.current) {
       editorRef.current.replaceChildren()
     }
-  }, [aui])
+  }, [commitComposerText])
 
   const loadIntoComposer = (text: string, attachments: ComposerAttachment[]) => {
     draftRef.current = text
-    aui.composer().setText(text)
+    commitComposerText(text)
     $composerAttachments.set(cloneAttachments(attachments))
 
     const editor = editorRef.current
@@ -917,11 +965,13 @@ export function ChatBar({
   }
 
   const queueCurrentDraft = useCallback(() => {
-    if (!activeQueueSessionKey || (!draft.trim() && attachments.length === 0)) {
+    const text = syncDraftFromEditor()
+
+    if (!activeQueueSessionKey || (!text.trim() && attachments.length === 0)) {
       return false
     }
 
-    if (!enqueueQueuedPrompt(activeQueueSessionKey, { text: draft, attachments })) {
+    if (!enqueueQueuedPrompt(activeQueueSessionKey, { text, attachments })) {
       return false
     }
 
@@ -930,7 +980,7 @@ export function ChatBar({
     triggerHaptic('selection')
 
     return true
-  }, [activeQueueSessionKey, attachments, clearDraft, draft])
+  }, [activeQueueSessionKey, attachments, clearDraft, syncDraftFromEditor])
 
   // All queue drain paths share one lock + send-then-remove sequence.
   // `pickEntry` lets each caller choose head, by-id, or skip-edited.
@@ -1035,6 +1085,9 @@ export function ChatBar({
   }, [activeQueueSessionKey, editingQueuedPrompt, queueEdit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitDraft = () => {
+    const liveDraft = syncDraftFromEditor()
+    const liveHasPayload = liveDraft.trim().length > 0 || attachments.length > 0
+
     if (queueEdit) {
       exitQueuedEdit('save')
     } else if (busy) {
@@ -1045,12 +1098,12 @@ export function ChatBar({
       // busy guard for commands that genuinely need an idle session (skill
       // /send directives).  Queuing them would make every slash command wait
       // for the current turn to finish, which is how the TUI never behaves.
-      if (!attachments.length && SLASH_COMMAND_RE.test(draft.trim())) {
-        const submitted = draft
+      if (!attachments.length && SLASH_COMMAND_RE.test(liveDraft.trim())) {
+        const submitted = liveDraft
         triggerHaptic('submit')
         clearDraft()
         void onSubmit(submitted)
-      } else if (hasComposerPayload) {
+      } else if (liveHasPayload) {
         queueCurrentDraft()
       } else {
         // Stop button: an explicit interrupt must actually halt the running
@@ -1062,10 +1115,10 @@ export function ChatBar({
         triggerHaptic('cancel')
         void Promise.resolve(onCancel())
       }
-    } else if (!hasComposerPayload && queuedPrompts.length > 0) {
+    } else if (!liveHasPayload && queuedPrompts.length > 0) {
       void drainNextQueued()
-    } else if (draft.trim() || attachments.length > 0) {
-      const submitted = draft
+    } else if (liveHasPayload) {
+      const submitted = liveDraft
       triggerHaptic('submit')
       clearDraft()
       clearComposerAttachments()
@@ -1210,6 +1263,7 @@ export function ChatBar({
         onBlur={() => window.setTimeout(closeTrigger, 80)}
         onCompositionEnd={() => {
           composingRef.current = false
+          syncDraftFromEditor()
         }}
         onCompositionStart={() => {
           composingRef.current = true

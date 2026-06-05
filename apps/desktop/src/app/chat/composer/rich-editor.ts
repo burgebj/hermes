@@ -151,7 +151,21 @@ export function composerPlainText(node: Node): string {
   const text = Array.from(node.childNodes).map(composerPlainText).join('')
   const block = el.tagName === 'DIV' || el.tagName === 'P'
 
-  return block && text && el.dataset.slot !== RICH_INPUT_SLOT ? `${text}\n` : text
+  return block && text && el.dataset.slot !== RICH_INPUT_SLOT && el.nextSibling ? `${text}\n` : text
+}
+
+export function syncComposerDraft(editor: Node | null, prevDraft: string, setText: (text: string) => void): string {
+  if (!editor) {
+    return prevDraft
+  }
+
+  const next = composerPlainText(editor)
+
+  if (next !== prevDraft) {
+    setText(next)
+  }
+
+  return next
 }
 
 export function placeCaretEnd(element: HTMLElement) {
