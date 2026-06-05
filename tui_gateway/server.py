@@ -520,6 +520,16 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     body = (text if text is not None else kind).strip()
     if not body:
         return
+    # Structured token_usage events are JSON-encoded; unpack and re-emit
+    # as a typed event so the desktop app can consume them directly.
+    if kind == "token_usage":
+        import json
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            return
+        _emit("token.usage", sid, payload)
+        return
     _emit(
         "status.update",
         sid,
