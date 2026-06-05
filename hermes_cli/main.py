@@ -7018,6 +7018,31 @@ def _run_with_idle_timeout(
     return subprocess.CompletedProcess(cmd, rc, stdout=combined, stderr="")
 
 
+def _looks_like_install_script_failure(result: subprocess.CompletedProcess) -> bool:
+    """Return True when a failed npm install appears to be caused by
+    install-script / postinstall / native-build errors rather than a
+    fundamental network or resolution failure.
+
+    Stderr patterns we look for:
+      - ``info run`` — npm logging that a lifecycle script was attempted
+      - ``EAGAIN`` + ``spawn`` — macOS resource limit hit during script exec
+      - ``ERR!`` around ``install`` / ``postinstall`` — script returned non-zero
+    """
+    stderr = (result.stderr or "")
+    if "info run" in stderr:
+        return True
+    if "EAGAIN" in stderr and "spawn" in stderr:
+        return True
+    if _import_re().search(r"ERR!.*(?:install|postinstall|preinstall|node-gyp|sh -c)", stderr):
+        return True
+    return False
+
+
+def _import_re():
+    import re
+    return re
+
+
 def _run_npm_install_deterministic(
     npm: str,
     cwd: Path,
@@ -7033,6 +7058,12 @@ def _run_npm_install_deterministic(
     rewrites committed lockfiles (stripping ``"peer": true`` etc.), which leaves
     the working tree dirty and causes the next ``hermes update`` to stash the
     lockfile — repeatedly.
+
+    If the initial install fails due to install-script errors (native module
+    compilation, postinstall scripts that don't apply to the current platform),
+    retry once with ``--ignore-scripts`` so the caller's build or test can
+    proceed.  This is safe because build steps (TypeScript compilation,
+    electron-builder packaging) handle native-module rebuilding independently.
     """
     lockfile = cwd / "package-lock.json"
     if lockfile.exists():
@@ -7040,26 +7071,50 @@ def _run_npm_install_deterministic(
         ci_result = subprocess.run(
             ci_cmd,
             cwd=cwd,
-            capture_output=capture_output,
+            capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             check=False,
         )
         if ci_result.returncode == 0:
+            if not capture_output:
+                sys.stderr.write(ci_result.stderr or "")
+                sys.stdout.write(ci_result.stdout or "")
             return ci_result
         # Fall through to `npm install` — lockfile may be out of sync on a
         # WIP fork/branch, or `npm ci` may not be available on very old npm.
     install_cmd = [npm, "install", *extra_args]
-    return subprocess.run(
+    result = subprocess.run(
         install_cmd,
         cwd=cwd,
-        capture_output=capture_output,
+        capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         check=False,
     )
+    if result.returncode != 0 and _looks_like_install_script_failure(result):
+        args_with_ignore = install_cmd + ["--ignore-scripts"]
+        logging.getLogger(__name__).debug(
+            "npm install failed with install-script error; retrying with --ignore-scripts"
+        )
+        result = subprocess.run(
+            args_with_ignore,
+            cwd=cwd,
+            capture_output=not capture_output,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode == 0:
+            return result
+
+    if not capture_output:
+        sys.stderr.write(result.stderr or "")
+        sys.stdout.write(result.stdout or "")
+    return result
 
 
 def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
