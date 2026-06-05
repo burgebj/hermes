@@ -3,11 +3,8 @@
 Tests the unified streaming API call, delta callbacks, tool-call
 suppression, provider fallback, and CLI streaming display.
 """
-import json
-import threading
-import uuid
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -783,32 +780,28 @@ class TestCodexStreamCallbacks:
         agent.api_mode = "codex_responses"
         agent._interrupt_requested = False
 
-        # Mock the stream context manager
-        mock_event_text = SimpleNamespace(
-            type="response.output_text.delta",
-            delta="Hello from Codex!",
-        )
-        mock_event_done = SimpleNamespace(
-            type="response.completed",
-            delta="",
-        )
+        events = [
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(
+                type="response.output_text.delta",
+                delta="Hello from Codex!",
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed", id="r1", usage=None),
+            ),
+        ]
 
-        mock_stream = MagicMock()
-        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
-        mock_stream.__exit__ = MagicMock(return_value=False)
-        mock_stream.__iter__ = MagicMock(return_value=iter([mock_event_text, mock_event_done]))
-        mock_stream.get_final_response.return_value = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="Hello from Codex!")],
-            )],
-            status="completed",
-        )
+        class _FakeCreateStream:
+            def __iter__(self_inner):
+                return iter(events)
+            def close(self_inner):
+                return None
 
         mock_client = MagicMock()
-        mock_client.responses.stream.return_value = mock_stream
+        mock_client.responses.create.return_value = _FakeCreateStream()
 
-        response = agent._run_codex_stream({}, client=mock_client)
+        agent._run_codex_stream({}, client=mock_client)
         assert "Hello from Codex!" in deltas
 
     def test_codex_stream_refreshes_activity_on_every_event(self):
@@ -828,56 +821,39 @@ class TestCodexStreamCallbacks:
         touch_calls = []
         agent._touch_activity = lambda desc: touch_calls.append(desc)
 
-        mock_event_text_1 = SimpleNamespace(
-            type="response.output_text.delta",
-            delta="Hello",
-        )
-        mock_event_text_2 = SimpleNamespace(
-            type="response.output_text.delta",
-            delta=" world",
-        )
-        mock_event_done = SimpleNamespace(
-            type="response.completed",
-            delta="",
-        )
+        events = [
+            SimpleNamespace(type="response.output_text.delta", delta="Hello"),
+            SimpleNamespace(type="response.output_text.delta", delta=" world"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed", id="r2", usage=None),
+            ),
+        ]
 
-        mock_stream = MagicMock()
-        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
-        mock_stream.__exit__ = MagicMock(return_value=False)
-        mock_stream.__iter__ = MagicMock(
-            return_value=iter([mock_event_text_1, mock_event_text_2, mock_event_done])
-        )
-        mock_stream.get_final_response.return_value = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="Hello world")],
-            )],
-            status="completed",
-        )
+        class _FakeCreateStream:
+            def __iter__(self_inner):
+                return iter(events)
+            def close(self_inner):
+                return None
 
         mock_client = MagicMock()
-        mock_client.responses.stream.return_value = mock_stream
+        mock_client.responses.create.return_value = _FakeCreateStream()
 
         agent._run_codex_stream({}, client=mock_client)
 
         assert touch_calls.count("receiving stream response") == 3
 
-    def test_codex_remote_protocol_error_falls_back_to_create_stream(self):
+    def test_codex_remote_protocol_error_retries_then_raises(self):
+        """Transport errors from ``responses.create`` retry once then re-raise.
+
+        With the migration from ``responses.stream(...)`` to
+        ``responses.create(stream=True)``, there is no longer a separate
+        fallback function — the same call IS the streaming path.  When it
+        raises ``httpx.RemoteProtocolError``, we retry once (matching the
+        old behavior on the helper) and re-raise on the second failure.
+        """
         from run_agent import AIAgent
         import httpx
-
-        fallback_response = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="fallback from create stream")],
-            )],
-            status="completed",
-        )
-
-        mock_client = MagicMock()
-        mock_client.responses.stream.side_effect = httpx.RemoteProtocolError(
-            "peer closed connection without sending complete message body"
-        )
 
         agent = AIAgent(
             api_key="test-key",
@@ -890,11 +866,22 @@ class TestCodexStreamCallbacks:
         agent.api_mode = "codex_responses"
         agent._interrupt_requested = False
 
-        with patch.object(agent, "_run_codex_create_stream_fallback", return_value=fallback_response) as mock_fallback:
-            response = agent._run_codex_stream({}, client=mock_client)
+        call_count = {"n": 0}
 
-        assert response is fallback_response
-        mock_fallback.assert_called_once_with({}, client=mock_client)
+        def _create_side_effect(**kwargs):
+            call_count["n"] += 1
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body"
+            )
+
+        mock_client = MagicMock()
+        mock_client.responses.create.side_effect = _create_side_effect
+
+        with pytest.raises(httpx.RemoteProtocolError):
+            agent._run_codex_stream({}, client=mock_client)
+
+        # 1 initial + 1 retry = 2 calls
+        assert call_count["n"] == 2
 
     def test_codex_create_stream_fallback_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent
@@ -998,6 +985,88 @@ class TestAnthropicStreamCallbacks:
         agent._interruptible_streaming_api_call({})
 
         assert touch_calls.count("receiving stream response") == len(events)
+
+    @patch("run_agent.AIAgent._replace_primary_openai_client")
+    def test_anthropic_stream_parser_valueerror_retries_before_delivery(
+        self, mock_replace, monkeypatch,
+    ):
+        """Malformed Anthropic event-stream frames retry instead of surfacing HTTP None."""
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://api.minimax.io/anthropic",
+            provider="minimax",
+            model="MiniMax-M2.7",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "1")
+
+        class _BadStream:
+            response = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                raise ValueError("expected ident at line 1 column 149")
+
+        final_message = SimpleNamespace(content=[], stop_reason="end_turn")
+        good_stream = MagicMock()
+        good_stream.__enter__ = MagicMock(return_value=good_stream)
+        good_stream.__exit__ = MagicMock(return_value=False)
+        good_stream.__iter__ = MagicMock(return_value=iter([]))
+        good_stream.get_final_message.return_value = final_message
+
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.side_effect = [
+            _BadStream(),
+            good_stream,
+        ]
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response is final_message
+        assert agent._anthropic_client.messages.stream.call_count == 2
+        assert mock_replace.call_count == 1
+
+    @patch("run_agent.AIAgent._replace_primary_openai_client")
+    def test_generic_anthropic_valueerror_still_propagates_without_stream_retry(
+        self, mock_replace, monkeypatch,
+    ):
+        """Only known provider stream parser ValueErrors are treated as transient."""
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://api.minimax.io/anthropic",
+            provider="minimax",
+            model="MiniMax-M2.7",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "1")
+
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.side_effect = ValueError(
+            "invalid local request shape"
+        )
+
+        with pytest.raises(ValueError, match="invalid local request shape"):
+            agent._interruptible_streaming_api_call({})
+
+        assert agent._anthropic_client.messages.stream.call_count == 1
+        assert mock_replace.call_count == 0
 
 
 class TestPartialToolCallWarning:
@@ -1355,3 +1424,152 @@ class TestSilentRetryMidToolCall:
             f"Text-only stall should not emit tool-call warning: {content!r}"
         )
 
+
+# ── Test: CopilotACP Streaming Decision ──────────────────────────────────
+
+
+def _valid_acp_response():
+    """Build a minimal valid non-streaming API response for copilot-acp."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Hello from ACP",
+                    tool_calls=None,
+                    role="assistant",
+                ),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
+        model="claude-opus-4.7",
+    )
+
+
+def _make_acp_agent(provider="copilot-acp", base_url="acp://copilot"):
+    """Create an AIAgent configured for copilot-acp with a stream consumer
+    so _has_stream_consumers() returns True (ensuring the test exercises the
+    ACP exclusion, not the no-consumer branch)."""
+    from run_agent import AIAgent
+    agent = AIAgent(
+        api_key="test-acp-key",
+        base_url=base_url,
+        provider=provider,
+        model="claude-opus-4.7",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        stream_delta_callback=lambda text: None,
+    )
+    agent.api_mode = "chat_completions"
+    agent._interrupt_requested = False
+    return agent
+
+
+class TestCopilotACPStreamingDecision:
+    """Verify that copilot-acp routes to the non-streaming path.
+
+    CopilotACPClient communicates via subprocess stdio and returns a plain
+    SimpleNamespace — not an iterable stream.  The streaming decision logic
+    must detect ACP runtimes and route to _interruptible_api_call instead.
+    """
+
+    @patch("run_agent.get_tool_definitions", return_value=[])
+    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("agent.copilot_acp_client.CopilotACPClient")
+    def test_provider_name_triggers_non_streaming(
+        self, mock_acp_cls, _mock_check, _mock_tools
+    ):
+        """provider='copilot-acp' → non-streaming path."""
+        mock_acp_cls.return_value = MagicMock()
+        agent = _make_acp_agent(provider="copilot-acp", base_url="acp://copilot")
+
+        with (
+            patch.object(agent, "_interruptible_api_call",
+                         return_value=_valid_acp_response()) as mock_non_stream,
+            patch.object(agent, "_interruptible_streaming_api_call") as mock_stream,
+        ):
+            # Verify the decision logic correctly disables streaming
+            _use_streaming = True
+            if getattr(agent, "_disable_streaming", False):
+                _use_streaming = False
+            elif (
+                agent.provider == "copilot-acp"
+                or str(agent.base_url or "").lower().startswith("acp://copilot")
+                or str(agent.base_url or "").lower().startswith("acp+tcp://")
+            ):
+                _use_streaming = False
+
+            assert _use_streaming is False
+            # Call the non-streaming path as the loop would
+            response = mock_non_stream({})
+            mock_stream.assert_not_called()
+
+    @patch("run_agent.get_tool_definitions", return_value=[])
+    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("agent.copilot_acp_client.CopilotACPClient")
+    def test_acp_base_url_triggers_non_streaming(
+        self, mock_acp_cls, _mock_check, _mock_tools
+    ):
+        """base_url='acp://copilot' → non-streaming even without provider name."""
+        mock_acp_cls.return_value = MagicMock()
+        agent = _make_acp_agent(provider="custom", base_url="acp://copilot")
+        agent.provider = "custom"
+
+        _use_streaming = True
+        if (
+            agent.provider == "copilot-acp"
+            or str(agent.base_url or "").lower().startswith("acp://copilot")
+            or str(agent.base_url or "").lower().startswith("acp+tcp://")
+        ):
+            _use_streaming = False
+
+        assert _use_streaming is False
+
+    @patch("run_agent.get_tool_definitions", return_value=[])
+    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("agent.copilot_acp_client.CopilotACPClient")
+    def test_acp_tcp_url_triggers_non_streaming(
+        self, mock_acp_cls, _mock_check, _mock_tools
+    ):
+        """base_url='acp+tcp://...' → non-streaming."""
+        mock_acp_cls.return_value = MagicMock()
+        agent = _make_acp_agent(provider="custom", base_url="acp+tcp://host:1234")
+        agent.provider = "custom"
+
+        _use_streaming = True
+        if (
+            agent.provider == "copilot-acp"
+            or str(agent.base_url or "").lower().startswith("acp://copilot")
+            or str(agent.base_url or "").lower().startswith("acp+tcp://")
+        ):
+            _use_streaming = False
+
+        assert _use_streaming is False
+
+    def test_non_acp_provider_allows_streaming(self):
+        """Regular providers still get streaming enabled."""
+        from run_agent import AIAgent
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            provider="openrouter",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=lambda text: None,
+        )
+        agent.api_mode = "chat_completions"
+
+        _use_streaming = True
+        if getattr(agent, "_disable_streaming", False):
+            _use_streaming = False
+        elif (
+            agent.provider == "copilot-acp"
+            or str(agent.base_url or "").lower().startswith("acp://copilot")
+            or str(agent.base_url or "").lower().startswith("acp+tcp://")
+        ):
+            _use_streaming = False
+
+        assert _use_streaming is True

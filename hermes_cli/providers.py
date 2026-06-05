@@ -47,7 +47,6 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "openrouter": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
-        extra_env_vars=("OPENAI_API_KEY",),
         base_url_env_var="OPENROUTER_BASE_URL",
     ),
     "nous": HermesOverlay(
@@ -60,6 +59,17 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         auth_type="oauth_external",
         base_url_override="https://chatgpt.com/backend-api/codex",
     ),
+    "openai-api": HermesOverlay(
+        transport="codex_responses",
+        base_url_override="https://api.openai.com/v1",
+        base_url_env_var="OPENAI_BASE_URL",
+    ),
+    "xai-oauth": HermesOverlay(
+        transport="codex_responses",
+        auth_type="oauth_external",
+        base_url_override="https://api.x.ai/v1",
+        base_url_env_var="XAI_BASE_URL",
+    ),
     "qwen-oauth": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
@@ -70,6 +80,13 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         auth_type="oauth_external",
         base_url_override="cloudcode-pa://google",
+    ),
+    "lmstudio": HermesOverlay(
+        transport="openai_chat",
+        auth_type="api_key",
+        extra_env_vars=("LM_API_KEY",),
+        base_url_override="http://127.0.0.1:1234/v1",
+        base_url_env_var="LM_BASE_URL",
     ),
     "copilot-acp": HermesOverlay(
         transport="codex_responses",
@@ -104,6 +121,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="anthropic_messages",
         base_url_env_var="MINIMAX_BASE_URL",
     ),
+    "minimax-oauth": HermesOverlay(
+        transport="anthropic_messages",
+        auth_type="oauth_external",
+        base_url_override="https://api.minimax.io/anthropic",
+    ),
     "minimax-cn": HermesOverlay(
         transport="anthropic_messages",
         base_url_env_var="MINIMAX_CN_BASE_URL",
@@ -116,9 +138,9 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="DASHSCOPE_BASE_URL",
     ),
-    "vercel": HermesOverlay(
+    "alibaba-coding-plan": HermesOverlay(
         transport="openai_chat",
-        is_aggregator=True,
+        base_url_env_var="ALIBABA_CODING_PLAN_BASE_URL",
     ),
     "opencode": HermesOverlay(
         transport="openai_chat",
@@ -140,6 +162,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         is_aggregator=True,
         base_url_env_var="HF_BASE_URL",
     ),
+    "novita": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="NOVITA_BASE_URL",
+    ),
     "xai": HermesOverlay(
         transport="codex_responses",
         base_url_override="https://api.x.ai/v1",
@@ -154,14 +181,35 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="XIAOMI_BASE_URL",
     ),
+    "tencent-tokenhub": HermesOverlay(
+        transport="openai_chat",
+        base_url_env_var="TOKENHUB_BASE_URL",
+    ),
     "arcee": HermesOverlay(
         transport="openai_chat",
         base_url_override="https://api.arcee.ai/api/v1",
         base_url_env_var="ARCEE_BASE_URL",
     ),
+    "gmi": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("GMI_API_KEY",),
+        base_url_override="https://api.gmi-serving.com/v1",
+        base_url_env_var="GMI_BASE_URL",
+    ),
     "ollama-cloud": HermesOverlay(
         transport="openai_chat",
+        base_url_override="https://ollama.com/v1",
         base_url_env_var="OLLAMA_BASE_URL",
+    ),
+    # Azure Foundry: supports both OpenAI-style and Anthropic-style endpoints.
+    # The transport is determined at runtime from config.yaml model.api_mode.
+    "azure-foundry": HermesOverlay(
+        transport="openai_chat",  # default; overridden by api_mode in config
+        base_url_env_var="AZURE_FOUNDRY_BASE_URL",
+    ),
+    "bedrock": HermesOverlay(
+        transport="bedrock_converse",
+        auth_type="aws_sdk",
     ),
 }
 
@@ -203,6 +251,10 @@ ALIASES: Dict[str, str] = {
     "x-ai": "xai",
     "x.ai": "xai",
     "grok": "xai",
+    "grok-oauth": "xai-oauth",
+    "xai-oauth": "xai-oauth",
+    "x-ai-oauth": "xai-oauth",
+    "xai-grok-oauth": "xai-oauth",
 
     # nvidia
     "nim": "nvidia",
@@ -233,11 +285,6 @@ ALIASES: Dict[str, str] = {
     "github": "github-copilot",
     "github-copilot-acp": "copilot-acp",
 
-    # vercel (models.dev ID for AI Gateway)
-    "ai-gateway": "vercel",
-    "aigateway": "vercel",
-    "vercel-ai-gateway": "vercel",
-
     # opencode (models.dev ID for OpenCode Zen)
     "opencode-zen": "opencode",
     "zen": "opencode",
@@ -259,6 +306,9 @@ ALIASES: Dict[str, str] = {
     "aliyun": "alibaba",
     "qwen": "alibaba",
     "alibaba-cloud": "alibaba",
+    "alibaba_coding": "alibaba-coding-plan",
+    "alibaba-coding": "alibaba-coding-plan",
+    "alibaba_coding_plan": "alibaba-coding-plan",
 
     # google-gemini-cli (OAuth + Code Assist)
     "gemini-cli": "google-gemini-cli",
@@ -270,9 +320,19 @@ ALIASES: Dict[str, str] = {
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
 
+    # novita
+    "novita-ai": "novita",
+    "novitaai": "novita",
+
     # xiaomi
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+
+    # tencent
+    "tencent": "tencent-tokenhub",
+    "tokenhub": "tencent-tokenhub",
+    "tencent-cloud": "tencent-tokenhub",
+    "tencentmaas": "tencent-tokenhub",
 
     # bedrock
     "aws": "bedrock",
@@ -283,6 +343,10 @@ ALIASES: Dict[str, str] = {
     # arcee
     "arcee-ai": "arcee",
     "arceeai": "arcee",
+
+    # gmi
+    "gmi-cloud": "gmi",
+    "gmicloud": "gmi",
 
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
@@ -306,9 +370,13 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "copilot-acp": "GitHub Copilot ACP",
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
+    "gmi": "GMI Cloud",
+    "tencent-tokenhub": "Tencent TokenHub",
+    "lmstudio": "LM Studio",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
     "ollama-cloud": "Ollama Cloud",
+    "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
 }
 
 
@@ -533,6 +601,12 @@ def resolve_custom_provider(
     if not requested:
         return None
 
+    # If the stored provider is the bare string "custom" (corrupt state
+    # from a prior model-switch bug), fall back to the first custom
+    # provider entry so existing configs self-heal.  (GH #17478)
+    bare_custom_fallback = requested == "custom"
+    first_valid = None
+
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
@@ -547,6 +621,10 @@ def resolve_custom_provider(
         if not display_name or not api_url:
             continue
 
+        # Stash the first valid entry for bare-"custom" fallback
+        if first_valid is None:
+            first_valid = (display_name, api_url)
+
         slug = custom_provider_slug(display_name)
         if requested not in {display_name.lower(), slug}:
             continue
@@ -557,6 +635,21 @@ def resolve_custom_provider(
             transport="openai_chat",
             api_key_env_vars=(),
             base_url=api_url,
+            is_aggregator=False,
+            auth_type="api_key",
+            source="user-config",
+        )
+
+    # Self-heal: bare "custom" matched nothing — return first valid entry
+    if bare_custom_fallback and first_valid:
+        dname, aurl = first_valid
+        slug = custom_provider_slug(dname)
+        return ProviderDef(
+            id=slug,
+            name=dname,
+            transport="openai_chat",
+            api_key_env_vars=(),
+            base_url=aurl,
             is_aggregator=False,
             auth_type="api_key",
             source="user-config",
@@ -583,6 +676,20 @@ def resolve_provider_full(
         ProviderDef if found, else None.
     """
     canonical = normalize_provider(name)
+    raw = name.strip().lower()
+
+    # 0. User-defined config providers win over the built-in alias table.
+    #    A user who declares ``providers.<name>`` in config.yaml has stated
+    #    explicit intent for that name — it must not be hijacked by a legacy
+    #    vendor alias (e.g. bare "openai" → "openrouter"). Resolve the raw
+    #    name against user config FIRST so a configured ``providers.openai``
+    #    (pointing at api.openai.com) beats the alias that would otherwise
+    #    silently route to OpenRouter. Only the raw (pre-alias) name is tried
+    #    here; canonical/alias resolution still happens below.
+    if user_providers:
+        user_pdef = resolve_user_provider(raw, user_providers)
+        if user_pdef is not None:
+            return user_pdef
 
     # 1. Built-in (models.dev + overlays)
     pdef = get_provider(canonical)
@@ -596,7 +703,7 @@ def resolve_provider_full(
         if user_pdef is not None:
             return user_pdef
         # Try original name (in case alias didn't match)
-        user_pdef = resolve_user_provider(name.strip().lower(), user_providers)
+        user_pdef = resolve_user_provider(raw, user_providers)
         if user_pdef is not None:
             return user_pdef
 

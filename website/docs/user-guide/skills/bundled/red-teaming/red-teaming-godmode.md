@@ -1,14 +1,14 @@
 ---
-title: "Godmode"
+title: "Godmode — Jailbreak LLMs: Parseltongue, GODMODE, ULTRAPLINIAN"
 sidebar_label: "Godmode"
-description: "Jailbreak API-served LLMs using G0DM0D3 techniques — Parseltongue input obfuscation (33 techniques), GODMODE CLASSIC system prompt templates, ULTRAPLINIAN mu..."
+description: "Jailbreak LLMs: Parseltongue, GODMODE, ULTRAPLINIAN"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Godmode
 
-Jailbreak API-served LLMs using G0DM0D3 techniques — Parseltongue input obfuscation (33 techniques), GODMODE CLASSIC system prompt templates, ULTRAPLINIAN multi-model racing, encoding escalation, and Hermes-native prefill/system prompt integration. Use when a user wants to bypass safety filters, jailbreak a model, or red-team model robustness.
+Jailbreak LLMs: Parseltongue, GODMODE, ULTRAPLINIAN.
 
 ## Skill metadata
 
@@ -19,6 +19,7 @@ Jailbreak API-served LLMs using G0DM0D3 techniques — Parseltongue input obfusc
 | Version | `1.0.0` |
 | Author | Hermes Agent + Teknium |
 | License | MIT |
+| Platforms | linux, macos, windows |
 | Tags | `jailbreak`, `red-teaming`, `G0DM0D3`, `Parseltongue`, `GODMODE`, `uncensoring`, `safety-bypass`, `prompt-engineering`, `L1B3RT4S` |
 | Related skills | [`obliteratus`](/docs/user-guide/skills/bundled/mlops/mlops-inference-obliteratus) |
 
@@ -107,7 +108,7 @@ undo_jailbreak()
 7. **If a strategy works**, locks it in:
    - Writes the winning system prompt to `agent.system_prompt` in `config.yaml`
    - Writes prefill messages to `~/.hermes/prefill.json`
-   - Sets `agent.prefill_messages_file: "prefill.json"` in `config.yaml`
+   - Sets `prefill_messages_file: "prefill.json"` in `config.yaml`
 8. **Reports results** — which strategy won, score, preview of compliant response
 
 ### Strategy order per model family:
@@ -188,8 +189,7 @@ Create `~/.hermes/prefill.json`:
 
 Then set in `~/.hermes/config.yaml`:
 ```yaml
-agent:
-  prefill_messages_file: "prefill.json"
+prefill_messages_file: "prefill.json"
 ```
 
 Prefill messages are injected at the start of every API call, after the system prompt. They are ephemeral — never saved to sessions or trajectories. The model sees them as prior conversation context, establishing a pattern of compliance.

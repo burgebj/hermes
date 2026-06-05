@@ -20,6 +20,11 @@ Usage:
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
 
+try:
+    import hermes_bootstrap  # noqa: F401 — must be first import (UTF-8 stdio shim)
+except ModuleNotFoundError:
+    pass
+
 import asyncio
 import base64
 import concurrent.futures
