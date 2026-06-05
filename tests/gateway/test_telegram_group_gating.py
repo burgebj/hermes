@@ -19,6 +19,7 @@ def _make_adapter(
     group_allow_from=None,
     allowed_chats=None,
     group_allowed_chats=None,
+    observe_only_chats=None,
     guest_mode=None,
     observe_unmentioned_group_messages=None,
     bot_username="hermes_bot",
@@ -58,6 +59,8 @@ def _make_adapter(
         extra["group_allowed_chats"] = group_allowed_chats
     else:
         extra["group_allowed_chats"] = []
+    if observe_only_chats is not None:
+        extra["observe_only_chats"] = observe_only_chats
     if guest_mode is not None:
         extra["guest_mode"] = guest_mode
     if observe_unmentioned_group_messages is not None:
@@ -150,6 +153,15 @@ def _bot_command_entity(text, command):
     return SimpleNamespace(type="bot_command", offset=offset, length=len(command))
 
 
+def _text_mention_bot_entity(username, user_id=123456):
+    return SimpleNamespace(
+        type="text_mention",
+        offset=0,
+        length=4,
+        user=SimpleNamespace(id=user_id, username=username, is_bot=True),
+    )
+
+
 def test_group_messages_can_be_opened_via_config():
     adapter = _make_adapter(require_mention=False)
 
@@ -189,6 +201,27 @@ def test_unmentioned_group_messages_can_be_observed_without_dispatching():
         assert store.sources[0].user_name is None
 
     asyncio.run(_run())
+
+
+def test_observe_only_chats_are_observed_but_never_dispatched_even_when_mentioned_or_replied():
+    adapter = _make_adapter(
+        require_mention=True,
+        group_allowed_chats=["-200"],
+        observe_only_chats=["-200"],
+        observe_unmentioned_group_messages=True,
+    )
+
+    plain = _group_message("ordinary chatter", chat_id=-200)
+    mention_text = "@hermes_bot please answer"
+    mentioned = _group_message(mention_text, chat_id=-200, entities=[_mention_entity(mention_text)])
+    reply = _group_message("replying to bot", chat_id=-200, reply_to_bot=True)
+
+    assert adapter._should_process_message(plain) is False
+    assert adapter._should_observe_unmentioned_group_message(plain) is True
+    assert adapter._should_process_message(mentioned) is False
+    assert adapter._should_observe_unmentioned_group_message(mentioned) is True
+    assert adapter._should_process_message(reply) is False
+    assert adapter._should_observe_unmentioned_group_message(reply) is True
 
 
 def test_observed_group_context_uses_shared_source_and_prompt_for_later_mentions():
@@ -514,6 +547,24 @@ def test_bot_command_addressed_to_other_bot_is_exclusive_even_when_mentions_not_
 
     assert test2_bot._should_process_message(_group_message(text, entities=[entity]), is_command=True) is False
     assert test1_bot._should_process_message(_group_message(text, entities=[entity]), is_command=True) is True
+
+
+def test_text_mention_addressed_to_other_bot_is_exclusive_even_in_free_response_chat():
+    text = "Home group setup"
+    entity = _text_mention_bot_entity("Keymaker_Kat_bot")
+
+    home_bot = _make_adapter(
+        require_mention=True,
+        free_response_chats=["-200"],
+        bot_username="Hermes_Home_7Bot",
+    )
+    main_bot = _make_adapter(
+        require_mention=True,
+        bot_username="Keymaker_Kat_bot",
+    )
+
+    assert home_bot._should_process_message(_group_message(text, chat_id=-200, entities=[entity])) is False
+    assert main_bot._should_process_message(_group_message(text, chat_id=-200, entities=[entity])) is True
 
 
 def test_raw_bot_mention_fallback_does_not_match_email_or_substring():

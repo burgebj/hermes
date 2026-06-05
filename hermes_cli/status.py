@@ -32,11 +32,13 @@ def check_mark(ok: bool) -> str:
 def redact_key(key: str) -> str:
     """Redact an API key for display.
 
-    Thin wrapper over :func:`agent.redact.mask_secret`. Preserves the
-    "(not set)" placeholder in dim color to match ``hermes config``'s
-    output (previously this variant was missing the DIM color —
-    consolidated via PR that also introduced ``mask_secret``).
+    By default this preserves the existing short-prefix/suffix display used by
+    local CLI status. Set ``HERMES_STATUS_STRICT_REDACTION=true`` when status is
+    being surfaced through agent/gateway reports; then configured secrets are
+    shown only as ``[configured]`` with no key fragments.
     """
+    if key and os.getenv("HERMES_STATUS_STRICT_REDACTION", "").lower() in {"1", "true", "yes", "on"}:
+        return color("[configured]", Colors.GREEN)
     from agent.redact import mask_secret
     return mask_secret(key, empty=color("(not set)", Colors.DIM))
 
@@ -89,10 +91,18 @@ def _effective_provider_label() -> str:
 from hermes_constants import is_termux as _is_termux
 
 
+_VALID_TERMINAL_BACKENDS = {"local", "docker", "singularity", "modal", "daytona", "ssh"}
+
+
+def _redacted_value(configured: bool) -> str:
+    return "configured" if configured else color("(not set)", Colors.DIM)
+
+
 def show_status(args):
     """Show status of all Hermes Agent components."""
     show_all = getattr(args, 'all', False)
     deep = getattr(args, 'deep', False)
+    redacted = bool(getattr(args, 'redacted', False))
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
@@ -165,12 +175,12 @@ def show_status(args):
             continue
         value = _resolve_env(env_ref)
         has_key = bool(value)
-        display = redact_key(value) if not show_all else value
+        display = _redacted_value(has_key) if redacted else redact_key(value)
         print(f"  {name:<12}  {check_mark(has_key)} {display}")
 
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    anthropic_display = redact_key(anthropic_value) if not show_all else anthropic_value
+    anthropic_display = _redacted_value(bool(anthropic_value)) if redacted else redact_key(anthropic_value)
     print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
 
     # =========================================================================
@@ -255,7 +265,7 @@ def show_status(args):
         f"{'logged in' if codex_logged_in else 'not logged in (run: hermes model)'}"
     )
     codex_auth_file = codex_status.get("auth_store")
-    if codex_auth_file:
+    if codex_auth_file and not redacted:
         print(f"    Auth file:  {codex_auth_file}")
     codex_last_refresh = _format_iso_timestamp(codex_status.get("last_refresh"))
     if codex_status.get("last_refresh"):
@@ -269,7 +279,7 @@ def show_status(args):
         f"{'logged in' if qwen_logged_in else 'not logged in (run: qwen auth qwen-oauth)'}"
     )
     qwen_auth_file = qwen_status.get("auth_file")
-    if qwen_auth_file:
+    if qwen_auth_file and not redacted:
         print(f"    Auth file:  {qwen_auth_file}")
     qwen_exp = qwen_status.get("expires_at_ms")
     if qwen_exp:
@@ -306,7 +316,7 @@ def show_status(args):
         f"{'logged in' if xai_oauth_logged_in else 'not logged in (run: hermes auth add xai-oauth)'}"
     )
     xai_auth_file = xai_oauth_status.get("auth_store")
-    if xai_auth_file:
+    if xai_auth_file and not redacted:
         print(f"    Auth file:  {xai_auth_file}")
     if xai_oauth_status.get("last_refresh"):
         print(f"    Refreshed:  {_format_iso_timestamp(xai_oauth_status.get('last_refresh'))}")
@@ -401,6 +411,13 @@ def show_status(args):
     if not terminal_env:
         terminal_env = terminal_cfg.get("backend", "local")
     print(f"  Backend:      {terminal_env}")
+    if terminal_env not in _VALID_TERMINAL_BACKENDS:
+        print(
+            f"  Warning:      {color('invalid backend', Colors.RED)} "
+            f"(expected one of {', '.join(sorted(_VALID_TERMINAL_BACKENDS))})"
+        )
+    elif os.getenv("TERMINAL_ENV", "") and terminal_cfg.get("backend") and terminal_env != terminal_cfg.get("backend"):
+        print("  Source:       env override (TERMINAL_ENV) differs from config")
 
     if terminal_env == "ssh":
         ssh_host = os.getenv("TERMINAL_SSH_HOST", "")
@@ -416,6 +433,18 @@ def show_status(args):
 
     sudo_password = os.getenv("SUDO_PASSWORD", "")
     print(f"  Sudo:         {check_mark(bool(sudo_password))} {'enabled' if sudo_password else 'disabled'}")
+
+    # =========================================================================
+    # Checkpoints / Rollback
+    # =========================================================================
+    print()
+    print(color("◆ Checkpoints", Colors.CYAN, Colors.BOLD))
+    checkpoints_cfg = config.get("checkpoints", {}) if isinstance(config.get("checkpoints"), dict) else {}
+    ck_enabled = bool(checkpoints_cfg.get("enabled", False))
+    print(f"  Enabled:      {check_mark(ck_enabled)} {'yes' if ck_enabled else 'no'}")
+    if ck_enabled:
+        print(f"  Max snapshots:{checkpoints_cfg.get('max_snapshots', 50)}")
+        print(f"  Auto prune:   {'yes' if checkpoints_cfg.get('auto_prune', True) else 'no'}")
 
     # =========================================================================
     # Messaging Platforms
@@ -453,7 +482,7 @@ def show_status(args):
             home_channel = os.getenv("QQ_HOME_CHANNEL", "")
         
         status = "configured" if has_token else "not configured"
-        if home_channel:
+        if home_channel and not redacted:
             status += f" (home: {home_channel})"
         
         print(f"  {name:<12}  {check_mark(has_token)} {status}")

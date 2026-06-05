@@ -3582,19 +3582,23 @@ class TelegramAdapter(BasePlatformAdapter):
     # data is always passed as the first positional arg.
     # is_state=True means the verb is a sticky sender-rule change (mute, trust,
     # vip) that should leave the keyboard tappable for follow-on actions.
-    # is_state=False is a per-email one-shot (send, archive, draft, spam) that
-    # strips the keyboard on success.
+    # is_state=False is a per-email one-shot (send, archive, draft, calendar,
+    # spam) that strips the keyboard on success.
     _GT_VERB_DISPATCH = {
-        "send":         ("send-draft.sh",      [],         "✓ sent draft",         False),
-        "archive":      ("archive.sh",         [],         "✓ archived",           False),
-        "draft":        ("draft-blank.sh",     [],         "✓ drafted reply",      False),
-        "spam":         ("spam.sh",            [],         "✓ marked spam",        False),
-        "mute":         ("mute-add.sh",        ["email"],  "✓ muted",              True),
-        "mute-domain":  ("mute-add.sh",        ["domain"], "✓ muted domain",       True),
-        "trust":        ("trusted-ops-add.sh", ["email"],  "✓ trusted",            True),
-        "trust-domain": ("trusted-ops-add.sh", ["domain"], "✓ trusted domain",     True),
-        "vip":          ("vip-add.sh",         ["email"],  "✓ marked VIP",         True),
-        "vip-domain":   ("vip-add.sh",         ["domain"], "✓ marked VIP domain",  True),
+        # Current M4 email triage scripts are shadow-feedback only: labels below
+        # must not imply Gmail was actually mutated. The send script deliberately
+        # exits non-zero until Nathan approves live Gmail sending.
+        "send":         ("send-draft.sh",      [],         "✓ send requested",     False),
+        "archive":      ("archive.sh",         [],         "✓ archive noted",      False),
+        "draft":        ("draft-blank.sh",     [],         "✓ draft requested",    False),
+        "calendar":     ("calendar-add.sh",    [],         "✓ calendar handled",   False),
+        "spam":         ("spam.sh",            [],         "✓ junk noted",         False),
+        "mute":         ("mute-add.sh",        ["email"],  "✓ quiet noted",        True),
+        "mute-domain":  ("mute-add.sh",        ["domain"], "✓ quiet domain noted", True),
+        "trust":        ("trusted-ops-add.sh", ["email"],  "✓ trust noted",        True),
+        "trust-domain": ("trusted-ops-add.sh", ["domain"], "✓ trust domain noted", True),
+        "vip":          ("vip-add.sh",         ["email"],  "✓ always-show noted",  True),
+        "vip-domain":   ("vip-add.sh",         ["domain"], "✓ VIP domain noted",   True),
     }
 
     async def _handle_gmail_triage_callback(
@@ -3631,7 +3635,11 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         script_name, extra_args, success_label, is_state_verb = entry
 
-        script_path = _Path.home() / ".hermes" / "scripts" / "gmail-triage" / script_name
+        try:
+            from hermes_constants import get_hermes_home
+            script_path = get_hermes_home() / "scripts" / "gmail-triage" / script_name
+        except Exception:
+            script_path = _Path.home() / ".hermes" / "scripts" / "gmail-triage" / script_name
         if not script_path.exists():
             await query.answer(text=f"❌ {script_name} missing")
             logger.error("[%s] gmail-triage script missing: %s", self.name, script_path)
@@ -4559,6 +4567,15 @@ class TelegramAdapter(BasePlatformAdapter):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
 
+    def _telegram_observe_only_chats(self) -> set[str]:
+        """Return group chats that should be observed but never trigger the bot."""
+        raw = self.config.extra.get("observe_only_chats")
+        if raw is None:
+            raw = os.getenv("TELEGRAM_OBSERVE_ONLY_CHATS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        return {part.strip() for part in str(raw).split(",") if part.strip()}
+
     def _telegram_allowed_chats(self) -> set[str]:
         """Return the whitelist of group/supergroup chat IDs the bot will respond in.
 
@@ -4703,14 +4720,26 @@ class TelegramAdapter(BasePlatformAdapter):
         for source_text, entities in _iter_sources():
             for entity in entities:
                 entity_type = str(getattr(entity, "type", "")).split(".")[-1].lower()
-                if entity_type not in {"mention", "bot_command"}:
+                if entity_type not in {"mention", "text_mention", "bot_command"}:
                     continue
+
+                if entity_type == "text_mention":
+                    # Some Telegram clients emit bot-picker mentions as
+                    # text_mention(user=...) instead of a plain @username
+                    # mention. Use the attached bot user's username when
+                    # present so exclusive multi-bot routing still works.
+                    user = getattr(entity, "user", None)
+                    handle = (getattr(user, "username", None) or "").lstrip("@").lower()
+                    if handle and re.fullmatch(r"[a-z0-9_]{2,29}bot", handle, re.IGNORECASE):
+                        mentioned_bot_usernames.add(handle)
+                    continue
+
                 offset = int(getattr(entity, "offset", -1))
                 length = int(getattr(entity, "length", 0))
                 if offset < 0 or length <= 0:
                     continue
-
                 entity_text = source_text[offset:offset + length].strip()
+
                 if entity_type == "mention":
                     handle = entity_text.lstrip("@").lower()
                     if re.fullmatch(r"[a-z0-9_]{2,29}bot", handle, re.IGNORECASE):
@@ -4869,6 +4898,11 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
             return False
+
+        observe_only = self._telegram_observe_only_chats()
+        if chat_id_str in observe_only:
+            allowed = self._telegram_observe_allowed_chats() | observe_only
+            return chat_id_str in allowed
 
         allowed = self._telegram_observe_allowed_chats()
         # Observed context is shared at chat/topic scope so a later trigger from
@@ -5116,6 +5150,8 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
 
         chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
+        if chat_id_str in self._telegram_observe_only_chats():
+            return False
 
         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
             return False
