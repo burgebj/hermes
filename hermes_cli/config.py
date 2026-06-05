@@ -4641,6 +4641,13 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 if not isinstance(ts_list, list):
                     # Coerce malformed entries to empty list rather than
                     # deleting them — safer than wiping unknown values.
+                    logger.warning(
+                        "platform_toolsets[%r] has unexpected type %s "
+                        "(expected list); coercing to [] during v25→v26 "
+                        "migration. Check your config file if tools are missing.",
+                        platform,
+                        type(ts_list).__name__,
+                    )
                     pt[platform] = []
                     touched = True
             if touched:
