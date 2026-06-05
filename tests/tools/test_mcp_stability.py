@@ -535,3 +535,294 @@ class TestMCPInitialConnectionRetry:
                 await task
 
         asyncio.get_event_loop().run_until_complete(_run())
+
+
+# ---------------------------------------------------------------------------
+# Fix 2c: Recursive descendant discovery via /proc and psutil
+# ---------------------------------------------------------------------------
+#
+# ``_discover_descendants()`` performs a BFS over /proc on Linux (falling
+# back to psutil) to find ALL descendants of a given PID.  The reaper
+# phase in ``_kill_orphaned_mcp_children()`` uses this to terminate
+# grandchildren that shell-wrapper MCP servers may have left behind in
+# a different process group — the killpg path alone can't reach them
+# when the wrapper started the real daemon in a separate session.
+
+class TestReaperRecursiveDiscovery:
+    """_discover_descendants and its integration into _kill_orphaned_mcp_children."""
+
+    def _reset_state(self):
+        from tools.mcp_tool import _stdio_pids, _orphan_stdio_pids, _stdio_pgids, _lock
+        with _lock:
+            _stdio_pids.clear()
+            _orphan_stdio_pids.clear()
+            _stdio_pgids.clear()
+
+    @staticmethod
+    def _make_proc_side_effect(children_map):
+        """Build side_effect for ``builtins.open`` that serves mock ``/proc/*/children``.
+
+        ``children_map`` maps pid -> space-separated child PID string.
+        Paths not matching ``/proc/<pid>/task/<pid>/children`` raise
+        ``FileNotFoundError``.
+        """
+        import re
+        from unittest.mock import mock_open
+
+        def side_effect(file, *args, **kwargs):
+            path = str(file)
+            m = re.match(r'/proc/(\d+)/task/\1/children', path)
+            if m:
+                pid = int(m.group(1))
+                data = children_map.get(pid, "")
+                return mock_open(read_data=data).return_value
+            raise FileNotFoundError(2, "No such file or directory", path)
+        return side_effect
+
+    # -- unit: discover_descendants via /proc (mocked) ----------------------
+
+    def test_discover_descendants_via_proc(self):
+        """_discover_descendants finds all descendants in a 3-level /proc tree."""
+        from tools.mcp_tool import _discover_descendants
+
+        # 10000 -> 10001, 10002
+        # 10001 -> 10003
+        # 10002 -> 10004, 10005
+        # 10003 -> 10006
+        tree = {
+            10000: "10001 10002",
+            10001: "10003",
+            10002: "10004 10005",
+            10003: "10006",
+            10004: "",
+            10005: "",
+            10006: "",
+        }
+        expected = {10001, 10002, 10003, 10004, 10005, 10006}
+
+        side_effect = self._make_proc_side_effect(tree)
+        with patch("builtins.open", side_effect=side_effect):
+            result = _discover_descendants(10000)
+
+        assert result == expected, f"/proc BFS: expected {expected}, got {result}"
+
+    def test_discover_descendants_leaf_pid_returns_empty(self):
+        """A PID with no children returns empty set (edge case)."""
+        from tools.mcp_tool import _discover_descendants
+
+        tree = {50000: ""}
+        side_effect = self._make_proc_side_effect(tree)
+        with patch("builtins.open", side_effect=side_effect):
+            result = _discover_descendants(50000)
+
+        assert result == set(), f"Leaf PID: expected empty set, got {result}"
+
+    # -- unit: discover_descendants via psutil fallback (mocked) ------------
+
+    def test_discover_descendants_via_psutil_fallback(self):
+        """_discover_descendants falls back to psutil when /proc is broken."""
+        pytest.importorskip("psutil")
+        from tools.mcp_tool import _discover_descendants
+
+        def _broken_proc(path, *args, **kwargs):
+            if '/proc/' in str(path):
+                raise RuntimeError("Simulated broken /proc filesystem")
+            raise FileNotFoundError(2, "No such file", str(path))
+
+        mock_child1 = MagicMock()
+        mock_child1.pid = 20001
+        mock_child2 = MagicMock()
+        mock_child2.pid = 20002
+
+        with patch("builtins.open", side_effect=_broken_proc), \
+             patch("psutil.Process") as mock_psutil_proc:
+            mock_proc_inst = MagicMock()
+            mock_proc_inst.children.return_value = [mock_child1, mock_child2]
+            mock_psutil_proc.return_value = mock_proc_inst
+
+            result = _discover_descendants(1000)
+
+        assert result == {20001, 20002}, (
+            f"psutil fallback: expected {{20001, 20002}}, got {result}"
+        )
+        mock_proc_inst.children.assert_called_once_with(recursive=True)
+
+    # -- unit: discover_descendants empty when both paths fail --------------
+
+    def test_discover_descendants_empty_when_both_fail(self):
+        """When /proc crashes and psutil fails, empty set is returned (no crash)."""
+        from tools.mcp_tool import _discover_descendants
+
+        def _crash_proc(path, *args, **kwargs):
+            if '/proc/' in str(path):
+                raise RuntimeError("Simulated /proc crash")
+            raise FileNotFoundError(2, "No such file", str(path))
+
+        with patch("builtins.open", side_effect=_crash_proc), \
+             patch("psutil.Process", side_effect=ProcessLookupError("no such process")):
+            result = _discover_descendants(1000)
+
+        assert result == set(), f"Both fail: expected empty set, got {result}"
+
+    # -- unit: discover_descendants cycle safety ---------------------------
+
+    def test_discover_descendants_cycle_safety(self):
+        """Cyclic /proc references (child points back to ancestor) are handled."""
+        from tools.mcp_tool import _discover_descendants
+
+        # 20000 -> 20001 -> 20002 -> 20000 (cycle back to root)
+        tree = {
+            20000: "20001",
+            20001: "20002",
+            20002: "20000",
+        }
+        expected = {20001, 20002}
+
+        side_effect = self._make_proc_side_effect(tree)
+        with patch("builtins.open", side_effect=side_effect):
+            result = _discover_descendants(20000)
+
+        assert result == expected, f"Cycle test: expected {expected}, got {result}"
+
+    # -- integration: kill_orphaned sends signals to descendants -----------
+
+    def test_kill_orphaned_sends_signal_to_descendants(self):
+        """_kill_orphaned_mcp_children sends SIGTERM/SIGKILL to discovered descendants."""
+        from tools.mcp_tool import (
+            _kill_orphaned_mcp_children,
+            _orphan_stdio_pids,
+            _lock,
+        )
+
+        self._reset_state()
+
+        target_pid = 30000
+        tree = {
+            30000: "30001",
+            30001: "30002 30003",
+            30002: "",
+            30003: "",
+        }
+
+        with _lock:
+            _orphan_stdio_pids.add(target_pid)
+
+        side_effect = self._make_proc_side_effect(tree)
+        with patch("builtins.open", side_effect=side_effect), \
+             patch("tools.mcp_tool.os.kill") as mock_kill, \
+             patch("tools.mcp_tool.os.killpg") as mock_killpg, \
+             patch("gateway.status._pid_exists", return_value=True), \
+             patch("tools.mcp_tool.time.sleep"):
+            _kill_orphaned_mcp_children()
+
+        # Phase 1: SIGTERM to tracked pid + each discovered descendant
+        mock_kill.assert_any_call(target_pid, signal.SIGTERM)
+        mock_kill.assert_any_call(30001, signal.SIGTERM)
+        mock_kill.assert_any_call(30002, signal.SIGTERM)
+        mock_kill.assert_any_call(30003, signal.SIGTERM)
+
+        # Phase 3: SIGKILL escalation for survivors (all 4 reported alive)
+        assert mock_kill.call_count >= 8, (
+            f"Expected >= 8 signal calls, got {mock_kill.call_count}"
+        )
+        mock_killpg.assert_not_called()
+
+    # -- integration: real grandchild discovery ----------------------------
+
+    @pytest.mark.live_system_guard_bypass
+    @pytest.mark.skipif(
+        not os.path.exists("/proc/self/status"),
+        reason="Requires Linux /proc filesystem for descendant discovery",
+    )
+    def test_real_grandchild_discovery(self, tmp_path):
+        """Real subprocess tree: grandchild is killed via descendant discovery.
+
+        Spawns a child process that ignores SIGTERM and keeps running,
+        which in turn spawns a grandchild in its own process group.
+        The grandchild is only reachable through ``_discover_descendants()``
+        (reading /proc), NOT through killpg on the child's pgid.
+
+        When ``_kill_orphaned_mcp_children()`` runs against the child's PID,
+        it should discover the grandchild via /proc and terminate it.
+        """
+        import subprocess
+        import sys
+        import time as _time
+
+        psutil = pytest.importorskip("psutil")
+
+        grandchild_pid_file = tmp_path / "gc.pid"
+
+        # Grandchild: start its own process group (won't be in child's pgid)
+        # and sleep so we can verify it's alive before reaping.
+        grandchild_code = (
+            "import os, sys, time\n"
+            "os.setpgid(0, 0)\n"
+            f"open({str(grandchild_pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            "while True:\n"
+            "    time.sleep(0.5)\n"
+        )
+
+        # Child: spawn grandchild, ignore SIGTERM so it stays alive long
+        # enough for the reaper to read /proc/{child.pid}/children.
+        child_code = (
+            "import subprocess, sys, time, signal\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}])\n"
+            "while True:\n"
+            "    time.sleep(0.5)\n"
+        )
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_code],
+        )
+
+        try:
+            # Wait for grandchild to start
+            deadline = _time.time() + 5
+            while _time.time() < deadline and not grandchild_pid_file.exists():
+                _time.sleep(0.05)
+            assert grandchild_pid_file.exists(), "Grandchild did not start"
+            gc_pid = int(grandchild_pid_file.read_text().strip())
+
+            # Sanity: grandchild is alive and NOT in the child's pgid
+            assert psutil.pid_exists(gc_pid), "Grandchild should be alive"
+            child_pgid = os.getpgid(child.pid)
+            gc_pgid = os.getpgid(gc_pid)
+            assert gc_pgid != child_pgid, (
+                "Grandchild must be in its own pgid for this test"
+            )
+
+            # Register child PID as orphan (no pgid entry so per-pid kill path)
+            from tools.mcp_tool import (
+                _kill_orphaned_mcp_children,
+                _orphan_stdio_pids,
+                _lock,
+            )
+            with _lock:
+                _orphan_stdio_pids.clear()
+                _orphan_stdio_pids.add(child.pid)
+
+            # Drive the reaper — should discover and kill grandchild via /proc
+            _kill_orphaned_mcp_children()
+
+            # Grandchild must be dead
+            deadline = _time.time() + 3
+            while _time.time() < deadline and psutil.pid_exists(gc_pid):
+                _time.sleep(0.05)
+            assert not psutil.pid_exists(gc_pid), (
+                f"Grandchild PID {gc_pid} survived descendant reaping"
+            )
+
+        finally:
+            # Belt-and-suspenders: ensure both are dead
+            for pid in (child.pid,):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+            if gc_pid:
+                try:
+                    os.kill(gc_pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
