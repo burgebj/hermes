@@ -779,6 +779,30 @@ class TurnController {
     patchTurnState({ activity: [], outcome: '', subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
   }
 
+  // Called from useSubmission when a fresh user prompt is being dispatched.
+  // Clears any streaming residue left behind by a previous turn that did
+  // not terminate cleanly — e.g. when the gateway crashed mid-stream or the
+  // PTY/WebSocket dropped between message.delta and message.complete, the
+  // turn never reaches recordMessageComplete()/recordError()/idle() and
+  // `segmentMessages` keeps its stale entries. Without this reset, the
+  // next turn's recordMessageComplete prepends the abandoned segments to
+  // the new assistant message (#33670: 90% prior-turn discussion leaking
+  // into a fresh "1+9=?" reply). The previous one-line fix only cleared
+  // `bufRef`, which left `segmentMessages` and the streaming nanostore
+  // mirrors untouched.
+  beginUserTurn() {
+    this.streamTimer = clear(this.streamTimer)
+    this.bufRef = ''
+    this.pendingSegmentTools = []
+    this.segmentMessages = []
+    this.interrupted = false
+    patchTurnState({
+      streamPendingTools: [],
+      streamSegments: [],
+      streaming: ''
+    })
+  }
+
   upsertSubagent(
     p: SubagentEventPayload,
     patch: (current: SubagentProgress) => Partial<SubagentProgress>,

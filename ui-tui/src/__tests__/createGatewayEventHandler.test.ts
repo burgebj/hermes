@@ -1177,4 +1177,48 @@ describe('createGatewayEventHandler', () => {
 
     expect(appended.some(msg => msg.role === 'system' && msg.text.startsWith('ask '))).toBe(false)
   })
+
+  it('drops stale streaming residue when a fresh user submission begins (#33670)', () => {
+    // Repro for v0.14.0 context pollution: when the previous turn never
+    // reaches recordMessageComplete()/recordError()/idle() — e.g. the
+    // gateway crashed mid-stream or the dashboard PTY/WebSocket dropped
+    // between message.delta and message.complete — `segmentMessages`
+    // keeps the stale entries. The next user submission's
+    // recordMessageComplete then prepends those abandoned segments to
+    // the fresh assistant reply, producing the symptom of "1+9=?" coming
+    // back as 90% prior-turn discussion + 10% actual answer.
+    //
+    // useSubmission.send() must call beginUserTurn() before dispatching
+    // the new prompt so the residue is cleared.
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    // Simulate a previous turn that pushed a diff segment but never
+    // completed cleanly. pushInlineDiffSegment is the path tool diffs
+    // take into segmentMessages; equivalent leakage applies to any
+    // segment kind because the bug is in the cross-turn reset, not in
+    // any specific segment producer.
+    turnController.pushInlineDiffSegment(
+      '--- a/old.txt\n+++ b/old.txt\n@@\n-old\n+STALE-PREVIOUS-TURN-RESIDUE'
+    )
+    expect(turnController.segmentMessages.length).toBeGreaterThan(0)
+
+    turnController.beginUserTurn()
+    expect(turnController.segmentMessages).toEqual([])
+    expect(turnController.bufRef).toBe('')
+    expect(getTurnState().streamSegments).toEqual([])
+
+    onEvent({ payload: {}, type: 'message.start' } as any)
+    onEvent({ payload: { text: '10' }, type: 'message.delta' } as any)
+    onEvent({ payload: { text: '10' }, type: 'message.complete' } as any)
+
+    const stale = appended.find(
+      m => typeof m.text === 'string' && m.text.includes('STALE-PREVIOUS-TURN-RESIDUE')
+    )
+    expect(stale).toBeUndefined()
+
+    const assistantMsgs = appended.filter(m => m.role === 'assistant')
+    expect(assistantMsgs).toHaveLength(1)
+    expect(assistantMsgs[0]?.text).toBe('10')
+  })
 })

@@ -104,8 +104,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         }
 
         patchUiState({ busy: true, status: 'running…' })
-        turnController.bufRef = ''
-        turnController.interrupted = false
+        turnController.beginUserTurn()
 
         gw.request<PromptSubmitResponse>('prompt.submit', { session_id: sid, text: submitText }).catch((e: Error) => {
           if (isSessionBusyError(e)) {
