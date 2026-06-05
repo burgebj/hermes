@@ -1417,6 +1417,23 @@ def _profile_arg(hermes_home: str | None = None) -> str:
     return ""
 
 
+def _configured_gateway_service_wrapper() -> str:
+    """Return an optional gateway service wrapper command from config/env."""
+    wrapper = os.environ.get("HERMES_GATEWAY_SERVICE_WRAPPER") or ""
+    if not wrapper:
+        try:
+            cfg = read_raw_config() or {}
+            gateway_cfg = cfg.get("gateway") if isinstance(cfg, dict) else {}
+            if isinstance(gateway_cfg, dict):
+                wrapper = str(gateway_cfg.get("service_wrapper") or "")
+        except Exception:
+            wrapper = ""
+    wrapper = wrapper.strip()
+    if not wrapper:
+        return ""
+    return str(Path(wrapper).expanduser())
+
+
 def get_service_name() -> str:
     """Derive a systemd service name scoped to this HERMES_HOME.
 
@@ -3035,12 +3052,19 @@ def generate_launchd_plist() -> str:
         )
     )
 
-    # Build ProgramArguments array, including --profile when using a named profile
-    prog_args = [
+    # Build ProgramArguments array, including --profile when using a named profile.
+    # A service wrapper can perform credential/runtime preflight before execing
+    # the normal gateway command; preserve it when comparing or regenerating
+    # service definitions.
+    service_wrapper = _configured_gateway_service_wrapper()
+    prog_args = []
+    if service_wrapper:
+        prog_args.append(f"<string>{service_wrapper}</string>")
+    prog_args.extend([
         f"<string>{python_path}</string>",
         "<string>-m</string>",
         "<string>hermes_cli.main</string>",
-    ]
+    ])
     if profile_arg:
         for part in profile_arg.split():
             prog_args.append(f"<string>{part}</string>")
