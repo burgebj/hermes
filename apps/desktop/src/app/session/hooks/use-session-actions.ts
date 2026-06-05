@@ -319,6 +319,12 @@ export function useSessionActions({
       })
       setSessionStartedAt(null)
       setTurnStartedAt(null)
+      setCurrentModel('')
+      setCurrentProvider('')
+      setCurrentReasoningEffort('')
+      setCurrentServiceTier('')
+      setCurrentFastMode(false)
+      setYoloActive(false)
       // New chats inherit the current workspace.
       setCurrentCwd(getRememberedWorkspaceCwd())
       setCurrentBranch('')

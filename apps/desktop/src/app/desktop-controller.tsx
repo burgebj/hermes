@@ -651,6 +651,13 @@ export function DesktopController() {
     }
   }, [gatewayState, refreshCronJobs])
 
+  useEffect(() => {
+    if (gatewayState === 'open' && !activeSessionId && freshDraftReady) {
+      void refreshCurrentModel()
+      void refreshHermesConfig()
+    }
+  }, [activeSessionId, freshDraftReady, gatewayState, refreshCurrentModel, refreshHermesConfig])
+
   useRouteResume({
     activeSessionId,
     activeSessionIdRef,
