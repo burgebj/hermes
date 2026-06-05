@@ -7606,6 +7606,27 @@ class GatewayRunner:
                     # itself will produce the next user-facing message.
                     return ""
 
+        # Intercept messages that are responses to a pending interactive_prompt
+        # request on platforms without rich UIs.  The base-platform text
+        # fallback marks entries as awaiting text; here we resolve them.
+        try:
+            from tools import human_input_gateway as _hig_mod
+            _pending_hi = _hig_mod.get_pending_for_session(_quick_key)
+        except Exception:
+            _pending_hi = None
+        if _pending_hi is not None and _hig_mod.is_awaiting_text(_pending_hi.prompt_id):
+            _raw_hi_reply = (event.text or "").strip()
+            if _raw_hi_reply and not _raw_hi_reply.startswith("/"):
+                _hi_resolved = _hig_mod.resolve_text_response(
+                    _pending_hi.prompt_id, _raw_hi_reply,
+                )
+                if _hi_resolved:
+                    logger.info(
+                        "Gateway intercepted interactive_prompt text response (session=%s, id=%s)",
+                        _quick_key, _pending_hi.prompt_id,
+                    )
+                    return ""
+
         # Intercept messages that are responses to a pending /reload-mcp
         # (or future) slash-confirm prompt.  Recognized confirm replies are
         # /approve, /always, /cancel (plus short aliases).  Anything else

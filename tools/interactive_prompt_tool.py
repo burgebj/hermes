@@ -430,6 +430,33 @@ def interactive_prompt_tool(
             ensure_ascii=False,
         )
 
+    # --- display_type validation ---
+    VALID_DISPLAY_TYPES = {"buttons"}
+    if display_type not in VALID_DISPLAY_TYPES:
+        return tool_error(
+            f"Unsupported display_type '{display_type}'. "
+            f"Must be one of {sorted(VALID_DISPLAY_TYPES)}."
+        )
+
+    # --- auth_policy validation ---
+    VALID_AUTH_POLICIES = {
+        "session_owner_only",
+        "any_allowed_user",
+        "any_allowed_role",
+        "any_allowed_user_or_role",
+    }
+    if auth_policy not in VALID_AUTH_POLICIES:
+        return tool_error(
+            f"Unsupported auth_policy '{auth_policy}'. "
+            f"Must be one of {sorted(VALID_AUTH_POLICIES)}."
+        )
+
+    # --- timeout validation ---
+    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds < 60 or timeout_seconds > 3600:
+        # Clamp to valid range instead of rejecting
+        clamped = max(60, min(3600, int(timeout_seconds or 900)))
+        timeout_seconds = clamped
+
     # --- delegate to platform callback ---
     try:
         result = callback(question, options, display_type, timeout_seconds, auth_policy)
@@ -443,7 +470,18 @@ def interactive_prompt_tool(
     if isinstance(result, HumanInputResult):
         return json.dumps(result.to_dict(), ensure_ascii=False)
 
-    # Fallback: result is already a dict or simple type
+    # Production-shaped gateway callbacks return JSON strings.  Detect and
+    # pass them through to avoid double-encoding (JSON string → JSON string
+    # literal).  Tests and direct registry invocations may return dicts.
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict):
+                return result  # already valid JSON — pass through unchanged
+        except (json.JSONDecodeError, ValueError):
+            pass  # not valid JSON; fall through to re-serialize
+
+    # Fallback: result is a dict or simple type
     return json.dumps(result, ensure_ascii=False)
 
 

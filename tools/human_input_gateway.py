@@ -341,6 +341,107 @@ def has_pending(session_key: str) -> bool:
         return any(_entries.get(cid) is not None for cid in ids)
 
 
+def get_pending_for_session(session_key: str) -> Optional[_HumanInputEntry]:
+    """Return the OLDEST pending entry for a session, or None.
+
+    Used by the text-fallback intercept in the gateway — when a prompt
+    is awaiting a free-form text response (because the platform has no
+    rich UI), the next user message in that session resolves the prompt
+    and unblocks the agent thread.
+    """
+    with _lock:
+        ids = _session_index.get(session_key) or []
+        for cid in ids:
+            entry = _entries.get(cid)
+            if entry is None:
+                continue
+            # Only return entries that are awaiting text (not yet resolved)
+            if not entry._resolved:
+                return entry
+    return None
+
+
+def mark_awaiting_text(prompt_id: str) -> bool:
+    """Mark a pending entry as expecting a free-form text reply.
+
+    Returns True if the entry was found and marked, False otherwise.
+    This is set by the base-platform text fallback in ``send_human_input``
+    so the gateway intercept knows to capture the next user message.
+    """
+    with _lock:
+        entry = _entries.get(prompt_id)
+    if entry is None:
+        return False
+    # Store a flag on the entry — reuse _resolved flag name with separate field
+    entry._awaiting_text = True  # type: ignore[attr-defined]
+    return True
+
+
+def is_awaiting_text(prompt_id: str) -> bool:
+    """Return True if this entry is awaiting a free-form text reply."""
+    with _lock:
+        entry = _entries.get(prompt_id)
+    if entry is None:
+        return False
+    return getattr(entry, "_awaiting_text", False)
+
+
+def resolve_text_response(prompt_id: str, text: str) -> bool:
+    """Resolve a pending entry with a free-form text response.
+
+    Interprets the text as either:
+      * A numeric index (1-based) into the options list
+      * A match against an option's label or value
+
+    Returns True if an entry was found and resolved, False otherwise.
+    """
+    with _lock:
+        entry = _entries.get(prompt_id)
+        if entry is None or entry._resolved:
+            return False
+        entry._resolved = True
+
+    text = text.strip()
+    choice_value = None
+
+    # Try numeric index
+    try:
+        idx = int(text) - 1
+        if 0 <= idx < len(entry.options):
+            choice_value = entry.options[idx].get("value")
+    except (ValueError, TypeError):
+        pass
+
+    # Try label/value match
+    if choice_value is None:
+        for opt in entry.options:
+            if text.lower() == opt.get("label", "").lower():
+                choice_value = opt.get("value")
+                break
+            if text.lower() == opt.get("value", "").lower():
+                choice_value = opt.get("value")
+                break
+
+    # If no match, use the raw text as the choice
+    if choice_value is None:
+        choice_value = text
+
+    # Reject modal-only options on text fallback — resolve as text
+    for opt in entry.options:
+        if opt.get("value") == choice_value and opt.get("action") == "modal":
+            # Can't collect modal fields via text; treat as a return with
+            # the raw text value instead.
+            choice_value = text
+            break
+
+    entry.result = HumanInputResult(
+        status="selected",
+        choice=choice_value,
+    )
+    entry.event.set()
+    return True
+
+
 def clear_session(session_key: str) -> int:
     """Cancel every pending entry for a session.
 

@@ -2515,7 +2515,7 @@ class BasePlatformAdapter(ABC):
             label = opt.get("label", f"Option {i}")
             desc = opt.get("description", "")
             action = opt.get("action", "return")
-            suffix = " (opens form)" if action == "modal" else ""
+            suffix = " (opens form — not available on this platform)" if action == "modal" else ""
             line = f"  {i}. {label}{suffix}"
             if desc:
                 line += f" — {desc}"
@@ -2523,6 +2523,16 @@ class BasePlatformAdapter(ABC):
         lines.append("")
         lines.append("Reply with the number or option text.")
         text = "\n".join(lines)
+
+        # Text fallback: mark this entry as awaiting text so the gateway
+        # text-intercept picks up the user's typed reply instead of hanging
+        # until timeout.
+        try:
+            from tools.human_input_gateway import mark_awaiting_text as _mark_text
+            _mark_text(prompt_id)
+        except Exception:
+            pass
+
         return await self.send(
             chat_id=chat_id,
             content=text,

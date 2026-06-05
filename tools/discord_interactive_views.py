@@ -187,9 +187,15 @@ if discord is not None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             """Check whether *interaction.user* may respond to this prompt.
 
-            ``session_owner_only`` restricts to the user who originated the
-            session.  All other policies fall through to the generic user/role
-            allowlist check.
+            Each policy is enforced independently:
+
+              * ``session_owner_only`` — restricts to the user who originated
+                the session.
+              * ``any_allowed_user`` — only the user allowlist is consulted;
+                roles are ignored even if present.
+              * ``any_allowed_role`` — only the role allowlist is consulted;
+                user ID matches are ignored.
+              * ``any_allowed_user_or_role`` — user OR role allowlist (union).
             """
             if (
                 self.auth_policy == "session_owner_only"
@@ -197,6 +203,32 @@ if discord is not None:
             ):
                 return str(interaction.user.id) == str(self.origin_user_id)
 
+            # Policy-specific checks for the remaining three policies.
+            if self.auth_policy == "any_allowed_user":
+                # Only user allowlist — ignore roles entirely.
+                user_set = self.allowed_user_ids or set()
+                if not user_set:
+                    return True  # no-allowlist deployment
+                try:
+                    return str(interaction.user.id) in user_set
+                except AttributeError:
+                    return False
+
+            if self.auth_policy == "any_allowed_role":
+                # Only role allowlist — ignore user IDs entirely.
+                role_set = self.allowed_role_ids or set()
+                if not role_set:
+                    return True  # no-allowlist deployment
+                roles_attr = getattr(interaction.user, "roles", None)
+                if roles_attr is None:
+                    return False  # fail closed (DM context)
+                try:
+                    user_role_ids = {getattr(r, "id", None) for r in roles_attr}
+                except TypeError:
+                    return False
+                return bool(user_role_ids & role_set)
+
+            # any_allowed_user_or_role — union of user and role allowlists.
             return _component_check_auth(
                 interaction,
                 self.allowed_user_ids,
@@ -536,7 +568,8 @@ if discord is not None:
                             import os
                             import uuid
 
-                            cache_dir = os.path.expanduser("~/.hermes/cache/uploads")
+                            from hermes_constants import get_hermes_home
+                            cache_dir = os.path.join(get_hermes_home(), "cache", "uploads")
                             os.makedirs(cache_dir, exist_ok=True)
                             ext = os.path.splitext(att.filename)[1] or ".bin"
                             cached_path = os.path.join(
