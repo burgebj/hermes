@@ -28,6 +28,7 @@ const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = requ
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
+const { applyDashboardWebDist, resolveDashboardWebDist } = require('./web-dist.cjs')
 const {
   authModeFromStatus,
   buildGatewayWsUrl,
@@ -4222,19 +4223,18 @@ async function spawnPoolBackend(profile, entry) {
   const dashboardArgs = ['--profile', profile, 'dashboard', '--no-open', '--host', '127.0.0.1', '--port', String(port)]
   const backend = await ensureRuntime(resolveHermesBackend(dashboardArgs))
   const hermesCwd = resolveHermesCwd()
-  const webDist = resolveWebDist()
+  const webDist = resolveDashboardWebDist(APP_ROOT)
 
   rememberLog(`Starting Hermes backend for profile "${profile}" via ${backend.label}`)
 
   const child = spawn(backend.command, backend.args, {
     cwd: hermesCwd,
-    env: {
+    env: applyDashboardWebDist({
       ...process.env,
       HERMES_HOME,
       ...backend.env,
-      HERMES_DASHBOARD_SESSION_TOKEN: token,
-      HERMES_WEB_DIST: webDist
-    },
+      HERMES_DASHBOARD_SESSION_TOKEN: token
+    }, webDist),
     shell: backend.shell,
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -4354,14 +4354,14 @@ async function startHermes() {
     await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
     const backend = await ensureRuntime(resolveHermesBackend(dashboardArgs))
     const hermesCwd = resolveHermesCwd()
-    const webDist = resolveWebDist()
+    const webDist = resolveDashboardWebDist(APP_ROOT)
 
     await advanceBootProgress('backend.spawn', `Starting Hermes backend via ${backend.label}`, 84)
     rememberLog(`Starting Hermes backend via ${backend.label}`)
 
     hermesProcess = spawn(backend.command, backend.args, {
       cwd: hermesCwd,
-      env: {
+      env: applyDashboardWebDist({
         ...process.env,
         // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
         // resolves to the SAME location our resolveHermesHome() picked. Without
@@ -4373,9 +4373,8 @@ async function startHermes() {
         // can't reliably do that, so we set it inline for every spawn.
         HERMES_HOME,
         ...backend.env,
-        HERMES_DASHBOARD_SESSION_TOKEN: token,
-        HERMES_WEB_DIST: webDist
-      },
+        HERMES_DASHBOARD_SESSION_TOKEN: token
+      }, webDist),
       shell: backend.shell,
       stdio: ['ignore', 'pipe', 'pipe']
     })
