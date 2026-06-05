@@ -825,3 +825,143 @@ termux = ["rich>=14"]
 
     assert hm._load_installable_optional_extras(group="all") == ["mcp"]
     assert hm._load_installable_optional_extras(group="termux-all") == ["termux", "mcp"]
+
+
+class TestCmdUpdateTermuxExtrasGroup:
+    """_cmd_update_impl selects the correct extras group on Termux."""
+
+    @patch("shutil.which", return_value="/usr/bin/uv")
+    @patch("subprocess.run")
+    def test_uv_branch_termux_passes_termux_all(
+        self, mock_run, _mock_which, mock_args, monkeypatch
+    ):
+        from hermes_cli import main as hm
+
+        mock_run.side_effect = _make_run_side_effect(
+            branch="main", verify_ok=True, commit_count="1"
+        )
+        monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: True)
+        monkeypatch.setattr(hm, "_is_android_python", lambda: False)
+
+        recorded = {}
+
+        def fake_install(cmd_prefix, *, env=None, group="all"):
+            recorded["cmd_prefix"] = list(cmd_prefix)
+            recorded["group"] = group
+
+        monkeypatch.setattr(
+            hm,
+            "_install_python_dependencies_with_optional_fallback",
+            fake_install,
+        )
+
+        hm.cmd_update(mock_args)
+
+        assert recorded.get("group") == "termux-all"
+        assert recorded.get("cmd_prefix") == ["/usr/bin/uv", "pip"]
+
+    @patch("shutil.which", return_value="/usr/bin/uv")
+    @patch("subprocess.run")
+    def test_uv_branch_non_termux_passes_all(
+        self, mock_run, _mock_which, mock_args, monkeypatch
+    ):
+        from hermes_cli import main as hm
+
+        mock_run.side_effect = _make_run_side_effect(
+            branch="main", verify_ok=True, commit_count="1"
+        )
+        monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: False)
+
+        recorded = {}
+
+        def fake_install(cmd_prefix, *, env=None, group="all"):
+            recorded["group"] = group
+
+        monkeypatch.setattr(
+            hm,
+            "_install_python_dependencies_with_optional_fallback",
+            fake_install,
+        )
+
+        hm.cmd_update(mock_args)
+
+        assert recorded.get("group") == "all"
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_pip_branch_termux_passes_termux_all(
+        self, mock_run, _mock_which, mock_args, monkeypatch
+    ):
+        import subprocess as sp
+        from hermes_cli import main as hm
+
+        base_side = _make_run_side_effect(
+            branch="main", verify_ok=True, commit_count="1"
+        )
+
+        def combined(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "pip" in joined and "--version" in joined:
+                return sp.CompletedProcess(cmd, 0, stdout="pip 24.0\n", stderr="")
+            if "ensurepip" in joined:
+                return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return base_side(cmd, **kwargs)
+
+        mock_run.side_effect = combined
+        monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: True)
+        monkeypatch.setattr(hm, "_is_android_python", lambda: False)
+        monkeypatch.setattr(hm, "_ensure_uv_for_termux", lambda pip_cmd: None)
+
+        recorded = {}
+
+        def fake_install(cmd_prefix, *, env=None, group="all"):
+            recorded["group"] = group
+
+        monkeypatch.setattr(
+            hm,
+            "_install_python_dependencies_with_optional_fallback",
+            fake_install,
+        )
+
+        hm.cmd_update(mock_args)
+
+        assert recorded.get("group") == "termux-all"
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_pip_branch_non_termux_passes_all(
+        self, mock_run, _mock_which, mock_args, monkeypatch
+    ):
+        import subprocess as sp
+        from hermes_cli import main as hm
+
+        base_side = _make_run_side_effect(
+            branch="main", verify_ok=True, commit_count="1"
+        )
+
+        def combined(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "pip" in joined and "--version" in joined:
+                return sp.CompletedProcess(cmd, 0, stdout="pip 24.0\n", stderr="")
+            if "ensurepip" in joined:
+                return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return base_side(cmd, **kwargs)
+
+        mock_run.side_effect = combined
+        monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: False)
+        monkeypatch.setattr(hm, "_ensure_uv_for_termux", lambda pip_cmd: None)
+
+        recorded = {}
+
+        def fake_install(cmd_prefix, *, env=None, group="all"):
+            recorded["group"] = group
+
+        monkeypatch.setattr(
+            hm,
+            "_install_python_dependencies_with_optional_fallback",
+            fake_install,
+        )
+
+        hm.cmd_update(mock_args)
+
+        assert recorded.get("group") == "all"
