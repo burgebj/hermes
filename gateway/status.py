@@ -643,9 +643,12 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     live_cmdline = _read_process_cmdline(existing_pid)
                     if live_cmdline is not None or not _record_looks_like_gateway(existing):
                         stale = True
-                # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
-                # processes still appear alive to _pid_exists but are not
-                # actually running. Treat them as stale so --replace works.
+                # Check if process is stopped (Ctrl+Z / SIGTSTP) or a zombie
+                # awaiting wait(2).  Both still satisfy ``_pid_exists`` because
+                # the kernel keeps the PID slot allocated, but neither is doing
+                # any work, so the lock must be treated as stale or future
+                # restarts deadlock waiting for a process that will never run
+                # again (issue #26651).
                 if not stale:
                     try:
                         _proc_status = Path(f"/proc/{existing_pid}/status")
@@ -653,7 +656,9 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                             for _line in _proc_status.read_text(encoding="utf-8").splitlines():
                                 if _line.startswith("State:"):
                                     _state = _line.split()[1]
-                                    if _state in {"T", "t"}:  # stopped or tracing stop
+                                    # T/t: stopped or tracing stop.
+                                    # Z/z: zombie / dead awaiting reap.
+                                    if _state in {"T", "t", "Z", "z"}:
                                         stale = True
                                     break
                     except (OSError, PermissionError):

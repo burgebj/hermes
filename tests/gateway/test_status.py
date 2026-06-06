@@ -531,6 +531,88 @@ class TestScopedLocks:
         assert acquired is False
         assert existing["pid"] == 99999
 
+    @staticmethod
+    def _install_fake_proc_state(monkeypatch, target_pid: int, state_line: str) -> None:
+        """Make ``Path('/proc/<target_pid>/status').read_text()`` return
+        a synthetic block with the requested ``State:`` line, leaving
+        every other Path I/O (the test's own lock file etc.) untouched.
+        """
+        _proc_status = f"/proc/{target_pid}/status"
+        real_exists = status.Path.exists
+        real_read_text = status.Path.read_text
+
+        def fake_exists(self):
+            if str(self) == _proc_status:
+                return True
+            return real_exists(self)
+
+        def fake_read_text(self, encoding=None, errors=None):
+            if str(self) == _proc_status:
+                return f"Name:\tpython\n{state_line}\nTgid:\t{target_pid}\n"
+            kwargs = {}
+            if encoding is not None:
+                kwargs["encoding"] = encoding
+            if errors is not None:
+                kwargs["errors"] = errors
+            return real_read_text(self, **kwargs)
+
+        monkeypatch.setattr(status.Path, "exists", fake_exists)
+        monkeypatch.setattr(status.Path, "read_text", fake_read_text)
+
+    def test_acquire_scoped_lock_treats_zombie_pid_holder_as_stale(self, tmp_path, monkeypatch):
+        """Linux regression: zombie/dead processes are not eligible owners.
+
+        ``_pid_exists`` (psutil) returns True for ``Z``/``z`` state processes
+        because the kernel keeps the PID slot allocated until the parent
+        reaps the child.  A zombie is not running and cannot service any
+        platform — leaving its lock in place forces every subsequent
+        ``gateway run`` to fall back to ``--replace`` (issue #26651).
+        """
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 2611,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_looks_like_gateway_process", lambda pid: True)
+        self._install_fake_proc_state(monkeypatch, 2611, "State:\tZ (zombie)")
+
+        acquired, _ = status.acquire_scoped_lock(
+            "telegram-bot-token", "secret", metadata={"platform": "telegram"},
+        )
+
+        assert acquired is True, "zombie-held lock must be reclaimable without --replace"
+        payload = json.loads(lock_path.read_text())
+        assert payload["pid"] == os.getpid()
+
+    def test_acquire_scoped_lock_treats_stopped_pid_holder_as_stale(self, tmp_path, monkeypatch):
+        """Pre-existing T/t coverage — kept alongside the zombie case so a
+        regression that drops one state from the set is obvious."""
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 4242,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_looks_like_gateway_process", lambda pid: True)
+        self._install_fake_proc_state(monkeypatch, 4242, "State:\tT (stopped)")
+
+        acquired, _ = status.acquire_scoped_lock(
+            "telegram-bot-token", "secret", metadata={"platform": "telegram"},
+        )
+
+        assert acquired is True
+
     def test_acquire_scoped_lock_replaces_stale_record(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
         lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
