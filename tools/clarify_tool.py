@@ -49,6 +49,12 @@ def clarify_tool(
         if not isinstance(choices, list):
             return tool_error("choices must be a list of strings.")
         choices = [str(c).strip() for c in choices if str(c).strip()]
+        if len(choices) < 2:
+            return tool_error(
+                '"choices" needs at least 2 options, but got '
+                f'{len(choices)}. If you intended an open-ended '
+                'question, omit the "choices" parameter entirely.'
+            )
         if len(choices) > MAX_CHOICES:
             choices = choices[:MAX_CHOICES]
         if not choices:
@@ -112,11 +118,13 @@ CLARIFY_SCHEMA = {
             "choices": {
                 "type": "array",
                 "items": {"type": "string"},
+                "minItems": 2,
                 "maxItems": MAX_CHOICES,
                 "description": (
                     "Up to 4 answer choices. Omit this parameter entirely to "
-                    "ask an open-ended question. When provided, the UI "
-                    "automatically appends an 'Other (type your answer)' option."
+                    "ask an open-ended question. When provided, at least 2 "
+                    "choices are required. The UI automatically appends an "
+                    "'Other (type your answer)' option."
                 ),
             },
         },
