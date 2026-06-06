@@ -391,6 +391,18 @@ class TestResolveDeliveryTarget:
         platforms = sorted(t["platform"] for t in targets)
         assert platforms == ["discord", "telegram"]
 
+    def test_whatsapp_home_channel_resolves_from_env(self, monkeypatch):
+        """deliver='whatsapp' uses WHATSAPP_HOME_CHANNEL like direct sends."""
+        from cron.scheduler import _resolve_delivery_target
+
+        monkeypatch.setenv("WHATSAPP_HOME_CHANNEL", "15551234567@s.whatsapp.net")
+
+        assert _resolve_delivery_target({"deliver": "whatsapp", "origin": None}) == {
+            "platform": "whatsapp",
+            "chat_id": "15551234567@s.whatsapp.net",
+            "thread_id": None,
+        }
+
     def test_empty_list_form_deliver_resolves_to_local(self):
         """deliver=[] is treated as local (no delivery)."""
         from cron.scheduler import _resolve_delivery_targets
@@ -408,6 +420,7 @@ class TestRoutingIntents:
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
         monkeypatch.setenv("SLACK_HOME_CHANNEL", "C333")
+        monkeypatch.setenv("WHATSAPP_HOME_CHANNEL", "15551234567@s.whatsapp.net")
         # Sanity: platforms without the env var must NOT appear in the expansion.
         monkeypatch.delenv("SIGNAL_HOME_CHANNEL", raising=False)
         monkeypatch.delenv("MATRIX_HOME_ROOM", raising=False)
@@ -418,6 +431,7 @@ class TestRoutingIntents:
         assert "telegram" in platforms
         assert "discord" in platforms
         assert "slack" in platforms
+        assert "whatsapp" in platforms
         assert "signal" not in platforms
         assert "matrix" not in platforms
 
@@ -448,7 +462,8 @@ class TestRoutingIntents:
                     "SIGNAL_HOME_CHANNEL", "MATRIX_HOME_ROOM", "MATTERMOST_HOME_CHANNEL",
                     "SMS_HOME_CHANNEL", "EMAIL_HOME_ADDRESS", "DINGTALK_HOME_CHANNEL",
                     "FEISHU_HOME_CHANNEL", "WECOM_HOME_CHANNEL", "WEIXIN_HOME_CHANNEL",
-                    "BLUEBUBBLES_HOME_CHANNEL", "QQBOT_HOME_CHANNEL", "QQ_HOME_CHANNEL"):
+                    "BLUEBUBBLES_HOME_CHANNEL", "QQBOT_HOME_CHANNEL", "QQ_HOME_CHANNEL",
+                    "WHATSAPP_HOME_CHANNEL"):
             monkeypatch.delenv(var, raising=False)
 
         assert _resolve_delivery_targets({"deliver": "all", "origin": None}) == []
