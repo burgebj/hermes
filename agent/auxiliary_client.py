@@ -3387,6 +3387,14 @@ def resolve_provider_client(
             return CodexAuxiliaryClient(client_obj, final_model_str)
         # Anthropic-wire endpoints: rewrap plain OpenAI clients so
         # chat.completions.create() is translated to /v1/messages.
+        # EXCEPTION: vision tasks on Kimi Coding should stay on OpenAI wire
+        # because /v1/chat/completions supports image_url while the Anthropic
+        # Messages translation does not (#17076).
+        if is_vision and base_url_str and "api.kimi.com" in base_url_str and "/coding" in base_url_str:
+            logger.debug(
+                "resolve_provider_client: skipping Anthropic wrap for Kimi Coding "
+                "vision task (base_url=%s)", base_url_str[:60])
+            return client_obj
         return _maybe_wrap_anthropic(
             client_obj, final_model_str, api_key_str, base_url_str, api_mode,
         )
@@ -4082,6 +4090,7 @@ def resolve_vision_provider_client(
             explicit_base_url=resolved_base_url,
             explicit_api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            is_vision=True,
         )
         if client is None:
             return provider_for_base_override, None, None
@@ -4639,6 +4648,14 @@ def _resolve_task_provider_model(
         cfg_provider, cfg_base_url = _expand_direct_api_alias(cfg_provider, cfg_base_url)
 
     if base_url:
+        # When base_url is passed explicitly but api_key is not, fall back to
+        # the task config so that vision tasks with explicit base_url still
+        # pick up the configured api_key (e.g. auxiliary.vision.api_key).
+        if api_key is None and task:
+            task_config = _get_auxiliary_task_config(task)
+            cfg_api_key = str(task_config.get("api_key", "")).strip() or None
+            if cfg_api_key:
+                api_key = cfg_api_key
         return "custom", resolved_model, base_url, api_key, resolved_api_mode
     if provider:
         return provider, resolved_model, base_url, api_key, resolved_api_mode
