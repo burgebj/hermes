@@ -2864,9 +2864,13 @@ class AIAgent:
 
         Called by the gateway timeout handler to report what the agent was doing
         when it was killed, and by the periodic "still working" notifications.
+
+        When this agent is delegating to active subagents, prefer the freshest
+        child activity so parent-level inactivity monitors (cron/gateway) do not
+        mistake ongoing delegated work for an idle parent.
         """
         elapsed = time.time() - self._last_activity_ts
-        return {
+        summary = {
             "last_activity_ts": self._last_activity_ts,
             "last_activity_desc": self._last_activity_desc,
             "seconds_since_activity": round(elapsed, 1),
@@ -2876,6 +2880,50 @@ class AIAgent:
             "budget_used": self.iteration_budget.used,
             "budget_max": self.iteration_budget.max_total,
         }
+
+        freshest_child = None
+        freshest_child_ts = self._last_activity_ts
+        with self._active_children_lock:
+            children_copy = list(self._active_children)
+
+        for child in children_copy:
+            if not hasattr(child, "get_activity_summary"):
+                continue
+            try:
+                child_summary = child.get_activity_summary()
+            except Exception:
+                continue
+            child_ts = child_summary.get("last_activity_ts")
+            if child_ts is None:
+                continue
+            try:
+                child_ts = float(child_ts)
+            except (TypeError, ValueError):
+                continue
+            if child_ts > freshest_child_ts:
+                freshest_child_ts = child_ts
+                freshest_child = child_summary
+
+        if freshest_child is not None:
+            child_desc = freshest_child.get("last_activity_desc", "unknown")
+            summary["last_activity_ts"] = freshest_child.get(
+                "last_activity_ts", summary["last_activity_ts"]
+            )
+            child_idle = freshest_child.get(
+                "seconds_since_activity", summary["seconds_since_activity"]
+            )
+            try:
+                summary["seconds_since_activity"] = round(float(child_idle), 1)
+            except (TypeError, ValueError):
+                pass
+            if self._current_tool == "delegate_task":
+                summary["last_activity_desc"] = f"delegate_task child active: {child_desc}"
+            else:
+                summary["last_activity_desc"] = f"child active: {child_desc}"
+            if summary["current_tool"] is None:
+                summary["current_tool"] = freshest_child.get("current_tool")
+
+        return summary
 
     def shutdown_memory_provider(self, messages: list = None) -> None:
         """Shut down the memory provider and context engine — call at actual session boundaries.
