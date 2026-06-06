@@ -204,9 +204,8 @@ def _get_command_timeout() -> int:
     """
     global _cached_command_timeout, _command_timeout_resolved
     if _command_timeout_resolved:
-        return _cached_command_timeout  # type: ignore[return-value]
+        return _cached_command_timeout or DEFAULT_COMMAND_TIMEOUT
 
-    _command_timeout_resolved = True
     result = DEFAULT_COMMAND_TIMEOUT
     try:
         from hermes_cli.config import read_raw_config
@@ -217,6 +216,7 @@ def _get_command_timeout() -> int:
     except Exception as e:
         logger.debug("Could not read command_timeout from config: %s", e)
     _cached_command_timeout = result
+    _command_timeout_resolved = True
     return result
 
 
@@ -1896,7 +1896,7 @@ def _run_browser_command(
         Parsed JSON response from agent-browser
     """
     if timeout is None:
-        timeout = _get_command_timeout()
+        timeout = _get_command_timeout() or DEFAULT_COMMAND_TIMEOUT
     args = args or []
 
     # Build the command
@@ -2379,7 +2379,8 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         session_info["_first_nav"] = False
         _maybe_start_recording(nav_session_key)
 
-    result = _run_browser_command(nav_session_key, "open", [url], timeout=max(_get_command_timeout(), 60))
+    command_timeout = _get_command_timeout() or DEFAULT_COMMAND_TIMEOUT
+    result = _run_browser_command(nav_session_key, "open", [url], timeout=max(command_timeout, 60))
 
     # Remember which session served this nav so snapshot/click/fill/...
     # on the same task_id hit it (critical when hybrid routing has both a

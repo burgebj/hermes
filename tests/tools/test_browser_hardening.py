@@ -114,6 +114,33 @@ class TestCommandTimeoutCache:
             _get_command_timeout()
         mock_read.assert_called_once()
 
+    def test_stale_resolved_flag_without_cached_value_uses_default(self):
+        import tools.browser_tool as bt
+
+        bt._command_timeout_resolved = True
+        bt._cached_command_timeout = None
+
+        assert bt._get_command_timeout() == bt.DEFAULT_COMMAND_TIMEOUT
+
+    def test_browser_navigate_handles_missing_cached_timeout(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch("tools.browser_tool._get_command_timeout", return_value=None), \
+             patch("tools.browser_tool._is_local_backend", return_value=True), \
+             patch("tools.browser_tool._is_camofox_mode", return_value=False), \
+             patch("tools.browser_tool.check_website_access", return_value=None), \
+             patch("tools.browser_tool._get_session_info", return_value={"_first_nav": False}), \
+             patch(
+                 "tools.browser_tool._run_browser_command",
+                 return_value={"success": True, "data": {"url": "https://example.com", "title": "Example"}},
+             ) as run_cmd:
+            result = json.loads(bt.browser_navigate("https://example.com", task_id="task-1"))
+
+        assert result["success"] is True
+        assert run_cmd.call_args_list[0].args == ("task-1", "open", ["https://example.com"])
+        assert run_cmd.call_args_list[0].kwargs["timeout"] == 60
+
 
 # ---------------------------------------------------------------------------
 # Caching: _discover_homebrew_node_dirs
