@@ -1,0 +1,6 @@
+name: burn_router
+kind: standalone
+version: 0.1.0
+description: Optional observe-only Burn/Rust tool-router telemetry hook
+provides_hooks:
+  - pre_llm_call
