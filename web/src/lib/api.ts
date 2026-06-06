@@ -34,6 +34,8 @@ declare global {
 }
 let _sessionToken: string | null = null;
 const SESSION_HEADER = "X-Hermes-Session-Token";
+// Track whether we've already triggered an auth-reload to avoid infinite loops.
+let _authReloadTriggered = false;
 
 function setSessionHeader(headers: Headers, token: string): void {
   if (!headers.has(SESSION_HEADER)) {
@@ -134,6 +136,14 @@ export async function fetchJSON<T>(
     }
   }
   if (!res.ok) {
+    // If the session token is stale (server restarted), reload the page
+    // once to pick up the fresh token from the new HTML response.
+    if (res.status === 401 && !_authReloadTriggered) {
+      _authReloadTriggered = true;
+      window.location.reload();
+      // Never resolves — the browser is navigating away.
+      return new Promise(() => {});
+    }
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);
   }
