@@ -9136,6 +9136,17 @@ class HermesCLI:
             if not payload:
                 _cprint("  Usage: /queue <prompt>")
             else:
+                # Truncate payloads that would exceed the filesystem's 255-byte
+                # filename limit when used as a temp file path in the paste/ANSI
+                # pipeline (ENAMETOOLONG on macOS/Linux).
+                MAX_PAYLOAD = 4000
+                if len(payload) > MAX_PAYLOAD:
+                    truncated = payload[:MAX_PAYLOAD]
+                    _cprint(
+                        f"  ⚠ Queued message truncated from {len(payload)} to {MAX_PAYLOAD} chars "
+                        f"(avoids filesystem filename limit)"
+                    )
+                    payload = truncated
                 self._pending_input.put(payload)
                 if self._agent_running:
                     _cprint(f"  Queued for the next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
@@ -15308,6 +15319,15 @@ class HermesCLI:
                         except Exception:
                             pass  # Non-fatal — don't break the main loop
 
+                except OSError as e:
+                    if getattr(e, 'errno', None) == 63:  # ENAMETOOLONG
+                        _cprint(
+                            f"  ⚠ Message too long — a {len(str(user_input))} char input "
+                            f"exceeded the filesystem's filename limit.\n"
+                            f"  Use a shorter message, or type it directly (not via /queue)."
+                        )
+                    else:
+                        logger.warning("process_loop unhandled OS error (msg may be lost): %s", e)
                 except Exception as e:
                     logger.warning("process_loop unhandled error (msg may be lost): %s", e)
         
