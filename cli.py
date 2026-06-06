@@ -5116,9 +5116,9 @@ class HermesCLI:
                 resolved_id = self.session_id
             if resolved_id and resolved_id != self.session_id:
                 ChatConsole().print(
-                    f"[{_DIM}]Session {_escape(self.session_id)} was compressed into "
+                    f"[dim]Session {_escape(self.session_id)} was compressed into "
                     f"{_escape(resolved_id)}; resuming the descendant with your "
-                    f"transcript.[/]"
+                    f"transcript.[/dim]"
                 )
                 self.session_id = resolved_id
                 resolved_meta = self._session_db.get_session(self.session_id)
@@ -5398,7 +5398,7 @@ class HermesCLI:
             if quiet:
                 print(msg, file=sys.stderr)
             else:
-                self._console_print(f"[{_DIM}]{_escape(msg)}[/]")
+                self._console_print(f"[dim]{_escape(msg)}[/dim]")
             return
 
         try:
@@ -5408,7 +5408,7 @@ class HermesCLI:
             if quiet:
                 print(msg, file=sys.stderr)
             else:
-                self._console_print(f"[{_DIM}]{_escape(msg)}[/]")
+                self._console_print(f"[dim]{_escape(msg)}[/dim]")
             return
 
         # Retarget the terminal/code-exec tools to match the process cwd.
@@ -5418,7 +5418,7 @@ class HermesCLI:
         if quiet:
             print(msg, file=sys.stderr)
         else:
-            self._console_print(f"[{_DIM}]{_escape(msg)}[/]")
+            self._console_print(f"[dim]{_escape(msg)}[/dim]")
 
     def _preload_resumed_session(self) -> bool:
         """Load a resumed session's history from the DB early (before first chat).
@@ -9022,6 +9022,10 @@ class HermesCLI:
         elif canonical == "update":
             if self._handle_update_command():
                 return False
+        elif canonical == "version":
+            from hermes_cli.main import _print_version_info
+
+            _print_version_info(check_updates=True)
         elif canonical == "paste":
             self._handle_paste_command()
         elif canonical == "image":
