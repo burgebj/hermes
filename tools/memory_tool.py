@@ -674,30 +674,39 @@ MEMORY_SCHEMA = {
         "remove (delete -- old_text identifies it).\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["add", "replace", "remove"],
-                "description": "The action to perform."
+    "oneOf": [
+        # add action: requires action, target, content
+        {
+            "properties": {
+                "action": {"const": "add"},
+                "target": {"enum": ["memory", "user"]},
+                "content": {"type": "string", "description": "The entry content."},
             },
-            "target": {
-                "type": "string",
-                "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
-            },
-            "content": {
-                "type": "string",
-                "description": "The entry content. Required for 'add' and 'replace'."
-            },
-            "old_text": {
-                "type": "string",
-                "description": "Short unique substring identifying the entry to replace or remove."
-            },
+            "required": ["action", "target", "content"],
+            "additionalProperties": False,
         },
-        "required": ["action", "target"],
-    },
+        # replace action: requires action, target, old_text, content
+        {
+            "properties": {
+                "action": {"const": "replace"},
+                "target": {"enum": ["memory", "user"]},
+                "content": {"type": "string", "description": "The entry content."},
+                "old_text": {"type": "string", "description": "Short unique substring identifying the entry to replace."},
+            },
+            "required": ["action", "target", "old_text", "content"],
+            "additionalProperties": False,
+        },
+        # remove action: requires action, target, old_text
+        {
+            "properties": {
+                "action": {"const": "remove"},
+                "target": {"enum": ["memory", "user"]},
+                "old_text": {"type": "string", "description": "Short unique substring identifying the entry to remove."},
+            },
+            "required": ["action", "target", "old_text"],
+            "additionalProperties": False,
+        },
+    ],
 }
 
 
