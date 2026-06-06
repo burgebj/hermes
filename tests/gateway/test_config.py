@@ -882,3 +882,91 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+
+class TestSlackEnvTokenActivation:
+    """Regression coverage for #16682.
+
+    The post-a01e767b code path uses ``Platform.SLACK in config.platforms``
+    as a proxy for "user explicitly set enabled". That's wrong — yaml-bridged
+    keys (channel_prompts, require_mention, channel_skill_bindings, …) put
+    Platform.SLACK into config.platforms without ever touching the enabled
+    flag. SLACK_BOT_TOKEN must still activate the adapter in that case.
+    """
+
+    def test_yaml_bridged_keys_without_enabled_still_activate_on_env_token(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "slack:\n"
+            "  channel_prompts:\n"
+            '    "C01ABC": Code review mode\n',
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-env-token")
+
+        config = load_gateway_config()
+
+        slack = config.platforms[Platform.SLACK]
+        assert slack.enabled is True, (
+            "yaml has bridged slack keys but no explicit enabled — env token "
+            "must enable the adapter to preserve pre-#16682 behaviour"
+        )
+        assert slack.token == "xoxb-env-token"
+        assert slack.extra["channel_prompts"] == {"C01ABC": "Code review mode"}
+
+    def test_yaml_explicit_enabled_false_is_respected_under_env_token(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "platforms:\n"
+            "  slack:\n"
+            "    enabled: false\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-env-token")
+
+        config = load_gateway_config()
+
+        slack = config.platforms[Platform.SLACK]
+        assert slack.enabled is False, "explicit enabled: false must be honoured"
+        assert slack.token == "xoxb-env-token", "token still stored for skill use"
+
+    def test_env_only_setup_without_yaml_block_enables_slack(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-env-only")
+
+        config = load_gateway_config()
+
+        slack = config.platforms[Platform.SLACK]
+        assert slack.enabled is True
+        assert slack.token == "xoxb-env-only"
+
+    def test_yaml_explicit_enabled_true_remains_enabled(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "platforms:\n"
+            "  slack:\n"
+            "    enabled: true\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-env")
+
+        config = load_gateway_config()
+
+        slack = config.platforms[Platform.SLACK]
+        assert slack.enabled is True
+        assert slack.token == "xoxb-env"
