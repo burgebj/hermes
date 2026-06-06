@@ -23,7 +23,7 @@ from agent.codex_responses_adapter import _normalize_codex_response
 import run_agent
 from run_agent import AIAgent
 from agent.error_classifier import FailoverReason
-from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.prompt_builder import ARTIFACT_LIFECYCLE_GUIDANCE, DEFAULT_AGENT_IDENTITY
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +95,25 @@ def agent_with_memory_tool():
         )
         a.client = MagicMock()
         return a
+
+
+def _build_agent_with_tools(*tool_names: str) -> AIAgent:
+    """Build a minimal agent with the requested tools loaded."""
+    with (
+        patch("run_agent.get_tool_definitions", return_value=_make_tool_defs(*tool_names)),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.build_skills_system_prompt", return_value=""),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.client = MagicMock()
+        return agent
 
 
 def test_aiagent_reuses_existing_errors_log_handler():
@@ -1082,6 +1101,20 @@ class TestBuildSystemPrompt:
 
         prompt = agent._build_system_prompt()
         assert MEMORY_GUIDANCE not in prompt
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "patch"])
+    def test_artifact_guidance_absent_without_durable_write_tools(self, tool_name):
+        prompt = _build_agent_with_tools(tool_name)._build_system_prompt()
+        assert ARTIFACT_LIFECYCLE_GUIDANCE not in prompt
+
+    @pytest.mark.parametrize("tool_name", ["write_file", "skill_manage"])
+    def test_artifact_guidance_present_for_durable_write_tools(self, tool_name):
+        prompt = _build_agent_with_tools(tool_name)._build_system_prompt()
+        assert ARTIFACT_LIFECYCLE_GUIDANCE in prompt
+
+    def test_artifact_guidance_added_once_with_multiple_durable_write_tools(self):
+        prompt = _build_agent_with_tools("write_file", "skill_manage")._build_system_prompt()
+        assert prompt.count(ARTIFACT_LIFECYCLE_GUIDANCE) == 1
 
     def test_includes_datetime(self, agent):
         prompt = agent._build_system_prompt()

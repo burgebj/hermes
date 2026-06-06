@@ -27,6 +27,8 @@ import json
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
+    ARTIFACT_LIFECYCLE_GUIDANCE,
+    ARTIFACT_LIFECYCLE_TOOL_NAMES,
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
@@ -119,6 +121,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
     if "skill_manage" in agent.valid_tool_names:
         tool_guidance.append(SKILLS_GUIDANCE)
+    if ARTIFACT_LIFECYCLE_TOOL_NAMES.intersection(agent.valid_tool_names):
+        tool_guidance.append(ARTIFACT_LIFECYCLE_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see

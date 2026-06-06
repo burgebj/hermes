@@ -178,6 +178,18 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+ARTIFACT_LIFECYCLE_GUIDANCE = (
+    "When you create or materially update durable artifact sets that should survive "
+    "the session, follow existing project conventions for discoverability. If there "
+    "is an established artifact root, README, index, or ledger, record where future "
+    "sessions should look first. Keep source-of-truth outputs distinct from temporary "
+    "intermediates. Do not create extra bookkeeping for small one-off files. Do not "
+    "delete, archive, or reorganize existing files unless the user asked for cleanup "
+    "or the files are clearly temporary artifacts you created."
+)
+
+ARTIFACT_LIFECYCLE_TOOL_NAMES = frozenset({"write_file", "skill_manage"})
+
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
     "You have been assigned ONE task from "
