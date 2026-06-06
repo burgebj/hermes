@@ -9,6 +9,7 @@ import pytest
 
 import tools.skills_tool as skills_tool_module
 from tools.skills_tool import (
+    _classify_skill_source,
     _get_required_environment_variables,
     _parse_frontmatter,
     _parse_tags,
@@ -306,6 +307,119 @@ class TestFindAllSkills:
 
         assert [s["name"] for s in skills] == ["knowledge-brain"]
         assert skills[0]["category"] == "linked"
+
+
+# ---------------------------------------------------------------------------
+# _classify_skill_source
+# ---------------------------------------------------------------------------
+
+
+class TestClassifySkillSource:
+    """Trichotomy mirrors `hermes skills list`: hub | builtin | local."""
+
+    def test_hub_skill_returns_source_and_identifier(self):
+        hub = {
+            "picasso-creative": {
+                "source": "github",
+                "identifier": "cypres0099/bp-marketplace/plugins/bp-creative/skills/picasso-creative",
+            }
+        }
+        source, ident = _classify_skill_source("picasso-creative", hub, set())
+        assert source == "hub"
+        assert ident == (
+            "github: cypres0099/bp-marketplace/plugins/bp-creative/skills/picasso-creative"
+        )
+
+    def test_hub_skill_without_identifier_falls_back_to_adapter(self):
+        hub = {"odd-one": {"source": "clawhub", "identifier": ""}}
+        source, ident = _classify_skill_source("odd-one", hub, set())
+        assert source == "hub"
+        assert ident == "clawhub"
+
+    def test_builtin_skill_has_no_identifier(self):
+        source, ident = _classify_skill_source(
+            "hermes-honcho-memory", {}, {"hermes-honcho-memory"}
+        )
+        assert source == "builtin"
+        assert ident is None
+
+    def test_local_skill_has_no_identifier(self):
+        source, ident = _classify_skill_source("kanban-orchestrator", {}, set())
+        assert source == "local"
+        assert ident is None
+
+    def test_hub_wins_over_builtin_when_both_match(self):
+        """A skill installed via the hub that shadows a builtin reports as hub."""
+        hub = {"shadowed": {"source": "github", "identifier": "owner/repo/shadowed"}}
+        source, ident = _classify_skill_source("shadowed", hub, {"shadowed"})
+        assert source == "hub"
+        assert ident == "github: owner/repo/shadowed"
+
+
+# ---------------------------------------------------------------------------
+# _find_all_skills source annotation
+# ---------------------------------------------------------------------------
+
+
+class TestFindAllSkillsSourceAnnotation:
+    """_find_all_skills annotates each row with source + source_identifier."""
+
+    def test_local_skill_annotated(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), \
+             patch("tools.skills_tool._load_skill_source_index",
+                   return_value=({}, set())):
+            _make_skill(tmp_path, "kanban-orchestrator")
+            skills = _find_all_skills()
+
+        assert len(skills) == 1
+        assert skills[0]["source"] == "local"
+        assert skills[0]["source_identifier"] is None
+
+    def test_hub_skill_annotated(self, tmp_path):
+        hub = {
+            "picasso-creative": {
+                "source": "github",
+                "identifier": "cypres0099/bp-marketplace/plugins/bp-creative/skills/picasso-creative",
+            }
+        }
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), \
+             patch("tools.skills_tool._load_skill_source_index",
+                   return_value=(hub, set())):
+            _make_skill(tmp_path, "picasso-creative")
+            skills = _find_all_skills()
+
+        assert len(skills) == 1
+        assert skills[0]["source"] == "hub"
+        assert skills[0]["source_identifier"] == (
+            "github: cypres0099/bp-marketplace/plugins/bp-creative/skills/picasso-creative"
+        )
+
+    def test_builtin_skill_annotated(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), \
+             patch("tools.skills_tool._load_skill_source_index",
+                   return_value=({}, {"hermes-honcho-memory"})):
+            _make_skill(tmp_path, "hermes-honcho-memory")
+            skills = _find_all_skills()
+
+        assert len(skills) == 1
+        assert skills[0]["source"] == "builtin"
+        assert skills[0]["source_identifier"] is None
+
+    def test_mixed_set_classified_independently(self, tmp_path):
+        hub = {"picasso-creative": {"source": "github", "identifier": "o/r/picasso"}}
+        builtin = {"hermes-honcho-memory"}
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), \
+             patch("tools.skills_tool._load_skill_source_index",
+                   return_value=(hub, builtin)):
+            _make_skill(tmp_path, "picasso-creative")
+            _make_skill(tmp_path, "hermes-honcho-memory")
+            _make_skill(tmp_path, "kanban-orchestrator")
+            skills = _find_all_skills()
+
+        by_name = {s["name"]: s for s in skills}
+        assert by_name["picasso-creative"]["source"] == "hub"
+        assert by_name["hermes-honcho-memory"]["source"] == "builtin"
+        assert by_name["kanban-orchestrator"]["source"] == "local"
 
 
 # ---------------------------------------------------------------------------

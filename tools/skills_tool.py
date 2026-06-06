@@ -565,6 +565,52 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
+def _load_skill_source_index() -> Tuple[Dict[str, Dict[str, Any]], set]:
+    """Snapshot the hub lock file and builtin manifest for source classification.
+
+    Returns ``(hub_installed, builtin_names)``. Both are empty on any error
+    so source classification falls back to ``"local"`` rather than failing
+    the whole skills listing.
+    """
+    try:
+        from tools.skills_hub import HubLockFile
+        hub_installed = {e["name"]: e for e in HubLockFile().list_installed()}
+    except Exception as e:
+        logger.debug("Could not load hub lock file: %s", e)
+        hub_installed = {}
+
+    try:
+        from tools.skills_sync import _read_manifest
+        builtin_names = set(_read_manifest())
+    except Exception as e:
+        logger.debug("Could not load builtin skills manifest: %s", e)
+        builtin_names = set()
+
+    return hub_installed, builtin_names
+
+
+def _classify_skill_source(
+    name: str,
+    hub_installed: Dict[str, Dict[str, Any]],
+    builtin_names: set,
+) -> Tuple[str, Optional[str]]:
+    """Map a skill name to ``(source, source_identifier)``.
+
+    Mirrors the trichotomy ``hermes skills list`` uses (``hub`` | ``builtin``
+    | ``local``). For hub skills, returns a human-readable identifier like
+    ``"github: owner/repo/path"`` suitable for tooltip display.
+    """
+    hub_entry = hub_installed.get(name)
+    if hub_entry:
+        adapter = hub_entry.get("source") or "hub"
+        identifier = hub_entry.get("identifier") or ""
+        source_identifier = f"{adapter}: {identifier}" if identifier else adapter
+        return "hub", source_identifier
+    if name in builtin_names:
+        return "builtin", None
+    return "local", None
+
+
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     """Recursively find all skills in ~/.hermes/skills/ and external dirs.
 
@@ -574,7 +620,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
             filters out disabled skills.
 
     Returns:
-        List of skill metadata dicts (name, description, category).
+        List of skill metadata dicts with ``name``, ``description``,
+        ``category``, ``source`` (``"hub"`` | ``"builtin"`` | ``"local"``),
+        and ``source_identifier`` (non-null only for hub skills).
     """
     from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
 
@@ -583,6 +631,9 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
+
+    # Snapshot hub/builtin state once so each skill row is annotated cheaply.
+    hub_installed, builtin_names = _load_skill_source_index()
 
     # Scan local dir first, then external dirs (local takes precedence)
     dirs_to_scan = []
@@ -627,10 +678,15 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 category = _get_category_from_path(skill_md)
 
                 seen_names.add(name)
+                source, source_identifier = _classify_skill_source(
+                    name, hub_installed, builtin_names
+                )
                 skills.append({
                     "name": name,
                     "description": description,
                     "category": category,
+                    "source": source,
+                    "source_identifier": source_identifier,
                 })
 
             except (UnicodeDecodeError, PermissionError) as e:

@@ -580,6 +580,15 @@ function SkillRow({
           >
             {skill.name}
           </span>
+          {skill.source === "hub" && (
+            <Badge
+              tone="secondary"
+              className="text-[10px]"
+              title={skill.source_identifier ?? "Synced from a skills source"}
+            >
+              HUB
+            </Badge>
+          )}
         </div>
         <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2">
           {skill.description || noDescriptionLabel}

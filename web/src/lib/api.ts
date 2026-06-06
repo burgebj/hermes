@@ -1648,6 +1648,10 @@ export interface SkillInfo {
   description: string;
   category: string;
   enabled: boolean;
+  /** Provenance: `hub` (synced from a skills source), `builtin` (bundled with Hermes), `local` (hand-authored). Optional for backwards compatibility with older dashboards. */
+  source?: "hub" | "builtin" | "local";
+  /** Human-readable identifier for hub skills, e.g. `github: owner/repo/path`. Null for builtin/local. */
+  source_identifier?: string | null;
 }
 
 export interface ToolsetInfo {
