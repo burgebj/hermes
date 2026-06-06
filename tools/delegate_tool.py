@@ -1146,6 +1146,8 @@ def _build_child_agent(
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
+        max_api_retries=getattr(parent_agent, "max_api_retries", 3),
+        max_stream_retries=getattr(parent_agent, "max_stream_retries", 1),
         max_tokens=getattr(parent_agent, "max_tokens", None),
         reasoning_config=child_reasoning,
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
