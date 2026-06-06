@@ -8774,7 +8774,14 @@ class GatewayRunner:
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
+            # The max snippet length is configurable; 500 is the conservative default.
+            _max_len = 500
+            try:
+                _cfg = _load_gateway_config()
+                _max_len = int((_cfg.get("gateway") or {}).get("reply_snippet_max_length", 500))
+            except Exception:
+                pass
+            reply_snippet = event.reply_to_text[:_max_len]
             message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
 
         if "@" in message_text:

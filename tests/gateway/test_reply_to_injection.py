@@ -157,3 +157,35 @@ async def test_reply_snippet_truncated_to_500_chars():
     assert result is not None
     assert result.startswith('[Replying to: "' + "x" * 500 + '"]')
     assert "x" * 501 not in result
+
+
+@pytest.mark.asyncio
+async def test_reply_snippet_respects_configured_max_length(monkeypatch):
+    """When gateway.reply_snippet_max_length is set, the snippet uses that value."""
+    def _mock_cfg():
+        return {"gateway": {"reply_snippet_max_length": 200}}
+
+    monkeypatch.setattr(
+        "gateway.run._load_gateway_config",
+        _mock_cfg,
+    )
+
+    runner = _make_runner()
+    source = _source()
+    long_text = "x" * 800
+    event = MessageEvent(
+        text="follow-up",
+        source=source,
+        reply_to_message_id="42",
+        reply_to_text=long_text,
+    )
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result is not None
+    assert result.startswith('[Replying to: "' + "x" * 200 + '"]')
+    assert "x" * 201 not in result

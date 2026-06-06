@@ -520,6 +520,12 @@ session_reset:
 # explicitly want one shared "room brain" per group/channel.
 group_sessions_per_user: true
 
+# Maximum characters from a replied-to message to inject as context
+# in the [Replying to: "..."] prefix. Longer messages are truncated.
+# Default: 500.
+gateway:
+  reply_snippet_max_length: 500
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming
 # ─────────────────────────────────────────────────────────────────────────────
