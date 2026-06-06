@@ -11,6 +11,8 @@ set -euo pipefail
 #
 # Usage:
 #   bash scripts/setup_open_webui.sh
+#   bash scripts/setup_open_webui.sh --dry-run
+#   bash scripts/setup_open_webui.sh --yes
 #
 # Optional environment overrides:
 #   OPEN_WEBUI_PORT=8080
@@ -29,6 +31,7 @@ OPEN_WEBUI_HOST="${OPEN_WEBUI_HOST:-127.0.0.1}"
 OPEN_WEBUI_NAME="${OPEN_WEBUI_NAME:-Hermes Agent WebUI}"
 OPEN_WEBUI_ENABLE_SIGNUP="${OPEN_WEBUI_ENABLE_SIGNUP:-true}"
 OPEN_WEBUI_ENABLE_SERVICE="${OPEN_WEBUI_ENABLE_SERVICE:-auto}"
+OPEN_WEBUI_ASSUME_YES="${OPEN_WEBUI_ASSUME_YES:-false}"
 OPEN_WEBUI_VENV="${OPEN_WEBUI_VENV:-$HOME/.local/open-webui-venv}"
 OPEN_WEBUI_DATA_DIR="${OPEN_WEBUI_DATA_DIR:-$HOME/.local/share/open-webui/data}"
 HERMES_ENV_FILE="${HERMES_ENV_FILE:-$HOME/.hermes/.env}"
@@ -39,9 +42,116 @@ HERMES_API_MODEL_NAME="${HERMES_API_MODEL_NAME:-Hermes Agent}"
 HERMES_API_BASE_URL="http://${HERMES_API_CONNECT_HOST}:${HERMES_API_PORT}/v1"
 LAUNCHER_PATH="$HOME/.local/bin/start-open-webui-hermes.sh"
 LOG_DIR="$HOME/.hermes/logs"
+OPEN_WEBUI_DRY_RUN=false
 
 log() {
   printf '[open-webui-bootstrap] %s\n' "$*"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/setup_open_webui.sh [--dry-run] [--yes]
+
+Options:
+  --dry-run   Print planned file/env/service changes and exit.
+  --yes, -y   Apply without the interactive confirmation prompt.
+  --help, -h  Show this help text.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        OPEN_WEBUI_DRY_RUN=true
+        ;;
+      --yes|-y)
+        OPEN_WEBUI_ASSUME_YES=true
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+  done
+}
+
+is_truthy() {
+  case "$1" in
+    1|true|TRUE|yes|YES|y|Y|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+require_confirmation() {
+  local prompt="$1"
+
+  if is_truthy "$OPEN_WEBUI_ASSUME_YES"; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    echo "Refusing to apply changes without an interactive confirmation." >&2
+    echo "Re-run with --dry-run to preview or --yes to apply non-interactively." >&2
+    exit 1
+  fi
+
+  local answer
+  read -r -p "${prompt} [y/N] " answer
+  case "$answer" in
+    y|Y|yes|YES)
+      ;;
+    *)
+      log "Cancelled before making changes."
+      exit 0
+      ;;
+  esac
+}
+
+validate_service_mode() {
+  case "$OPEN_WEBUI_ENABLE_SERVICE" in
+    true|auto|false)
+      ;;
+    *)
+      echo "OPEN_WEBUI_ENABLE_SERVICE must be one of: auto, true, false" >&2
+      exit 1
+      ;;
+  esac
+}
+
+print_plan() {
+  local api_key_plan="$1"
+
+  log "Plan:"
+  printf '  - Update %s with API_SERVER_ENABLED=true, API_SERVER_HOST=%s, API_SERVER_PORT=%s, API_SERVER_MODEL_NAME=%s, and %s.\n' \
+    "$HERMES_ENV_FILE" "$HERMES_API_HOST" "$HERMES_API_PORT" "$HERMES_API_MODEL_NAME" "$api_key_plan"
+  printf '  - chmod 600 %s.\n' "$HERMES_ENV_FILE"
+  printf '  - Restart Hermes gateway, then verify http://%s:%s/health.\n' \
+    "$HERMES_API_CONNECT_HOST" "$HERMES_API_PORT"
+  printf '  - Install or update Open WebUI in %s.\n' "$OPEN_WEBUI_VENV"
+  printf '  - Write launcher %s using data dir %s and API base %s.\n' \
+    "$LAUNCHER_PATH" "$OPEN_WEBUI_DATA_DIR" "$HERMES_API_BASE_URL"
+  case "$OPEN_WEBUI_ENABLE_SERVICE" in
+    auto)
+      printf '  - Install a user service when launchd/systemd-user is available; otherwise print the launcher command.\n'
+      ;;
+    true)
+      printf '  - Install and start a user service with launchd or systemd-user.\n'
+      ;;
+    false)
+      printf '  - Skip service installation and print the launcher command.\n'
+      ;;
+  esac
 }
 
 require_cmd() {
@@ -287,17 +397,30 @@ start_foreground_hint() {
 }
 
 main() {
-  require_cmd hermes
-  require_cmd curl
+  parse_args "$@"
+  validate_service_mode
   require_cmd python3
 
-  install_macos_dependencies
-
-  local api_key
+  local api_key api_key_plan
   api_key="$(get_env_value API_SERVER_KEY "$HERMES_ENV_FILE")"
   if [[ -z "$api_key" ]]; then
     api_key="$(generate_secret)"
+    api_key_plan="generate a new API_SERVER_KEY"
+  else
+    api_key_plan="preserve the existing API_SERVER_KEY"
   fi
+
+  print_plan "$api_key_plan"
+  if [[ "$OPEN_WEBUI_DRY_RUN" == "true" ]]; then
+    log "Dry run complete. No files, services, or gateway processes were changed."
+    return 0
+  fi
+
+  require_confirmation "Apply this Open WebUI bootstrap plan?"
+  require_cmd hermes
+  require_cmd curl
+
+  install_macos_dependencies
 
   log 'Ensuring Hermes API server is configured...'
   upsert_env API_SERVER_ENABLED true "$HERMES_ENV_FILE"
@@ -334,10 +457,6 @@ main() {
       ;;
     false)
       start_foreground_hint
-      ;;
-    *)
-      echo "OPEN_WEBUI_ENABLE_SERVICE must be one of: auto, true, false" >&2
-      exit 1
       ;;
   esac
 
