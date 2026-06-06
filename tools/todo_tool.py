@@ -129,6 +129,14 @@ class TodoStore:
         Ensures required fields exist and status is valid.
         Returns a clean dict with only {id, content, status}.
         """
+        # Defensive: non-dict items get a placeholder error record
+        if not isinstance(item, dict):
+            return {
+                "id": "?",
+                "content": f"(invalid item type: {type(item).__name__})",
+                "status": "cancelled",
+            }
+
         item_id = str(item.get("id", "")).strip()
         if not item_id:
             item_id = "?"
@@ -148,6 +156,8 @@ class TodoStore:
         """Collapse duplicate ids, keeping the last occurrence in its position."""
         last_index: Dict[str, int] = {}
         for i, item in enumerate(todos):
+            if not isinstance(item, dict):
+                continue
             item_id = str(item.get("id", "")).strip() or "?"
             last_index[item_id] = i
         return [todos[i] for i in sorted(last_index.values())]
@@ -172,7 +182,17 @@ def todo_tool(
     if store is None:
         return tool_error("TodoStore not initialized")
 
+    # Defensive: coerce string -> list (LLM sometimes double-JSON-encodes)
+    if isinstance(todos, str):
+        try:
+            todos = json.loads(todos)
+        except (json.JSONDecodeError, TypeError):
+            return tool_error(f"todo: 'todos' must be a JSON array, got string: {todos[:80]!r}")
+
     if todos is not None:
+        # Defensive: type check only when todos is provided
+        if not isinstance(todos, list):
+            return tool_error(f"todo: 'todos' must be a list, got {type(todos).__name__}")
         items = store.write(todos, merge)
     else:
         items = store.read()
