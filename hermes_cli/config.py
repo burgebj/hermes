@@ -831,6 +831,12 @@ DEFAULT_CONFIG = {
         # on flaky primaries; raise it if you prefer to tolerate longer
         # provider hiccups on a single provider.
         "api_max_retries": 3,
+        # When True (default), rate-limit/billing errors (429/402) trigger
+        # an immediate fallback to a backup provider instead of retrying the
+        # primary model.  Set to False to let the normal retry loop with
+        # exponential backoff handle these errors as well — the primary is
+        # retried api_max_retries times before falling back.
+        "eager_rate_limit_fallback": True,
         "service_tier": "",
         # Tool-use enforcement: injects system prompt guidance that tells the
         # model to actually call tools instead of describing intended actions.

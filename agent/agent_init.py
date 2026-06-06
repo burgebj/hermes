@@ -1233,6 +1233,11 @@ def init_agent(
         _api_retries = 3
     agent._api_max_retries = _api_retries
 
+    # Whether rate-limit/billing errors (429/402) trigger immediate fallback
+    # instead of retrying the primary model.  Default True preserves existing
+    # behavior.  Configurable via agent.eager_rate_limit_fallback.
+    agent._eager_rate_limit_fallback = _agent_section.get("eager_rate_limit_fallback", True)
+
     # Initialize context compressor for automatic context management
     # Compresses conversation when approaching model's context limit
     # Configuration via config.yaml (compression section)
