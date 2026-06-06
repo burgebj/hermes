@@ -264,9 +264,30 @@ _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
 
 # Environment variables that are safe to pass to stdio subprocesses
+# Baseline variables that are always forwarded to stdio subprocesses.
+# Runtime lookup variables (PYTHONPATH, NODE_PATH, etc.) are added
+# separately so MCP servers can locate their own installed packages.
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
 })
+
+# Runtime module-resolution variables — needed by Python and Node MCP servers
+# to locate packages installed in virtual envs or non-standard prefix paths.
+# These are forwarded *in addition to* _SAFE_ENV_KEYS so a server like
+# `mcp-server-filesystem` (Node) or a FastMCP server (Python) can import
+# its own dependencies.  They do not contain secrets.
+_RUNTIME_ENV_PREFIXES = (
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "VIRTUAL_ENV",
+    "NODE_PATH",
+    "NODE_ENV",
+    "NPM_CONFIG_PREFIX",
+    "CARGO_HOME",
+    "GOPATH",
+    "JAVA_HOME",
+    "JAVA_OPTS",
+)
 
 # Regex for credential patterns to strip from error messages
 _CREDENTIAL_PATTERN = re.compile(
@@ -305,7 +326,11 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
     """
     env = {}
     for key, value in os.environ.items():
-        if key in _SAFE_ENV_KEYS or key.startswith("XDG_"):
+        if (
+            key in _SAFE_ENV_KEYS
+            or key.startswith("XDG_")
+            or any(key == p or key.startswith(p + "_") for p in _RUNTIME_ENV_PREFIXES)
+        ):
             env[key] = value
     if user_env:
         env.update(user_env)
