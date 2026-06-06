@@ -416,6 +416,65 @@ class TestBlockingApprovalE2E:
         assert result_holder[0]["approved"] is True
         unregister_gateway_notify(session_key)
 
+    def test_approve_once_does_not_grant_session_wide_approval(self):
+        """A plain gateway /approve should require approval again on the next risky command."""
+        from tools.approval import (
+            check_all_command_guards,
+            detect_dangerous_command,
+            is_approved,
+            register_gateway_notify,
+            resolve_gateway_approval,
+            unregister_gateway_notify,
+        )
+
+        session_key = "e2e-once-no-persist"
+        notified = []
+        register_gateway_notify(session_key, lambda d: notified.append(d))
+        pattern_key = detect_dangerous_command("rm -rf /important")[1]
+        assert pattern_key is not None
+
+        first_result = [None]
+        second_result = [None]
+
+        def run_command(holder):
+            os.environ["HERMES_EXEC_ASK"] = "1"
+            os.environ["HERMES_SESSION_KEY"] = session_key
+            try:
+                holder[0] = check_all_command_guards("rm -rf /important", "local")
+            finally:
+                os.environ.pop("HERMES_EXEC_ASK", None)
+                os.environ.pop("HERMES_SESSION_KEY", None)
+
+        t1 = threading.Thread(target=run_command, args=(first_result,))
+        t1.start()
+        for _ in range(50):
+            if notified:
+                break
+            time.sleep(0.05)
+
+        assert len(notified) == 1
+        resolve_gateway_approval(session_key, "once")
+        t1.join(timeout=5)
+        assert first_result[0] is not None
+        assert first_result[0]["approved"] is True
+        assert first_result[0]["message"] is None
+        assert not is_approved(session_key, pattern_key)
+
+        t2 = threading.Thread(target=run_command, args=(second_result,))
+        t2.start()
+        for _ in range(50):
+            if len(notified) >= 2:
+                break
+            time.sleep(0.05)
+
+        assert len(notified) == 2, "second dangerous command should require a fresh approval"
+        resolve_gateway_approval(session_key, "deny")
+        t2.join(timeout=5)
+        assert second_result[0] is not None
+        assert second_result[0]["approved"] is False
+        assert "BLOCKED" in second_result[0]["message"]
+        unregister_gateway_notify(session_key)
+
     def test_blocking_approval_deny(self):
         """check_all_command_guards returns BLOCKED when denied."""
         from tools.approval import (
