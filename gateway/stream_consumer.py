@@ -99,12 +99,12 @@ class GatewayStreamConsumer:
     # Must stay in sync with cli.py _OPEN_TAGS/_CLOSE_TAGS and
     # run_agent.py _strip_think_blocks() tag variants.
     _OPEN_THINK_TAGS = (
-        "<REASONING_SCRATCHPAD>", "<think>", "<reasoning>",
-        "<THINKING>", "<thinking>", "<thought>",
+        "<reasoning_scratchpad>", "<think>", "<reasoning>",
+        "<thinking>", "<thought>",
     )
     _CLOSE_THINK_TAGS = (
-        "</REASONING_SCRATCHPAD>", "</think>", "</reasoning>",
-        "</THINKING>", "</thinking>", "</thought>",
+        "</reasoning_scratchpad>", "</think>", "</reasoning>",
+        "</thinking>", "</thought>",
     )
 
     # Class-wide monotonic counter for native-streaming draft ids.  Telegram
@@ -314,12 +314,13 @@ class GatewayStreamConsumer:
         self._think_buffer = ""
 
         while buf:
+            lower_buf = buf.lower()
             if self._in_think_block:
                 # Look for the earliest closing tag
                 best_idx = -1
                 best_len = 0
                 for tag in self._CLOSE_THINK_TAGS:
-                    idx = buf.find(tag)
+                    idx = lower_buf.find(tag)
                     if idx != -1 and (best_idx == -1 or idx < best_idx):
                         best_idx = idx
                         best_len = len(tag)
@@ -344,7 +345,7 @@ class GatewayStreamConsumer:
                 for tag in self._OPEN_THINK_TAGS:
                     search_start = 0
                     while True:
-                        idx = buf.find(tag, search_start)
+                        idx = lower_buf.find(tag, search_start)
                         if idx == -1:
                             break
                         # Block-boundary check (mirrors cli.py logic)
@@ -381,7 +382,7 @@ class GatewayStreamConsumer:
                     held_back = 0
                     for tag in self._OPEN_THINK_TAGS:
                         for i in range(1, len(tag)):
-                            if buf.endswith(tag[:i]) and i > held_back:
+                            if lower_buf.endswith(tag[:i]) and i > held_back:
                                 held_back = i
                     if held_back:
                         self._accumulated += buf[:-held_back]
