@@ -99,6 +99,21 @@ def _check_local_runtime() -> tuple[bool, str | None]:
         return False, str(exc)
 
 
+def _check_cloud_client() -> tuple[bool, str | None]:
+    """Return whether the external Hindsight client imports cleanly.
+
+    Cloud and local_external modes both rely on ``hindsight-client``. If the
+    optional package is absent, report the provider as unavailable and disable
+    it during initialization instead of letting a late ImportError crash the
+    gateway.
+    """
+    try:
+        importlib.import_module("hindsight_client")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Hindsight API capability probe — mirrors hindsight-integrations/openclaw.
 # ---------------------------------------------------------------------------
@@ -604,11 +619,15 @@ class HindsightMemoryProvider(MemoryProvider):
         try:
             cfg = _load_config()
             mode = cfg.get("mode", "cloud")
-            if mode in {"local", "local_embedded"}:
+            if mode in ("local", "local_embedded"):
                 available, _ = _check_local_runtime()
                 return available
             if mode == "local_external":
-                return True
+                available, _ = _check_cloud_client()
+                return available
+            client_available, _ = _check_cloud_client()
+            if not client_available:
+                return False
             has_key = bool(
                 cfg.get("apiKey")
                 or cfg.get("api_key")
@@ -920,7 +939,13 @@ class HindsightMemoryProvider(MemoryProvider):
                 kwargs["idle_timeout"] = idle_timeout
                 self._client = HindsightEmbedded(**kwargs)
             else:
-                from hindsight_client import Hindsight
+                try:
+                    from hindsight_client import Hindsight
+                except Exception as exc:
+                    raise RuntimeError(
+                        "hindsight-client is not installed or could not be imported. "
+                        f"Install with: uv pip install 'hindsight-client>={_MIN_CLIENT_VERSION}'"
+                    ) from exc
                 timeout = self._timeout or _DEFAULT_TIMEOUT
                 kwargs = {"base_url": self._api_url, "timeout": float(timeout)}
                 if self._api_key:
@@ -1137,6 +1162,16 @@ class HindsightMemoryProvider(MemoryProvider):
             if not available:
                 logger.warning(
                     "Hindsight local mode disabled because its runtime could not be imported: %s",
+                    reason,
+                )
+                self._mode = "disabled"
+                return
+        elif self._mode in {"cloud", "local_external"}:
+            available, reason = _check_cloud_client()
+            if not available:
+                logger.warning(
+                    "Hindsight %s mode disabled because hindsight-client could not be imported: %s",
+                    self._mode,
                     reason,
                 )
                 self._mode = "disabled"
