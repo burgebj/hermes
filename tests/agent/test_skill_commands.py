@@ -51,6 +51,13 @@ def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Pat
 
 
 class TestScanSkillCommands:
+    def test_symlink_category_skips_when_symlinks_unavailable(self, tmp_path):
+        with (
+            patch.object(Path, "symlink_to", side_effect=OSError("no symlink")),
+            pytest.raises(pytest.skip.Exception),
+        ):
+            _symlink_category(tmp_path / "skills", tmp_path / "repo", "linked")
+
     def test_finds_skills(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "my-skill")
