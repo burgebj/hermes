@@ -4606,6 +4606,14 @@ class AIAgent:
             opts = self._lmstudio_reasoning_options_cached()
             # "off-only" (or absent) means no real reasoning capability.
             return any(opt and opt != "off" for opt in opts)
+        # Custom provider (e.g. vLLM, Ollama, etc.): honor explicit
+        # reasoning_config from the user.  vLLM supports reasoning_effort
+        # and thinking_token_budget for thinking models; without this gate
+        # those parameters are silently dropped.  See #20576.
+        if (self.provider or "").strip().lower() == "custom":
+            if self.reasoning_config and isinstance(self.reasoning_config, dict):
+                return self.reasoning_config.get("enabled") is not False
+            return False
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:

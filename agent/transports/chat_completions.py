@@ -421,7 +421,16 @@ class ChatCompletionsTransport(ProviderTransport):
                 if gh_reasoning is not None:
                     extra_body["reasoning"] = gh_reasoning
             else:
-                extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
+                # Use the user-configured effort level when available,
+                # falling back to "medium" for known providers.  Custom
+                # providers (vLLM etc.) carry the user's reasoning_config
+                # effort so thinking_token_budget is respected.  See #20576.
+                _effort = "medium"
+                if reasoning_config and isinstance(reasoning_config, dict):
+                    _e = (reasoning_config.get("effort") or "").strip().lower()
+                    if _e in ("low", "medium", "high"):
+                        _effort = _e
+                extra_body["reasoning"] = {"enabled": True, "effort": _effort}
 
         if provider_name == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
