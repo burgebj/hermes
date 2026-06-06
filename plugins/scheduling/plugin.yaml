@@ -1,0 +1,20 @@
+name: scheduling
+version: 1.0.0
+description: "Unified scheduling integrations for Cal.com, Calendly, and Google Calendar. Provides event listing, creation, lookup, cancellation, availability checks, calendar listing, and OAuth management."
+author: NousResearch
+kind: backend
+requires_env:
+  - name: CALCOM_API_KEY
+    optional: true
+  - name: CALENDLY_CLIENT_ID
+    optional: true
+  - name: CALENDLY_CLIENT_SECRET
+    optional: true
+provides_tools:
+  - scheduling_list_events
+  - scheduling_create_event
+  - scheduling_get_event
+  - scheduling_cancel_event
+  - scheduling_check_availability
+  - scheduling_list_calendars
+  - scheduling_oauth
