@@ -747,6 +747,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def post_setup(self, hermes_home: str, config: dict) -> None:
         """Custom setup wizard — installs only the deps needed for the selected mode."""
+        import getpass
         import subprocess
         import shutil
         import sys
