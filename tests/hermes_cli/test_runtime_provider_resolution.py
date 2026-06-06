@@ -710,6 +710,7 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
     assert resolved["api_key"] == "local-provider-key"
     assert resolved["requested_provider"] == "local"
     assert resolved["source"] == "custom_provider:Local"
+    assert resolved["custom_provider"] is True
 
 
 def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch):
@@ -744,7 +745,9 @@ def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch
 
     resolved = rp.resolve_runtime_provider(requested="openai-direct-primary")
 
-    assert resolved["provider"] == "custom"
+    assert resolved["provider"] == "openai-direct-primary"
+    assert resolved["provider_key"] == "openai-direct-primary"
+    assert resolved["custom_provider"] is True
     assert resolved["api_mode"] == "codex_responses"
     assert resolved["base_url"] == "https://api.openai.com/v1"
     assert resolved["api_key"] == "dir-key"
@@ -784,7 +787,9 @@ def test_named_custom_provider_uses_key_env_from_providers_dict(monkeypatch):
 
     resolved = rp.resolve_runtime_provider(requested="mycorp-proxy")
 
-    assert resolved["provider"] == "custom"
+    assert resolved["provider"] == "mycorp-proxy"
+    assert resolved["provider_key"] == "mycorp-proxy"
+    assert resolved["custom_provider"] is True
     assert resolved["api_mode"] == "chat_completions"
     assert resolved["base_url"] == "https://proxy.example.com/v1"
     assert resolved["api_key"] == "env-secret"
@@ -872,6 +877,44 @@ def test_named_custom_provider_falls_back_to_openai_api_key(monkeypatch):
     # localhost is not openai.com — OPENAI_API_KEY must not leak to local endpoints (#28660)
     assert resolved["api_key"] == "no-key-required"
     assert resolved["requested_provider"] == "custom:local-llm"
+    assert resolved["provider"] == "custom"
+    assert "provider_key" not in resolved
+    assert resolved["custom_provider"] is True
+
+
+def test_providers_dict_provider_key_is_normalized(monkeypatch):
+    """Store provider_key without accidental YAML key whitespace."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "  mycorp-proxy  ": {
+                    "base_url": "https://proxy.example.com/v1",
+                    "api_key": "direct-secret",
+                    "default_model": "acme-large",
+                    "name": "MyCorp Proxy",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="mycorp-proxy")
+
+    assert resolved["provider"] == "mycorp-proxy"
+    assert resolved["provider_key"] == "mycorp-proxy"
+    assert resolved["source"] == "custom_provider:MyCorp Proxy"
 
 
 def test_named_custom_provider_does_not_shadow_builtin_provider(monkeypatch):
@@ -1669,6 +1712,7 @@ def test_named_custom_runtime_propagates_model_pool_path(monkeypatch):
         rp, "_get_named_custom_provider",
         lambda p: {
             "name": "my-server",
+            "provider_key": "my-server",
             "base_url": "http://localhost:8000/v1",
             "api_key": "test-key",
             "model": "qwen3.6-plus",
@@ -1690,6 +1734,9 @@ def test_named_custom_runtime_propagates_model_pool_path(monkeypatch):
     assert resolved["model"] == "qwen3.6-plus", (
         "model must be injected into pool result"
     )
+    assert resolved["provider"] == "custom"
+    assert resolved["provider_key"] == "my-server"
+    assert resolved["custom_provider"] is True
     assert resolved["api_key"] == "pool-key", "pool credentials should be used"
 
 

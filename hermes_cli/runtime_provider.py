@@ -469,6 +469,7 @@ def _try_resolve_from_custom_pool(
             "api_key": pool_api_key,
             "source": f"pool:{pool_key}",
             "credential_pool": pool,
+            "custom_provider": True,
         }
     except Exception:
         return None
@@ -537,8 +538,10 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                 # Found match by provider key
                 base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
                 if base_url:
+                    provider_key = str(ep_name).strip()
                     result = {
-                        "name": entry.get("name", ep_name),
+                        "provider_key": provider_key,
+                        "name": entry.get("name", provider_key),
                         "base_url": base_url.strip(),
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
@@ -566,7 +569,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     # Found match by display name
                     base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
                     if base_url:
+                        provider_key = str(ep_name).strip()
                         result = {
+                            "provider_key": provider_key,
                             "name": display_name,
                             "base_url": base_url.strip(),
                             "api_key": resolved_api_key,
@@ -696,6 +701,7 @@ def _resolve_named_custom_runtime(
             "api_key": api_key,
             "source": "direct-alias",
             "requested_provider": requested_provider,
+            "custom_provider": True,
         }
 
     custom_provider = _get_named_custom_provider(requested_provider)
@@ -709,9 +715,22 @@ def _resolve_named_custom_runtime(
     if not base_url:
         return None
 
+    # New-style `providers:` entries are first-class named providers in the
+    # rest of the runtime (model switching, capability lookup, logs, aux
+    # vision routing).  Preserve their provider key instead of collapsing them
+    # to bare "custom".  Legacy `custom_providers:` entries intentionally keep
+    # the old "custom" label unless they were migrated with a provider_key.
+    runtime_provider = str(
+        custom_provider.get("provider_key") or "custom"
+    ).strip() or "custom"
+    provider_key = str(custom_provider.get("provider_key") or "").strip()
+
     # Check if a credential pool exists for this custom endpoint
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"), provider_name=custom_provider.get("name"))
+    pool_result = _try_resolve_from_custom_pool(base_url, runtime_provider, custom_provider.get("api_mode"), provider_name=custom_provider.get("name"))
     if pool_result:
+        pool_result["custom_provider"] = True
+        if provider_key:
+            pool_result["provider_key"] = provider_key
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
         model_name = custom_provider.get("model")
@@ -744,14 +763,17 @@ def _resolve_named_custom_runtime(
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
     result = {
-        "provider": "custom",
+        "provider": runtime_provider,
         "api_mode": custom_provider.get("api_mode")
         or _detect_api_mode_for_url(base_url)
         or "chat_completions",
         "base_url": base_url,
         "api_key": api_key or "no-key-required",
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
+        "custom_provider": True,
     }
+    if provider_key:
+        result["provider_key"] = provider_key
     # Propagate the model name so callers can override self.model when the
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
