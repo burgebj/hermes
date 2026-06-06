@@ -380,6 +380,23 @@ class TestActiveQueries:
         assert registry.has_active_for_session("gw_session_1") is True
         assert registry.has_active_for_session("other") is False
 
+    def test_register_host_process_tracks_gateway_session(self, registry):
+        session_id = registry.register_host_process(
+            os.getpid(),
+            command="slash_worker:gw_session_1",
+            task_id="gw_session_1",
+            session_key="gw_session_1",
+        )
+
+        session = registry.get(session_id)
+        assert session is not None
+        assert session.pid == os.getpid()
+        assert session.detached is True
+        assert session.pid_scope == "host"
+        assert session.task_id == "gw_session_1"
+        assert session.session_key == "gw_session_1"
+        assert registry.has_active_for_session("gw_session_1") is True
+
     def test_exited_not_active(self, registry):
         s = _make_session(task_id="t1", exited=True, exit_code=0)
         registry._finished[s.id] = s

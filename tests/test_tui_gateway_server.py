@@ -981,6 +981,71 @@ def test_init_session_fires_reset_hook(monkeypatch):
         server._sessions.pop(sid, None)
 
 
+def test_slash_worker_registers_host_process_with_session_key(monkeypatch):
+    registrations = []
+
+    class _FakePipe:
+        def __iter__(self):
+            return iter(())
+
+        def write(self, _text):
+            return None
+
+        def flush(self):
+            return None
+
+    class _FakeProc:
+        pid = 4242
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.stdin = _FakePipe()
+            self.stdout = _FakePipe()
+            self.stderr = _FakePipe()
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    fake_registry = types.SimpleNamespace(
+        register_host_process=lambda *args, **kwargs: registrations.append(
+            (args, kwargs)
+        )
+    )
+
+    monkeypatch.setattr(server.subprocess, "Popen", _FakeProc)
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.process_registry",
+        types.SimpleNamespace(process_registry=fake_registry),
+    )
+
+    worker = server._SlashWorker("gw-session-1", "test-model")
+    worker.close()
+
+    assert registrations == [
+        (
+            (4242,),
+            {
+                "command": "slash_worker:gw-session-1",
+                "task_id": "gw-session-1",
+                "session_key": "gw-session-1",
+            },
+        )
+    ]
+
+
 def test_session_title_queues_when_db_row_not_ready(monkeypatch):
     class _FakeDB:
         def get_session_title(self, _key):

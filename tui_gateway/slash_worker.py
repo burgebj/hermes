@@ -9,10 +9,66 @@ import io
 import json
 import os
 import sys
+import threading
+import time
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 import cli as cli_mod
 from cli import HermesCLI
 from rich.console import Console
+
+
+def _start_orphan_watchdog():
+    """Start a daemon thread that kills this process if its parent disappears.
+    
+    This is the L2 safety net (Issue #21370) to prevent zombie processes.
+    It uses PID + create_time fingerprinting to ensure cross-platform 
+    determinism and prevent PID reuse false-positives on Windows.
+    """
+    if not psutil:
+        return
+
+    ppid = os.getppid()
+    try:
+        # Capture parent fingerprint at startup
+        parent_proc = psutil.Process(ppid)
+        parent_started = parent_proc.create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        # Parent already gone or inaccessible
+        os._exit(0)
+
+    def watchdog():
+        # Delay startup slightly to let the main process stabilize
+        time.sleep(5)
+        while True:
+            try:
+                # 1. Basic existence check
+                if not psutil.pid_exists(ppid):
+                    os._exit(0)
+                
+                # 2. Fingerprint check (Critical for Windows PID reuse)
+                current_parent = psutil.Process(ppid)
+                if current_parent.create_time() != parent_started:
+                    os._exit(0)
+                
+                # 3. POSIX orphan check (adopted by init)
+                if os.name != 'nt' and os.getppid() == 1:
+                    os._exit(0)
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                os._exit(0)
+            except Exception:
+                # Fallback: ignore transient errors in psutil calls
+                pass
+            
+            time.sleep(10)
+
+    t = threading.Thread(target=watchdog, daemon=True, name="OrphanWatchdog")
+    t.start()
 
 
 def _run(cli: HermesCLI, command: str) -> str:
@@ -44,6 +100,7 @@ def _run(cli: HermesCLI, command: str) -> str:
 
 
 def main():
+    _start_orphan_watchdog()
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--session-key", required=True)
     p.add_argument("--model", default="")
