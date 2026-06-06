@@ -155,6 +155,16 @@ class TestCodexBuildKwargs:
         )
         assert "max_output_tokens" not in kw
 
+    def test_codex_backend_does_not_inject_extra_headers(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.5", messages=messages, tools=[],
+            session_id="codex-session-123",
+            is_codex_backend=True,
+        )
+        assert kw.get("prompt_cache_key") == "codex-session-123"
+        assert "extra_headers" not in kw
+
     def test_xai_headers(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
