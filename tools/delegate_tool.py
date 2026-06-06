@@ -1973,6 +1973,10 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
     role: Optional[str] = None,
     parent_agent=None,
 ) -> str:
@@ -2049,6 +2053,10 @@ def delegate_task(
         return tool_error(str(exc))
 
     # Normalize to task list
+    per_call_model = str(model or "").strip() or None
+    per_call_provider = str(provider or "").strip() or None
+    per_call_base_url = str(base_url or "").strip() or None
+    per_call_api_key = str(api_key or "").strip() or None
     max_children = _get_max_concurrent_children()
     recovered_tasks, tasks_error = _recover_tasks_from_json_string(tasks)
     if tasks_error:
@@ -2068,7 +2076,16 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "model": per_call_model,
+                "provider": per_call_provider,
+                "base_url": per_call_base_url,
+                "api_key": per_call_api_key,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2109,26 +2126,57 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            task_model_override = str(t.get("model") or "").strip() or per_call_model
+            task_provider_override = str(t.get("provider") or "").strip() or per_call_provider
+            task_base_url_override = str(t.get("base_url") or "").strip() or per_call_base_url
+            task_api_key_override = str(t.get("api_key") or "").strip() or per_call_api_key
+            if any(
+                (
+                    task_model_override,
+                    task_provider_override,
+                    task_base_url_override,
+                    task_api_key_override,
+                )
+            ):
+                task_cfg = dict(cfg)
+                if task_model_override:
+                    task_cfg["model"] = task_model_override
+                if task_provider_override:
+                    task_cfg["provider"] = task_provider_override
+                if task_base_url_override:
+                    task_cfg["base_url"] = task_base_url_override
+                if task_api_key_override:
+                    task_cfg["api_key"] = task_api_key_override
+                try:
+                    task_creds = _resolve_delegation_credentials(task_cfg, parent_agent)
+                except ValueError as exc:
+                    return tool_error(f"Task {i} credential resolution failed: {exc}")
+            else:
+                task_creds = creds
+            task_model = task_model_override or task_creds["model"]
+            task_provider = task_creds["provider"]
+            task_base_url = task_base_url_override or task_creds["base_url"]
+            task_api_key = task_api_key_override or task_creds["api_key"]
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=task_model,
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=task_provider,
+                override_base_url=task_base_url,
+                override_api_key=task_api_key,
+                override_api_mode=task_creds["api_mode"],
                 override_acp_command=t.get("acp_command")
                 or acp_command
-                or creds.get("command"),
+                or task_creds.get("command"),
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (acp_args if acp_args is not None else task_creds.get("args"))
                 ),
                 role=effective_role,
             )
@@ -2777,6 +2825,22 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task model override. Overrides top-level and delegation config model for this task only.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Per-task provider override (e.g. openrouter, anthropic, zai, moonshot, custom:name). Overrides delegation config provider for this task only.",
+                        },
+                        "base_url": {
+                            "type": "string",
+                            "description": "Per-task direct OpenAI-compatible base URL override. Use with api_key/model when the provider is not configured globally.",
+                        },
+                        "api_key": {
+                            "type": "string",
+                            "description": "Per-task API key override. Only use when the user explicitly provided or configured a key for this task; never invent keys.",
+                        },
                         "acp_command": {
                             "type": "string",
                             "description": (
@@ -2807,6 +2871,22 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "model": {
+                "type": "string",
+                "description": "Model override for this delegate_task call. In batch mode, per-task model fields override this value.",
+            },
+            "provider": {
+                "type": "string",
+                "description": "Provider override for this delegate_task call (e.g. openrouter, anthropic, zai, moonshot, custom:name). In batch mode, per-task provider fields override this value.",
+            },
+            "base_url": {
+                "type": "string",
+                "description": "Direct OpenAI-compatible base URL override for this delegate_task call. In batch mode, per-task base_url fields override this value.",
+            },
+            "api_key": {
+                "type": "string",
+                "description": "API key override for this delegate_task call. Only use keys explicitly provided/configured by the user; per-task api_key fields override this value.",
             },
             "acp_command": {
                 "type": "string",
@@ -2851,6 +2931,10 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
+        model=args.get("model"),
+        provider=args.get("provider"),
+        base_url=args.get("base_url"),
+        api_key=args.get("api_key"),
         role=args.get("role"),
         parent_agent=kw.get("parent_agent"),
     ),

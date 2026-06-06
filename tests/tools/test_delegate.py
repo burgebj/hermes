@@ -69,6 +69,12 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        # Per-call model routing lets a single delegate_task invocation assign
+        # different providers/models to different children without changing the
+        # global delegation config.
+        for key in ("model", "provider", "base_url", "api_key"):
+            self.assertIn(key, props)
+            self.assertIn(key, props["tasks"]["items"]["properties"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -1312,6 +1318,203 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], "http://localhost:1234/v1")
             self.assertEqual(kwargs["api_key"], "local-key")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_per_task_model_routing_overrides_global_config(self, mock_creds, mock_cfg):
+        """Each batch task can override model/provider/base_url/api_key independently."""
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "global-model",
+            "provider": "global-provider",
+            "base_url": "https://global.example/v1",
+            "api_key": "global-key",
+        }
+        mock_creds.side_effect = [
+            {
+                "model": "global-model",
+                "provider": "global-provider",
+                "base_url": "https://global.example/v1",
+                "api_key": "global-key",
+                "api_mode": "chat_completions",
+            },
+            {
+                "model": "deepseek-chat",
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "deepseek-key",
+                "api_mode": "chat_completions",
+            },
+            {
+                "model": "glm-4.5",
+                "provider": "zai",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "api_key": "glm-key",
+                "api_mode": "chat_completions",
+            },
+        ]
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_child_a = MagicMock()
+            mock_child_b = MagicMock()
+            mock_build.side_effect = [mock_child_a, mock_child_b]
+            mock_run.side_effect = [
+                {
+                    "task_index": 0,
+                    "status": "completed",
+                    "summary": "A",
+                    "api_calls": 1,
+                    "duration_seconds": 1.0,
+                },
+                {
+                    "task_index": 1,
+                    "status": "completed",
+                    "summary": "B",
+                    "api_calls": 1,
+                    "duration_seconds": 1.0,
+                },
+            ]
+
+            tasks = [
+                {
+                    "goal": "DeepSeek review",
+                    "model": "deepseek-chat",
+                    "provider": "deepseek",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "deepseek-key",
+                },
+                {
+                    "goal": "GLM review",
+                    "model": "glm-4.5",
+                    "provider": "zai",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                    "api_key": "glm-key",
+                },
+            ]
+            delegate_task(tasks=tasks, parent_agent=parent)
+
+            self.assertEqual(mock_build.call_count, 2)
+            first = mock_build.call_args_list[0].kwargs
+            second = mock_build.call_args_list[1].kwargs
+            self.assertEqual(first["model"], "deepseek-chat")
+            self.assertEqual(first["override_provider"], "deepseek")
+            self.assertEqual(first["override_base_url"], "https://api.deepseek.com/v1")
+            self.assertEqual(first["override_api_key"], "deepseek-key")
+            self.assertEqual(second["model"], "glm-4.5")
+            self.assertEqual(second["override_provider"], "zai")
+            self.assertEqual(second["override_base_url"], "https://open.bigmodel.cn/api/paas/v4")
+            self.assertEqual(second["override_api_key"], "glm-key")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_toplevel_model_routing_overrides_global_config(self, mock_creds, mock_cfg):
+        """Top-level model routing applies to single-task mode."""
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "global-model",
+            "provider": "global-provider",
+            "base_url": "https://global.example/v1",
+            "api_key": "global-key",
+        }
+        mock_creds.side_effect = [
+            {
+                "model": "global-model",
+                "provider": "global-provider",
+                "base_url": "https://global.example/v1",
+                "api_key": "global-key",
+                "api_mode": "chat_completions",
+            },
+            {
+                "model": "kimi-k2-0905-preview",
+                "provider": "moonshot",
+                "base_url": "https://api.moonshot.cn/v1",
+                "api_key": "kimi-key",
+                "api_mode": "chat_completions",
+            },
+        ]
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_build.return_value = MagicMock()
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Done",
+                "api_calls": 1,
+                "duration_seconds": 1.0,
+            }
+
+            delegate_task(
+                goal="KIMI efficiency review",
+                model="kimi-k2-0905-preview",
+                provider="moonshot",
+                base_url="https://api.moonshot.cn/v1",
+                api_key="kimi-key",
+                parent_agent=parent,
+            )
+
+            _, kwargs = mock_build.call_args
+            self.assertEqual(kwargs["model"], "kimi-k2-0905-preview")
+            self.assertEqual(kwargs["override_provider"], "moonshot")
+            self.assertEqual(kwargs["override_base_url"], "https://api.moonshot.cn/v1")
+            self.assertEqual(kwargs["override_api_key"], "kimi-key")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_per_task_provider_resolved_when_only_provider_and_model_given(self, mock_creds, mock_cfg):
+        """Per-task provider/model must use provider resolution, not raw parent credentials."""
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.side_effect = [
+            {
+                "model": None,
+                "provider": None,
+                "base_url": None,
+                "api_key": None,
+                "api_mode": None,
+            },
+            {
+                "model": "glm-4.5",
+                "provider": "zai",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "api_key": "resolved-glm-key",
+                "api_mode": "chat_completions",
+                "command": "glm-acp",
+                "args": ["--stdio"],
+            },
+        ]
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_build.return_value = MagicMock()
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Done",
+                "api_calls": 1,
+                "duration_seconds": 1.0,
+            }
+
+            delegate_task(
+                tasks=[{"goal": "GLM review", "model": "glm-4.5", "provider": "zai"}],
+                parent_agent=parent,
+            )
+
+            self.assertEqual(mock_creds.call_count, 2)
+            resolved_cfg = mock_creds.call_args_list[1].args[0]
+            self.assertEqual(resolved_cfg["model"], "glm-4.5")
+            self.assertEqual(resolved_cfg["provider"], "zai")
+            _, kwargs = mock_build.call_args
+            self.assertEqual(kwargs["model"], "glm-4.5")
+            self.assertEqual(kwargs["override_provider"], "zai")
+            self.assertEqual(kwargs["override_base_url"], "https://open.bigmodel.cn/api/paas/v4")
+            self.assertEqual(kwargs["override_api_key"], "resolved-glm-key")
+            self.assertEqual(kwargs["override_api_mode"], "chat_completions")
+            self.assertEqual(kwargs["override_acp_command"], "glm-acp")
+            self.assertEqual(kwargs["override_acp_args"], ["--stdio"])
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
