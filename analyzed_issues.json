@@ -1,0 +1,117 @@
+{
+  "27198": {
+    "title": "[Bug]: WhatsApp messages stuck at 1 tick — delivery ACK missing in addition to read receipts",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27198",
+    "seen_at": "2026-05-17T01:45:29.080613+00:00"
+  },
+  "27166": {
+    "title": "[Bug] Telegram DM topic response routed to All Messages after session split",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27166",
+    "seen_at": "2026-05-17T01:45:29.080852+00:00"
+  },
+  "27156": {
+    "title": "Session resume can replay prior assistant/tool context instead of answering exact-output prompt",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27156",
+    "seen_at": "2026-05-17T01:45:29.081027+00:00"
+  },
+  "27312": {
+    "title": "Browser tool should prefer packaged agent-browser native binary when npm shim needs unavailable node",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27312",
+    "seen_at": "2026-05-17T07:46:52.354983+00:00"
+  },
+  "27296": {
+    "title": "[Bug] delegate_task ignores delegation.base_url — subagent always inherits parent model",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27296",
+    "seen_at": "2026-05-17T07:46:52.355896+00:00"
+  },
+  "27295": {
+    "title": "[Bug] delegate_task ignores delegation.base_url — subagent always inherits parent model",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27295",
+    "seen_at": "2026-05-17T07:46:52.357442+00:00"
+  },
+  "27294": {
+    "title": "[Bug] delegate_task ignores delegation.base_url — subagent always inherits parent model",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27294",
+    "seen_at": "2026-05-17T07:46:52.358251+00:00"
+  },
+  "27282": {
+    "title": "[--tui] gateway exits mid-turn with stdin EOF (TUI closed the command pipe) — NOT byterover-related",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27282",
+    "seen_at": "2026-05-17T07:46:52.359345+00:00"
+  },
+  "27265": {
+    "title": "Discord long bot-to-bot handoffs can drop unmentioned continuation chunks",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27265",
+    "seen_at": "2026-05-17T07:46:52.360103+00:00"
+  },
+  "27230": {
+    "title": "[Bug]: Telegram gateway only acknowledges tool requests but never delivers final results",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27230",
+    "seen_at": "2026-05-17T07:46:52.361212+00:00"
+  },
+  "27430": {
+    "title": "hermes update fails web UI build when NODE_ENV=production — npm install omits devDependencies",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27430",
+    "seen_at": "2026-05-17T13:48:05.033485+00:00"
+  },
+  "27402": {
+    "title": "NameError: '_pool_may_recover_from_rate_limit' is not defined in conversation_loop.py",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27402",
+    "seen_at": "2026-05-17T13:48:05.071950+00:00"
+  },
+  "27383": {
+    "title": "[Bug]: change working directory for Telegram agent",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27383",
+    "seen_at": "2026-05-17T13:48:05.073121+00:00"
+  },
+  "27352": {
+    "title": "[Bug] Gateway approval wait is not resolved by normal user replies during pending approval",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27352",
+    "seen_at": "2026-05-17T13:48:05.074324+00:00"
+  },
+  "27345": {
+    "title": "[Bug]: API connection Fail with minimax provider in windows",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27345",
+    "seen_at": "2026-05-17T13:48:05.075138+00:00"
+  },
+  "27566": {
+    "title": "Context compression triggers every turn due to rough token estimate inflating last_prompt_tokens",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27566",
+    "seen_at": "2026-05-17T19:48:41.166309+00:00"
+  },
+  "27563": {
+    "title": "Python shutdown deadlock: worker thread blocks Py_FinalizeEx, process hangs forever after exit",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27563",
+    "seen_at": "2026-05-17T19:48:41.167190+00:00"
+  },
+  "27555": {
+    "title": "Bug: vision fallback_chain silently broken — wrong kwargs in _resolve_single_provider",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27555",
+    "seen_at": "2026-05-17T19:48:41.168199+00:00"
+  },
+  "27540": {
+    "title": "[Bug]: AIAgent() got multiple values for keyword argument 'model' — reproduces on second turn of session",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27540",
+    "seen_at": "2026-05-17T19:48:41.168926+00:00"
+  },
+  "27538": {
+    "title": "auxiliary.compression.provider ignored after switching model provider",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27538",
+    "seen_at": "2026-05-17T19:48:41.170045+00:00"
+  },
+  "27529": {
+    "title": "[feishu] Fix markdown table rendering: use post+tag:md instead of force-text workaround",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27529",
+    "seen_at": "2026-05-17T19:48:41.170928+00:00"
+  },
+  "27477": {
+    "title": "[Bug] Feishu 转发聊天记录无法被 Hermes 读取",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27477",
+    "seen_at": "2026-05-17T19:48:41.172039+00:00"
+  },
+  "27469": {
+    "title": "[feishu] Unified fix for markdown rendering: inbound escaping + GFM table → Card 2.0",
+    "url": "https://github.com/NousResearch/hermes-agent/issues/27469",
+    "seen_at": "2026-05-17T19:48:41.173084+00:00"
+  }
+}
