@@ -103,6 +103,50 @@ class TestHermesTokenStorage:
         client_path = tmp_path / "mcp-tokens" / "test-server.client.json"
         assert client_path.exists()
 
+    def test_client_info_with_secret_uses_client_secret_post(self, tmp_path, monkeypatch):
+        """DCR clients with secrets must not be treated as public clients.
+
+        Supabase MCP returns a client_secret from dynamic client registration
+        while omitting token_endpoint_auth_method. Persisting that shape as-is
+        makes the MCP SDK omit the secret during token exchange.
+        """
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        storage = HermesTokenStorage("supabase")
+        client_info = OAuthClientInformationFull.model_validate({
+            "client_id": "client-id",
+            "client_secret": "secret",
+            "redirect_uris": ["http://127.0.0.1:12345/callback"],
+        })
+
+        asyncio.run(storage.set_client_info(client_info))
+        loaded = asyncio.run(storage.get_client_info())
+
+        assert loaded is not None
+        assert loaded.token_endpoint_auth_method == "client_secret_post"
+        client_path = tmp_path / "mcp-tokens" / "supabase.client.json"
+        assert json.loads(client_path.read_text())["token_endpoint_auth_method"] == "client_secret_post"
+
+    def test_client_info_with_secret_and_none_method_is_coerced(self, tmp_path, monkeypatch):
+        """Also repair older cache files that explicitly saved method='none'."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        token_dir = tmp_path / "mcp-tokens"
+        token_dir.mkdir(parents=True)
+        client_path = token_dir / "supabase.client.json"
+        client_path.write_text(json.dumps({
+            "client_id": "client-id",
+            "client_secret": "secret",
+            "redirect_uris": ["http://127.0.0.1:12345/callback"],
+            "token_endpoint_auth_method": "none",
+        }))
+
+        loaded = asyncio.run(HermesTokenStorage("supabase").get_client_info())
+
+        assert loaded is not None
+        assert loaded.token_endpoint_auth_method == "client_secret_post"
+        assert json.loads(client_path.read_text())["token_endpoint_auth_method"] == "client_secret_post"
+
     def test_remove_cleans_up(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         storage = HermesTokenStorage("test-server")
@@ -205,6 +249,63 @@ class TestBuildOAuthAuth:
         assert provider is not None
         assert provider.context.client_metadata.scope == "read write admin"
 
+    @pytest.mark.asyncio
+    async def test_token_exchange_includes_secret_for_dcr_secret_client(self, tmp_path, monkeypatch):
+        from mcp.shared.auth import OAuthClientInformationFull
+        from urllib.parse import parse_qs
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+        provider.context.client_info = OAuthClientInformationFull.model_validate({
+            "client_id": "client-id",
+            "client_secret": "secret",
+            "redirect_uris": [str(provider.context.client_metadata.redirect_uris[0])],
+            "token_endpoint_auth_method": "none",
+        })
+
+        request = await provider._exchange_token_authorization_code("auth-code", "verifier")
+        body = parse_qs(request.content.decode())
+
+        assert body["client_id"] == ["client-id"]
+        assert body["client_secret"] == ["secret"]
+        assert provider.context.client_info.token_endpoint_auth_method == "client_secret_post"
+
+    @pytest.mark.asyncio
+    async def test_token_response_accepts_201_created(self, tmp_path, monkeypatch):
+        import httpx
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+        response = httpx.Response(201, json={
+            "access_token": "access-token",
+            "token_type": "Bearer",
+            "refresh_token": "refresh-token",
+        })
+
+        await provider._handle_token_response(response)
+
+        assert provider.context.current_tokens.access_token == "access-token"
+        token_path = tmp_path / "mcp-tokens" / "supabase.json"
+        assert token_path.exists()
+        assert json.loads(token_path.read_text())["access_token"] == "access-token"
+
+    def test_cached_dcr_client_reuses_registered_redirect_port(self, tmp_path, monkeypatch):
+        """Cached DCR clients must keep the registered redirect_uri port."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        token_dir = tmp_path / "mcp-tokens"
+        token_dir.mkdir(parents=True)
+        (token_dir / "supabase.client.json").write_text(json.dumps({
+            "client_id": "client-id",
+            "client_secret": "secret",
+            "redirect_uris": ["http://127.0.0.1:53902/callback"],
+            "token_endpoint_auth_method": "client_secret_post",
+        }))
+
+        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+
+        assert str(provider.context.client_metadata.redirect_uris[0]) == (
+            "http://127.0.0.1:53902/callback"
+        )
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -588,6 +689,23 @@ def test_configure_callback_port_uses_explicit_port():
     assert cfg["_resolved_port"] == 54321
 
 
+def test_reuse_stored_redirect_port_preserves_explicit_config(tmp_path, monkeypatch):
+    from tools.mcp_oauth import HermesTokenStorage, _reuse_stored_redirect_port
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    token_dir = tmp_path / "mcp-tokens"
+    token_dir.mkdir(parents=True)
+    (token_dir / "supabase.client.json").write_text(json.dumps({
+        "client_id": "client-id",
+        "redirect_uris": ["http://127.0.0.1:53902/callback"],
+    }))
+
+    cfg = {"redirect_port": 54321}
+    _reuse_stored_redirect_port(HermesTokenStorage("supabase"), cfg)
+
+    assert cfg["redirect_port"] == 54321
+
+
 def test_build_oauth_auth_preserves_server_url_path():
     """server_url with path is forwarded to OAuthClientProvider unmodified.
 
@@ -607,7 +725,7 @@ def test_build_oauth_auth_preserves_server_url_path():
             captured.update(kwargs)
 
     with patch.object(mcp_oauth, "_OAUTH_AVAILABLE", True), \
-         patch.object(mcp_oauth, "OAuthClientProvider", _FakeProvider), \
+         patch.object(mcp_oauth, "HermesOAuthClientProvider", _FakeProvider), \
          patch.object(mcp_oauth, "_is_interactive", return_value=True), \
          patch.object(mcp_oauth, "_maybe_preregister_client"), \
          patch.object(mcp_oauth, "HermesTokenStorage") as mock_storage_cls:
@@ -619,8 +737,6 @@ def test_build_oauth_auth_preserves_server_url_path():
         )
 
     assert captured["server_url"] == "https://mcp.notion.com/mcp"
-
-
 
 class TestPasteCallbackReader:
     """_paste_callback_reader parses redirect URLs / query strings from stdin."""

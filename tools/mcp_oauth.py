@@ -305,13 +305,32 @@ class HermesTokenStorage:
         if data is None:
             return None
         try:
-            return OAuthClientInformationFull.model_validate(data)
+            info = OAuthClientInformationFull.model_validate(data)
+            # Some dynamic registration providers (notably Supabase MCP) return
+            # a client_secret but omit token_endpoint_auth_method. The MCP SDK
+            # defaults that missing field to "none", which causes token exchange
+            # to omit client_secret and fail with "Required parameter: client_secret".
+            # If a secret is present, use client_secret_post unless the provider
+            # explicitly saved a different method.
+            if getattr(info, "client_secret", None) and data.get("token_endpoint_auth_method") in (None, "none", ""):
+                data["token_endpoint_auth_method"] = "client_secret_post"
+                info = OAuthClientInformationFull.model_validate(data)
+                _write_json(self._client_info_path(), info.model_dump(mode="json", exclude_none=True))
+            return info
         except (ValueError, TypeError, KeyError) as exc:
             logger.warning("Corrupt client info at %s -- ignoring: %s", self._client_info_path(), exc)
             return None
 
     async def set_client_info(self, client_info: "OAuthClientInformationFull") -> None:
-        _write_json(self._client_info_path(), client_info.model_dump(mode="json", exclude_none=True))
+        data = client_info.model_dump(mode="json", exclude_none=True)
+        # Supabase MCP dynamic client registration returns a client_secret but
+        # omits token_endpoint_auth_method. The MCP SDK defaults that to
+        # "none", which makes token exchange omit client_secret and loops the
+        # browser authorization page. Persist the effective method immediately
+        # so this flow and subsequent retries use client_secret_post.
+        if data.get("client_secret") and data.get("token_endpoint_auth_method") in (None, "none", ""):
+            data["token_endpoint_auth_method"] = "client_secret_post"
+        _write_json(self._client_info_path(), data)
         logger.debug("OAuth client info saved for %s", self._server_name)
 
     # -- oauth server metadata --------------------------------------------
@@ -620,6 +639,70 @@ def _paste_callback_reader(result: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# OAuth provider compatibility shims
+# ---------------------------------------------------------------------------
+
+
+class HermesOAuthClientProvider(OAuthClientProvider):
+    """OAuth provider with pragmatic fixes for real-world MCP providers.
+
+    Supabase MCP dynamic registration returns ``client_secret`` but omits
+    ``token_endpoint_auth_method``. The upstream MCP SDK treats the missing
+    method as ``none`` and therefore omits ``client_secret`` from the token
+    request, causing Supabase to reject the exchange and the browser to show
+    the authorization page again. Coerce the in-memory client info right before
+    token/refresh requests as well as persisting the fixed shape in storage.
+    """
+
+    def _coerce_client_secret_post(self) -> None:
+        info = getattr(self.context, "client_info", None)
+        if not info or not getattr(info, "client_secret", None):
+            return
+        method = getattr(info, "token_endpoint_auth_method", None)
+        if method not in (None, "none", ""):
+            return
+        data = info.model_dump(mode="json", exclude_none=True)
+        data["token_endpoint_auth_method"] = "client_secret_post"
+        self.context.client_info = OAuthClientInformationFull.model_validate(data)
+
+    async def _exchange_token_authorization_code(self, *args: Any, **kwargs: Any):
+        self._coerce_client_secret_post()
+        return await super()._exchange_token_authorization_code(*args, **kwargs)
+
+    async def _refresh_token(self):
+        self._coerce_client_secret_post()
+        return await super()._refresh_token()
+
+    async def _handle_token_response(self, response):
+        """Accept any 2xx token response and avoid leaking token bodies in errors."""
+        if 200 <= response.status_code < 300:
+            from mcp.client.auth.utils import handle_token_response_scopes
+
+            token_response = await handle_token_response_scopes(response)
+            self.context.current_tokens = token_response
+            self.context.update_token_expiry(token_response)
+            await self.context.storage.set_tokens(token_response)
+            return
+
+        from mcp.client.auth.oauth2 import OAuthTokenError
+
+        raise OAuthTokenError(f"Token exchange failed ({response.status_code})")
+
+    async def _handle_refresh_response(self, response) -> bool:
+        """Accept any 2xx refresh response and avoid logging token bodies."""
+        if not (200 <= response.status_code < 300):
+            logger.warning("Token refresh failed: %s", response.status_code)
+            self.context.clear_tokens()
+            return False
+
+        content = await response.aread()
+        token_response = OAuthToken.model_validate_json(content)
+        self.context.current_tokens = token_response
+        self.context.update_token_expiry(token_response)
+        await self.context.storage.set_tokens(token_response)
+        return True
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -659,6 +742,41 @@ def _configure_callback_port(cfg: dict) -> int:
     cfg["_resolved_port"] = port
     _oauth_port = port  # legacy consumer: _wait_for_callback reads this
     return port
+
+
+def _reuse_stored_redirect_port(storage: "HermesTokenStorage", cfg: dict) -> None:
+    """Reuse the redirect port registered for a cached DCR client.
+
+    Dynamic client registration binds the generated client_id to the redirect
+    URI used at registration time. If a later process restart picks a fresh
+    random port, providers such as Supabase reject authorization before token
+    exchange with ``redirect_uri not allowed``.
+    """
+    configured = cfg.get("redirect_port")
+    if configured not in (None, 0, "0", ""):
+        return
+
+    try:
+        data = _read_json(storage._client_info_path())
+    except (AttributeError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    for redirect_uri in data.get("redirect_uris") or []:
+        try:
+            parsed = urlparse(str(redirect_uri))
+        except (TypeError, ValueError):
+            continue
+        if parsed.hostname not in {"127.0.0.1", "localhost"} or not parsed.port:
+            continue
+        cfg["redirect_port"] = parsed.port
+        logger.debug(
+            "MCP OAuth for '%s': reusing cached redirect port %s",
+            storage._server_name,
+            parsed.port,
+        )
+        return
 
 
 def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
@@ -762,11 +880,12 @@ def build_oauth_auth(
             server_name,
         )
 
+    _reuse_stored_redirect_port(storage, cfg)
     _configure_callback_port(cfg)
     client_metadata = _build_client_metadata(cfg)
     _maybe_preregister_client(storage, cfg, client_metadata)
 
-    return OAuthClientProvider(
+    return HermesOAuthClientProvider(
         server_url=server_url,
         client_metadata=client_metadata,
         storage=storage,
