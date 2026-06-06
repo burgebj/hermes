@@ -8484,8 +8484,11 @@ class GatewayRunner:
                                 f"Enable it with: `hermes skills config`"
                             )
                     user_instruction = event.get_command_args().strip()
+                    _skill_session_entry = self.session_store.get_or_create_session(source)
                     msg = build_skill_invocation_message(
-                        cmd_key, user_instruction, task_id=_quick_key
+                        cmd_key,
+                        user_instruction,
+                        task_id=_skill_session_entry.session_id,
                     )
                     if msg:
                         event.text = msg
@@ -9076,7 +9079,12 @@ class GatewayRunner:
                             f'[IMPORTANT: The "{_display_name}" skill is auto-loaded. '
                             f"Follow its instructions for this session.]"
                         )
-                        _part = _build_skill_message(_loaded_skill, _skill_dir, _note)
+                        _part = _build_skill_message(
+                            _loaded_skill,
+                            _skill_dir,
+                            _note,
+                            session_id=session_entry.session_id,
+                        )
                         if _part:
                             _combined_parts.append(_part)
                             _loaded_names.append(_sname)
