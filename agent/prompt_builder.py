@@ -69,8 +69,12 @@ def _find_git_root(start: Path) -> Optional[Path]:
     """
     current = start.resolve()
     for parent in [current, *current.parents]:
-        if (parent / ".git").exists():
-            return parent
+        try:
+            if (parent / ".git").exists():
+                return parent
+        except PermissionError:
+            logger.debug("Permission denied accessing %s/.git, skipping", parent)
+            continue
     return None
 
 
@@ -90,8 +94,12 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     for directory in [current, *current.parents]:
         for name in _HERMES_MD_NAMES:
             candidate = directory / name
-            if candidate.is_file():
-                return candidate
+            try:
+                if candidate.is_file():
+                    return candidate
+            except PermissionError:
+                logger.debug("Permission denied accessing %s, skipping", candidate)
+                continue
         # Stop walking at the git root (or filesystem root).
         if stop_at and directory == stop_at:
             break
@@ -1453,7 +1461,12 @@ def _load_agents_md(cwd_path: Path) -> str:
     """AGENTS.md — top-level only (no recursive walk)."""
     for name in ["AGENTS.md", "agents.md"]:
         candidate = cwd_path / name
-        if candidate.exists():
+        try:
+            exists = candidate.exists()
+        except PermissionError:
+            logger.debug("Permission denied accessing %s, skipping", candidate)
+            continue
+        if exists:
             try:
                 content = candidate.read_text(encoding="utf-8").strip()
                 if content:
@@ -1469,7 +1482,12 @@ def _load_claude_md(cwd_path: Path) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ["CLAUDE.md", "claude.md"]:
         candidate = cwd_path / name
-        if candidate.exists():
+        try:
+            exists = candidate.exists()
+        except PermissionError:
+            logger.debug("Permission denied accessing %s, skipping", candidate)
+            continue
+        if exists:
             try:
                 content = candidate.read_text(encoding="utf-8").strip()
                 if content:
@@ -1485,7 +1503,12 @@ def _load_cursorrules(cwd_path: Path) -> str:
     """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
     cursorrules_file = cwd_path / ".cursorrules"
-    if cursorrules_file.exists():
+    try:
+        cursorrules_exists = cursorrules_file.exists()
+    except PermissionError:
+        logger.debug("Permission denied accessing %s, skipping", cursorrules_file)
+        cursorrules_exists = False
+    if cursorrules_exists:
         try:
             content = cursorrules_file.read_text(encoding="utf-8").strip()
             if content:
@@ -1495,7 +1518,12 @@ def _load_cursorrules(cwd_path: Path) -> str:
             logger.debug("Could not read .cursorrules: %s", e)
 
     cursor_rules_dir = cwd_path / ".cursor" / "rules"
-    if cursor_rules_dir.exists() and cursor_rules_dir.is_dir():
+    try:
+        cursor_dir_ok = cursor_rules_dir.exists() and cursor_rules_dir.is_dir()
+    except PermissionError:
+        logger.debug("Permission denied accessing %s, skipping", cursor_rules_dir)
+        cursor_dir_ok = False
+    if cursor_dir_ok:
         mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
         for mdc_file in mdc_files:
             try:
