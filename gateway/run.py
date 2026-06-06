@@ -15025,13 +15025,20 @@ class GatewayRunner:
         # Send confirmation message with is_approval_prompt to avoid closing
         # the agent's stream when it resumes. The confirmation is an independent
         # message that shouldn't interfere with the agent's ongoing output.
+        # Use await instead of fire-and-forget to ensure delivery and log failures.
         confirmation_text = t(f"gateway.approve.{choice}_{plural}", count=count)
         if _adapter:
-            asyncio.create_task(_adapter.send(
-                source.chat_id,
-                confirmation_text,
-                metadata={"is_approval_prompt": True}  # Correct metadata key
-            ))
+            try:
+                await _adapter.send(
+                    source.chat_id,
+                    confirmation_text,
+                    metadata={"is_approval_prompt": True}  # Correct metadata key
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send /approve confirmation to %s: %s",
+                    source.chat_id, e, exc_info=True
+                )
 
         # Return None so the default command handler doesn't send the message again
         return None
@@ -15073,13 +15080,20 @@ class GatewayRunner:
 
         # Send confirmation message with is_approval_prompt to avoid closing
         # the agent's stream when it resumes. Similar to /approve handling.
+        # Use await instead of fire-and-forget to ensure delivery and log failures.
         confirmation_text = t("gateway.deny.denied_plural", count=count) if count > 1 else t("gateway.deny.denied_singular")
         if _adapter:
-            asyncio.create_task(_adapter.send(
-                source.chat_id,
-                confirmation_text,
-                metadata={"is_approval_prompt": True}  # Correct metadata key
-            ))
+            try:
+                await _adapter.send(
+                    source.chat_id,
+                    confirmation_text,
+                    metadata={"is_approval_prompt": True}  # Correct metadata key
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send /deny confirmation to %s: %s",
+                    source.chat_id, e, exc_info=True
+                )
 
         # Return None so the default command handler doesn't send the message again
         return None
