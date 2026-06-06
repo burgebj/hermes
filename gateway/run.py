@@ -3684,7 +3684,22 @@ class GatewayRunner:
         Called at the very start of stop() — adapters are still connected so
         messages can be delivered. Best-effort: individual send failures are
         logged and swallowed so they never block the shutdown sequence.
+
+        Set the ``HERMES_SUPPRESS_SHUTDOWN_NOTIFY`` environment variable to a
+        truthy value (``"true"``, ``"1"``, ``"yes"`` — case-insensitive) to
+        skip all outbound notifications.  Useful for single-machine deployments
+        (e.g. Fly.io) where every ``fly deploy`` emits a SIGTERM and the
+        resulting broadcast is noise for operator-only installs.  The default
+        when the variable is absent is to send notifications (i.e. previous
+        behaviour is preserved).
         """
+        import os as _os
+        if _os.getenv("HERMES_SUPPRESS_SHUTDOWN_NOTIFY", "").lower() in ("1", "true", "yes"):
+            logger.debug(
+                "HERMES_SUPPRESS_SHUTDOWN_NOTIFY is set — skipping shutdown notifications"
+            )
+            return
+
         active = self._snapshot_running_agents()
         restart_source = self._restart_command_source if self._restart_requested else None
 
