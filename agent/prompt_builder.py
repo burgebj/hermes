@@ -251,7 +251,11 @@ KANBAN_GUIDANCE = (
     "specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is "
     "for short reasoning subtasks inside your own run; board tasks are for "
-    "cross-agent handoffs that outlive one API loop."
+    "cross-agent handoffs that outlive one API loop.\n"
+    "- Do not call `clarify`. There is no live user on the other end — the "
+    "call will time out and the task will hang in `running`. If you need a "
+    "human decision, use `kanban_comment` for context then `kanban_block` "
+    "with the specific question."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (

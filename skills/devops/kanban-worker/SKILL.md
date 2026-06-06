@@ -172,6 +172,7 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 - Modify files outside `$HERMES_KANBAN_WORKSPACE` unless the task body says to.
 - Create follow-up tasks assigned to yourself — assign to the right specialist.
 - Complete a task you didn't actually finish. Block it instead.
+- Call `clarify` — there is no live user to answer. Use `kanban_comment` for context, then `kanban_block` with the specific question.
 
 ## Pitfalls
 
