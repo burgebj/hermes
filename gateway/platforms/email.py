@@ -13,6 +13,8 @@ Environment variables:
     EMAIL_PASSWORD      — Email password or app-specific password
     EMAIL_POLL_INTERVAL — Seconds between mailbox checks (default: 15)
     EMAIL_ALLOWED_USERS — Comma-separated list of allowed sender addresses
+    EMAIL_SENT_FOLDER   — IMAP folder for sent-mail archival (default: "Sent");
+                          set to empty string "" to disable IMAP APPEND entirely
 """
 
 import asyncio
@@ -23,6 +25,7 @@ import os
 import re
 import smtplib
 import ssl
+import time
 import uuid
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
@@ -255,6 +258,8 @@ class EmailAdapter(BasePlatformAdapter):
         self._smtp_host = os.getenv("EMAIL_SMTP_HOST", "")
         self._smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
         self._poll_interval = int(os.getenv("EMAIL_POLL_INTERVAL", "15"))
+        # Empty string is a deliberate opt-out — do NOT collapse with `or`.
+        self._sent_folder = os.environ.get("EMAIL_SENT_FOLDER", "Sent")
 
         # Skip attachments — configured via config.yaml:
         #   platforms:
@@ -292,6 +297,40 @@ class EmailAdapter(BasePlatformAdapter):
         except (ValueError, TypeError):
             # Fallback: just clear old entries if sort fails
             self._seen_uids = set(list(self._seen_uids)[-self._seen_uids_max // 2:])
+
+    def _append_to_sent(self, raw_bytes: bytes) -> None:
+        """IMAP-APPEND a freshly-sent outbound mail to ``self._sent_folder``.
+
+        No-op when the folder is unset (empty string).  Best-effort: failures
+        are logged as warnings and never re-raised — losing the Sent-folder
+        copy must NOT roll back an SMTP send that already succeeded.
+        """
+        if not self._sent_folder:
+            return
+        try:
+            imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
+            try:
+                imap.login(self._address, self._password)
+                _send_imap_id(imap)
+                # CREATE is idempotent; most servers return NO on "already exists".
+                try:
+                    imap.create(self._sent_folder)
+                except Exception:  # noqa: BLE001 — ignore "already exists" and similar
+                    pass
+                imap.append(
+                    self._sent_folder,
+                    "(\\Seen)",
+                    imaplib.Time2Internaldate(time.time()),
+                    raw_bytes,
+                )
+                logger.debug("[Email] APPEND to %r ok", self._sent_folder)
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+        except Exception as e:  # noqa: BLE001 — Sent-folder mirror is best-effort
+            logger.warning("[Email] APPEND to %r failed: %s", self._sent_folder, e)
 
     async def connect(self) -> bool:
         """Connect to the IMAP server and start polling for new messages."""
@@ -560,6 +599,7 @@ class EmailAdapter(BasePlatformAdapter):
                 smtp.close()
 
         logger.info("[Email] Sent reply to %s (subject: %s)", to_addr, subject)
+        self._append_to_sent(msg.as_bytes())
         return msg_id
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -682,6 +722,7 @@ class EmailAdapter(BasePlatformAdapter):
                 smtp.close()
 
         logger.info("[Email] Sent multi-attachment email to %s (%d files)", to_addr, len(file_paths))
+        self._append_to_sent(msg.as_bytes())
         return msg_id
 
     async def send_document(
@@ -760,6 +801,7 @@ class EmailAdapter(BasePlatformAdapter):
             except Exception:
                 smtp.close()
 
+        self._append_to_sent(msg.as_bytes())
         return msg_id
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
