@@ -196,6 +196,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="https://api.gmi-serving.com/v1",
         base_url_env_var="GMI_BASE_URL",
     ),
+    "actual": HermesOverlay(
+        transport="codex_responses",
+        extra_env_vars=("ACTUAL_API_KEY", "ACTUAL_BASE_URL"),
+        base_url_override="https://api.actual.inc/v1",
+        base_url_env_var="ACTUAL_BASE_URL",
+    ),
     "ollama-cloud": HermesOverlay(
         transport="openai_chat",
         base_url_override="https://ollama.com/v1",
@@ -348,6 +354,11 @@ ALIASES: Dict[str, str] = {
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
 
+    # Actual Computer
+    "actual-computer": "actual",
+    "actualcomputer": "actual",
+    "aci": "actual",
+
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
@@ -371,6 +382,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
     "gmi": "GMI Cloud",
+    "actual": "Actual Computer",
     "tencent-tokenhub": "Tencent TokenHub",
     "lmstudio": "LM Studio",
     "local": "Local endpoint",

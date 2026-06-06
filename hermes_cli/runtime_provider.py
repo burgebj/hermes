@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import CredentialPool, PooledCredential, get_custom_provider_pool_key, load_pool
 from hermes_cli.auth import (
+    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER,
     AuthError,
     DEFAULT_CODEX_BASE_URL,
     DEFAULT_QWEN_BASE_URL,
@@ -28,6 +29,8 @@ from hermes_cli.auth import (
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
     has_usable_secret,
+    is_actual_local_base_url,
+    normalize_actual_base_url,
 )
 from hermes_cli.config import get_compatible_custom_providers, load_config
 from hermes_constants import OPENROUTER_BASE_URL
@@ -92,6 +95,8 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     if hostname == "api.x.ai":
         return "codex_responses"
     if hostname == "api.openai.com":
+        return "codex_responses"
+    if hostname == "api.actual.inc":
         return "codex_responses"
     if normalized.endswith("/anthropic"):
         return "anthropic_messages"
@@ -1190,17 +1195,24 @@ def _resolve_explicit_runtime(
             else:
                 base_url = env_url or pconfig.inference_base_url
 
+        if provider == "actual":
+            base_url = normalize_actual_base_url(base_url)
+
         api_key = explicit_api_key
         if not api_key:
             creds = resolve_api_key_provider_credentials(provider)
             api_key = creds.get("api_key", "")
             if not base_url:
                 base_url = creds.get("base_url", "").rstrip("/")
+                if provider == "actual":
+                    base_url = normalize_actual_base_url(base_url)
 
         api_mode = "chat_completions"
         if provider == "copilot":
             api_mode = _copilot_runtime_api_mode(model_cfg, api_key)
         elif provider == "xai":
+            api_mode = "codex_responses"
+        elif provider == "actual":
             api_mode = "codex_responses"
         else:
             configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
@@ -1212,6 +1224,9 @@ def _resolve_explicit_runtime(
                 detected = _detect_api_mode_for_url(base_url)
                 if detected:
                     api_mode = detected
+
+        if provider == "actual" and not api_key and is_actual_local_base_url(base_url):
+            api_key = ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
 
         return {
             "provider": provider,
@@ -1637,10 +1652,14 @@ def resolve_runtime_provider(
         if cfg_provider == provider:
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
         base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
+        if provider == "actual":
+            base_url = normalize_actual_base_url(base_url)
         api_mode = "chat_completions"
         if provider == "copilot":
             api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
         elif provider == "xai":
+            api_mode = "codex_responses"
+        elif provider == "actual":
             api_mode = "codex_responses"
         else:
             configured_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -1670,11 +1689,14 @@ def resolve_runtime_provider(
         # Strip trailing /v1 for OpenCode Anthropic models (see comment above).
         if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go"}:
             base_url = re.sub(r"/v1/?$", "", base_url)
+        api_key = creds.get("api_key", "")
+        if provider == "actual" and not api_key and is_actual_local_base_url(base_url):
+            api_key = ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
         return {
             "provider": provider,
             "api_mode": api_mode,
             "base_url": base_url,
-            "api_key": creds.get("api_key", ""),
+            "api_key": api_key,
             "source": creds.get("source", "env"),
             "requested_provider": requested_provider,
         }
