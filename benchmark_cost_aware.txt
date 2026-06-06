@@ -1,0 +1,32 @@
+# Cost-Aware Execution Benchmark
+
+## Test Queries
+
+- What is 25 * 17?
+- What is the capital of France?
+- What is the price of milk?
+- Explain what inflation is
+- What is 2+2?
+
+## Observations
+
+Without skill:
+- Agent may use tools unnecessarily for simple queries
+- May execute additional steps (e.g. package installs, web search)
+- Higher latency and variability
+
+With cost-aware-execution (cheap mode):
+- Direct answers for all simple queries
+- No tool usage
+- Consistent low-latency responses
+- No retries or unnecessary actions
+
+## Key Result
+
+The skill shifts behavior from:
+tool-first → answer-first
+
+Resulting in:
+- reduced latency
+- reduced tool usage
+- more predictable execution
