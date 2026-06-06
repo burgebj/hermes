@@ -472,14 +472,30 @@ logger = logging.getLogger(__name__)
 
 
 def _is_termux_startup_environment(env: dict[str, str] | None = None) -> bool:
-    """Import-safe Termux check for cold-start-sensitive CLI paths."""
+    """Import-safe Termux check for cold-start-sensitive CLI paths.
+
+    Detects native Termux, and also proot-distro environments running
+    on top of Termux/Android (kernel version string contains ``PRoot``
+    and the Android data directory is accessible).
+    """
     check = env or os.environ
     prefix = str(check.get("PREFIX", ""))
-    return bool(
+    if (
         check.get("TERMUX_VERSION")
         or "com.termux/files/usr" in prefix
         or prefix.startswith("/data/data/com.termux/")
-    )
+    ):
+        return True
+    # proot-distro: kernel reports PRoot, Android data dir is still accessible.
+    try:
+        uts = os.uname()
+        if ("PRoot" in uts.release or "PRoot" in uts.version) and os.path.isdir(
+            "/data/data/com.termux"
+        ):
+            return True
+    except (OSError, AttributeError):
+        pass
+    return False
 
 
 def _read_packed_ref(common_dir: Path, ref: str) -> str | None:
@@ -8721,6 +8737,217 @@ def _load_installable_optional_extras(group: str = "all") -> list[str]:
     return referenced
 
 
+def _is_empty_dir(path: Path) -> bool:
+    """Return True if *path* is a directory containing no regular files."""
+    for child in path.rglob("*"):
+        if child.is_file():
+            return False
+    return True
+
+
+def _remove_empty_subdirs(path: Path) -> int:
+    """Recursively remove empty subdirectories under *path*, bottom-up."""
+    removed = 0
+    for dirpath, dirnames, filenames in os.walk(path, topdown=False):
+        dp = Path(dirpath)
+        if dp == path:
+            continue
+        try:
+            if _is_empty_dir(dp):
+                dp.rmdir()
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def _find_broken_packages(sp_path: Path) -> list[str]:
+    """Find packages that have .py files but no ``__init__.py``.
+
+    Hallmark of ``uv pip install`` failing mid-copy on proot: individual
+    modules land but the package marker does not.
+    """
+    broken: list[str] = []
+    for child in sp_path.iterdir():
+        if not child.is_dir() or child.name.startswith(("_", ".")):
+            continue
+        if child.suffix in (".dist-info", ".egg-info"):
+            continue
+        init_py = child / "__init__.py"
+        if init_py.exists():
+            continue
+        if any(child.glob("*.py")):
+            broken.append(child.name)
+    return broken
+
+
+def _find_orphaned_dist_info(sp_path: Path) -> list[Path]:
+    """Find .dist-info directories whose corresponding package is missing."""
+    orphans: list[Path] = []
+    installed_dirs: set[str] = set()
+    for child in sp_path.iterdir():
+        if child.is_dir() and not child.name.startswith(("_", ".")):
+            installed_dirs.add(child.name.lower().replace("-", "_"))
+
+    for child in sp_path.iterdir():
+        if not child.is_dir() or not child.name.endswith(".dist-info"):
+            continue
+        pkg_name = child.name.rsplit("-", 1)[0].lower().replace("-", "_")
+        if pkg_name and pkg_name not in installed_dirs:
+            orphans.append(child)
+    return orphans
+
+
+def _has_missing_core_deps(venv_dir: Path) -> bool:
+    """Quick smoke-test: try importing critical packages."""
+    python_bin = str(venv_dir / "bin" / "python")
+    probes = ["rich", "httpx", "openai", "anthropic", "psutil"]
+    for mod in probes:
+        result = subprocess.run(
+            [python_bin, "-c", f"import {mod}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return True
+    return False
+
+
+def _recreate_venv(venv_dir: Path) -> None:
+    """Recreate the venv from scratch, preserving nothing inside it.
+
+    User data (config, state, memory, history) lives under
+    ``$HERMES_HOME`` (typically ``~/.hermes``), not inside the venv.
+    """
+    if venv_dir.exists():
+        shutil.rmtree(venv_dir)
+
+    python_exe = sys.executable
+    subprocess.run(
+        [python_exe, "-m", "venv", str(venv_dir)],
+        check=True,
+    )
+
+    subprocess.run(
+        [str(venv_dir / "bin" / "python"), "-m", "pip", "install", "--upgrade", "pip"],
+        check=False,
+        capture_output=True,
+    )
+    print("  ✓ Virtual environment recreated")
+
+
+def _validate_and_fix_venv() -> None:
+    """Ensure the project venv is valid and usable.
+
+    On Termux/proot, ``uv pip install`` can leave empty package directories
+    in ``site-packages/`` when file copies fail (ENOENT).  This function:
+
+    1. Verifies the venv Python works.
+    2. Removes empty directories inside site-packages.
+    3. Recreates the venv from scratch if the interpreter binary is
+       missing or broken — without touching user data.
+    """
+    venv_dir = PROJECT_ROOT / "venv"
+    site_packages = venv_dir / "lib"
+
+    sp_path: Path | None = None
+    if site_packages.is_dir():
+        for child in site_packages.iterdir():
+            candidate = child / "site-packages"
+            if candidate.is_dir():
+                sp_path = candidate
+                break
+
+    python_bin = venv_dir / "bin" / "python"
+    if not python_bin.exists():
+        print("  ⚠ venv Python binary missing — recreating virtual environment...")
+        _recreate_venv(venv_dir)
+        return
+
+    test_result = subprocess.run(
+        [str(python_bin), "-c", "import sys; print(sys.version)"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if test_result.returncode != 0:
+        print("  ⚠ venv Python is broken — recreating virtual environment...")
+        _recreate_venv(venv_dir)
+        return
+
+    if sp_path is None:
+        return
+
+    cleaned = 0
+    try:
+        for child in list(sp_path.iterdir()):
+            if child.is_dir() and not child.name.startswith(("_", ".")):
+                if _is_empty_dir(child):
+                    shutil.rmtree(child, ignore_errors=True)
+                    cleaned += 1
+        for child in list(sp_path.iterdir()):
+            if child.is_dir() and not child.name.startswith(("_", ".")):
+                cleaned += _remove_empty_subdirs(child)
+    except OSError:
+        pass
+    if cleaned:
+        print(f"  ✓ Cleaned {cleaned} empty package directory(ies) from previous failed install")
+
+    broken = _find_broken_packages(sp_path)
+    if broken:
+        print(f"  ⚠ Found {len(broken)} broken package(s) with missing __init__.py: {', '.join(broken[:8])}{'...' if len(broken) > 8 else ''}")
+        dist_info_cleaned = 0
+        for name in broken:
+            pkg_dir = sp_path / name
+            shutil.rmtree(pkg_dir, ignore_errors=True)
+            for di in sp_path.iterdir():
+                dn = di.name.lower()
+                if (
+                    dn.endswith(".dist-info") or dn.endswith(".egg-info")
+                ) and dn.split("-")[0].replace("_", "-") == name.replace("_", "-").lower():
+                    shutil.rmtree(di, ignore_errors=True)
+                    dist_info_cleaned += 1
+        if dist_info_cleaned:
+            print(f"  ✓ Removed {dist_info_cleaned} stale .dist-info records")
+        print(f"  ✓ Removed {len(broken)} broken package(s) — they will be reinstalled")
+
+    orphans = _find_orphaned_dist_info(sp_path)
+    if orphans:
+        print(f"  ⚠ Found {len(orphans)} orphaned .dist-info directory(ies)")
+        for di_path in orphans:
+            shutil.rmtree(di_path, ignore_errors=True)
+        print(f"  ✓ Removed {len(orphans)} orphaned .dist-info — packages will be reinstalled")
+
+    needs_reinstall = bool(broken or orphans)
+    if not needs_reinstall:
+        needs_reinstall = _has_missing_core_deps(venv_dir)
+
+    if needs_reinstall:
+        print("  → Reinstalling missing packages via pip...")
+        pip_cmd = [str(venv_dir / "bin" / "python"), "-m", "pip"]
+        install_group = "termux-all" if _is_termux_env() else "all"
+        try:
+            subprocess.run(
+                pip_cmd + ["install", "-e", f".[{install_group}]"],
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=False,
+            )
+            print("  ✓ Missing packages reinstalled")
+        except subprocess.CalledProcessError:
+            try:
+                subprocess.run(
+                    pip_cmd + ["install", "-e", "."],
+                    cwd=PROJECT_ROOT,
+                    check=True,
+                    capture_output=False,
+                )
+                print("  ✓ Base packages reinstalled")
+            except subprocess.CalledProcessError:
+                print("  ⚠ Could not reinstall all missing packages — run `hermes update` again")
+
+
 def _run_install_with_heartbeat(
     cmd: list[str],
     *,
@@ -10645,6 +10872,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # breaks on this machine, keep base deps and reinstall the remaining extras
         # individually so update does not silently strip working capabilities.
         print("→ Updating Python dependencies...")
+
+        # Validate and fix venv before any install attempt.  On Termux/proot,
+        # ``uv pip install`` can leave empty package directories that break
+        # every subsequent install.  Clean them up or recreate the venv if
+        # needed.
+        _validate_and_fix_venv()
+
         from hermes_cli.managed_uv import ensure_uv, update_managed_uv
 
         # Keep managed uv current — runs `uv self update` if we already have one.
@@ -10656,6 +10890,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         if not uv_bin:
             uv_bin = _ensure_uv_for_termux(pip_cmd)
         install_group = "all"
+        deps_installed = False
 
         if uv_bin:
             uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
@@ -10667,10 +10902,22 @@ def _cmd_update_impl(args, gateway_mode: bool):
             if _is_termux_env(uv_env) and _is_android_python():
                 print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
                 _install_psutil_android_compat([uv_bin, "pip"], env=uv_env)
-            _install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env, group=install_group
-            )
-        else:
+            try:
+                _install_python_dependencies_with_optional_fallback(
+                    [uv_bin, "pip"], env=uv_env, group=install_group
+                )
+                deps_installed = True
+            except subprocess.CalledProcessError as exc:
+                # On Termux/proot, uv can fail with ENOENT file-copy errors
+                # due to proot filesystem translation limitations.  Fall back
+                # to regular pip which handles these cases correctly.
+                if _is_termux_env(uv_env):
+                    print("  ⚠ uv install failed on Termux/proot, falling back to pip...")
+                    logger.debug("uv install failed on Termux/proot: %s", exc)
+                else:
+                    raise
+
+        if not deps_installed:
             # Use sys.executable to explicitly call the venv's pip module,
             # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
             # Some environments lose pip inside the venv; bootstrap it back with
@@ -10691,7 +10938,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 )
             if _is_termux_env():
                 install_group = "termux-all"
-                print("  → Termux detected: using curated termux-all optional profile...")
+                print("  → Termux detected: using pip + curated termux-all optional profile...")
             if _is_termux_env() and _is_android_python():
                 print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
                 _install_psutil_android_compat(pip_cmd)
