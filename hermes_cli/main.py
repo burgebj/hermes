@@ -395,6 +395,26 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
+
+# ---------------------------------------------------------------------------
+# Align the main process's HOME with the per-profile subprocess HOME so one
+# active profile never carries two competing HOME values.  See issue #27250.
+#
+# Must run AFTER _apply_profile_override() finalises HERMES_HOME and BEFORE
+# any subsequent module-level code caches Path.home() / expands ``~``.
+# Honours HERMES_PRESERVE_HOST_HOME=1 as an opt-out for callers that depend
+# on the historical split-HOME behaviour.
+# ---------------------------------------------------------------------------
+try:
+    from hermes_constants import align_main_process_home_with_subprocess
+
+    align_main_process_home_with_subprocess()
+except Exception:
+    # A bug here must never block hermes from starting; worst case is the
+    # pre-fix behaviour (host HOME for main, profile HOME for tools).
+    pass
+
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home

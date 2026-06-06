@@ -294,8 +294,12 @@ def get_subprocess_home() -> str | None:
     * **Profile isolation** — each profile gets its own git identity, SSH
       keys, gh tokens, etc.
 
-    The Python process's own ``os.environ["HOME"]`` and ``Path.home()`` are
-    **never** modified — only subprocess environments should inject this value.
+    This function is a pure read — it never modifies the environment.  Use
+    :func:`align_main_process_home_with_subprocess` to also align the main
+    process's own ``HOME`` with the same value (the default at startup), or
+    set ``HERMES_PRESERVE_HOST_HOME=1`` to skip that alignment and keep the
+    original host-level ``HOME`` for the main process.
+
     Activation is directory-based: if the ``home/`` subdirectory doesn't
     exist, returns ``None`` and behavior is unchanged.
     """
@@ -306,6 +310,60 @@ def get_subprocess_home() -> str | None:
     if os.path.isdir(profile_home):
         return profile_home
     return None
+
+
+def _truthy_env(name: str) -> bool:
+    """Return True when ``name`` is set to a recognised affirmative value."""
+    raw = os.environ.get(name, "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def align_main_process_home_with_subprocess() -> str | None:
+    """Align the main process's ``HOME`` with the per-profile subprocess HOME.
+
+    Without this, the same active profile can have two competing ``HOME``
+    values: the Hermes Python process keeps the host-level ``HOME`` (e.g.
+    ``/opt/data`` from the Docker image's ``useradd -d``), while tool
+    subprocesses see ``HERMES_HOME/home/`` (injected by ``_make_run_env``).
+    That makes paths like ``~/.ssh``, ``~/.config/gh``, ``~/.gitconfig`` and
+    ``~/workspace`` resolve to *different* directories depending on where
+    they are expanded — confusing both for users authoring skills/configs
+    and for tools that round-trip through ``Path.home()``.  See issue
+    `#27250 <https://github.com/NousResearch/hermes-agent/issues/27250>`_.
+
+    Within one active profile, this function pulls the main process's
+    ``HOME`` (and ``USERPROFILE`` on Windows so ``Path.home()`` follows)
+    over to the same per-profile directory subprocesses already use.
+    Different profiles still get different homes — isolation is preserved
+    at the profile boundary, not within a single profile.
+
+    Activation rules:
+
+    * No-op when ``get_subprocess_home()`` returns ``None`` (no profile
+      ``home/`` directory exists — covers fresh / non-Docker installs).
+    * No-op when ``HERMES_PRESERVE_HOST_HOME=1`` (escape hatch for users
+      who depend on the old split-HOME behaviour).
+    * Idempotent — safe to call multiple times; subsequent calls return
+      the already-aligned path without re-setting the env var.
+
+    Returns the aligned ``HOME`` value when alignment was performed (or
+    is already in effect), otherwise ``None``.
+    """
+    profile_home = get_subprocess_home()
+    if profile_home is None:
+        return None
+    if _truthy_env("HERMES_PRESERVE_HOST_HOME"):
+        return None
+
+    current = os.environ.get("HOME", "")
+    if current != profile_home:
+        os.environ["HOME"] = profile_home
+    # ``Path.home()`` reads ``USERPROFILE`` first on Windows.  Keep it in
+    # sync so ``Path.home()`` and ``os.path.expanduser('~')`` agree with
+    # the subprocess view there too.
+    if os.name == "nt" and os.environ.get("USERPROFILE", "") != profile_home:
+        os.environ["USERPROFILE"] = profile_home
+    return profile_home
 
 
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
