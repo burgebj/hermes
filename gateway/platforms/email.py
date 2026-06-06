@@ -270,6 +270,7 @@ class EmailAdapter(BasePlatformAdapter):
 
         # Map chat_id (sender email) -> last subject + message-id for threading
         self._thread_context: Dict[str, Dict[str, str]] = {}
+        self._smtp_use_starttls: Optional[bool] = None
 
         logger.info("[Email] Adapter initialized for %s", self._address)
 
@@ -292,6 +293,68 @@ class EmailAdapter(BasePlatformAdapter):
         except (ValueError, TypeError):
             # Fallback: just clear old entries if sort fails
             self._seen_uids = set(list(self._seen_uids)[-self._seen_uids_max // 2:])
+
+    @staticmethod
+    def _close_smtp(smtp: smtplib.SMTP) -> None:
+        """Close an SMTP connection, falling back to close() if quit() fails."""
+        try:
+            smtp.quit()
+        except Exception:
+            smtp.close()
+
+    def _smtp_supports_starttls(self) -> bool:
+        """Probe whether this SMTP endpoint supports explicit STARTTLS."""
+        if self._smtp_use_starttls is not None:
+            return self._smtp_use_starttls
+
+        smtp: Optional[smtplib.SMTP] = None
+        try:
+            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+            smtp.ehlo()
+            self._smtp_use_starttls = bool(smtp.has_extn("starttls"))
+        except Exception as e:
+            logger.info(
+                "[Email] STARTTLS probe failed for %s:%s, falling back to SMTP_SSL: %s",
+                self._smtp_host,
+                self._smtp_port,
+                e,
+            )
+            self._smtp_use_starttls = False
+        finally:
+            if smtp is not None:
+                self._close_smtp(smtp)
+
+        if self._smtp_use_starttls:
+            logger.info(
+                "[Email] SMTP endpoint %s:%s supports STARTTLS.",
+                self._smtp_host,
+                self._smtp_port,
+            )
+        else:
+            logger.info(
+                "[Email] SMTP endpoint %s:%s does not support STARTTLS; using SMTP_SSL.",
+                self._smtp_host,
+                self._smtp_port,
+            )
+        return self._smtp_use_starttls
+
+    def _connect_smtp(self) -> smtplib.SMTP:
+        """Connect and authenticate using STARTTLS when supported, else SMTP_SSL."""
+        context = ssl.create_default_context()
+        if self._smtp_supports_starttls():
+            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+            smtp.ehlo()
+            smtp.starttls(context=context)
+            smtp.ehlo()
+        else:
+            smtp = smtplib.SMTP_SSL(
+                self._smtp_host,
+                self._smtp_port,
+                timeout=30,
+                context=context,
+            )
+        smtp.login(self._address, self._password)
+        return smtp
 
     async def connect(self) -> bool:
         """Connect to the IMAP server and start polling for new messages."""
@@ -316,10 +379,8 @@ class EmailAdapter(BasePlatformAdapter):
 
         try:
             # Test SMTP connection
-            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
-            smtp.quit()
+            smtp = self._connect_smtp()
+            self._close_smtp(smtp)
             logger.info("[Email] SMTP connection test passed.")
         except Exception as e:
             logger.error("[Email] SMTP connection failed: %s", e)
@@ -548,16 +609,11 @@ class EmailAdapter(BasePlatformAdapter):
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        smtp = self._connect_smtp()
         try:
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
             smtp.send_message(msg)
         finally:
-            try:
-                smtp.quit()
-            except Exception:
-                smtp.close()
+            self._close_smtp(smtp)
 
         logger.info("[Email] Sent reply to %s (subject: %s)", to_addr, subject)
         return msg_id
@@ -749,16 +805,11 @@ class EmailAdapter(BasePlatformAdapter):
             part.add_header("Content-Disposition", f"attachment; filename={fname}")
             msg.attach(part)
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        smtp = self._connect_smtp()
         try:
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
             smtp.send_message(msg)
         finally:
-            try:
-                smtp.quit()
-            except Exception:
-                smtp.close()
+            self._close_smtp(smtp)
 
         return msg_id
 

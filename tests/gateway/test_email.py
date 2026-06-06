@@ -522,6 +522,7 @@ class TestThreadContext(unittest.TestCase):
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
+        adapter._smtp_use_starttls = True
         return adapter
 
     def test_thread_context_stored_after_dispatch(self):
@@ -619,6 +620,7 @@ class TestSendMethods(unittest.TestCase):
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
+        adapter._smtp_use_starttls = True
         return adapter
 
     def test_send_calls_smtp(self):
@@ -654,6 +656,30 @@ class TestSendMethods(unittest.TestCase):
 
             self.assertFalse(result.success)
             self.assertIn("Connection refused", result.error)
+
+    def test_send_falls_back_to_smtp_ssl_without_starttls(self):
+        """send() should use SMTP_SSL when STARTTLS is unavailable."""
+        import asyncio
+        adapter = self._make_adapter()
+        adapter._smtp_use_starttls = None
+
+        probe_server = MagicMock()
+        probe_server.has_extn.return_value = False
+        ssl_server = MagicMock()
+
+        with patch("smtplib.SMTP", return_value=probe_server) as mock_smtp, \
+             patch("smtplib.SMTP_SSL", return_value=ssl_server) as mock_smtp_ssl:
+            result = asyncio.run(
+                adapter.send("user@test.com", "Hello from Hermes!")
+            )
+
+        self.assertTrue(result.success)
+        mock_smtp.assert_called_once()
+        probe_server.ehlo.assert_called_once()
+        mock_smtp_ssl.assert_called_once()
+        ssl_server.login.assert_called_once_with("hermes@test.com", "secret")
+        ssl_server.send_message.assert_called_once()
+        probe_server.starttls.assert_not_called()
 
     def test_send_image_includes_url(self):
         """send_image should include image URL in email body."""
@@ -703,6 +729,36 @@ class TestSendMethods(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
+    def test_send_document_falls_back_to_smtp_ssl_without_starttls(self):
+        """send_document() should use SMTP_SSL when STARTTLS is unavailable."""
+        import asyncio
+        import tempfile
+
+        adapter = self._make_adapter()
+        adapter._smtp_use_starttls = None
+
+        probe_server = MagicMock()
+        probe_server.has_extn.return_value = False
+        ssl_server = MagicMock()
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"Test document content")
+            tmp_path = f.name
+
+        try:
+            with patch("smtplib.SMTP", return_value=probe_server), \
+                 patch("smtplib.SMTP_SSL", return_value=ssl_server):
+                result = asyncio.run(
+                    adapter.send_document("user@test.com", tmp_path, "Here is the file")
+                )
+
+            self.assertTrue(result.success)
+            ssl_server.login.assert_called_once_with("hermes@test.com", "secret")
+            ssl_server.send_message.assert_called_once()
+            probe_server.starttls.assert_not_called()
+        finally:
+            os.unlink(tmp_path)
+
     def test_send_typing_is_noop(self):
         """send_typing should do nothing for email."""
         import asyncio
@@ -738,6 +794,7 @@ class TestConnectDisconnect(unittest.TestCase):
         }):
             from gateway.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
+        adapter._smtp_use_starttls = True
         return adapter
 
     def test_connect_success(self):
@@ -786,6 +843,32 @@ class TestConnectDisconnect(unittest.TestCase):
              patch("smtplib.SMTP", side_effect=Exception("SMTP down")):
             result = asyncio.run(adapter.connect())
             self.assertFalse(result)
+
+    def test_connect_falls_back_to_smtp_ssl_without_starttls(self):
+        """connect() should use SMTP_SSL when STARTTLS is unavailable."""
+        import asyncio
+
+        adapter = self._make_adapter()
+        adapter._smtp_use_starttls = None
+
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+        probe_server = MagicMock()
+        probe_server.has_extn.return_value = False
+        ssl_server = MagicMock()
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
+             patch("smtplib.SMTP", return_value=probe_server), \
+             patch("smtplib.SMTP_SSL", return_value=ssl_server) as mock_smtp_ssl:
+            result = asyncio.run(adapter.connect())
+
+        self.assertTrue(result)
+        mock_smtp_ssl.assert_called_once()
+        ssl_server.login.assert_called_once_with("hermes@test.com", "secret")
+        probe_server.starttls.assert_not_called()
+        adapter._running = False
+        if adapter._poll_task:
+            adapter._poll_task.cancel()
 
     def test_disconnect_cancels_poll(self):
         """disconnect() should cancel the polling task."""
@@ -1024,7 +1107,9 @@ class TestSmtpConnectionCleanup(unittest.TestCase):
     def _make_adapter(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.email import EmailAdapter
-        return EmailAdapter(PlatformConfig(enabled=True))
+        adapter = EmailAdapter(PlatformConfig(enabled=True))
+        adapter._smtp_use_starttls = True
+        return adapter
 
     @patch.dict(os.environ, {
         "EMAIL_ADDRESS": "hermes@test.com",
