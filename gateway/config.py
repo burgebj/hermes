@@ -225,7 +225,35 @@ class HomeChannel:
         return result
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "HomeChannel":
+    def from_dict(
+        cls,
+        data: Any,
+        *,
+        platform_default: Optional[Platform] = None,
+    ) -> "HomeChannel":
+        # `hermes config set platforms.<name>.home_channel <chat_id>` writes a
+        # bare string, since the CLI has no schema awareness of the structured
+        # HomeChannel shape.  Accept that shape here too — the parent platform
+        # is known from the surrounding `platforms.<name>:` key, threaded in
+        # via platform_default.
+        if isinstance(data, str):
+            if platform_default is None:
+                raise TypeError(
+                    "HomeChannel.from_dict received a bare string chat_id but "
+                    "no platform_default was provided to associate it with. "
+                    "Accepted shapes: a string chat_id (when called with "
+                    "platform_default=<Platform>), or a dict "
+                    "{'platform': ..., 'chat_id': ..., 'name': ..., 'thread_id': ...}."
+                )
+            return cls(platform=platform_default, chat_id=data, name="Home")
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"HomeChannel.from_dict expects a str chat_id or a dict, "
+                f"got {type(data).__name__}: {data!r}. "
+                f"Accepted shapes: a string chat_id (when called with "
+                f"platform_default=<Platform>), or a dict "
+                f"{{'platform': ..., 'chat_id': ..., 'name': ..., 'thread_id': ...}}."
+            )
         return cls(
             platform=Platform(data["platform"]),
             chat_id=str(data["chat_id"]),
@@ -317,10 +345,17 @@ class PlatformConfig:
         return result
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        *,
+        platform: Optional[Platform] = None,
+    ) -> "PlatformConfig":
         home_channel = None
         if "home_channel" in data:
-            home_channel = HomeChannel.from_dict(data["home_channel"])
+            home_channel = HomeChannel.from_dict(
+                data["home_channel"], platform_default=platform,
+            )
 
         # gateway_restart_notification may be bridged into extra via the
         # shared-key loop in load_gateway_config(); check both top-level
@@ -611,7 +646,9 @@ class GatewayConfig:
         for platform_name, platform_data in data.get("platforms", {}).items():
             try:
                 platform = Platform(platform_name)
-                platforms[platform] = PlatformConfig.from_dict(platform_data)
+                platforms[platform] = PlatformConfig.from_dict(
+                    platform_data, platform=platform,
+                )
             except ValueError:
                 pass  # Skip unknown platforms
         
