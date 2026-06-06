@@ -1,0 +1,15 @@
+name: prometheus_avatar
+version: 0.1.0
+description: "Avatar assets, voice, and chat for Hermes. Live2D engine today, 3D engine on the roadmap."
+author: "Myths Labs"
+provides_tools:
+  - avatar_list_assets
+  - avatar_describe
+  - avatar_status
+# Notes for reviewers:
+# - v0.1 ships stub handlers (deterministic demo data). v0.2+ wires the
+#   live service described in README.md.
+# - No pip_dependencies, no external_dependencies, no hooks for v0.1 so the
+#   plugin loads cleanly on any Hermes install.
+# - Companion fast-path skill: optional-skills/creative/prometheus-avatar/
+#   (PR #9754).
