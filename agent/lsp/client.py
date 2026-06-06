@@ -805,11 +805,11 @@ class LSPClient:
         doesn't support pull diagnostics; we still get the push side.
         """
         budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
-        deadline = asyncio.get_event_loop().time() + budget
+        deadline = asyncio.get_running_loop().time() + budget
         abs_path = os.path.abspath(path)
 
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return
 
@@ -845,7 +845,7 @@ class LSPClient:
 
     async def _wait_for_fresh_push(self, path: str, version: int, timeout: float) -> None:
         """Wait until a publishDiagnostics arrives for ``path`` at ``version``+."""
-        deadline = asyncio.get_event_loop().time() + timeout
+        deadline = asyncio.get_running_loop().time() + timeout
         baseline = self._push_counter
         while True:
             current_v = self._published_version.get(path)
@@ -855,9 +855,9 @@ class LSPClient:
                 # snapshot the counter so we wake on a *new* push, not
                 # on the one that satisfied us a moment ago.
                 debounce_baseline = self._push_counter
-                debounce_deadline = asyncio.get_event_loop().time() + PUSH_DEBOUNCE
+                debounce_deadline = asyncio.get_running_loop().time() + PUSH_DEBOUNCE
                 while self._push_counter == debounce_baseline:
-                    remaining = debounce_deadline - asyncio.get_event_loop().time()
+                    remaining = debounce_deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         break
                     self._push_event.clear()
@@ -866,7 +866,7 @@ class LSPClient:
                     except asyncio.TimeoutError:
                         break
                 return
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return
             if self._push_counter > baseline:
