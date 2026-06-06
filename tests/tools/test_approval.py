@@ -11,8 +11,10 @@ from unittest.mock import patch as mock_patch
 import tools.approval as approval_module
 from tools.approval import (
     _get_approval_mode,
+    _get_approval_timeout,
     _smart_approve,
     approve_session,
+    check_all_command_guards,
     detect_dangerous_command,
     is_approved,
     load_permanent,
@@ -28,6 +30,43 @@ class TestApprovalModeParsing:
     def test_string_off_still_maps_to_off(self):
         with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "off"}}):
             assert _get_approval_mode() == "off"
+
+    def test_non_mapping_approvals_config_falls_back_to_defaults(self):
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": "bad"}):
+            assert _get_approval_mode() == "manual"
+            assert _get_approval_timeout() == 60
+
+    def test_malformed_approval_timeouts_fall_back_to_default(self):
+        malformed_timeouts = [False, True, -1, 0, float("inf"), 10**400]
+        for timeout in malformed_timeouts:
+            with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"timeout": timeout}}):
+                assert _get_approval_timeout() == 60
+
+    def test_prompt_callback_path_survives_malformed_timeout_config(self):
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"timeout": float("inf")}}):
+            assert prompt_dangerous_approval(
+                "example command",
+                "test danger",
+                approval_callback=lambda command, description, **kwargs: "once",
+            ) == "once"
+
+    def test_legacy_input_prompt_survives_huge_timeout_config(self):
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"timeout": 10**400}}), mock_patch(
+            "builtins.input", return_value="o"
+        ):
+            assert prompt_dangerous_approval("example command", "test danger") == "once"
+
+    def test_combined_guard_survives_non_mapping_approvals_config(self):
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": "bad"}), mock_patch.dict(
+            "os.environ", {"HERMES_INTERACTIVE": "1"}, clear=False
+        ):
+            result = check_all_command_guards(
+                "chmod --recursive 777 /tmp/example",
+                "local",
+                approval_callback=lambda command, description, **kwargs: "once",
+            )
+
+        assert result["approved"] is True
 
 
 class TestSmartApproval:

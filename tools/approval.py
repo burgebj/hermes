@@ -903,7 +903,11 @@ def _get_approval_config() -> dict:
     try:
         from hermes_cli.config import load_config
         config = load_config()
-        return config.get("approvals", {}) or {}
+        approvals = config.get("approvals", {}) or {}
+        if isinstance(approvals, dict):
+            return approvals
+        logger.warning("Ignoring malformed approvals config block: %r", type(approvals).__name__)
+        return {}
     except Exception as e:
         logger.warning("Failed to load approval config: %s", e)
         return {}
@@ -915,12 +919,24 @@ def _get_approval_mode() -> str:
     return _normalize_approval_mode(mode)
 
 
+def _coerce_approval_timeout(value, default: int = 60) -> int:
+    """Return a safe positive approval timeout, or the default for malformed values."""
+    try:
+        if isinstance(value, bool):
+            return default
+        timeout = int(value)
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+    max_timeout = getattr(threading, "TIMEOUT_MAX", 2**31 - 1)
+    if timeout <= 0 or timeout > max_timeout:
+        return default
+    return timeout
+
+
 def _get_approval_timeout() -> int:
     """Read the approval timeout from config. Defaults to 60 seconds."""
-    try:
-        return int(_get_approval_config().get("timeout", 60))
-    except (ValueError, TypeError):
-        return 60
+    return _coerce_approval_timeout(_get_approval_config().get("timeout", 60))
 
 
 def _get_cron_approval_mode() -> str:
