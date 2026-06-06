@@ -58,6 +58,52 @@ def _restore_file_mode(path: Path, mode: "int | None") -> None:
         pass
 
 
+def _chown_to_match_parent(path: str) -> None:
+    """Chown *path* to its parent directory's owner when running as root.
+
+    Containerized deployments (#17144) typically have a root-init
+    entrypoint (``tini``, ``s6``, etc.) that spawns the gateway as a
+    less-privileged user — e.g. ``nousresearch/hermes-agent:latest``
+    runs PID 1 as root and the gateway process as ``hermes`` / UID
+    ``10000``. When a code path inadvertently runs an atomic write from
+    the root side of that boundary (memory tool consolidation triggered
+    from a root-context worker, hook scripts, etc.), the resulting file
+    on the persistent volume is owned by ``root:root`` and cannot be
+    read by the gateway, so memory updates appear to succeed but never
+    re-enter the agent's session context.
+
+    Sticking the parent directory's owner/group onto the new file after
+    ``os.replace`` is the simplest deterministic way to restore
+    reachability without forcing every call site to know which user
+    owns the host volume.
+
+    Best-effort and POSIX-only:
+      * no-op on Windows (no concept of UID/GID);
+      * no-op when the process is not running as root, where ``chown``
+        to a foreign UID would just ``EPERM`` anyway;
+      * no-op when the parent itself is owned by root (nothing to
+        propagate);
+      * no-op on any ``OSError`` (e.g. the path was unlinked, parent
+        stat failed, filesystem rejects chown like FUSE without
+        ``allow_other``).
+    """
+    if os.name != "posix":
+        return
+    try:
+        if os.geteuid() != 0:
+            return
+        parent = os.path.dirname(path) or "."
+        parent_stat = os.stat(parent)
+        if parent_stat.st_uid == 0 and parent_stat.st_gid == 0:
+            return
+        os.chown(path, parent_stat.st_uid, parent_stat.st_gid)
+    except OSError:
+        # Best-effort: keep going even if the chown is rejected.  The
+        # write itself already succeeded and downstream readers will
+        # surface the permission problem with a more specific error.
+        pass
+
+
 def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     """Atomically move *tmp_path* onto *target*, preserving symlinks.
 
@@ -75,10 +121,17 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
 
     Returns the resolved real path used for the replace, so callers that
     need to re-apply permissions can target it instead of the symlink.
+
+    When the process is running as root and the parent directory is
+    owned by a non-root user, the new file is chown'd to match the
+    parent (#17144). This keeps Docker / NAS volume mounts where the
+    container's gateway runs as a service user readable after writes
+    that happened to land on the root side of the entrypoint.
     """
     target_str = str(target)
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
     os.replace(str(tmp_path), real_path)
+    _chown_to_match_parent(real_path)
     return real_path
 
 
