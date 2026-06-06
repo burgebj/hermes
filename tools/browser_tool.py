@@ -1993,6 +1993,14 @@ def _run_browser_command(
 
         browser_env = {**os.environ}
 
+        # Strip proxy env vars — the browser manages its own connections and
+        # corporate proxies cause ERR_EMPTY_RESPONSE (#14372).
+        for _proxy_var in (
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+        ):
+            browser_env.pop(_proxy_var, None)
+
         # Ensure subprocesses inherit the same browser-specific PATH fallbacks
         # used during CLI discovery.
         browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
