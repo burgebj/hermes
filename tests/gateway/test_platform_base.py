@@ -1393,6 +1393,18 @@ class TestTruncateMessageUtf16:
                 f"Chunk {i} has unbalanced fences ({fence_count})"
             )
 
+    def test_natural_break_split_keeps_utf16_safe_boundaries(self):
+        """Natural break preference must still produce UTF-16-safe chunks."""
+        msg = ("alpha 🎩 beta " * 400).strip()
+        chunks = BasePlatformAdapter.truncate_message(msg, 120, len_fn=utf16_len)
+        assert len(chunks) > 1
+        for i, chunk in enumerate(chunks):
+            # Regression guard: chunk should always be encodable and within limits.
+            chunk.encode("utf-16-le")
+            assert utf16_len(chunk) <= 120 + 20, (
+                f"Chunk {i} UTF-16 length {utf16_len(chunk)} exceeds limit"
+            )
+
 
 class TestProxyKwargsForAiohttp:
     """Verify proxy_kwargs_for_aiohttp routes all schemes through ProxyConnector."""

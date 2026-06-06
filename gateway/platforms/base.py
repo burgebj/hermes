@@ -4779,6 +4779,14 @@ class BasePlatformAdapter(ABC):
                     if safe_split > _cp_limit // 4:
                         split_at = safe_split
 
+            if _len is not len:
+                # Re-clamp after natural-break adjustments so the final slice
+                # is still valid under custom unit counting (e.g. UTF-16).
+                safe_prefix = _prefix_within_utf16_limit(remaining[:split_at], headroom)
+                split_at = len(safe_prefix)
+                if split_at < 1:
+                    split_at = max(1, _custom_unit_to_cp(remaining, max(1, headroom), _len))
+
             chunk_body = remaining[:split_at]
             remaining = remaining[split_at:].lstrip()
 
