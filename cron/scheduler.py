@@ -1703,6 +1703,10 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
+            if job.get("api_key"):
+                runtime_kwargs["explicit_api_key"] = os.path.expandvars(
+                    job.get("api_key", "")
+                )
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except AuthError as auth_exc:
             # Primary provider auth failed — try fallback chain before giving up.
