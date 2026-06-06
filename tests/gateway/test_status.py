@@ -48,6 +48,11 @@ class TestGatewayPidState:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         pid_path = tmp_path / "gateway.pid"
         pid_path.write_text(str(os.getpid()))
+        # Drop a lock file alongside so cleanup can prove the metadata is
+        # stale (lock exists but nobody holds it → dead process aftermath).
+        # See #26643 for why the absence of a lock file is no longer
+        # treated as proof of staleness.
+        (tmp_path / "gateway.lock").write_text("")
 
         assert status.get_running_pid() is None
         assert not pid_path.exists()
@@ -66,6 +71,11 @@ class TestGatewayPidState:
             "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
             "start_time": 111,
         }))
+        # Crashed gateways leave the lock file on disk (the OS releases
+        # the kernel-level flock but does not unlink the inode), so the
+        # "dead process" scenario the test pins includes a present lock
+        # file alongside the stale PID record.
+        (tmp_path / "gateway.lock").write_text("")
 
         def _dead_process(pid, sig):
             raise ProcessLookupError
@@ -157,7 +167,16 @@ class TestGatewayPidState:
 
         assert status.is_gateway_runtime_lock_active() is False
 
-    def test_get_running_pid_treats_pid_file_as_stale_without_runtime_lock(self, tmp_path, monkeypatch):
+    def test_get_running_pid_preserves_pid_file_when_lock_file_missing(self, tmp_path, monkeypatch):
+        """Regression for #26643.
+
+        During a ``hermes update --replace`` handoff the lock file can be
+        briefly absent from disk while a live gateway still owns the PID
+        file.  ``get_running_pid()`` must not interpret that as
+        "stale PID record" and unlink the new gateway's PID file —
+        doing so makes ``is_gateway_running()`` flip to False and hides
+        the ``send_message`` tool from CLI sessions for ~24h.
+        """
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         pid_path = tmp_path / "gateway.pid"
         pid_path.write_text(json.dumps({
@@ -171,8 +190,11 @@ class TestGatewayPidState:
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
 
+        # No lock file on disk → can't verify the live gateway, but
+        # also can't prove the PID file is stale.  Return None without
+        # destroying state a live gateway may own.
         assert status.get_running_pid() is None
-        assert not pid_path.exists()
+        assert pid_path.exists()
 
     def test_get_running_pid_cleans_stale_metadata_from_dead_foreign_pid(self, tmp_path, monkeypatch):
         """Stale PID file from a *different* PID (crashed process) must still be cleaned.
