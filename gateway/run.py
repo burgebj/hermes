@@ -19131,11 +19131,16 @@ class GatewayRunner:
                                 "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
                                 session_key or "?",
                             )
-                            await adapter.send(
+                            send_result = await adapter.send(
                                 source.chat_id,
                                 first_response,
                                 metadata=_status_thread_metadata,
                             )
+                            if send_result is not None and not getattr(send_result, "success", True):
+                                logger.warning(
+                                    "Failed to send first response before queued message: %s",
+                                    getattr(send_result, "error", send_result),
+                                )
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
                     elif first_response:
