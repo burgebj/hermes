@@ -703,7 +703,13 @@ class TestAdapterBehavior(unittest.TestCase):
             adapter._on_reaction_event("im.message.reaction.created_v1", data)
         run_threadsafe.assert_called_once()
 
-    def _build_reaction_adapter(self, *, msg_sender_id: str):
+    def _build_reaction_adapter(
+        self,
+        *,
+        msg_sender_id: str,
+        msg_sender_type: str = "app",
+        reaction_shortcuts_enabled: bool = False,
+    ):
         """Build a FeishuAdapter wired up to return a single GET-message result."""
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -712,9 +718,10 @@ class TestAdapterBehavior(unittest.TestCase):
         adapter._app_id = "cli_self_app"
         adapter._bot_open_id = "ou_self_bot"
         adapter._bot_user_id = "u_self_bot"
+        adapter._reaction_shortcuts_enabled = reaction_shortcuts_enabled
 
         msg = SimpleNamespace(
-            sender=SimpleNamespace(sender_type="app", id=msg_sender_id, id_type="app_id"),
+            sender=SimpleNamespace(sender_type=msg_sender_type, id=msg_sender_id, id_type="app_id"),
             chat_id="oc_chat",
             chat_type="group",
         )
@@ -763,6 +770,122 @@ class TestAdapterBehavior(unittest.TestCase):
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
         adapter._handle_message_with_guards.assert_awaited_once()
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_shortcuts_map_selected_emojis_when_enabled(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            reaction_shortcuts_enabled=True,
+        )
+        cases = {
+            "Eyes": "/status",
+            "Repeat": "/retry",
+            "Broom": "/new",
+            "CheckMarkButton": "/approve",
+            "CrossMarkButton": "/deny",
+        }
+
+        for emoji_type, expected_text in cases.items():
+            adapter._handle_message_with_guards.reset_mock()
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message_id="om_self_msg",
+                    user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+                    reaction_type=SimpleNamespace(emoji_type=emoji_type),
+                )
+            )
+            asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+            routed_event = adapter._handle_message_with_guards.await_args.args[0]
+            self.assertEqual(routed_event.text, expected_text)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_shortcuts_disabled_keeps_legacy_format_for_mapped_emoji(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            reaction_shortcuts_enabled=False,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message_id="om_self_msg",
+                user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="Eyes"),
+            )
+        )
+        asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+        routed_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertEqual(routed_event.text, "reaction:added:Eyes")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_shortcuts_removed_event_keeps_legacy_format(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            reaction_shortcuts_enabled=True,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message_id="om_self_msg",
+                user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="Eyes"),
+            )
+        )
+        asyncio.run(adapter._handle_reaction_event("im.message.reaction.deleted_v1", data))
+        routed_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertEqual(routed_event.text, "reaction:removed:Eyes")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_shortcuts_unmapped_emoji_keeps_legacy_format(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            reaction_shortcuts_enabled=True,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message_id="om_self_msg",
+                user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="PartyPopper"),
+            )
+        )
+        asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+        routed_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertEqual(routed_event.text, "reaction:added:PartyPopper")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_duplicate_created_reaction_replays_command_without_dedup(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            reaction_shortcuts_enabled=True,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message_id="om_self_msg",
+                user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="Eyes"),
+            )
+        )
+        asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+        asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+        self.assertEqual(adapter._handle_message_with_guards.await_count, 2)
+        first_event = adapter._handle_message_with_guards.await_args_list[0].args[0]
+        second_event = adapter._handle_message_with_guards.await_args_list[1].args[0]
+        self.assertEqual(first_event.text, "/status")
+        self.assertEqual(second_event.text, "/status")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_on_user_message_is_not_routed(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="ou_user_message",
+            msg_sender_type="user",
+            reaction_shortcuts_enabled=True,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message_id="om_user_msg",
+                user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="Eyes"),
+            )
+        )
+        asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+        adapter._handle_message_with_guards.assert_not_awaited()
 
     @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "open"}, clear=True)
     def test_group_message_requires_mentions_even_when_policy_open(self):

@@ -127,7 +127,7 @@ except ImportError:
 FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import Platform, PlatformConfig, _coerce_bool
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -236,6 +236,21 @@ _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withd
 # the success signal.
 _FEISHU_REACTION_IN_PROGRESS = "Typing"
 _FEISHU_REACTION_FAILURE = "CrossMark"
+_FEISHU_REACTION_SHORTCUTS: Dict[str, str] = {
+    "👀": "/status",
+    "Eyes": "/status",
+    "🔁": "/retry",
+    "Repeat": "/retry",
+    "CounterclockwiseArrowsButton": "/retry",
+    "🧹": "/new",
+    "Broom": "/new",
+    "✅": "/approve",
+    "CheckMarkButton": "/approve",
+    "WhiteCheckMark": "/approve",
+    "❌": "/deny",
+    "CrossMarkButton": "/deny",
+    "CrossMark": "/deny",
+}
 # Bound on the (message_id → reaction_id) handle cache. Happy-path entries
 # drain on completion; the cap is a safeguard against unbounded growth from
 # delete-failures, not a capacity plan.
@@ -264,6 +279,15 @@ FALLBACK_SHARE_CHAT_TEXT = "[Shared chat]"
 FALLBACK_INTERACTIVE_TEXT = "[Interactive message]"
 FALLBACK_IMAGE_TEXT = "[Image]"
 FALLBACK_ATTACHMENT_TEXT = "[Attachment]"
+
+
+def _reaction_shortcut_text(action: str, emoji_type: str) -> Optional[str]:
+    """Return a slash command for mapped inbound reactions on bot messages."""
+    if action != "added":
+        return None
+    return _FEISHU_REACTION_SHORTCUTS.get(str(emoji_type or ""))
+
+
 # ---------------------------------------------------------------------------
 # Post/card parsing helpers
 # ---------------------------------------------------------------------------
@@ -390,6 +414,7 @@ class FeishuAdapterSettings:
     ws_reconnect_interval: int = 120
     ws_ping_interval: Optional[int] = None
     ws_ping_timeout: Optional[int] = None
+    reaction_shortcuts_enabled: bool = False
     admins: frozenset[str] = frozenset()
     default_group_policy: str = ""
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
@@ -1566,6 +1591,7 @@ class FeishuAdapter(BasePlatformAdapter):
             ws_reconnect_interval=_coerce_required_int(extra.get("ws_reconnect_interval"), default=120, min_value=1),
             ws_ping_interval=_coerce_int(extra.get("ws_ping_interval"), default=None, min_value=1),
             ws_ping_timeout=_coerce_int(extra.get("ws_ping_timeout"), default=None, min_value=1),
+            reaction_shortcuts_enabled=_coerce_bool(extra.get("reaction_shortcuts_enabled"), default=False),
             admins=admins,
             default_group_policy=default_group_policy,
             group_rules=group_rules,
@@ -1603,6 +1629,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_reconnect_interval = settings.ws_reconnect_interval
         self._ws_ping_interval = settings.ws_ping_interval
         self._ws_ping_timeout = settings.ws_ping_timeout
+        self._reaction_shortcuts_enabled = settings.reaction_shortcuts_enabled
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
 
@@ -2762,7 +2789,10 @@ class FeishuAdapter(BasePlatformAdapter):
         reaction_type_obj = getattr(event, "reaction_type", None)
         emoji_type = str(getattr(reaction_type_obj, "emoji_type", "") or "UNKNOWN")
         action = "added" if "created" in event_type else "removed"
-        synthetic_text = f"reaction:{action}:{emoji_type}"
+        shortcut_text = None
+        if self._reaction_shortcuts_enabled:
+            shortcut_text = _reaction_shortcut_text(action, emoji_type)
+        synthetic_text = shortcut_text or f"reaction:{action}:{emoji_type}"
 
         sender_profile = await self._resolve_sender_profile(user_id_obj)
         chat_info = await self.get_chat_info(chat_id)
@@ -2783,7 +2813,13 @@ class FeishuAdapter(BasePlatformAdapter):
             message_id=message_id,
             timestamp=datetime.now(),
         )
-        logger.info("[Feishu] Routing reaction %s:%s on bot message %s as synthetic event", action, emoji_type, message_id)
+        logger.info(
+            "[Feishu] Routing reaction %s:%s on bot message %s as synthetic event %r",
+            action,
+            emoji_type,
+            message_id,
+            synthetic_text,
+        )
         await self._handle_message_with_guards(synthetic_event)
 
     def _is_card_action_duplicate(self, token: str) -> bool:
