@@ -352,6 +352,7 @@ class SlackAdapter(BasePlatformAdapter):
         # Cache for _fetch_thread_context results: cache_key → _ThreadContextCache
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
         self._THREAD_CACHE_TTL = 60.0
+        self._THREAD_CACHE_MAX = 2500
         # Track message IDs that should get reaction lifecycle (DMs / @mentions).
         self._reacting_message_ids: set = set()
         # Track active assistant thread status indicators so stop_typing can
@@ -3141,6 +3142,13 @@ class SlackAdapter(BasePlatformAdapter):
                 message_count=len(context_parts),
                 parent_text=parent_text,
             )
+            if len(self._thread_context_cache) > self._THREAD_CACHE_MAX:
+                stale_keys = [
+                    k for k, v in self._thread_context_cache.items()
+                    if now - v.fetched_at >= self._THREAD_CACHE_TTL
+                ]
+                for k in stale_keys:
+                    del self._thread_context_cache[k]
             return content
 
         except Exception as e:
