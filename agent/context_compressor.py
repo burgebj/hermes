@@ -1393,8 +1393,16 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
             response = call_llm(**call_kwargs)
-            content = response.choices[0].message.content
-            # Handle cases where content is not a string (e.g., dict from llama.cpp)
+            # Normalize dict content (e.g. llama.cpp tool calls) before
+            # extracting, then use extract_content_or_reasoning to handle
+            # models that put all output inside think/reasoning blocks with
+            # empty content field (e.g. DeepSeek-R1, Qwen-QwQ, glm-5-turbo).
+            raw_content = response.choices[0].message.content
+            if isinstance(raw_content, dict):
+                raw_content = str(raw_content) if raw_content else ""
+                response.choices[0].message.content = raw_content
+            from agent.auxiliary_client import extract_content_or_reasoning
+            content = extract_content_or_reasoning(response)
             if not isinstance(content, str):
                 content = str(content) if content else ""
             # Redact the summary output as well — the summarizer LLM may

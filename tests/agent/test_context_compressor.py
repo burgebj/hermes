@@ -1079,6 +1079,68 @@ class TestAbortOnSummaryFailure:
         assert len(result) < len(msgs)
 
 
+class TestReasoningOnlyExtraction:
+    """Regression: reasoning models (DeepSeek-R1, QwQ, glm-5-turbo) that put
+    all output in reasoning/think blocks with empty content must still produce
+    a valid summary via extract_content_or_reasoning."""
+
+    @pytest.fixture
+    def _compressor(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            return ContextCompressor(model="test", quiet_mode=True)
+
+    def test_reasoning_content_extracted_as_summary(self, _compressor):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = ""
+        mock_response.choices[0].message.reasoning = "The user was working on feature X and completed steps 1-3."
+
+        messages = [
+            {"role": "user", "content": "do something"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            summary = _compressor._generate_summary(messages)
+        assert isinstance(summary, str)
+        assert "feature X" in summary
+
+    def test_think_blocks_stripped_and_content_used(self, _compressor):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Let me analyze this.\n\n## Summary\nWorked on the API module."
+        mock_response.choices[0].message.reasoning = None
+
+        messages = [
+            {"role": "user", "content": "summarize"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            summary = _compressor._generate_summary(messages)
+        assert isinstance(summary, str)
+        assert "API module" in summary
+
+    def test_inline_think_tags_stripped(self, _compressor):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        # extract_content_or_reasoning strips <think/> XML tags but not emoji blocks
+        mock_response.choices[0].message.content = "<thinking>Internal reasoning here.</thinking>\n\nThe actual summary content."
+        mock_response.choices[0].message.reasoning = None
+
+        messages = [
+            {"role": "user", "content": "summarize"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            summary = _compressor._generate_summary(messages)
+        assert isinstance(summary, str)
+        assert "actual summary" in summary
+        # Think block content should not leak into summary
+        assert "Internal reasoning" not in summary
+
+
 class TestSummaryPrefixNormalization:
     def test_legacy_prefix_is_replaced(self):
         summary = ContextCompressor._with_summary_prefix("[CONTEXT SUMMARY]: did work")
