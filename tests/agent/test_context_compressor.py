@@ -1999,6 +1999,89 @@ class TestTokenBudgetTailProtection:
         )
 
 
+class TestLastUserTailAnchor:
+    """Regression #10896: the latest user message must remain in the protected tail.
+
+    If token budgeting plus tool-group alignment places ``cut_idx`` after the
+    last user turn, the model is told to answer only user messages after the
+    summary — the active request vanishes. ``_ensure_last_user_message_in_tail``
+    walks the cut back to include that user.
+    """
+
+    @pytest.fixture()
+    def anchor_compressor(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+            return ContextCompressor(
+                model="test/model",
+                threshold_percent=0.50,
+                protect_first_n=2,
+                protect_last_n=20,
+                quiet_mode=True,
+            )
+
+    def test_find_last_user_returns_negative_when_none_beyond_head(self, anchor_compressor):
+        c = anchor_compressor
+        messages = [
+            {"role": "user", "content": "only in head"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        assert c._find_last_user_message_idx(messages, head_end=2) == -1
+
+    def test_ensure_last_user_pulls_cut_back_from_middle(self, anchor_compressor):
+        c = anchor_compressor
+        head_end = 2
+        messages = [
+            {"role": "user", "content": "head u"},
+            {"role": "assistant", "content": "head a"},
+            {"role": "user", "content": "will compress"},
+            {"role": "assistant", "content": "middle"},
+            {"role": "user", "content": "ACTIVE latest user"},
+            {"role": "assistant", "content": "tail a1"},
+            {"role": "assistant", "content": "tail a2"},
+            {"role": "assistant", "content": "tail a3"},
+        ]
+        assert c._find_last_user_message_idx(messages, head_end) == 4
+        bad_cut = 6
+        fixed = c._ensure_last_user_message_in_tail(messages, bad_cut, head_end)
+        assert fixed == 4
+
+    def test_ensure_noop_when_last_user_already_in_tail(self, anchor_compressor):
+        c = anchor_compressor
+        head_end = 2
+        messages = [
+            {"role": "user", "content": "h0"},
+            {"role": "assistant", "content": "h1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a3"},
+            {"role": "user", "content": "LAST"},
+        ]
+        cut = 4
+        assert c._find_last_user_message_idx(messages, head_end) == 4
+        assert c._ensure_last_user_message_in_tail(messages, cut, head_end) == cut
+
+    def test_find_tail_cut_by_tokens_keeps_last_user_in_slice(self, anchor_compressor):
+        c = anchor_compressor
+        c.tail_token_budget = 20
+        head_end = 2
+        messages = [
+            {"role": "user", "content": "h0"},
+            {"role": "assistant", "content": "h1"},
+            {"role": "user", "content": "mid"},
+            {"role": "assistant", "content": "mid2"},
+            {"role": "user", "content": "ACTIVE_TASK"},
+            {"role": "assistant", "content": "short"},
+            {"role": "assistant", "content": "short"},
+            {"role": "assistant", "content": "short"},
+        ]
+        cut = c._find_tail_cut_by_tokens(messages, head_end)
+        last_u = c._find_last_user_message_idx(messages, head_end)
+        assert last_u >= 0
+        assert last_u >= cut, (
+            f"last user idx {last_u} must be inside tail [{cut}:], "
+            f"otherwise the active user turn is summarised away"
+        )
+
+
 class TestUpdateModelBudgets:
     """Regression: update_model() must recalculate token budgets."""
 
