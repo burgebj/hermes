@@ -18,6 +18,7 @@ import ast
 import importlib
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -72,6 +73,42 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
         except Exception as e:
             logger.warning("Could not import tool module %s: %s", mod_name, e)
     return imported
+
+
+def _normalize_tool_name(name: str, known_names: set) -> Optional[str]:
+    """Try to recover a registered tool name from a CamelCase/_tool-suffix variant.
+
+    Claude models intermittently emit names like ``TodoTool_tool``,
+    ``Patch_tool``, or ``BrowserClick_tool``.  This helper applies two
+    transformations in a bounded loop (max 4 iterations) until a match is
+    found in *known_names*:
+
+      1. Strip a trailing ``_tool`` suffix.
+      2. Convert CamelCase to snake_case.
+
+    Returns the matched registered name, or ``None`` if no match is found.
+    """
+    candidate = name
+    for _ in range(4):
+        # Pass 1: strip _tool suffix
+        if candidate.endswith("_tool") and len(candidate) > 5:
+            candidate = candidate[:-5]
+            if candidate in known_names:
+                return candidate
+
+        # Pass 2: CamelCase -> snake_case
+        snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", candidate)
+        snake = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", snake)
+        snake = snake.lower()
+        if snake != candidate:
+            candidate = snake
+            if candidate in known_names:
+                return candidate
+        else:
+            # No further transforms possible — stop early.
+            break
+
+    return None
 
 
 class ToolEntry:
@@ -390,13 +427,28 @@ class ToolRegistry:
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """Execute a tool handler by name.
 
+        * Exact match is tried first.
+        * On miss, ``_normalize_tool_name()`` attempts to recover the
+          canonical name from CamelCase / ``_tool``-suffix drift.
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
         """
         entry = self.get_entry(name)
         if not entry:
-            return json.dumps({"error": f"Unknown tool: {name}"})
+            # Fallback: try normalizing the name before giving up.
+            with self._lock:
+                known = set(self._tools.keys())
+            normalized = _normalize_tool_name(name, known)
+            if normalized:
+                logger.warning(
+                    "Tool name normalized: '%s' -> '%s' (model drift detected)",
+                    name,
+                    normalized,
+                )
+                entry = self.get_entry(normalized)
+            if not entry:
+                return json.dumps({"error": f"Unknown tool: {name}"})
         try:
             if entry.is_async:
                 from model_tools import _run_async
