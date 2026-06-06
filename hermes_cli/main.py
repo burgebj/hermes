@@ -2804,6 +2804,8 @@ def select_provider_and_model(args=None):
         _model_flow_copilot_acp(config, current_model)
     elif selected_provider == "copilot":
         _model_flow_copilot(config, current_model)
+    elif selected_provider == "cli-shim":
+        _model_flow_cli_shim(config, current_model)
     elif selected_provider == "custom":
         _model_flow_custom(config)
     elif (
@@ -5374,6 +5376,74 @@ def _model_flow_copilot_acp(config, current_model=""):
     )
     _save_model_choice(selected)
 
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = provider_id
+    model["base_url"] = effective_base
+    model["api_mode"] = "chat_completions"
+    save_config(cfg)
+    deactivate_provider()
+
+    print(f"Default model set to: {selected} (via {pconfig.name})")
+
+
+def _model_flow_cli_shim(config, current_model=""):
+    """Local CLI shim flow — routes Hermes turns through the locally-installed
+    claude/codex/gemini CLIs using each CLI's own OAuth login. No API key.
+
+    Mirrors `_model_flow_copilot_acp` but skips credential entry entirely: the
+    CLIs read their own credential caches (~/.claude, ~/.codex, ~/.gemini), so
+    the only choice the user makes here is which model alias to route to.
+    """
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+        resolve_external_process_provider_credentials,
+    )
+    from hermes_cli.config import load_config, save_config
+
+    del config
+
+    provider_id = "cli-shim"
+    pconfig = PROVIDER_REGISTRY[provider_id]
+    effective_base = pconfig.inference_base_url  # "cli://shim"
+
+    print("  cli-shim routes Hermes turns through your locally-installed CLIs")
+    print("  (claude / codex / gemini) using their own OAuth login — no API key.")
+    print("  Ensure the CLI backing your chosen model is installed and logged in:")
+    print("    claude-*-cli → `claude`,  codex-* → `codex`,  gemini-cli → `gemini`")
+    print()
+
+    # No credential to resolve up front — each CLI uses its own OAuth cache.
+    # Surface a soft diagnostic if the resolver objects, but never block here.
+    try:
+        resolve_external_process_provider_credentials(provider_id)
+    except Exception as exc:
+        print(f"  ⚠ {exc}")
+
+    # Single source of truth for the selectable aliases: the provider profile.
+    model_list = ["claude-sonnet-cli", "claude-opus-cli", "codex-gpt5-cli", "gemini-cli"]
+    try:
+        from providers import get_provider_profile
+
+        prof = get_provider_profile(provider_id)
+        fetched = prof.fetch_models() if prof is not None else None
+        if fetched:
+            model_list = fetched
+    except Exception:
+        pass
+
+    selected = _prompt_model_selection(model_list, current_model=current_model)
+    if not selected:
+        print("No change.")
+        return
+
+    _save_model_choice(selected)
     cfg = load_config()
     model = cfg.get("model")
     if not isinstance(model, dict):

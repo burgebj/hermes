@@ -1487,6 +1487,25 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    if provider == "cli-shim":
+        # Local CLI shim — claude/codex/gemini via their own OAuth subscription,
+        # no API key. The marker base_url "cli://shim" routes client creation to
+        # CliShimClient; the per-request model field selects which CLI runs.
+        # resolve_provider_client() builds the client, but the main/gateway
+        # runtime path resolves credentials here first — without this branch it
+        # falls through to auto→openrouter and demands an API key (#cli-shim).
+        creds = resolve_external_process_provider_credentials(provider)
+        return {
+            "provider": "cli-shim",
+            "api_mode": "chat_completions",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "command": creds.get("command", ""),
+            "args": list(creds.get("args") or []),
+            "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
     # Anthropic (native Messages API)
     if provider == "anthropic":
         # Allow base URL override from config.yaml model.base_url, but only

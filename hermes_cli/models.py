@@ -953,7 +953,10 @@ try:
     for _pp in _list_providers_for_canonical():
         if _pp.name in _canonical_slugs:
             continue
-        if _pp.auth_type in {"oauth_device_code", "oauth_external", "external_process", "aws_sdk", "copilot"}:
+        # cli-shim is exempt from the skip below: it ships a dedicated no-API-key
+        # picker flow (_model_flow_cli_shim in hermes_cli/main.py), so it is safe
+        # to surface in the model picker even though its auth_type is external_process.
+        if _pp.name != "cli-shim" and _pp.auth_type in {"oauth_device_code", "oauth_external", "external_process", "aws_sdk", "copilot"}:
             continue  # non-api-key flows need bespoke picker UX; skip auto-inject
         _label = _pp.display_name or _pp.name
         _desc = _pp.description or f"{_label} (direct API)"
