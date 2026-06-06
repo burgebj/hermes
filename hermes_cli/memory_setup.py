@@ -169,11 +169,14 @@ def _get_available_providers() -> list:
 
         schema = provider.get_config_schema() if hasattr(provider, "get_config_schema") else []
         has_secrets = any(f.get("secret") for f in schema)
+        required_secrets = any(f.get("secret") and f.get("required") for f in schema)
         has_non_secrets = any(not f.get("secret") for f in schema)
-        if has_secrets and has_non_secrets:
+        if required_secrets:
+            setup_hint = "requires API key"
+        elif has_secrets and has_non_secrets:
             setup_hint = "API key / local"
         elif has_secrets:
-            setup_hint = "requires API key"
+            setup_hint = "API key / local"
         elif not schema:
             setup_hint = "no setup needed"
         else:
