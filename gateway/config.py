@@ -1688,7 +1688,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "token": os.getenv("WECOM_CALLBACK_TOKEN", ""),
             "encoding_aes_key": os.getenv("WECOM_CALLBACK_ENCODING_AES_KEY", ""),
             "host": os.getenv("WECOM_CALLBACK_HOST", "0.0.0.0"),
-            "port": int(os.getenv("WECOM_CALLBACK_PORT", "8645")),
+            "port": _coerce_int(os.getenv("WECOM_CALLBACK_PORT"), 8645),
         })
 
     # Weixin (personal WeChat via iLink Bot API)
@@ -1744,7 +1744,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "server_url": bluebubbles_server_url.rstrip("/"),
             "password": bluebubbles_password,
             "webhook_host": os.getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
-            "webhook_port": int(os.getenv("BLUEBUBBLES_WEBHOOK_PORT", "8645")),
+            "webhook_port": _coerce_int(os.getenv("BLUEBUBBLES_WEBHOOK_PORT"), 8645),
             "webhook_path": os.getenv("BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook"),
             "send_read_receipts": os.getenv("BLUEBUBBLES_SEND_READ_RECEIPTS", "true").lower() in {"true", "1", "yes"},
         })

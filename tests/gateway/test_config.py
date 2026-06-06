@@ -882,3 +882,27 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+
+class TestMalformedEnvPortOverrides:
+    def test_invalid_bluebubbles_webhook_port_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
+        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
+        monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_PORT", "not-a-port")
+
+        config = GatewayConfig()
+
+        _apply_env_overrides(config)
+
+        assert config.platforms[Platform.BLUEBUBBLES].extra["webhook_port"] == 8645
+
+    def test_invalid_wecom_callback_port_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("WECOM_CALLBACK_CORP_ID", "corp-id")
+        monkeypatch.setenv("WECOM_CALLBACK_CORP_SECRET", "corp-secret")
+        monkeypatch.setenv("WECOM_CALLBACK_PORT", "not-a-port")
+
+        config = GatewayConfig()
+
+        _apply_env_overrides(config)
+
+        assert config.platforms[Platform.WECOM_CALLBACK].extra["port"] == 8645
