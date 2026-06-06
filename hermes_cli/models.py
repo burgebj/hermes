@@ -284,6 +284,15 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "kimi-k2-turbo-preview",
         "kimi-k2-0905-preview",
     ],
+    "kimi-for-coding": [
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "kimi-for-coding",
+        "kimi-k2-thinking",
+        "kimi-k2-thinking-turbo",
+        "kimi-k2-turbo-preview",
+        "kimi-k2-0905-preview",
+    ],
     "kimi-coding-cn": [
         "kimi-k2.6",
         "kimi-k2.5",
@@ -3779,6 +3788,42 @@ def validate_requested_model(
             suggestion_text = ""
             if suggestions:
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
+
+            # Fallback to static catalog even when the live /models endpoint
+            # responds with an incomplete list (e.g. Kimi Coding Plan only
+            # advertises a subset of its actual models).
+            try:
+                catalog_models = provider_model_ids(normalized)
+            except Exception:
+                catalog_models = []
+            if catalog_models:
+                catalog_lower = {m.lower(): m for m in catalog_models}
+                if requested_for_lookup.lower() in catalog_lower:
+                    return {
+                        "accepted": True,
+                        "persist": True,
+                        "recognized": True,
+                        "message": None,
+                    }
+                auto_catalog = get_close_matches(
+                    requested_for_lookup.lower(), list(catalog_lower.keys()), n=1, cutoff=0.9
+                )
+                if auto_catalog:
+                    corrected = catalog_lower[auto_catalog[0]]
+                    return {
+                        "accepted": True,
+                        "persist": True,
+                        "recognized": True,
+                        "corrected_model": corrected,
+                        "message": f"Auto-corrected `{requested}` → `{corrected}`",
+                    }
+                catalog_suggestions = get_close_matches(
+                    requested_for_lookup.lower(), list(catalog_lower.keys()), n=3, cutoff=0.5
+                )
+                if catalog_suggestions:
+                    suggestion_text = "\n  Similar models: " + ", ".join(
+                        f"`{catalog_lower[s]}`" for s in catalog_suggestions
+                    )
 
         return {
             "accepted": False,
