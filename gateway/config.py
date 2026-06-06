@@ -160,7 +160,7 @@ class Platform(Enum):
         # the enum was defined).
         try:
             from gateway.platform_registry import platform_registry
-            if platform_registry.is_registered(value):
+            if platform_registry.get(value) is not None:
                 pseudo = object.__new__(cls)
                 pseudo._value_ = value
                 pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
@@ -177,18 +177,25 @@ class Platform(Enum):
         """Return names of bundled platform plugins under ``plugins/platforms/``."""
         names: set = set()
         try:
-            platforms_dir = Path(__file__).parent.parent / "plugins" / "platforms"
-            if platforms_dir.is_dir():
-                for child in platforms_dir.iterdir():
-                    if (
-                        child.is_dir()
-                        and (child / "__init__.py").exists()
-                        and (
-                            (child / "plugin.yaml").exists()
-                            or (child / "plugin.yml").exists()
-                        )
-                    ):
-                        names.add(child.name.lower())
+            # Scan both the bundled plugins/ dir and the user's plugins/ dir
+            bases = [Path(__file__).parent.parent / "plugins" / "platforms"]
+            herimes_home = Path(os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes"))
+            user_plugins = herimes_home / "plugins" / "platforms"
+            if user_plugins.is_dir():
+                bases.append(user_plugins)
+
+            for platforms_dir in bases:
+                if platforms_dir.is_dir():
+                    for child in platforms_dir.iterdir():
+                        if (
+                            child.is_dir()
+                            and (child / "__init__.py").exists()
+                            and (
+                                (child / "plugin.yaml").exists()
+                                or (child / "plugin.yml").exists()
+                            )
+                        ):
+                            names.add(child.name.lower())
         except Exception:
             pass
         return names
