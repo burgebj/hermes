@@ -2060,6 +2060,18 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # Anti-thrashing: track compression effectiveness
         savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
         self._last_compression_savings_pct = savings_pct
+        if saved_estimate <= 0:
+            # Compression made things worse or had no effect — return original.
+            # Inflation happens when the summary text is longer than the content
+            # it replaced, typically for small sessions or very verbose models.
+            if not self.quiet_mode:
+                logger.warning(
+                    "Compression ineffective: compressed size >= original "
+                    "(%d tokens saved). Skipping compression this round.",
+                    saved_estimate,
+                )
+            self._ineffective_compression_count += 1
+            return messages
         if savings_pct < 10:
             self._ineffective_compression_count += 1
         else:

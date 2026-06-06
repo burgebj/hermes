@@ -109,13 +109,35 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return the kernel start time for a process when available."""
+    """Return the kernel start time for a process when available.
+
+    Linux: reads field 22 from /proc/<pid>/stat (clock ticks).
+    macOS/BSD: uses ``ps -o lstart= -p <pid>`` to get the start time,
+    then converts to epoch seconds.
+    """
+    # Linux: /proc/<pid>/stat field 22
     stat_path = Path(f"/proc/{pid}/stat")
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text(encoding="utf-8").split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
-        return None
+        pass
+
+    # macOS/BSD: ps -o lstart= for start time, parse via strptime
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+        raw = result.stdout.strip()
+        if raw:
+            from datetime import datetime
+            dt = datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")
+            return int(dt.timestamp())
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+
+    return None
 
 
 def get_process_start_time(pid: int) -> Optional[int]:
