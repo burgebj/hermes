@@ -1,0 +1,7 @@
+name: dgx-ollama-profile
+kind: model-provider
+version: 0.1.0
+description: "DGX Spark Ollama model provider — makes DGX models appear in
+  'hermes model' picker. URL is read from hermes dgx config at startup so it
+  tracks the active DGX node automatically."
+author: hartsock
