@@ -95,6 +95,26 @@ uv pip install -e ".[all,dev]"
 npm install
 ```
 
+### Clone and install (Windows PowerShell)
+
+For daily CLI use, the project recommends **WSL2** (see the [README](README.md)). If you are developing on native Windows (tests, patches, IDE workflows), use the same flow with PowerShell:
+
+```powershell
+git clone --recurse-submodules https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent
+
+uv venv venv --python 3.11
+.\venv\Scripts\Activate.ps1
+
+uv pip install -e ".[all,dev]"
+
+# Optional: RL training submodule
+# git submodule update --init tinker-atropos; uv pip install -e ".\tinker-atropos"
+
+# Optional: browser tools
+npm install
+```
+
 ### Configure for development
 
 ```bash
@@ -106,6 +126,18 @@ touch ~/.hermes/.env
 echo "OPENROUTER_API_KEY=***" >> ~/.hermes/.env
 ```
 
+### Configure for development (Windows PowerShell)
+
+```powershell
+$HermesHome = Join-Path $env:USERPROFILE ".hermes"
+foreach ($d in "cron", "sessions", "logs", "memories", "skills") {
+    New-Item -ItemType Directory -Force -Path (Join-Path $HermesHome $d) | Out-Null
+}
+Copy-Item -Path "cli-config.yaml.example" -Destination (Join-Path $HermesHome "config.yaml")
+New-Item -ItemType File -Force -Path (Join-Path $HermesHome ".env") | Out-Null
+Add-Content -Path (Join-Path $HermesHome ".env") -Value "OPENROUTER_API_KEY=sk-or-v1-your-key"
+```
+
 ### Run
 
 ```bash
@@ -114,6 +146,16 @@ mkdir -p ~/.local/bin
 ln -sf "$(pwd)/venv/bin/hermes" ~/.local/bin/hermes
 
 # Verify
+hermes doctor
+hermes chat -q "Hello"
+```
+
+### Run (Windows PowerShell)
+
+With the venv activated, the `hermes` console script is on your `PATH` for that session:
+
+```powershell
+.\venv\Scripts\Activate.ps1
 hermes doctor
 hermes chat -q "Hello"
 ```
