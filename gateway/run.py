@@ -15022,7 +15022,7 @@ class GatewayRunner:
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
         plural = "plural" if count > 1 else "singular"
 
-        # Send confirmation message with skip_stream_finalize to avoid closing
+        # Send confirmation message with is_approval_prompt to avoid closing
         # the agent's stream when it resumes. The confirmation is an independent
         # message that shouldn't interfere with the agent's ongoing output.
         confirmation_text = t(f"gateway.approve.{choice}_{plural}", count=count)
@@ -15030,7 +15030,7 @@ class GatewayRunner:
             asyncio.create_task(_adapter.send(
                 source.chat_id,
                 confirmation_text,
-                metadata={"skip_stream_finalize": True}
+                metadata={"is_approval_prompt": True}  # Correct metadata key
             ))
 
         # Return None so the default command handler doesn't send the message again
@@ -15071,14 +15071,14 @@ class GatewayRunner:
 
         logger.info("User denied %d dangerous command(s) via /deny", count)
 
-        # Send confirmation message with skip_stream_finalize to avoid closing
+        # Send confirmation message with is_approval_prompt to avoid closing
         # the agent's stream when it resumes. Similar to /approve handling.
         confirmation_text = t("gateway.deny.denied_plural", count=count) if count > 1 else t("gateway.deny.denied_singular")
         if _adapter:
             asyncio.create_task(_adapter.send(
                 source.chat_id,
                 confirmation_text,
-                metadata={"skip_stream_finalize": True}
+                metadata={"is_approval_prompt": True}  # Correct metadata key
             ))
 
         # Return None so the default command handler doesn't send the message again

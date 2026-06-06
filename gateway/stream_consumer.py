@@ -134,6 +134,14 @@ class GatewayStreamConsumer:
         # Called with no arguments. Exceptions are swallowed.
         self._on_new_message = on_new_message
         self._initial_reply_to_id = initial_reply_to_id
+
+        # Per-turn identifier: uniquely identifies this consumer's stream turn.
+        # Passed to adapter.send_stream_frame() to prevent concurrent consumers
+        # from interfering with each other (e.g., /background, parallel subagents).
+        # Mirrors official wecom-openclaw-plugin's per-message streamId generation.
+        import uuid
+        self._turn_id = str(uuid.uuid4())
+
         self._queue: queue.Queue = queue.Queue()
         self._accumulated = ""
         self._message_id: Optional[str] = None
@@ -449,6 +457,7 @@ class GatewayStreamConsumer:
                     "",
                     chat_id=self.chat_id,
                     reply_to=self._initial_reply_to_id,
+                    turn_id=self._turn_id,
                 )
             except Exception:
                 logger.debug(
@@ -1305,6 +1314,7 @@ class GatewayStreamConsumer:
                     finalize=finalize,
                     chat_id=self.chat_id,
                     reply_to=self._initial_reply_to_id,
+                    turn_id=self._turn_id,
                 )
             except Exception as e:
                 logger.debug(
