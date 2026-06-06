@@ -191,3 +191,26 @@ class TestNormalizeCustomProviderEntry:
         result = _normalize_custom_provider_entry(entry)
         assert result is not None
         assert "models" not in result
+
+    def test_env_var_placeholder_in_base_url_not_rejected(self):
+        """A base_url containing ${ENV_VAR} should not be rejected as invalid
+        URL — validation is deferred until after env-var expansion in
+        load_config().  Regression test for issue #14457."""
+        entry = {
+            "name": "my-provider",
+            "base_url": "${MY_PROVIDER_BASE_URL}",
+            "api_key": "env:MY_PROVIDER_API_KEY",
+        }
+        result = _normalize_custom_provider_entry(entry)
+        assert result is not None
+        assert result["base_url"] == "${MY_PROVIDER_BASE_URL}"
+
+    def test_multiple_env_vars_in_base_url(self):
+        """base_url with multiple env-var placeholders is accepted."""
+        entry = {
+            "name": "multi-var-provider",
+            "base_url": "${SCHEME}://${HOST}:${PORT}/v1",
+        }
+        result = _normalize_custom_provider_entry(entry)
+        assert result is not None
+        assert result["base_url"] == "${SCHEME}://${HOST}:${PORT}/v1"

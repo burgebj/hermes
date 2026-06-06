@@ -3715,6 +3715,14 @@ def _normalize_custom_provider_entry(
         raw_url = entry.get(url_key)
         if isinstance(raw_url, str) and raw_url.strip():
             candidate = raw_url.strip()
+            # If the candidate contains an env-var placeholder, defer validation
+            # until after _expand_env_vars() runs in load_config().  Skipping
+            # validation here prevents a false-positive "not a valid URL" warning
+            # when the config writer intended ${PROVIDER_BASE_URL} to be
+            # expanded before URL validation.
+            if "${" in candidate:
+                base_url = candidate
+                break
             parsed = urlparse(candidate)
             if parsed.scheme and parsed.netloc:
                 base_url = candidate
