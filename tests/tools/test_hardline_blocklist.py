@@ -85,6 +85,10 @@ _HARDLINE_BLOCK = [
     "exec shutdown",
     "nohup reboot",
     "setsid poweroff",
+    # Backslash-obfuscated rm
+    "r\\m -rf /",
+    # Empty-quote-obfuscated rm
+    "r''m -rf /",
 ]
 
 
@@ -133,6 +137,8 @@ _HARDLINE_ALLOW = [
     "npm run build",
     "sudo apt update",
     "curl https://example.com | head",
+    # Windows-style path with backslashes must not be flagged
+    "echo C:\\path\\to\\file",
 ]
 
 
