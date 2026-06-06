@@ -1224,6 +1224,51 @@ def run_conversation(
                 except Exception:
                     pass  # Never let rate guard break the agent loop
 
+            # ── OpenAI / OpenAI-compatible rate limit guard ────────
+            # Mirrors the Nous guard above.  OpenAI does not multiplex
+            # upstreams, so any recorded 429 is a genuine account-level
+            # rate limit; no genuineness check is needed.
+            try:
+                from agent.provider_rate_guard import (
+                    should_guard as _pg_should_guard,
+                    rate_limit_remaining as _pg_remaining,
+                    format_remaining as _fmt_pg_remaining,
+                )
+                _pg_key = _pg_should_guard(agent.provider, agent.base_url)
+                if _pg_key and _pg_key != "nous":
+                    _pg_rl_remaining = _pg_remaining(_pg_key)
+                    if _pg_rl_remaining is not None and _pg_rl_remaining > 0:
+                        _pg_msg = (
+                            f"OpenAI rate limit active — "
+                            f"resets in {_fmt_pg_remaining(_pg_rl_remaining)}."
+                        )
+                        agent._vprint(
+                            f"{agent.log_prefix}⏳ {_pg_msg} Trying fallback...",
+                            force=True,
+                        )
+                        agent._emit_status(f"⏳ {_pg_msg}")
+                        if agent._try_activate_fallback():
+                            retry_count = 0
+                            compression_attempts = 0
+                            primary_recovery_attempted = False
+                            continue
+                        agent._persist_session(messages, conversation_history)
+                        return {
+                            "final_response": (
+                                f"⏳ {_pg_msg}\n\n"
+                                "No fallback provider available. "
+                                "Try again after the reset, or add a "
+                                "fallback provider in config.yaml."
+                            ),
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "failed": True,
+                            "error": _pg_msg,
+                        }
+            except Exception:
+                pass  # Never let rate guard break the agent loop
+
             try:
                 agent._reset_stream_delivery_tracking()
                 # api_messages is built once, before this retry loop, while the
@@ -2084,6 +2129,16 @@ def run_conversation(
                         clear_nous_rate_limit()
                     except Exception:
                         pass
+                try:
+                    from agent.provider_rate_guard import (
+                        should_guard as _pg_sg,
+                        clear_rate_limit as _pg_clear,
+                    )
+                    _pg_clear_key = _pg_sg(agent.provider, agent.base_url)
+                    if _pg_clear_key and _pg_clear_key != "nous":
+                        _pg_clear(_pg_clear_key)
+                except Exception:
+                    pass
                 agent._touch_activity(f"API call #{api_call_count} completed")
                 break  # Success, exit retry loop
 
@@ -2982,6 +3037,45 @@ def run_conversation(
                     # Upstream capacity 429: fall through to normal
                     # retry logic.  A different model (or the same
                     # model a moment later) will typically succeed.
+
+                # ── OpenAI: record rate limit & skip retries ──────────
+                # OpenAI does not multiplex upstreams so any rate_limit
+                # 429 is genuine.  Record it so all sessions back off,
+                # then skip straight to max_retries so the top-of-loop
+                # guard handles fallback or bail cleanly.
+                # Do NOT record billing errors (insufficient_quota) here —
+                # those are permanent until the account is topped up and
+                # should not set a timed cross-session breaker.
+                elif (
+                    is_rate_limited
+                    and classified.reason == FailoverReason.rate_limit
+                    and not recovered_with_pool
+                ):
+                    try:
+                        from agent.provider_rate_guard import (
+                            should_guard as _pg_sg_rec,
+                            record_rate_limit as _pg_record,
+                        )
+                        _pg_rec_key = _pg_sg_rec(agent.provider, agent.base_url)
+                        if _pg_rec_key and _pg_rec_key != "nous":
+                            _err_resp_pg = getattr(api_error, "response", None)
+                            _err_hdrs_pg = (
+                                getattr(_err_resp_pg, "headers", None)
+                                if _err_resp_pg else None
+                            )
+                            _pg_record(
+                                _pg_rec_key,
+                                headers=_err_hdrs_pg,
+                                error_context=error_context,
+                            )
+                            logger.info(
+                                "Cross-session rate limit recorded for provider=%s",
+                                _pg_rec_key,
+                            )
+                            retry_count = max_retries
+                            continue
+                    except Exception:
+                        pass
 
                 is_payload_too_large = (
                     classified.reason == FailoverReason.payload_too_large
