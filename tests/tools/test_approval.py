@@ -12,6 +12,7 @@ import tools.approval as approval_module
 from tools.approval import (
     _get_approval_mode,
     _smart_approve,
+    _normalize_approval_timeout,
     approve_session,
     detect_dangerous_command,
     is_approved,
@@ -28,6 +29,19 @@ class TestApprovalModeParsing:
     def test_string_off_still_maps_to_off(self):
         with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "off"}}):
             assert _get_approval_mode() == "off"
+
+
+class TestApprovalTimeoutParsing:
+    def test_positive_timeout_remains_seconds(self):
+        assert _normalize_approval_timeout(60) == 60
+        assert _normalize_approval_timeout("30") == 30
+
+    def test_zero_and_none_disable_timeout(self):
+        for raw in (0, "0", None, False, "none", "false", "never", "off", ""):
+            assert _normalize_approval_timeout(raw) is None
+
+    def test_invalid_timeout_falls_back_to_default(self):
+        assert _normalize_approval_timeout("bogus", default=42) == 42
 
 
 class TestSmartApproval:

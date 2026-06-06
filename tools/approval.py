@@ -786,6 +786,8 @@ def prompt_dangerous_approval(command: str, description: str,
     """
     if timeout_seconds is None:
         timeout_seconds = _get_approval_timeout()
+    else:
+        timeout_seconds = _normalize_approval_timeout(timeout_seconds)
 
     if approval_callback is not None:
         try:
@@ -915,12 +917,31 @@ def _get_approval_mode() -> str:
     return _normalize_approval_mode(mode)
 
 
-def _get_approval_timeout() -> int:
-    """Read the approval timeout from config. Defaults to 60 seconds."""
+def _normalize_approval_timeout(raw, default: int = 60) -> int | None:
+    """Normalize ``approvals.timeout`` values.
+
+    Returns an integer number of seconds for finite timeouts.  Returns
+    ``None`` when the configured value explicitly disables timeout-based
+    auto-denial.  This lets a human approval prompt remain pending while the
+    user is away, instead of treating absence as denial.
+    """
+    if raw is None or raw is False:
+        return None
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"", "0", "none", "false", "never", "off"}:
+            return None
+        raw = normalized
     try:
-        return int(_get_approval_config().get("timeout", 60))
+        value = int(raw)
     except (ValueError, TypeError):
-        return 60
+        return default
+    return None if value <= 0 else value
+
+
+def _get_approval_timeout() -> int | None:
+    """Read the approval timeout from config. Defaults to 60 seconds."""
+    return _normalize_approval_timeout(_get_approval_config().get("timeout", 60))
 
 
 def _get_cron_approval_mode() -> str:
