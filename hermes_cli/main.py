@@ -10177,6 +10177,35 @@ def cmd_update(args):
 
     gateway_mode = getattr(args, "gateway", False)
 
+    # Warn if the gateway is currently running — updating in-place while the
+    # gateway holds open connections (e.g. Telegram polling) can leave the
+    # bot token in a stale state and break messaging platforms after the
+    # update (issue #23783).
+    if not gateway_mode:
+        try:
+            from hermes_cli.gateway import find_gateway_pids
+            _running_pids = find_gateway_pids()
+            if _running_pids:
+                _pid_list = ", ".join(str(p) for p in _running_pids[:3])
+                print(
+                    f"⚠️  Gateway is running (PID {_pid_list}). "
+                    f"Updating while the gateway is active may break "
+                    f"messaging platform connections (Telegram, etc.)."
+                )
+                print(
+                    "   Run 'hermes gateway stop' first, then 'hermes update', "
+                    "then 'hermes gateway start'."
+                )
+                try:
+                    _ans = input("   Continue anyway? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    _ans = "n"
+                if _ans not in ("y", "yes"):
+                    print("Update cancelled.")
+                    return
+        except Exception:
+            pass  # Never block update over a PID check failure
+
     # Protect against mid-update terminal disconnects (SIGHUP) and tolerate
     # writes to a closed stdout.  No-op in gateway mode.  See
     # _install_hangup_protection for rationale.
