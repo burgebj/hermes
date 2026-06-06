@@ -945,6 +945,7 @@ def skill_view(
 
         candidates: List[Tuple[Optional[Path], Path]] = []  # (skill_dir, skill_md)
         seen_md: set = set()
+        name_is_path = Path(name).is_absolute() or "/" in name or "\\" in name
 
         def _record(sd: Optional[Path], smd: Path) -> None:
             try:
@@ -982,9 +983,10 @@ def skill_view(
                     _record(found_skill_md.parent, found_skill_md)
 
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
-            for found_md in search_dir.rglob(f"{name}.md"):
-                if found_md.name != "SKILL.md":
-                    _record(None, found_md)
+            if not name_is_path:
+                for found_md in search_dir.rglob(f"{name}.md"):
+                    if found_md.name != "SKILL.md":
+                        _record(None, found_md)
 
         if len(candidates) > 1:
             paths = [str(smd) for _, smd in candidates]
