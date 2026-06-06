@@ -4440,19 +4440,21 @@ def _is_openrouter_client(client: Any) -> bool:
     return False
 
 
-def _cached_client_accepts_slash_models(client: Any, cached_default: Optional[str]) -> bool:
+def _cached_client_accepts_slash_models(client: Any, cached_default: Optional[str], provider: str = "") -> bool:
     """Best-effort check for cached clients that accept ``vendor/model`` IDs."""
+    if provider == "custom":
+        return True
     if _is_openrouter_client(client):
         return True
     return bool(cached_default and "/" in cached_default)
 
 
-def _compat_model(client: Any, model: Optional[str], cached_default: Optional[str]) -> Optional[str]:
+def _compat_model(client: Any, model: Optional[str], cached_default: Optional[str], provider: str = "") -> Optional[str]:
     """Keep slash-bearing model IDs only for cached clients that support them.
 
     Mirrors the guard in resolve_provider_client() which is skipped on cache hits.
     """
-    if model and "/" in model and not _cached_client_accepts_slash_models(client, cached_default):
+    if model and "/" in model and not _cached_client_accepts_slash_models(client, cached_default, provider):
         return cached_default
     return model or cached_default
 
@@ -4517,13 +4519,13 @@ def _get_cached_client(
                     and not cached_loop.is_closed()
                 )
                 if loop_ok:
-                    effective = _compat_model(cached_client, model, cached_default)
+                    effective = _compat_model(cached_client, model, cached_default, provider)
                     return cached_client, effective
                 # Stale — evict and fall through to create a new client.
                 _force_close_async_httpx(cached_client)
                 del _client_cache[cache_key]
             else:
-                effective = _compat_model(cached_client, model, cached_default)
+                effective = _compat_model(cached_client, model, cached_default, provider)
                 return cached_client, effective
     # Build outside the lock.
     # For pool-backed api_key providers, derive the active API key from the
