@@ -125,7 +125,8 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "whatsapp":        _TIER_MEDIUM,  # Baileys bridge supports /edit
     "bluebubbles":     _TIER_LOW,
     "weixin":          _TIER_LOW,
-    "wecom":           _TIER_LOW,
+    # WeCom: supports pseudo-edit via stream msgtype
+    "wecom":           _TIER_MEDIUM,
     "wecom_callback":  _TIER_LOW,
     "dingtalk":        _TIER_LOW,
 
