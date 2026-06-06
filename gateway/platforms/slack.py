@@ -16,7 +16,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any, Tuple, List
+from typing import Dict, Optional, Any, Tuple, List, ClassVar
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -891,6 +891,17 @@ class SlackAdapter(BasePlatformAdapter):
             @self._app.event("assistant_thread_context_changed")
             async def handle_assistant_thread_context_changed(event, say):
                 await self._handle_assistant_thread_lifecycle_event(event)
+
+            # Forward reaction_added events through the normal message
+            # pipeline. Skills that present confirmation-style proposals
+            # ("react 👍 to proceed") then work end-to-end. Reactions are
+            # synthesized into MessageEvents whose text is the reaction
+            # emoji (translated to unicode for common cases), keeping the
+            # downstream auth gate, thread context fetch, and skill
+            # routing unchanged.
+            @self._app.event("reaction_added")
+            async def handle_reaction_added(event, say):
+                await self._handle_slack_reaction(event)
 
             # Register slash command handler(s)
             #
@@ -2101,6 +2112,114 @@ class SlackAdapter(BasePlatformAdapter):
         metadata = self._extract_assistant_thread_metadata(event)
         self._cache_assistant_thread_metadata(metadata)
         self._seed_assistant_thread_session(metadata)
+
+    # Common reaction names → unicode emoji. Used by ``_handle_slack_reaction``
+    # so skills that match on ``text`` see the same character whether the user
+    # typed it or reacted with it.
+    _REACTION_EMOJI_MAP: ClassVar[Dict[str, str]] = {
+        "thumbsup": "👍",
+        "+1": "👍",
+        "thumbsdown": "👎",
+        "-1": "👎",
+        "white_check_mark": "✅",
+        "heavy_check_mark": "✅",
+        "x": "❌",
+        "no_entry": "⛔",
+        "warning": "⚠️",
+        "rotating_light": "🚨",
+        "eyes": "👀",
+        "rocket": "🚀",
+        "tada": "🎉",
+        "fire": "🔥",
+        "wave": "👋",
+    }
+
+    async def _handle_slack_reaction(self, event: dict) -> None:
+        """Forward ``reaction_added`` events through the normal message pipeline.
+
+        The reactor's user_id becomes the synthesized message's user, so the
+        downstream auth gate (``_is_user_authorized``) applies as it does for
+        any other message. The reacted-to message's ``thread_ts`` becomes
+        the synthesized message's ``thread_ts`` so the reaction lands in the
+        same thread as a regular reply would, letting skills that present
+        confirmation-style proposals (``react 👍 to proceed``) treat
+        reactions as real responses.
+
+        Common reactions are translated to unicode emoji in the text field
+        (👍, 👎, ✅, etc.) so skill bodies that match on the typed character
+        also fire on the equivalent reaction without needing to know about
+        Slack-specific names.
+
+        Self-reactions (the bot reacting to its own messages, e.g. the
+        :eyes: lifecycle reaction) are dropped here to prevent feedback
+        loops. file-targeted reactions are ignored — only ``item.type ==
+        "message"`` is forwarded.
+        """
+        item = event.get("item") or {}
+        if item.get("type") != "message":
+            return
+        channel_id = item.get("channel")
+        msg_ts = item.get("ts")
+        reaction_name = event.get("reaction") or ""
+        user_id = event.get("user")
+        if not channel_id or not msg_ts or not user_id or not reaction_name:
+            return
+        # Drop self-reactions (lifecycle markers like :eyes: on incoming msgs).
+        if self._bot_user_id and user_id == self._bot_user_id:
+            return
+        team_id = self._channel_team.get(channel_id) or ""
+        if not team_id and self._team_clients:
+            team_id = next(iter(self._team_clients))
+        client = self._team_clients.get(team_id) if team_id else None
+
+        # Look up the reacted-to message so we can route the synthesized
+        # event into the right thread. If the lookup fails, fall back to
+        # treating the reacted-to message as the thread parent — that's
+        # correct for top-level messages and degrades gracefully for
+        # in-thread reactions where we lose the parent linkage.
+        thread_ts: Optional[str] = msg_ts
+        if client is not None:
+            try:
+                history = await client.conversations_replies(
+                    channel=channel_id, ts=msg_ts, limit=1, inclusive=True,
+                )
+                messages = (history or {}).get("messages") or []
+                if messages:
+                    first = messages[0]
+                    thread_ts = first.get("thread_ts") or first.get("ts") or msg_ts
+            except Exception as e:  # pragma: no cover - network path
+                logger.debug(
+                    "[Slack] reaction thread_ts lookup failed for %s: %s",
+                    msg_ts, e,
+                )
+
+        emoji_text = self._REACTION_EMOJI_MAP.get(reaction_name, f":{reaction_name}:")
+
+        # Use the reaction's own event_ts as the synthesized message ts so
+        # the deduplicator in _handle_slack_message treats this reaction
+        # as a distinct event (it has nothing to do with the reacted-to
+        # message's ts).
+        synthetic_ts = event.get("event_ts") or f"reaction-{msg_ts}-{reaction_name}-{user_id}"
+        synthetic: dict = {
+            "type": "message",
+            "user": user_id,
+            "text": emoji_text,
+            "channel": channel_id,
+            "ts": synthetic_ts,
+            "thread_ts": thread_ts,
+            # Surfaced for any downstream code that wants to know this was a
+            # reaction rather than a typed message; not used by the default
+            # pipeline.
+            "_hermes_reaction": {
+                "name": reaction_name,
+                "reacted_to_ts": msg_ts,
+                "event_ts": event.get("event_ts"),
+            },
+        }
+        if team_id:
+            synthetic["team"] = team_id
+
+        await self._handle_slack_message(synthetic)
 
     async def _handle_slack_message(self, event: dict) -> None:
         """Handle an incoming Slack message event."""
