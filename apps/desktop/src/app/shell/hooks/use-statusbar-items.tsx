@@ -11,6 +11,7 @@ import {
   Clock,
   Command,
   Hash,
+  Layers3,
   Loader2,
   Sparkles,
   Zap,
@@ -26,6 +27,7 @@ import { $previewServerRestartStatus } from '@/store/preview'
 import {
   $activeSessionId,
   $busy,
+  $currentCompressCount,
   $currentFastMode,
   $currentModel,
   $currentProvider,
@@ -82,6 +84,7 @@ export function useStatusbarItems({
   const yoloActive = useStore($yoloActive)
   const busy = useStore($busy)
   const currentFastMode = useStore($currentFastMode)
+  const currentCompressCount = useStore($currentCompressCount)
   const currentModel = useStore($currentModel)
   const currentProvider = useStore($currentProvider)
   const currentReasoningEffort = useStore($currentReasoningEffort)
@@ -312,6 +315,15 @@ export function useStatusbarItems({
         variant: 'text'
       },
       {
+        detail: `x${currentCompressCount}`,
+        hidden: currentCompressCount <= 0,
+        icon: <Layers3 className="size-3" />,
+        id: 'compression-count',
+        label: 'Compressed',
+        title: `Session compressed ${currentCompressCount} time${currentCompressCount === 1 ? '' : 's'}`,
+        variant: 'text'
+      },
+      {
         detail: <LiveDuration since={sessionStartedAt} />,
         hidden: !sessionStartedAt,
         id: 'session-timer',
@@ -367,6 +379,7 @@ export function useStatusbarItems({
       busy,
       contextBar,
       contextUsage,
+      currentCompressCount,
       currentFastMode,
       currentModel,
       currentProvider,
