@@ -65,6 +65,11 @@ def test_resolve_provider_full_finds_named_custom_provider():
     assert resolved.source == "user-config"
 
 
+def test_named_custom_provider_is_aggregator():
+    """Named custom providers accept vendor/model slugs like aggregators."""
+    assert providers_mod.is_aggregator("custom:zenmux") is True
+
+
 def test_switch_model_accepts_explicit_named_custom_provider(monkeypatch):
     """Shared /model switch pipeline should accept --provider for custom_providers."""
     monkeypatch.setattr(

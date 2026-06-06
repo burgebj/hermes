@@ -492,6 +492,8 @@ def get_label(provider_id: str) -> str:
 
 def is_aggregator(provider: str) -> bool:
     """Return True when the provider is a multi-model aggregator."""
+    if provider and provider.startswith("custom:"):
+        return True
     pdef = get_provider(provider)
     return pdef.is_aggregator if pdef else False
 
