@@ -151,7 +151,17 @@ class TestSupportedDocumentTypes:
 
     @pytest.mark.parametrize(
         "ext",
-        [".pdf", ".md", ".txt", ".zip", ".docx", ".xlsx", ".pptx"],
+        [
+            ".pdf",
+            ".md",
+            ".txt",
+            ".zip",
+            ".rar",
+            ".7z",
+            ".docx",
+            ".xlsx",
+            ".pptx",
+        ],
     )
     def test_expected_extensions_present(self, ext):
         assert ext in SUPPORTED_DOCUMENT_TYPES
