@@ -78,6 +78,85 @@ class TestParseAddFile:
         assert contents[0] == "import os"
         assert contents[2] == 'print("hello")'
 
+    def test_add_file_preserves_lines_missing_plus_prefix(self):
+        """Regression: LLM-generated ADD patches sometimes omit the `+`
+        prefix on body lines. These must be preserved as content rather
+        than silently dropped, which would truncate the created file.
+        """
+        patch = "\n".join([
+            "*** Begin Patch",
+            "*** Add File: new/module.py",
+            "+def foo():",
+            "    pass",              # missing '+' prefix
+            "+    return 1",
+            "*** End Patch",
+        ])
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        assert len(ops) == 1
+
+        op = ops[0]
+        assert op.operation == OperationType.ADD
+        # All three body lines must survive as '+' content.
+        contents = [l.content for l in op.hunks[0].lines]
+        assert contents == ["def foo():", "    pass", "    return 1"]
+        # And they must all carry the '+' prefix so `_apply_add` (which
+        # filters by prefix) picks them up.
+        assert all(l.prefix == "+" for l in op.hunks[0].lines)
+
+    def test_add_file_preserves_blank_lines(self):
+        """Regression: blank lines inside ADD hunks (truly empty — not
+        even a `+`) were dropped by the general hunk parser's
+        `elif current_op and line:` guard because `""` is falsy."""
+        patch = "\n".join([
+            "*** Begin Patch",
+            "*** Add File: new/module.py",
+            "+def foo():",
+            "",                       # truly empty line
+            "+    return 1",
+            "*** End Patch",
+        ])
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+        contents = [l.content for l in ops[0].hunks[0].lines]
+        assert contents == ["def foo():", "", "    return 1"]
+
+
+class TestApplyAddFile:
+    """Apply-phase regression: confirm _apply_add writes every parsed line."""
+
+    def test_apply_add_writes_content_from_missing_plus_lines(self):
+        """Full round-trip: malformed patch (missing `+` prefix) produces
+        a file with the expected complete contents, not a truncated one.
+        """
+        patch = "\n".join([
+            "*** Begin Patch",
+            "*** Add File: greet.py",
+            "+def foo():",
+            "    pass",              # missing '+' — used to be lost
+            "+    return 1",
+            "*** End Patch",
+        ])
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def __init__(self):
+                self.written = {}
+
+            def read_file_raw(self, path):
+                # Destination doesn't exist — required for ADD validation
+                return SimpleNamespace(error="not found", content="")
+
+            def write_file(self, path, content):
+                self.written[path] = content
+                return SimpleNamespace(error=None)
+
+        fake = FakeFileOps()
+        result = apply_v4a_operations(ops, fake)
+        assert result.success is True
+        assert fake.written["greet.py"] == "def foo():\n    pass\n    return 1"
+
 
 class TestParseDeleteFile:
     def test_delete_file(self):

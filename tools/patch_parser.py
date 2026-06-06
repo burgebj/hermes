@@ -178,11 +178,26 @@ def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[
                 hint = hint_match.group(1) if hint_match else None
                 current_hunk = Hunk(context_hint=hint)
                 
+        elif current_op and current_op.operation == OperationType.ADD:
+            # For ADD operations every line is file content — there is
+            # no context / removal concept when creating a new file.
+            # Preserve empty lines (which the general hunk branch drops
+            # because `""` is falsy) and treat lines without a `+`
+            # prefix as content too, so a malformed LLM patch that
+            # omits the `+` on some lines does not silently lose data.
+            if line.startswith('\\'):
+                # "\ No newline at end of file" marker - skip
+                pass
+            else:
+                if current_hunk is None:
+                    current_hunk = Hunk()
+                content = line[1:] if line.startswith('+') else line
+                current_hunk.lines.append(HunkLine('+', content))
         elif current_op and line:
             # Parse hunk line
             if current_hunk is None:
                 current_hunk = Hunk()
-            
+
             if line.startswith('+'):
                 current_hunk.lines.append(HunkLine('+', line[1:]))
             elif line.startswith('-'):
