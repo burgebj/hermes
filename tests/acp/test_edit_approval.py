@@ -6,6 +6,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from acp_adapter.edit_approval import (
     EditProposal,
     build_acp_edit_tool_call,
@@ -180,6 +182,110 @@ def test_patch_replace_approval_request_includes_full_file_diff(tmp_path):
     assert proposals[0].tool_name == "patch"
     assert proposals[0].old_text == "alpha\nbeta\n"
     assert proposals[0].new_text == "alpha\ngamma\n"
+
+
+def test_patch_v4a_rejection_does_not_mutate(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("hello world\n", encoding="utf-8")
+
+    set_edit_approval_requester(lambda _proposal: False)
+
+    patch_text = (
+        "*** Begin Patch\n"
+        f"*** Update File: {target}\n"
+        f"-hello world\n"
+        f"+goodbye world\n"
+        "*** End Patch\n"
+    )
+
+    result = json.loads(
+        handle_function_call(
+            "patch",
+            {"mode": "patch", "patch": patch_text},
+            task_id="acp-v4a-reject",
+        )
+    )
+
+    assert "error" in result
+    assert "Edit approval denied" in result["error"]
+    assert target.read_text(encoding="utf-8") == "hello world\n"
+
+
+def test_patch_v4a_approval_request_captures_proposal(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("hello world\n", encoding="utf-8")
+    proposals = []
+
+    # Reject so we never reach the file-write step (avoids sensitive-path
+    # blocks that exist in the local test environment for /private/var paths).
+    def capture_and_reject(proposal):
+        proposals.append(proposal)
+        return False
+
+    set_edit_approval_requester(capture_and_reject)
+
+    patch_text = (
+        "*** Begin Patch\n"
+        f"*** Update File: {target}\n"
+        f"-hello world\n"
+        f"+goodbye world\n"
+        "*** End Patch\n"
+    )
+
+    result = json.loads(
+        handle_function_call(
+            "patch",
+            {"mode": "patch", "patch": patch_text},
+            task_id="acp-v4a-capture",
+        )
+    )
+
+    assert "error" in result
+    assert "Edit approval denied" in result["error"]
+    assert len(proposals) == 1
+    assert proposals[0].tool_name == "patch"
+    assert proposals[0].arguments.get("mode") == "patch"
+    assert target.read_text(encoding="utf-8") == "hello world\n"
+
+
+def test_patch_v4a_tool_call_uses_per_file_diff_content():
+    pytest.importorskip("acp")  # only runs where the ACP SDK is installed
+
+    patch_text = (
+        "*** Begin Patch\n"
+        "*** Update File: foo.py\n"
+        "-old line\n"
+        "+new line\n"
+        "*** End Patch\n"
+    )
+    proposal = EditProposal(
+        tool_name="patch",
+        path="",
+        old_text=None,
+        new_text="",
+        arguments={"mode": "patch", "patch": patch_text},
+    )
+
+    tool_call = build_acp_edit_tool_call(proposal)
+
+    assert tool_call.kind == "edit"
+    assert tool_call.title == "Approve multi-file V4A patch"
+    assert any(getattr(block, "path", None) == "foo.py" for block in tool_call.content)
+
+
+def test_patch_v4a_auto_approval_session_policy_approves():
+    proposal = EditProposal("patch", "", None, "", {"mode": "patch", "patch": "*** Begin Patch\n*** End Patch\n"})
+    assert should_auto_approve_edit(proposal, "session") is True
+
+
+def test_patch_v4a_auto_approval_workspace_policy_requires_prompt():
+    proposal = EditProposal("patch", "", None, "", {"mode": "patch", "patch": "*** Begin Patch\n*** End Patch\n"})
+    assert should_auto_approve_edit(proposal, "workspace_session") is False
+
+
+def test_patch_v4a_auto_approval_ask_policy_requires_prompt():
+    proposal = EditProposal("patch", "", None, "", {"mode": "patch", "patch": "*** Begin Patch\n*** End Patch\n"})
+    assert should_auto_approve_edit(proposal, "ask") is False
 
 
 def test_workspace_auto_approval_allows_workspace_and_tmp_but_not_sensitive(tmp_path):

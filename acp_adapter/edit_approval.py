@@ -94,6 +94,19 @@ def _proposal_for_write_file(arguments: dict[str, Any]) -> EditProposal:
     )
 
 
+def _proposal_for_patch_v4a(arguments: dict[str, Any]) -> EditProposal:
+    patch_text = str(arguments.get("patch") or "")
+    if not patch_text:
+        raise ValueError("patch content required")
+    return EditProposal(
+        tool_name="patch",
+        path="",
+        old_text=None,
+        new_text="",
+        arguments=dict(arguments),
+    )
+
+
 def _proposal_for_patch_replace(arguments: dict[str, Any]) -> EditProposal:
     path = str(arguments.get("path") or "")
     if not path:
@@ -132,8 +145,12 @@ def build_edit_proposal(tool_name: str, arguments: dict[str, Any]) -> EditPropos
 
     if tool_name == "write_file":
         return _proposal_for_write_file(arguments)
-    if tool_name == "patch" and arguments.get("mode", "replace") == "replace":
-        return _proposal_for_patch_replace(arguments)
+    if tool_name == "patch":
+        mode = arguments.get("mode", "replace")
+        if mode == "replace":
+            return _proposal_for_patch_replace(arguments)
+        if mode == "patch":
+            return _proposal_for_patch_v4a(arguments)
     return None
 
 
@@ -155,6 +172,11 @@ def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | Non
     policy = str(policy or AUTO_APPROVE_ASK).strip()
     if policy == AUTO_APPROVE_ASK or _is_sensitive_auto_approve_path(proposal.path):
         return False
+    # V4A patch has an empty path (multi-file); workspace containment cannot be
+    # verified per-file without parsing each operation.  Allow only under the
+    # fully-permissive session policy; workspace policy must prompt.
+    if proposal.tool_name == "patch" and proposal.arguments.get("mode") == "patch":
+        return policy == AUTO_APPROVE_SESSION
     path = Path(proposal.path).expanduser().resolve(strict=False)
     if policy == AUTO_APPROVE_SESSION:
         return True
@@ -209,24 +231,90 @@ def maybe_require_edit_approval(tool_name: str, arguments: dict[str, Any]) -> st
     return json.dumps({"error": "Edit approval denied by ACP client; file was not modified."}, ensure_ascii=False)
 
 
+def _build_v4a_approval_content(patch_text: str) -> list:
+    """Build per-file ACP diff content blocks from a V4A patch string.
+
+    Mirrors the rendering logic in acp_adapter/tools._build_patch_mode_content
+    but lives here so edit_approval stays self-contained.
+    """
+    import acp
+
+    if not patch_text:
+        return [acp.tool_content(acp.text_block(""))]
+    try:
+        from tools.patch_parser import OperationType, parse_v4a_patch
+
+        operations, error = parse_v4a_patch(patch_text)
+        if error or not operations:
+            return [acp.tool_content(acp.text_block(patch_text))]
+
+        content: list = []
+        for op in operations:
+            if op.operation == OperationType.UPDATE:
+                old_chunks: list[str] = []
+                new_chunks: list[str] = []
+                for hunk in op.hunks:
+                    old_lines = [ln.content for ln in hunk.lines if ln.prefix in {" ", "-"}]
+                    new_lines = [ln.content for ln in hunk.lines if ln.prefix in {" ", "+"}]
+                    if old_lines or new_lines:
+                        old_chunks.append("\n".join(old_lines))
+                        new_chunks.append("\n".join(new_lines))
+                old_text = "\n...\n".join(c for c in old_chunks if c)
+                new_text = "\n...\n".join(c for c in new_chunks if c)
+                if old_text or new_text:
+                    content.append(acp.tool_diff_content(
+                        path=op.file_path,
+                        old_text=old_text or None,
+                        new_text=new_text or "",
+                    ))
+            elif op.operation == OperationType.ADD:
+                added = [ln.content for hunk in op.hunks for ln in hunk.lines if ln.prefix == "+"]
+                content.append(acp.tool_diff_content(
+                    path=op.file_path,
+                    new_text="\n".join(added),
+                ))
+            elif op.operation == OperationType.DELETE:
+                content.append(acp.tool_diff_content(
+                    path=op.file_path,
+                    old_text=f"Delete file: {op.file_path}",
+                    new_text="",
+                ))
+            elif op.operation == OperationType.MOVE:
+                content.append(acp.tool_content(
+                    acp.text_block(f"Move: {op.file_path} -> {op.new_path}")
+                ))
+        return content or [acp.tool_content(acp.text_block(patch_text))]
+    except Exception:
+        return [acp.tool_content(acp.text_block(patch_text))]
+
+
 def build_acp_edit_tool_call(proposal: EditProposal):
     """Build the ToolCallUpdate payload for ACP request_permission."""
 
     import acp
 
     tool_call_id = f"edit-approval-{next(_PERMISSION_REQUEST_IDS)}"
-    return acp.update_tool_call(
-        tool_call_id,
-        title=f"Approve edit: {proposal.path}",
-        kind="edit",
-        status="pending",
-        content=[
+
+    if proposal.tool_name == "patch" and proposal.arguments.get("mode") == "patch":
+        patch_text = str(proposal.arguments.get("patch") or "")
+        content = _build_v4a_approval_content(patch_text)
+        title = "Approve multi-file V4A patch"
+    else:
+        content = [
             acp.tool_diff_content(
                 path=proposal.path,
                 old_text=proposal.old_text,
                 new_text=proposal.new_text,
             )
-        ],
+        ]
+        title = f"Approve edit: {proposal.path}"
+
+    return acp.update_tool_call(
+        tool_call_id,
+        title=title,
+        kind="edit",
+        status="pending",
+        content=content,
         raw_input={"tool": proposal.tool_name, "arguments": proposal.arguments},
     )
 
