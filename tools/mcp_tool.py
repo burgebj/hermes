@@ -1761,6 +1761,7 @@ class MCPServerTask:
         """
         self._config = config
         self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
+        self.max_reconnect_retries = config.get("max_reconnect_retries", _MAX_RECONNECT_RETRIES)
         self._auth_type = (config.get("auth") or "").lower().strip()
 
         # Set up sampling handler if enabled and SDK types are available
@@ -1910,18 +1911,18 @@ class MCPServerTask:
                     return
 
                 retries += 1
-                if retries > _MAX_RECONNECT_RETRIES:
+                if retries > self.max_reconnect_retries:
                     logger.warning(
                         "MCP server '%s' failed after %d reconnection attempts, "
                         "giving up: %s",
-                        self.name, _MAX_RECONNECT_RETRIES, exc,
+                        self.name, self.max_reconnect_retries, exc,
                     )
                     return
 
                 logger.warning(
                     "MCP server '%s' connection lost (attempt %d/%d), "
                     "reconnecting in %.0fs: %s",
-                    self.name, retries, _MAX_RECONNECT_RETRIES,
+                    self.name, retries, self.max_reconnect_retries,
                     backoff, exc,
                 )
                 await asyncio.sleep(backoff)
