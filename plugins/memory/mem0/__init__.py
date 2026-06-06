@@ -7,6 +7,8 @@ Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
 
 Config via environment variables:
   MEM0_API_KEY       — Mem0 Platform API key (required)
+  MEM0_HOST          — Mem0 API host (default: https://api.mem0.ai)
+  MEM0_API_MODE      — platform or oss (default: platform)
   MEM0_USER_ID       — User identifier (default: hermes-user)
   MEM0_AGENT_ID      — Agent identifier (default: hermes)
 
@@ -48,6 +50,8 @@ def _load_config() -> dict:
 
     config = {
         "api_key": os.environ.get("MEM0_API_KEY", ""),
+        "host": os.environ.get("MEM0_HOST", "https://api.mem0.ai"),
+        "api_mode": os.environ.get("MEM0_API_MODE", "platform"),
         "user_id": os.environ.get("MEM0_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
         "rerank": True,
@@ -64,6 +68,84 @@ def _load_config() -> dict:
             pass
 
     return config
+
+
+class _Mem0OssClient:
+    """Small client for the open-source mem0 FastAPI server.
+
+    The mem0ai Python ``MemoryClient`` targets the hosted Platform API
+    (``/v1/ping/`` and ``/v3/memories/...``). Self-hosted OSS FastAPI
+    deployments expose ``/memories`` and ``/search`` instead, so keep this
+    adapter deliberately narrow and aligned with the methods used by the
+    Hermes provider.
+    """
+
+    def __init__(self, *, host: str, api_key: str):
+        import httpx
+
+        self._client = httpx.Client(
+            base_url=host.rstrip("/"),
+            headers={"X-API-Key": api_key} if api_key else {},
+            timeout=300,
+        )
+
+    @staticmethod
+    def _entity_kwargs_to_filters(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        filters = dict(kwargs.get("filters") or {})
+        for key in ("user_id", "agent_id", "run_id"):
+            value = kwargs.get(key)
+            if value is not None and value != "":
+                filters[key] = value
+        return filters
+
+    def add(self, messages, **kwargs) -> Dict[str, Any]:
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        elif isinstance(messages, dict):
+            messages = [messages]
+
+        payload = {
+            "messages": messages,
+            "user_id": kwargs.get("user_id"),
+            "agent_id": kwargs.get("agent_id"),
+            "run_id": kwargs.get("run_id"),
+            "metadata": kwargs.get("metadata"),
+            "infer": kwargs.get("infer", True),
+        }
+        if kwargs.get("memory_type"):
+            payload["memory_type"] = kwargs["memory_type"]
+        if kwargs.get("prompt"):
+            payload["prompt"] = kwargs["prompt"]
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        response = self._client.post("/memories", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def search(self, query: str, **kwargs) -> Dict[str, Any]:
+        payload = {
+            "query": query,
+            "filters": self._entity_kwargs_to_filters(kwargs),
+            "top_k": kwargs.get("top_k", 10),
+        }
+        if kwargs.get("threshold") is not None:
+            payload["threshold"] = kwargs["threshold"]
+        response = self._client.post("/search", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def get_all(self, **kwargs) -> Dict[str, Any]:
+        # The current OSS REST wrapper passes query entity IDs as top-level
+        # mem0 args, which mem0 v1.1 rejects. Use semantic broad recall as a
+        # compatible approximation until the server endpoint is patched.
+        filters = self._entity_kwargs_to_filters(kwargs)
+        top_k = kwargs.get("top_k") or kwargs.get("page_size") or 50
+        return self.search(
+            "user preferences facts project context memory profile",
+            filters=filters,
+            top_k=top_k,
+            threshold=0.0,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +206,8 @@ class Mem0MemoryProvider(MemoryProvider):
         self._client = None
         self._client_lock = threading.Lock()
         self._api_key = ""
+        self._host = "https://api.mem0.ai"
+        self._api_mode = "platform"
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._rerank = True
@@ -161,6 +245,8 @@ class Mem0MemoryProvider(MemoryProvider):
     def get_config_schema(self):
         return [
             {"key": "api_key", "description": "Mem0 Platform API key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "host", "description": "Mem0 API host", "default": "https://api.mem0.ai"},
+            {"key": "api_mode", "description": "Mem0 API mode", "default": "platform", "choices": ["platform", "oss"]},
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
             {"key": "agent_id", "description": "Agent identifier", "default": "hermes"},
             {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
@@ -172,8 +258,11 @@ class Mem0MemoryProvider(MemoryProvider):
             if self._client is not None:
                 return self._client
             try:
+                if self._api_mode == "oss":
+                    self._client = _Mem0OssClient(host=self._host, api_key=self._api_key)
+                    return self._client
                 from mem0 import MemoryClient
-                self._client = MemoryClient(api_key=self._api_key)
+                self._client = MemoryClient(api_key=self._api_key, host=self._host)
                 return self._client
             except ImportError:
                 raise RuntimeError("mem0 package not installed. Run: pip install mem0ai")
@@ -204,6 +293,8 @@ class Mem0MemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
         self._api_key = self._config.get("api_key", "")
+        self._host = self._config.get("host", "https://api.mem0.ai")
+        self._api_mode = self._config.get("api_mode", "platform")
         # Prefer gateway-provided user_id for per-user memory scoping;
         # fall back to config/env default for CLI (single-user) sessions.
         self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
