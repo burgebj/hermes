@@ -6747,6 +6747,24 @@ class HermesCLI:
         self._resumed = False
         _sync_process_session_id(self.session_id)
 
+        try:
+            from hermes_cli.config import load_config
+
+            refreshed_cfg = load_config() or {}
+            refreshed_model_cfg = refreshed_cfg.get("model", {})
+            if isinstance(refreshed_model_cfg, dict):
+                refreshed_model = (
+                    refreshed_model_cfg.get("default")
+                    or refreshed_model_cfg.get("model")
+                    or ""
+                )
+            else:
+                refreshed_model = refreshed_model_cfg or ""
+            if refreshed_model:
+                self.model = refreshed_model
+        except Exception:
+            pass
+
         if self.agent:
             self.agent.session_id = self.session_id
             self.agent.session_start = self.session_start
