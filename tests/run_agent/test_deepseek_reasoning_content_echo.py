@@ -14,9 +14,12 @@ Fix covers three paths:
    persisted poisoned.
 2. ``_copy_reasoning_content_for_api`` — already-poisoned history replays
    with ``reasoning_content=" "`` injected defensively.
-3. Detection covers three signals: ``provider == "deepseek"``,
-   ``"deepseek" in model``, and ``api.deepseek.com`` host match. The third
-   catches custom-provider setups pointing at DeepSeek.
+3. Detection is host-driven, not model-name-driven: two signals suffice —
+   ``provider == "deepseek"`` and ``api.deepseek.com`` host match. The host
+   match catches custom-provider setups pointing at the official DeepSeek
+   endpoint. Aggregators like OpenRouter that re-export DeepSeek models are
+   intentionally excluded — they speak their own protocol and reject
+   ``reasoning_content`` echoes.
 
 The placeholder is a single space (not empty string) because DeepSeek V4 Pro
 tightened validation and rejects empty-string reasoning_content with a
@@ -78,10 +81,15 @@ class TestNeedsDeepSeekToolReasoning:
         agent = _make_agent(provider="deepseek", model="deepseek-v4-flash")
         assert agent._needs_deepseek_tool_reasoning() is True
 
-    def test_model_substring(self) -> None:
-        # Custom provider pointing at DeepSeek with provider='custom'
-        agent = _make_agent(provider="custom", model="deepseek-v4-pro")
-        assert agent._needs_deepseek_tool_reasoning() is True
+    def test_openrouter_deepseek_model_not_detected(self) -> None:
+        # OpenRouter re-exports deepseek models but speaks its own protocol —
+        # must NOT trigger reasoning_content echo or it causes HTTP 400.
+        agent = _make_agent(
+            provider="openrouter",
+            model="deepseek/deepseek-v3",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert agent._needs_deepseek_tool_reasoning() is False
 
     def test_base_url_host(self) -> None:
         agent = _make_agent(

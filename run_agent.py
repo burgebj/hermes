@@ -4762,12 +4762,16 @@ class AIAgent:
         DeepSeek V4 thinking mode requires ``reasoning_content`` on every
         assistant tool-call turn; omitting it causes HTTP 400 when the
         message is replayed in a subsequent API request (#15250).
+
+        Detection is host-driven, not model-name-driven: aggregators like
+        OpenRouter that re-export DeepSeek models speak their own protocol
+        and reject ``reasoning_content`` echoes. We only enable the
+        deepseek-reasoning replay when the request actually targets the
+        official DeepSeek endpoint or the dedicated deepseek provider.
         """
         provider = (self.provider or "").lower()
-        model = (self.model or "").lower()
         return (
             provider == "deepseek"
-            or "deepseek" in model
             or base_url_host_matches(self.base_url, "api.deepseek.com")
         )
 
@@ -4777,12 +4781,16 @@ class AIAgent:
         MiMo thinking mode requires ``reasoning_content`` on every assistant
         tool-call message when replaying history; omitting it causes HTTP 400.
         Refs: https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/passing-back-reasoning_content
+
+        Detection is host-driven, not model-name-driven: aggregators that
+        re-export MiMo models speak their own protocol and reject
+        ``reasoning_content`` echoes. We only enable the replay when the
+        request actually targets an official MiMo endpoint or the dedicated
+        xiaomi provider.
         """
         provider = (self.provider or "").lower()
-        model = (self.model or "").lower()
         return (
             provider == "xiaomi"
-            or "mimo" in model
             or base_url_host_matches(self.base_url, "api.xiaomimimo.com")
             or base_url_host_matches(self.base_url, "xiaomimimo.com")
         )
