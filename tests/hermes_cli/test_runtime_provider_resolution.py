@@ -95,6 +95,37 @@ def test_resolve_runtime_provider_anthropic_explicit_override_skips_pool(monkeyp
     assert resolved.get("credential_pool") is None
 
 
+def test_resolve_runtime_provider_bare_custom_uses_model_config_base_url(monkeypatch):
+    def _unexpected_resolve_provider(*args, **kwargs):
+        raise AssertionError("resolve_provider should not be called for bare custom config runtime")
+
+    def _unexpected_load_pool(provider):
+        raise AssertionError(f"load_pool should not be called for {provider}")
+
+    monkeypatch.setattr(rp, "resolve_provider", _unexpected_resolve_provider)
+    monkeypatch.setattr(rp, "load_pool", _unexpected_load_pool)
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "custom",
+            "default": "MiniMax-M2.7",
+            "base_url": "https://api.minimaxi.com/anthropic",
+            "api_key": "test-minimax-key",
+            "api_mode": "anthropic_messages",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "https://api.minimaxi.com/anthropic"
+    assert resolved["api_key"] == "test-minimax-key"
+    assert resolved["source"] == "config"
+    assert resolved["requested_provider"] == "custom"
+
+
 def test_resolve_runtime_provider_falls_back_when_pool_empty(monkeypatch):
     class _Pool:
         def has_credentials(self):

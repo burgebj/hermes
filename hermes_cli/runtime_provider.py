@@ -1288,12 +1288,44 @@ def resolve_runtime_provider(
         custom_runtime["requested_provider"] = requested_provider
         return custom_runtime
 
+    model_cfg = _get_model_config()
+
+    # Bare top-level custom provider configured via model.provider + model.base_url
+    # should resolve directly from config, even when the caller did not pass an
+    # explicit_base_url. Without this, gateway/cron startup falls through to the
+    # generic openrouter/custom path and can lose the configured Anthropic-style
+    # endpoint, causing provider/base_url mismatches for custom main models.
+    if requested_provider == "custom":
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+        if cfg_provider == "custom" and cfg_base_url:
+            cfg_api_key = str(model_cfg.get("api_key") or "").strip()
+            api_key_candidates = [
+                (explicit_api_key or "").strip(),
+                cfg_api_key,
+                os.getenv("OPENAI_API_KEY", "").strip(),
+                os.getenv("OPENROUTER_API_KEY", "").strip(),
+            ]
+            api_key = next(
+                (candidate for candidate in api_key_candidates if has_usable_secret(candidate)),
+                "",
+            ) or "no-key-required"
+            return {
+                "provider": "custom",
+                "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
+                or _detect_api_mode_for_url(cfg_base_url)
+                or "chat_completions",
+                "base_url": cfg_base_url,
+                "api_key": api_key,
+                "source": "config",
+                "requested_provider": requested_provider,
+            }
+
     provider = resolve_provider(
         requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
     )
-    model_cfg = _get_model_config()
     explicit_runtime = _resolve_explicit_runtime(
         provider=provider,
         requested_provider=requested_provider,
