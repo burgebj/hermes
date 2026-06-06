@@ -281,6 +281,92 @@ class TestQwenProfile:
         assert "metadata" not in eb
 
 
+class TestXiaomiProfile:
+    def test_prepare_messages_pads_empty_assistant_content(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "assistant", "tool_calls": [{"id": "t1", "function": {"name": "f"}}], "content": ""},
+            {"role": "assistant", "tool_calls": [{"id": "t2", "function": {"name": "f"}}], "content": None},
+            {"role": "assistant", "tool_calls": [{"id": "t3", "function": {"name": "f"}}], "content": []},
+        ]
+        result = p.prepare_messages(msgs)
+        for msg in result:
+            assert msg["content"] == " "
+
+    def test_prepare_messages_preserves_assistant_content(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "assistant", "tool_calls": [{"id": "t1", "function": {"name": "f"}}], "content": "thinking..."},
+            {"role": "assistant", "content": "plain text"},
+        ]
+        result = p.prepare_messages(msgs)
+        assert result[0]["content"] == "thinking..."
+        assert result[1]["content"] == "plain text"
+
+    def test_prepare_messages_downgrades_tool_list_with_image(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "tool", "tool_call_id": "t1", "content": [
+                {"type": "text", "text": "screenshot analysis"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}},
+            ]},
+        ]
+        result = p.prepare_messages(msgs)
+        assert isinstance(result[0]["content"], str)
+        assert "screenshot analysis" in result[0]["content"]
+        assert "image_url" not in result[0]["content"]
+        assert "abc123" not in result[0]["content"]
+
+    def test_prepare_messages_tool_image_only_gets_placeholder(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "tool", "tool_call_id": "t1", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ]},
+        ]
+        result = p.prepare_messages(msgs)
+        assert isinstance(result[0]["content"], str)
+        assert "image content removed" in result[0]["content"]
+
+    def test_prepare_messages_tool_text_only_list_joined(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "tool", "tool_call_id": "t1", "content": [
+                {"type": "text", "text": "line 1"},
+                {"type": "text", "text": "line 2"},
+            ]},
+        ]
+        result = p.prepare_messages(msgs)
+        assert result[0]["content"] == "line 1\n\nline 2"
+
+    def test_prepare_messages_tool_string_content_unchanged(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "tool", "tool_call_id": "t1", "content": "plain string"},
+        ]
+        result = p.prepare_messages(msgs)
+        assert result[0]["content"] == "plain string"
+
+    def test_prepare_messages_does_not_mutate_original(self):
+        p = get_provider_profile("xiaomi")
+        msgs = [
+            {"role": "tool", "tool_call_id": "t1", "content": [
+                {"type": "text", "text": "x"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ]},
+        ]
+        original_content = msgs[0]["content"]
+        p.prepare_messages(msgs)
+        # Original must be untouched (deep copy).
+        assert isinstance(original_content, list)
+        assert len(original_content) == 2
+
+    def test_aliases(self):
+        p = get_provider_profile("xiaomi")
+        assert "mimo" in p.aliases
+        assert "xiaomi-mimo" in p.aliases
+
+
 class TestBaseProfile:
     def test_prepare_messages_passthrough(self):
         p = ProviderProfile(name="test")
