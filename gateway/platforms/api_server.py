@@ -3563,6 +3563,73 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return _callback
 
+    async def _handle_platform_send(self, request: "web.Request") -> "web.Response":
+        """POST /v1/platforms/{platform}/send — relay a send_message call through
+        the gateway's live adapter.  Used by CLI/cron agents that run in a separate
+        process and don't share the gateway's _LIVE_ADAPTERS state.
+
+        Body: {"token": "...", "chat_id": "...", "message": "...",
+               "media_files": [["/path", false], ...]}
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        platform = request.match_info.get("platform", "").strip().lower()
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+        token = str(body.get("token", "")).strip()
+        chat_id = str(body.get("chat_id", "")).strip()
+        message = str(body.get("message", "")).strip()
+        media_files = body.get("media_files") or []
+
+        if not token or not chat_id:
+            return web.json_response(
+                {"error": "token and chat_id are required"}, status=400
+            )
+
+        # Look up the live adapter for this platform
+        if platform == "weixin":
+            try:
+                from gateway.platforms.weixin import _LIVE_ADAPTERS as _WEIXIN_ADAPTERS
+                live_adapter = _WEIXIN_ADAPTERS.get(token)
+                if live_adapter is None:
+                    return web.json_response(
+                        {"error": "Weixin adapter not connected for this token. "
+                                  "Gateway must be running with an active Weixin connection."},
+                        status=503,
+                    )
+                send_session = getattr(live_adapter, "_send_session", None)
+                if send_session is None or send_session.closed:
+                    return web.json_response(
+                        {"error": "Weixin send session not available"}, status=503
+                    )
+
+                from gateway.platforms.weixin import send_weixin_direct
+                result = await send_weixin_direct(
+                    extra=getattr(live_adapter, "_extra_cache", {}) or {},
+                    token=token,
+                    chat_id=chat_id,
+                    message=message,
+                    media_files=media_files,
+                )
+                return web.json_response(result)
+
+            except ImportError:
+                return web.json_response(
+                    {"error": "Weixin adapter not available"}, status=503
+                )
+            except Exception as e:
+                logger.exception("Platform send relay failed for weixin")
+                return web.json_response({"error": str(e)}, status=500)
+
+        return web.json_response(
+            {"error": f"Unsupported platform: {platform}"}, status=400
+        )
+
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
         auth_err = self._check_auth(request)
@@ -4120,6 +4187,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
+            self._app.router.add_post("/v1/platforms/{platform}/send", self._handle_platform_send)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
             # Cron jobs management API

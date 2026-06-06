@@ -2146,6 +2146,43 @@ class WeixinAdapter(BasePlatformAdapter):
         return _wrap_copy_friendly_lines_for_weixin(_normalize_markdown_blocks(content))
 
 
+async def _relay_weixin_via_gateway(
+    *,
+    token: str,
+    chat_id: str,
+    message: str,
+    media_files: Optional[List[Tuple[str, bool]]] = None,
+) -> Dict[str, Any]:
+    """Relay a Weixin send through the gateway's API server.
+
+    Used when send_message is called from a CLI/cron process that doesn't
+    share the gateway's _LIVE_ADAPTERS state.  The gateway's API server
+    has access to the live adapter with a valid iLink session.
+    """
+    import aiohttp
+
+    api_port = int(os.getenv("HERMES_API_PORT", "8642"))
+    api_url = f"http://127.0.0.1:{api_port}/v1/platforms/weixin/send"
+
+    payload = {
+        "token": token,
+        "chat_id": chat_id,
+        "message": message,
+        "media_files": media_files or [],
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                result = await resp.json()
+                if resp.status != 200:
+                    return {"error": result.get("error", f"Gateway relay failed - HTTP {resp.status}")}
+                return result
+    except aiohttp.ClientError as e:
+        return {"error": f"Gateway relay connection failed: {e}"}
+    except Exception as e:
+        return {"error": f"Gateway relay failed: {e}"}
+
+
 async def send_weixin_direct(
     *,
     extra: Dict[str, Any],
@@ -2201,6 +2238,21 @@ async def send_weixin_direct(
             "context_token_used": bool(context_token),
         }
 
+    # No live adapter — running outside the gateway process (CLI, cron, etc.).
+    # Relay through the gateway's API server which has access to the live adapter.
+    try:
+        from gateway.status import is_gateway_running
+        if is_gateway_running():
+            return await _relay_weixin_via_gateway(
+                token=resolved_token,
+                chat_id=chat_id,
+                message=message,
+                media_files=media_files,
+            )
+    except Exception:
+        pass
+
+    # Gateway not accessible — fall through to direct send
     async with aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector()) as session:
         adapter = WeixinAdapter(
             PlatformConfig(
