@@ -345,6 +345,7 @@ def iter_skills_files(
 _CACHE_DIRS: list[tuple[str, str]] = [
     ("cache/documents", "document_cache"),
     ("cache/images", "image_cache"),
+    ("images", "images"),
     ("cache/audio", "audio_cache"),
     ("cache/screenshots", "browser_screenshots"),
 ]
