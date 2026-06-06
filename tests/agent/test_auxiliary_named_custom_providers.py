@@ -174,6 +174,80 @@ class TestResolveProviderClientNamedCustom:
         assert client is None
 
 
+class TestAuxiliaryTaskProviderBaseUrlOverrides:
+    """Per-task base_url overrides must not clobber configured providers."""
+
+    def test_task_base_url_preserves_configured_zai_provider(self, tmp_path):
+        _write_config(tmp_path, {
+            "auxiliary": {
+                "title_generation": {
+                    "provider": "zai",
+                    "model": "glm-4-flash",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                },
+            },
+        })
+
+        from agent.auxiliary_client import _resolve_task_provider_model
+
+        provider, model, base_url, api_key, api_mode = _resolve_task_provider_model("title_generation")
+
+        assert provider == "zai"
+        assert model == "glm-4-flash"
+        assert base_url == "https://open.bigmodel.cn/api/paas/v4"
+        assert api_key is None
+        assert api_mode is None
+
+    def test_task_base_url_without_provider_still_routes_as_custom(self, tmp_path):
+        _write_config(tmp_path, {
+            "auxiliary": {
+                "title_generation": {
+                    "model": "local-model",
+                    "base_url": "http://localhost:11434/v1",
+                },
+            },
+        })
+
+        from agent.auxiliary_client import _resolve_task_provider_model
+
+        provider, model, base_url, api_key, api_mode = _resolve_task_provider_model("title_generation")
+
+        assert provider == "custom"
+        assert model == "local-model"
+        assert base_url == "http://localhost:11434/v1"
+        assert api_key is None
+        assert api_mode is None
+
+    def test_zai_task_uses_glm_key_and_explicit_base_url_over_glm_base_url(
+        self, tmp_path, monkeypatch
+    ):
+        _write_config(tmp_path, {
+            "auxiliary": {
+                "title_generation": {
+                    "provider": "zai",
+                    "model": "glm-4-flash",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                },
+            },
+        })
+        monkeypatch.setenv("GLM_API_KEY", "glm-synthetic-key")
+        monkeypatch.setenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, model = get_text_auxiliary_client("title_generation")
+
+        assert client is not None
+        assert model == "glm-4-flash"
+        mock_openai.assert_called_once()
+        kwargs = mock_openai.call_args.kwargs
+        assert kwargs["api_key"] == "glm-synthetic-key"
+        assert kwargs["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+
+
 class TestResolveProviderClientModelNormalization:
     """Direct-provider auxiliary routing should normalize models like main runtime."""
 
