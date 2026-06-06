@@ -17920,6 +17920,20 @@ class GatewayRunner:
                                 pass
                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
                         logger.debug("Reusing cached agent for session %s", session_key)
+                        # If the session was reset since the agent was cached (e.g. idle
+                        # expiry, daily reset, /new), the agent's session_id still points
+                        # to the old session.  _flush_messages_to_session_db() writes to
+                        # agent.session_id, so new messages go to the old (ended) session.
+                        # The next turn then calls load_transcript(new_session_id) which
+                        # returns empty — the model sees only 1 message.
+                        # Fix: sync the cached agent's session_id to the current session.
+                        if agent.session_id != session_id:
+                            logger.debug(
+                                "Cached agent session_id mismatch (%s → %s), syncing",
+                                agent.session_id, session_id,
+                            )
+                            agent.session_id = session_id
+                            agent._last_flushed_db_idx = 0
 
             if agent is None:
                 # Config changed or first message — create fresh agent
