@@ -221,8 +221,27 @@ def _get_command_timeout() -> int:
 
 
 def _get_vision_model() -> Optional[str]:
-    """Model for browser_vision (screenshot analysis — multimodal)."""
-    return os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
+    """Model for browser_vision (screenshot analysis — multimodal).
+
+    Resolution order:
+      1. ``AUXILIARY_VISION_MODEL`` env var (explicit override)
+      2. ``auxiliary.vision.model`` in config.yaml
+      3. ``None`` (caller lets the auxiliary router auto-detect)
+    """
+    env_model = os.getenv("AUXILIARY_VISION_MODEL", "").strip()
+    if env_model:
+        return env_model
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        cfg = load_config()
+        cfg_model = cfg_get(cfg, "auxiliary", "vision", "model")
+        if cfg_model is not None:
+            cfg_model = str(cfg_model).strip()
+            if cfg_model:
+                return cfg_model
+    except Exception:
+        pass
+    return None
 
 
 def _get_extraction_model() -> Optional[str]:

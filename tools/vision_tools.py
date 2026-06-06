@@ -1205,11 +1205,24 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         return _vision_analyze_native(image_url, question)
 
     # Legacy path: aux LLM describes the image and we return its text.
+    # Resolve model: env var takes precedence, then config.yaml, then None
+    # (lets the auxiliary router auto-detect).
     full_prompt = (
         "Fully describe and explain everything about this image, then answer the "
         f"following question:\n\n{question}"
     )
     model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
+    if not model:
+        try:
+            from hermes_cli.config import cfg_get, load_config
+            _cfg = load_config()
+            _cfg_model = cfg_get(_cfg, "auxiliary", "vision", "model")
+            if _cfg_model is not None:
+                _cfg_model = str(_cfg_model).strip()
+                if _cfg_model:
+                    model = _cfg_model
+        except Exception:
+            pass
     return vision_analyze_tool(image_url, full_prompt, model)
 
 
@@ -1573,6 +1586,20 @@ def _handle_video_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         f"transitions. Then answer the following question:\n\n{question}"
     )
     model = os.getenv("AUXILIARY_VIDEO_MODEL", "").strip() or os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
+    if not model:
+        try:
+            from hermes_cli.config import cfg_get, load_config
+            _cfg = load_config()
+            # Try auxiliary.video.model first, then auxiliary.vision.model
+            _cfg_model = cfg_get(_cfg, "auxiliary", "video", "model")
+            if not _cfg_model:
+                _cfg_model = cfg_get(_cfg, "auxiliary", "vision", "model")
+            if _cfg_model is not None:
+                _cfg_model = str(_cfg_model).strip()
+                if _cfg_model:
+                    model = _cfg_model
+        except Exception:
+            pass
     return video_analyze_tool(video_url, full_prompt, model)
 
 
