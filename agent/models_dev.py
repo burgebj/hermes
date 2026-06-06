@@ -377,6 +377,92 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
     return None
 
 
+async def fetch_models_dev_async(force_refresh: bool = False) -> Dict[str, Any]:
+    """Async variant of fetch_models_dev — uses aiohttp to avoid blocking
+    the event loop during network fetches.
+
+    Shares the same in-memory cache as the sync version.  If the cache is
+    fresh, returns immediately without any I/O.
+    """
+    global _models_dev_cache, _models_dev_cache_time
+
+    # Check in-memory cache (same as sync path — no I/O needed if warm)
+    if (
+        not force_refresh
+        and _models_dev_cache
+        and (time.time() - _models_dev_cache_time) < _MODELS_DEV_CACHE_TTL
+    ):
+        return _models_dev_cache
+
+    # Async network fetch
+    try:
+        import aiohttp
+    except ImportError:
+        logger.debug("aiohttp not available for async models.dev fetch")
+        return _models_dev_cache or _load_disk_cache() or {}
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(MODELS_DEV_URL) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        if isinstance(data, dict) and data:
+            _models_dev_cache = data
+            _models_dev_cache_time = time.time()
+            _save_disk_cache(data)
+            logger.debug(
+                "Fetched models.dev registry (async): %d providers, %d total models",
+                len(data),
+                sum(len(p.get("models", {})) for p in data.values() if isinstance(p, dict)),
+            )
+            return data
+    except Exception as e:
+        logger.debug("Failed to fetch models.dev (async): %s", e)
+
+    # Fall back to disk cache
+    if not _models_dev_cache:
+        _models_dev_cache = _load_disk_cache()
+        if _models_dev_cache:
+            _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
+            logger.debug("Loaded models.dev from disk cache (%d providers)", len(_models_dev_cache))
+
+    return _models_dev_cache
+
+
+async def lookup_models_dev_context_async(provider: str, model: str) -> Optional[int]:
+    """Async variant of lookup_models_dev_context."""
+    mdev_provider_id = PROVIDER_TO_MODELS_DEV.get(provider)
+    if not mdev_provider_id:
+        return None
+
+    data = await fetch_models_dev_async()
+    provider_data = data.get(mdev_provider_id)
+    if not isinstance(provider_data, dict):
+        return None
+
+    models = provider_data.get("models", {})
+    if not isinstance(models, dict):
+        return None
+
+    # Exact match
+    entry = models.get(model)
+    if entry:
+        ctx = _extract_context(entry)
+        if ctx:
+            return ctx
+
+    # Case-insensitive match
+    model_lower = model.lower()
+    for mid, mdata in models.items():
+        if mid.lower() == model_lower:
+            ctx = _extract_context(mdata)
+            if ctx:
+                return ctx
+
+    return None
+
+
 def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
     """Extract context_length from a models.dev model entry.
 
