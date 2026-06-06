@@ -62,6 +62,9 @@ def generate_title(
             timeout=timeout,
             main_runtime=main_runtime,
         )
+        if not response.choices:
+            logger.warning("Title generation returned empty choices (content filtered?)")
+            return None
         title = (response.choices[0].message.content or "").strip()
         # Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
         title = title.strip('"\'')
