@@ -42,9 +42,14 @@ def _cmd_list(store):
         print(f"  {'Platform':<12} {'Code':<10} {'User ID':<20} {'Name':<20} {'Age'}")
         print(f"  {'--------':<12} {'----':<10} {'-------':<20} {'----':<20} {'---'}")
         for p in pending:
+            platform = str(p.get('platform') or '')
+            code = str(p.get('code') or '')
+            user_id = str(p.get('user_id') or '')
+            user_name = str(p.get('user_name') or '')
+            age = p.get('age_minutes', 0)
             print(
-                f"  {p['platform']:<12} {p['code']:<10} {p['user_id']:<20} "
-                f"{(p.get('user_name') or ''):<20} {p['age_minutes']}m ago"
+                f"  {platform:<12} {code:<10} {user_id:<20} "
+                f"{user_name:<20} {age}m ago"
             )
     else:
         print("\n  No pending pairing requests.")
@@ -54,7 +59,10 @@ def _cmd_list(store):
         print(f"  {'Platform':<12} {'User ID':<20} {'Name':<20}")
         print(f"  {'--------':<12} {'-------':<20} {'----':<20}")
         for a in approved:
-            print(f"  {a['platform']:<12} {a['user_id']:<20} {(a.get('user_name') or ''):<20}")
+            platform = str(a.get('platform') or '')
+            user_id = str(a.get('user_id') or '')
+            user_name = str(a.get('user_name') or '')
+            print(f"  {platform:<12} {user_id:<20} {user_name:<20}")
     else:
         print("\n  No approved users.")
 
