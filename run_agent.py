@@ -1544,7 +1544,15 @@ class AIAgent:
             if not self._session_db_created:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
-            flush_from = max(start_idx, self._last_flushed_db_idx)
+            # Clamp flush_from to the current message list length.
+            # _repair_message_sequence() can shorten `messages` in-place
+            # (merging consecutive user messages, dropping stray tool
+            # results) while `conversation_history` still reflects the
+            # pre-repair length.  Without this guard, flush_from can
+            # exceed len(messages), causing messages[flush_from:] to
+            # return an empty list — silently dropping the current turn
+            # from the session DB.  See #24187.
+            flush_from = min(max(start_idx, self._last_flushed_db_idx), len(messages))
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
