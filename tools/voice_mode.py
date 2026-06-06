@@ -13,6 +13,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1087,6 +1088,46 @@ def play_audio_file(file_path: str) -> bool:
 
     if system == "Darwin":
         players.append(["afplay", file_path])
+    # WSL2: route audio through Windows PowerShell when Linux audio unavailable
+    # (issue #17573). Detects Windows %%TEMP%% dynamically — no hardcoded paths.
+    _is_wsl = False
+    try:
+        with open("/proc/version") as _fv:
+            _is_wsl = "microsoft" in _fv.read().lower()
+    except OSError:
+        pass
+    if _is_wsl and system == "Linux" and shutil.which("powershell.exe"):
+        try:
+            _win_tmp_raw = subprocess.check_output(
+                ["cmd.exe", "/c", "echo %TEMP%"],
+                stderr=subprocess.DEVNULL, timeout=3,
+            ).decode(errors="replace").strip()
+            _win_tmp_wsl = subprocess.check_output(
+                ["wslpath", "-u", _win_tmp_raw],
+                stderr=subprocess.DEVNULL, timeout=3,
+            ).decode(errors="replace").strip()
+            if _win_tmp_wsl:
+                _wsl_wav = os.path.join(_win_tmp_wsl, "hermes-tts.wav")
+                _win_wav = subprocess.check_output(
+                    ["wslpath", "-w", _wsl_wav],
+                    stderr=subprocess.DEVNULL, timeout=3,
+                ).decode(errors="replace").strip()
+                ffmpeg_exe = shutil.which("ffmpeg")
+                if ffmpeg_exe and _win_wav:
+                    _win_wav_safe = _win_wav.replace("'", "''")
+                    _ps_script = "(New-Object Media.SoundPlayer '" + _win_wav_safe + "').PlaySync()"
+                    _ps_cmd = (
+                        shlex.join([ffmpeg_exe, "-i", file_path, "-f", "wav",
+                                    _wsl_wav, "-loglevel", "quiet", "-y"])
+                        + " && "
+                        + shlex.join(["powershell.exe", "-NoProfile", "-Command", _ps_script])
+                        + " && "
+                        + shlex.join(["rm", "-f", _wsl_wav])
+                    )
+                    players.insert(0, ["sh", "-c", _ps_cmd])
+        except Exception as _wsl_err:
+            logger.debug("WSL PowerShell audio setup failed: %s", _wsl_err)
+
     players.append(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file_path])
     if system == "Linux":
         players.append(["aplay", "-q", file_path])
