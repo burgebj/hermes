@@ -2,7 +2,7 @@
 # setuptools>=77. Keep this floor in lockstep with the `license` form in
 # [project]; an older build backend rejects the string form.
 [build-system]
-requires = ["setuptools>=77.0,<83"]
+requires = ["setuptools>=77.0,<83", "more_itertools>=10.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
