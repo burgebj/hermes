@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -319,25 +319,31 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_active
 
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content
+    content,
+    tool_name,
+    tool_calls,
+    content='messages',
+    content_rowid='id'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls) VALUES (
+        new.id, new.content, new.tool_name, new.tool_calls
     );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls) VALUES (
+        'delete', old.id, old.content, old.tool_name, old.tool_calls
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
-    INSERT INTO messages_fts(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls) VALUES (
+        'delete', old.id, old.content, old.tool_name, old.tool_calls
+    );
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls) VALUES (
+        new.id, new.content, new.tool_name, new.tool_calls
     );
 END;
 """
@@ -349,25 +355,31 @@ END;
 FTS_TRIGRAM_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
     content,
+    tool_name,
+    tool_calls,
+    content='messages',
+    content_rowid='id',
     tokenize='trigram'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts_trigram(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls) VALUES (
+        new.id, new.content, new.tool_name, new.tool_calls
     );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls) VALUES (
+        'delete', old.id, old.content, old.tool_name, old.tool_calls
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
-    INSERT INTO messages_fts_trigram(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls) VALUES (
+        'delete', old.id, old.content, old.tool_name, old.tool_calls
+    );
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls) VALUES (
+        new.id, new.content, new.tool_name, new.tool_calls
     );
 END;
 """
@@ -510,23 +522,11 @@ class SessionDB:
 
     @staticmethod
     def _rebuild_fts_indexes(cursor: sqlite3.Cursor) -> None:
-        for table_name in ("messages_fts", "messages_fts_trigram"):
-            cursor.execute(f"DELETE FROM {table_name}")
+        # External-content FTS5 tables read source columns from messages.
+        # The special rebuild command repopulates the index from that backing table.
+        cursor.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
         cursor.execute(
-            "INSERT INTO messages_fts(rowid, content) "
-            "SELECT id, "
-            "COALESCE(content, '') || ' ' || "
-            "COALESCE(tool_name, '') || ' ' || "
-            "COALESCE(tool_calls, '') "
-            "FROM messages"
-        )
-        cursor.execute(
-            "INSERT INTO messages_fts_trigram(rowid, content) "
-            "SELECT id, "
-            "COALESCE(content, '') || ' ' || "
-            "COALESCE(tool_name, '') || ' ' || "
-            "COALESCE(tool_calls, '') "
-            "FROM messages"
+            "INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')"
         )
 
     def _fts_table_probe(self, cursor: sqlite3.Cursor, table_name: str) -> Optional[bool]:
@@ -838,12 +838,11 @@ class SessionDB:
                 else:
                     fts_migrations_complete = False
             if current_version < 11:
-                # v11: re-index FTS5 tables to cover tool_name + tool_calls and
-                # switch from external-content to inline mode. Existing DBs have
-                # old-schema FTS tables and triggers that IF NOT EXISTS won't
-                # overwrite, so we drop them explicitly and let the post-migration
-                # existence checks (below) recreate them from FTS_SQL /
-                # FTS_TRIGRAM_SQL, then backfill every message row. Fixes #16751.
+                # v11: re-index FTS5 tables to cover tool_name + tool_calls.
+                # Existing DBs have old-schema FTS tables and triggers that IF
+                # NOT EXISTS won't overwrite, so drop them explicitly and let
+                # the post-migration existence checks recreate them from the
+                # current FTS_SQL / FTS_TRIGRAM_SQL definitions. Fixes #16751.
                 if fts5_available:
                     self._drop_fts_triggers(cursor)
                     for _tbl in ("messages_fts", "messages_fts_trigram"):
@@ -858,31 +857,56 @@ class SessionDB:
                             break
 
                     if fts5_available:
-                        # Recreate virtual tables + triggers with the new inline-mode
-                        # schema that indexes content || tool_name || tool_calls.
                         if (
                             self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
                             and self._ensure_fts_schema(
                                 cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                             )
                         ):
-                            # Backfill both indexes from every existing messages row.
-                            cursor.execute(
-                                "INSERT INTO messages_fts(rowid, content) "
-                                "SELECT id, "
-                                "COALESCE(content, '') || ' ' || "
-                                "COALESCE(tool_name, '') || ' ' || "
-                                "COALESCE(tool_calls, '') "
-                                "FROM messages"
+                            self._rebuild_fts_indexes(cursor)
+                        else:
+                            fts_migrations_complete = False
+                else:
+                    fts_migrations_complete = False
+            if current_version < 15:
+                # v15: switch from inline FTS5 to external-content FTS5.
+                # The previous inline mode duplicated indexed content in the FTS
+                # tables. External-content mode keeps only index data in FTS
+                # tables; content is read from the messages table on demand.
+                #
+                # Operational notes:
+                # - The messages table is the source of truth and is never
+                #   mutated here; this migration only rebuilds derived indexes.
+                # - Disk space becomes reusable inside SQLite immediately, but
+                #   the file is only returned to the filesystem after VACUUM.
+                # - Users who need to roll back should restore a pre-upgrade
+                #   state.db backup; this migration intentionally updates
+                #   derived FTS tables and schema_version.
+                # - Phrase queries no longer match across content/tool_name/
+                #   tool_calls column boundaries. That is intentional: v12's
+                #   cross-column phrase matches were an artifact of string
+                #   concatenation, not meaningful message text.
+                if fts5_available:
+                    self._drop_fts_triggers(cursor)
+                    for table_name in ("messages_fts", "messages_fts_trigram"):
+                        try:
+                            cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+                        except sqlite3.OperationalError as exc:
+                            if not self._is_fts5_unavailable_error(exc):
+                                raise
+                            self._warn_fts5_unavailable(exc)
+                            fts5_available = False
+                            fts_migrations_complete = False
+                            break
+
+                    if fts5_available:
+                        if (
+                            self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
+                            and self._ensure_fts_schema(
+                                cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                             )
-                            cursor.execute(
-                                "INSERT INTO messages_fts_trigram(rowid, content) "
-                                "SELECT id, "
-                                "COALESCE(content, '') || ' ' || "
-                                "COALESCE(tool_name, '') || ' ' || "
-                                "COALESCE(tool_calls, '') "
-                                "FROM messages"
-                            )
+                        ):
+                            self._rebuild_fts_indexes(cursor)
                         else:
                             fts_migrations_complete = False
                 else:
@@ -2881,7 +2905,7 @@ class SessionDB:
                 m.id,
                 m.session_id,
                 m.role,
-                snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
+                snippet(messages_fts, -1, '>>>', '<<<', '...', 40) AS snippet,
                 m.content,
                 m.timestamp,
                 m.tool_name,
@@ -2952,7 +2976,7 @@ class SessionDB:
                         m.id,
                         m.session_id,
                         m.role,
-                        snippet(messages_fts_trigram, 0, '>>>', '<<<', '...', 40) AS snippet,
+                        snippet(messages_fts_trigram, -1, '>>>', '<<<', '...', 40) AS snippet,
                         m.content,
                         m.timestamp,
                         m.tool_name,
