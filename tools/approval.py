@@ -659,6 +659,24 @@ def approve_session(session_key: str, pattern_key: str):
         _session_approved.setdefault(session_key, set()).add(pattern_key)
 
 
+def clear_session(session_key: str) -> None:
+    """Clear all in-memory approval state for a session key.
+
+    Safe to call even when the session has no tracked approval state.
+    Any blocked gateway approvals for the session are unblocked.
+    """
+    if not session_key:
+        return
+    with _lock:
+        _pending.pop(session_key, None)
+        _session_approved.pop(session_key, None)
+        _session_yolo.discard(session_key)
+        _gateway_notify_cbs.pop(session_key, None)
+        entries = _gateway_queues.pop(session_key, [])
+    for entry in entries:
+        entry.event.set()
+
+
 def enable_session_yolo(session_key: str) -> None:
     """Enable YOLO bypass for a single session key."""
     if not session_key:
