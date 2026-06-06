@@ -380,6 +380,8 @@ def _apply_profile_override() -> None:
             )
             return
         os.environ["HERMES_HOME"] = hermes_home
+        # Export HERMES_PYTHON so skills use the agent's interpreter, not system python3.
+        os.environ.setdefault("HERMES_PYTHON", sys.executable)
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0:
             for i, arg in enumerate(argv):
