@@ -64,6 +64,84 @@ except ImportError:
     HTTPX_AVAILABLE = False
     httpx = None  # type: ignore[assignment]
 
+# ── websockets >= 11 compatibility patch for dingtalk-stream ──────
+# dingtalk-stream (<=0.24.3) uses "async with websockets.connect(uri)" which
+# fails with websockets >= 11 because connect() became a coroutine function.
+# The correct form is "async with await websockets.connect(uri)".
+# Monkey-patch DingTalkStreamClient.start at import time.
+if DINGTALK_STREAM_AVAILABLE:
+    import asyncio
+    import json
+    import logging as _logging
+
+    import websockets as _websockets
+    from urllib.parse import quote_plus
+
+    import dingtalk_stream.stream as _ds_stream
+
+    _dt_logger = _logging.getLogger("dingtalk_stream.patch")
+
+    _original_start = _ds_stream.DingTalkStreamClient.start
+
+    async def _patched_start(self):
+        """Patched start() — websockets >= 11 compatible connect() call.
+
+        The sole change from the upstream implementation is line:
+            async with await websockets.connect(uri) as websocket:
+        (note the *await* keyword).  The rest mirrors dingtalk_stream.stream
+        faithfully so the patch stays invisible to the rest of the SDK.
+        """
+        self.pre_start()
+        while True:
+            try:
+                connection = self.open_connection()
+                if not connection:
+                    self.logger.error("open connection failed")
+                    await asyncio.sleep(10)
+                    continue
+                self.logger.info("endpoint is %s", connection)
+
+                uri = (
+                    f'{connection["endpoint"]}'
+                    f'?ticket={quote_plus(connection["ticket"])}'
+                )
+                # ← websockets>=11: connect() returns a coroutine → await required
+                async with await _websockets.connect(uri) as websocket:
+                    self.websocket = websocket
+                    asyncio.create_task(self.keepalive(websocket))
+                    async for raw_message in websocket:
+                        json_message = json.loads(raw_message)
+                        asyncio.create_task(self.background_task(json_message))
+            except KeyboardInterrupt:
+                break
+            except (
+                asyncio.CancelledError,
+                _websockets.exceptions.ConnectionClosedError,
+            ) as e:
+                self.logger.error("[start] network exception, error=%s", e)
+                await asyncio.sleep(10)
+                continue
+            except Exception as e:
+                await asyncio.sleep(3)
+                self.logger.exception("unknown exception", e)
+                continue
+
+    _ds_stream.DingTalkStreamClient.start = _patched_start
+    _dt_logger.info(
+        "Monkey-patched DingTalkStreamClient.start for websockets>=11"
+    )
+    del (
+        asyncio,
+        json,
+        _logging,
+        _websockets,
+        quote_plus,
+        _ds_stream,
+        _dt_logger,
+        _original_start,
+        _patched_start,
+    )
+
 # Card SDK for AI Cards (following QwenPaw pattern)
 try:
     from alibabacloud_dingtalk.card_1_0 import (
