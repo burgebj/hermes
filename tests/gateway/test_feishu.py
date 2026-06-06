@@ -417,6 +417,129 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_edit_message_rolls_over_before_feishu_edit_cap(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import (
+            FeishuAdapter,
+            _FEISHU_STREAMING_MAX_SAFE_EDITS,
+        )
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace())))
+        adapter._remember_streaming_message(
+            message_id="om_progress",
+            chat_id="oc_chat",
+            reply_to="om_parent",
+            metadata={"thread_id": "omt_thread"},
+            active_edit_count=_FEISHU_STREAMING_MAX_SAFE_EDITS,
+        )
+
+        with (
+            patch.object(
+                adapter,
+                "send",
+                new=AsyncMock(return_value=SimpleNamespace(
+                    success=True,
+                    message_id="om_replacement",
+                    continuation_message_ids=(),
+                )),
+            ) as mock_send,
+            patch.object(adapter, "delete_message", new=AsyncMock(return_value=True)) as mock_delete,
+        ):
+            result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_progress",
+                    content="stream update",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_replacement")
+        self.assertEqual(result.continuation_message_ids, ("om_replacement",))
+        mock_send.assert_awaited_once_with(
+            chat_id="oc_chat",
+            content="stream update",
+            reply_to="om_parent",
+            metadata={"thread_id": "omt_thread"},
+        )
+        mock_delete.assert_awaited_once_with("oc_chat", "om_progress")
+        self.assertNotIn("om_progress", adapter._streaming_message_state)
+        self.assertIn("om_replacement", adapter._streaming_message_state)
+        self.assertEqual(
+            adapter._streaming_message_state["om_replacement"].active_edit_count,
+            0,
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_edit_message_rolls_over_on_feishu_edit_cap_error(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def update(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: False,
+                    code=230072,
+                    msg="The message has reached the number of times it can be edited.",
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+        adapter._remember_streaming_message(
+            message_id="om_progress",
+            chat_id="oc_chat",
+            reply_to="om_parent",
+            metadata={"thread_id": "omt_thread"},
+            active_edit_count=3,
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct),
+            patch.object(
+                adapter,
+                "send",
+                new=AsyncMock(return_value=SimpleNamespace(
+                    success=True,
+                    message_id="om_replacement",
+                    continuation_message_ids=(),
+                )),
+            ) as mock_send,
+            patch.object(adapter, "delete_message", new=AsyncMock(return_value=True)) as mock_delete,
+        ):
+            result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_progress",
+                    content="stream update",
+                )
+            )
+
+        self.assertFalse(getattr(captured["request"].request_body, "msg_type", "") == "")
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_replacement")
+        self.assertEqual(result.continuation_message_ids, ("om_replacement",))
+        mock_send.assert_awaited_once_with(
+            chat_id="oc_chat",
+            content="stream update",
+            reply_to="om_parent",
+            metadata={"thread_id": "omt_thread"},
+        )
+        mock_delete.assert_awaited_once_with("oc_chat", "om_progress")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_get_chat_info_uses_real_feishu_chat_api(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter

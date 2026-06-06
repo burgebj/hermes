@@ -94,6 +94,7 @@ try:
         CreateImageRequestBody,
         CreateMessageRequest,
         CreateMessageRequestBody,
+        DeleteMessageRequest,
         GetChatRequest,
         GetMessageRequest,
         GetMessageResourceRequest,
@@ -229,6 +230,8 @@ _APPROVAL_LABEL_MAP: Dict[str, str] = {
 }
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
 _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+_FEISHU_STREAMING_MAX_SAFE_EDITS = 19
+_FEISHU_EDIT_LIMIT_ERROR_CODES = frozenset({"230072"})
 
 # Feishu reactions render as prominent badges, unlike Discord/Telegram's
 # small footer emoji — a success badge on every message would add noise, so
@@ -412,6 +415,14 @@ class FeishuBatchState:
     events: Dict[str, MessageEvent] = field(default_factory=dict)
     tasks: Dict[str, asyncio.Task] = field(default_factory=dict)
     counts: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class FeishuStreamingMessageState:
+    chat_id: str
+    reply_to: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    active_edit_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1462,6 +1473,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
+        self._streaming_message_state: Dict[str, FeishuStreamingMessageState] = {}
+        self._streaming_message_state_order: List[str] = []
         # Exec approval button state (approval_id → {session_key, message_id, chat_id})
         self._approval_state: Dict[int, Dict[str, str]] = {}
         self._approval_counter = itertools.count(1)
@@ -1765,6 +1778,125 @@ class FeishuAdapter(BasePlatformAdapter):
             self._webhook_runner = None
             self._webhook_site = None
 
+    def _remember_streaming_message(
+        self,
+        *,
+        message_id: str,
+        chat_id: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        active_edit_count: int = 0,
+    ) -> None:
+        if not message_id:
+            return
+        if message_id in self._streaming_message_state_order:
+            self._streaming_message_state_order.remove(message_id)
+        self._streaming_message_state_order.append(message_id)
+        self._streaming_message_state[message_id] = FeishuStreamingMessageState(
+            chat_id=chat_id,
+            reply_to=reply_to,
+            metadata=dict(metadata or {}),
+            active_edit_count=active_edit_count,
+        )
+        while len(self._streaming_message_state_order) > _FEISHU_BOT_MSG_TRACK_SIZE:
+            stale_id = self._streaming_message_state_order.pop(0)
+            self._streaming_message_state.pop(stale_id, None)
+
+    def _pop_streaming_message_state(self, message_id: str) -> Optional[FeishuStreamingMessageState]:
+        if not message_id:
+            return None
+        if message_id in self._streaming_message_state_order:
+            self._streaming_message_state_order.remove(message_id)
+        return self._streaming_message_state.pop(message_id, None)
+
+    def _get_streaming_message_state(
+        self,
+        *,
+        message_id: str,
+        chat_id: str,
+    ) -> FeishuStreamingMessageState:
+        existing = self._streaming_message_state.get(message_id)
+        if existing is not None:
+            return existing
+        state = FeishuStreamingMessageState(chat_id=chat_id)
+        if message_id in self._streaming_message_state_order:
+            self._streaming_message_state_order.remove(message_id)
+        self._streaming_message_state_order.append(message_id)
+        self._streaming_message_state[message_id] = state
+        while len(self._streaming_message_state_order) > _FEISHU_BOT_MSG_TRACK_SIZE:
+            stale_id = self._streaming_message_state_order.pop(0)
+            if stale_id != message_id:
+                self._streaming_message_state.pop(stale_id, None)
+        return state
+
+    @staticmethod
+    def _looks_like_edit_limit_error(error: str) -> bool:
+        if not error:
+            return False
+        normalized = error.lower()
+        return any(
+            signal in normalized
+            for signal in (
+                *tuple(_FEISHU_EDIT_LIMIT_ERROR_CODES),
+                "has reached the number of times it can be edited",
+            )
+        )
+
+    async def _rollover_streaming_message(
+        self,
+        *,
+        previous_message_id: str,
+        state: FeishuStreamingMessageState,
+        content: str,
+    ) -> SendResult:
+        logger.debug(
+            "[Feishu] Streaming rollover triggered for message %s in chat %s "
+            "(edit_count=%d, reply_to=%s)",
+            previous_message_id,
+            state.chat_id,
+            state.active_edit_count,
+            state.reply_to or "",
+        )
+        send_result = await self.send(
+            chat_id=state.chat_id,
+            content=content,
+            reply_to=state.reply_to,
+            metadata=state.metadata,
+        )
+        if not send_result.success or not send_result.message_id:
+            logger.warning(
+                "[Feishu] Streaming rollover send failed for message %s in chat %s: %s",
+                previous_message_id,
+                state.chat_id,
+                send_result.error or "unknown error",
+            )
+            return send_result
+
+        new_message_id = str(send_result.message_id)
+        logger.debug(
+            "[Feishu] Streaming rollover created replacement message %s for retired message %s in chat %s",
+            new_message_id,
+            previous_message_id,
+            state.chat_id,
+        )
+        self._pop_streaming_message_state(previous_message_id)
+        self._remember_streaming_message(
+            message_id=new_message_id,
+            chat_id=state.chat_id,
+            reply_to=state.reply_to,
+            metadata=state.metadata,
+            active_edit_count=0,
+        )
+        if previous_message_id and previous_message_id != new_message_id:
+            deleted = await self.delete_message(state.chat_id, previous_message_id)
+            if not deleted:
+                logger.debug(
+                    "[Feishu] Failed to delete retired streaming message %s after rollover",
+                    previous_message_id,
+                )
+        send_result.continuation_message_ids = (new_message_id,)
+        return send_result
+
     # =========================================================================
     # Outbound — send / edit / send_image / send_voice / …
     # =========================================================================
@@ -1821,7 +1953,16 @@ class FeishuAdapter(BasePlatformAdapter):
                     )
                 last_response = response
 
-            return self._finalize_send_result(last_response, "send failed")
+            result = self._finalize_send_result(last_response, "send failed")
+            if result.success and result.message_id:
+                self._remember_streaming_message(
+                    message_id=str(result.message_id),
+                    chat_id=chat_id,
+                    reply_to=reply_to,
+                    metadata=metadata,
+                    active_edit_count=0,
+                )
+            return result
         except Exception as exc:
             logger.error("[Feishu] Send error: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
@@ -1840,6 +1981,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
         content = self.format_message(content)
         try:
+            state = self._get_streaming_message_state(message_id=message_id, chat_id=chat_id)
+            if state.active_edit_count >= _FEISHU_STREAMING_MAX_SAFE_EDITS:
+                return await self._rollover_streaming_message(
+                    previous_message_id=message_id,
+                    state=state,
+                    content=content,
+                )
             msg_type, payload = self._build_outbound_payload(content)
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
             request = self._build_update_message_request(message_id=message_id, request_body=body)
@@ -1856,10 +2004,56 @@ class FeishuAdapter(BasePlatformAdapter):
                 result = self._finalize_send_result(fallback_response, "update failed")
             if result.success:
                 result.message_id = message_id
+                state.active_edit_count += 1
+                if finalize:
+                    self._pop_streaming_message_state(message_id)
+                else:
+                    self._streaming_message_state[message_id] = state
+                return result
+            if self._looks_like_edit_limit_error(result.error or ""):
+                return await self._rollover_streaming_message(
+                    previous_message_id=message_id,
+                    state=state,
+                    content=content,
+                )
             return result
         except Exception as exc:
+            if self._looks_like_edit_limit_error(str(exc)):
+                state = self._get_streaming_message_state(message_id=message_id, chat_id=chat_id)
+                return await self._rollover_streaming_message(
+                    previous_message_id=message_id,
+                    state=state,
+                    content=content,
+                )
             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
+
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a previously sent Feishu message."""
+        if not self._client or not message_id:
+            return False
+        try:
+            request = self._build_delete_message_request(message_id)
+            response = await asyncio.to_thread(self._client.im.v1.message.delete, request)
+            success = self._response_succeeded(response)
+            if success:
+                self._pop_streaming_message_state(message_id)
+                logger.debug(
+                    "[Feishu] Deleted message %s in chat %s",
+                    message_id,
+                    chat_id,
+                )
+            else:
+                logger.debug(
+                    "[Feishu] Delete message %s failed: [%s] %s",
+                    message_id,
+                    getattr(response, "code", "unknown"),
+                    getattr(response, "msg", "delete failed"),
+                )
+            return success
+        except Exception as exc:
+            logger.debug("[Feishu] Failed to delete message %s: %s", message_id, exc)
+            return False
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,
@@ -4733,6 +4927,12 @@ class FeishuAdapter(BasePlatformAdapter):
                 .build()
             )
         return SimpleNamespace(message_id=message_id, request_body=request_body)
+
+    @staticmethod
+    def _build_delete_message_request(message_id: str) -> Any:
+        if "DeleteMessageRequest" in globals():
+            return DeleteMessageRequest.builder().message_id(message_id).build()
+        return SimpleNamespace(message_id=message_id)
 
     @staticmethod
     def _build_create_message_body(*, receive_id: str, msg_type: str, content: str, uuid_value: str) -> Any:
