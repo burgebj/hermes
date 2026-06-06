@@ -1245,6 +1245,7 @@ class MCPServerTask:
             async with self._rpc_lock:
                 tools_result = await self.session.list_tools()
             new_mcp_tools = tools_result.tools if hasattr(tools_result, "tools") else []
+            new_mcp_tools = _sanitize_mcp_tool_output_schemas(self.session, new_mcp_tools)
 
             # 2. Re-register with fresh tool list. Avoid nuke-and-repave for
             # all names: live agent turns may already have tool-call IDs
@@ -1752,6 +1753,7 @@ class MCPServerTask:
             if hasattr(tools_result, "tools")
             else []
         )
+        self._tools = _sanitize_mcp_tool_output_schemas(self.session, self._tools)
 
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.
@@ -3104,6 +3106,66 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
         normalized = {**normalized, "properties": {}}
 
     return normalized
+
+
+_MCP_DISCRIMINATOR_SHAPES = (
+    frozenset({"name", "entityType", "observations"}),
+    frozenset({"from", "to", "relationType"}),
+)
+
+
+def _sanitize_mcp_output_schema(schema: Any) -> Any:
+    """Allow harmless MCP structuredContent discriminator fields.
+
+    Some MCP servers return objects with a ``type`` discriminator while their
+    advertised schema uses ``additionalProperties: false``.  Relax only the
+    known strict object shapes so SDK-side validation can accept the payload
+    without broadly disabling schema checks.
+    """
+    if isinstance(schema, list):
+        return [_sanitize_mcp_output_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    normalized = {
+        key: _sanitize_mcp_output_schema(value)
+        for key, value in schema.items()
+    }
+    properties = normalized.get("properties")
+    required = normalized.get("required")
+    if (
+        normalized.get("type") == "object"
+        and normalized.get("additionalProperties") is False
+        and isinstance(properties, dict)
+        and isinstance(required, list)
+        and "type" not in properties
+    ):
+        required_fields = frozenset(str(item) for item in required)
+        if any(shape.issubset(required_fields) for shape in _MCP_DISCRIMINATOR_SHAPES):
+            normalized["properties"] = {
+                **properties,
+                "type": {"type": "string"},
+            }
+    return normalized
+
+
+def _sanitize_mcp_tool_output_schemas(session: Any, tools: list) -> list:
+    """Sanitize MCP tool output schemas and the SDK validation cache."""
+    cache = getattr(session, "_tool_output_schemas", None)
+    for tool in tools:
+        output_schema = getattr(tool, "outputSchema", None)
+        if not isinstance(output_schema, dict):
+            continue
+        sanitized = _sanitize_mcp_output_schema(output_schema)
+        if sanitized is output_schema:
+            continue
+        try:
+            setattr(tool, "outputSchema", sanitized)
+        except Exception:
+            pass
+        if isinstance(cache, dict):
+            cache[getattr(tool, "name", "")] = sanitized
+    return tools
 
 
 def sanitize_mcp_name_component(value: str) -> str:

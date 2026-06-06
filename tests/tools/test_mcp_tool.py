@@ -806,6 +806,47 @@ class TestMCPServerTask:
 
         asyncio.run(_test())
 
+    def test_discovery_allows_known_structured_content_discriminators(self):
+        """Discovery relaxes output schemas before SDK call_tool validation."""
+        from tools.mcp_tool import MCPServerTask
+
+        relation_schema = {
+            "type": "object",
+            "properties": {
+                "relations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": {"type": "string"},
+                            "to": {"type": "string"},
+                            "relationType": {"type": "string"},
+                        },
+                        "required": ["from", "to", "relationType"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        }
+        mock_tool = _make_mcp_tool("search")
+        mock_tool.outputSchema = relation_schema
+        mock_session = SimpleNamespace(
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[mock_tool])),
+            _tool_output_schemas={"search": relation_schema},
+        )
+
+        async def _test():
+            server = MCPServerTask("srv")
+            server.session = mock_session
+
+            await server._discover_tools()
+
+            item_schema = server._tools[0].outputSchema["properties"]["relations"]["items"]
+            assert "type" in item_schema["properties"]
+            assert mock_session._tool_output_schemas["search"] is server._tools[0].outputSchema
+
+        asyncio.run(_test())
+
     def test_no_command_raises(self):
         """Missing 'command' in config raises ValueError."""
         from tools.mcp_tool import MCPServerTask
