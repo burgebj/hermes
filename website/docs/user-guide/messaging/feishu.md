@@ -189,6 +189,8 @@ FEISHU_ALLOWED_USERS=ou_xxx,ou_yyy
 
 If you leave the allowlist empty, anyone who can reach the bot may be able to use it. In group chats, the allowlist is checked against the sender's open_id before the message is processed.
 
+Group messages require an explicit `@`-mention by default, after the group policy/allowlist check passes. To let allowed group users trigger the bot without an `@`-mention, set `FEISHU_REQUIRE_MENTION=false` or configure `platforms.feishu.extra.require_mention: false`.
+
 ### Webhook Encryption Key
 
 When running in webhook mode, set an encryption key to enable signature verification of inbound webhook payloads:
@@ -551,6 +553,7 @@ Inbound messages are deduplicated using message IDs with a 24-hour TTL. The dedu
 | `FEISHU_ENCRYPT_KEY` | — | _(empty)_ | Encrypt key for webhook signature verification |
 | `FEISHU_VERIFICATION_TOKEN` | — | _(empty)_ | Verification token for webhook payload auth |
 | `FEISHU_GROUP_POLICY` | — | `allowlist` | Group message policy: `open`, `allowlist`, `disabled` |
+| `FEISHU_REQUIRE_MENTION` / `HERMES_FEISHU_REQUIRE_MENTION` | — | `true` | Require group messages to @mention the bot after group policy passes |
 | `FEISHU_BOT_OPEN_ID` | — | _(empty)_ | Bot's open_id (for @mention detection) |
 | `FEISHU_BOT_USER_ID` | — | _(empty)_ | Bot's user_id (for @mention detection) |
 | `FEISHU_BOT_NAME` | — | _(empty)_ | Bot's display name (for @mention detection) |

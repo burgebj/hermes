@@ -1642,6 +1642,11 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         feishu_verification_token = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
         if feishu_verification_token:
             config.platforms[Platform.FEISHU].extra["verification_token"] = feishu_verification_token
+        for require_mention_var in ("FEISHU_REQUIRE_MENTION", "HERMES_FEISHU_REQUIRE_MENTION"):
+            feishu_require_mention = os.getenv(require_mention_var)
+            if feishu_require_mention is not None:
+                config.platforms[Platform.FEISHU].extra["require_mention"] = feishu_require_mention
+                break
         feishu_home = os.getenv("FEISHU_HOME_CHANNEL")
         if feishu_home:
             config.platforms[Platform.FEISHU].home_channel = HomeChannel(
