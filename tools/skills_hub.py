@@ -2331,8 +2331,22 @@ class ClawHubSource(SkillSource):
                             logger.debug("Skipping large file in ZIP: %s (%d bytes)", name, info.file_size)
                             continue
                         try:
-                            raw = zf.read(info.filename)
-                            files[name] = raw.decode("utf-8")
+                            chunks: list[bytes] = []
+                            total = 0
+                            with zf.open(info.filename) as fh:
+                                while True:
+                                    chunk = fh.read(65536)
+                                    if not chunk:
+                                        break
+                                    total += len(chunk)
+                                    if total > 500_000:
+                                        logger.debug("Skipping ZIP member exceeding size limit: %s", name)
+                                        chunks = []
+                                        break
+                                    chunks.append(chunk)
+                            if not chunks:
+                                continue
+                            files[name] = b"".join(chunks).decode("utf-8")
                         except (UnicodeDecodeError, KeyError):
                             logger.debug("Skipping non-text file in ZIP: %s", name)
                             continue
