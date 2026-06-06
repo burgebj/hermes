@@ -504,8 +504,9 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
     skipping the translation silently breaks every ``pre_tool_call``
     block directive.
 
-    For ``pre_llm_call``, ``{"context": "..."}`` is passed through
-    unchanged to match the existing plugin-hook contract.
+    For ``pre_llm_call``, ``{"context": "..."}`` and
+    ``{"short_circuit_response": "..."}`` are passed through unchanged to
+    match the existing plugin-hook contract.
 
     Anything else returns ``None``.
     """
@@ -532,11 +533,15 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
             return {"action": "block", "message": _block_message(data.get("reason"), data.get("message"))}
         return None
 
+    response: Dict[str, Any] = {}
     context = data.get("context")
     if isinstance(context, str) and context.strip():
-        return {"context": context}
+        response["context"] = context
 
-    return None
+    if event == "pre_llm_call" and data.get("short_circuit_response") is not None:
+        response["short_circuit_response"] = data["short_circuit_response"]
+
+    return response or None
 
 
 # ---------------------------------------------------------------------------
