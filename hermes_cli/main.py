@@ -1264,6 +1264,32 @@ def _workspace_root(dir: Path) -> Path:
     return dir
 
 
+def _termux_workspace_install_context(
+    dir: Path, *, include_child_workspaces: bool = False
+) -> tuple[Path, tuple[str, ...]]:
+    """Return Termux-only ``(cwd, npm_args)`` for installing deps for *dir* only."""
+    ws_root = _workspace_root(dir)
+    if ws_root == dir:
+        return dir, ()
+
+    try:
+        workspace = dir.relative_to(ws_root).as_posix()
+    except ValueError:
+        return ws_root, ()
+
+    workspace_args: list[str] = ["--workspace", workspace]
+    if include_child_workspaces:
+        packages_dir = dir / "packages"
+        if packages_dir.is_dir():
+            for child in sorted(packages_dir.iterdir()):
+                if child.is_dir() and (child / "package.json").is_file():
+                    workspace_args.extend(
+                        ["--workspace", child.relative_to(ws_root).as_posix()]
+                    )
+    workspace_args.append("--include-workspace-root=false")
+    return ws_root, tuple(workspace_args)
+
+
 def _tui_need_npm_install(root: Path) -> bool:
     """True when @hermes/ink is missing or node_modules is behind package-lock.json.
 
@@ -1528,16 +1554,43 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
 
     # 2. Normal flow: npm install if needed, always esbuild, then node dist/entry.js.
     #    --dev flow: npm install if needed, then tsx src/entry.tsx.
-    #    npm install runs from the workspace root (where package-lock.json lives);
-    #    npm workspaces resolves ui-tui deps automatically.
+    #    Existing desktop behaviour runs npm from the workspace root.  Termux
+    #    scopes the install to ui-tui so launch does not pull desktop/web
+    #    dependencies into the hot path.
     did_install = False
-    if _tui_need_npm_install(tui_dir):
+    termux_startup = _is_termux_startup_environment()
+    termux_need_rebuild = False
+    if termux_startup and not tui_dev:
+        termux_need_rebuild = _tui_need_rebuild(tui_dir)
+
+    skip_install_for_fresh_termux_bundle = (
+        termux_startup and not tui_dev and not termux_need_rebuild
+    )
+    if (
+        not skip_install_for_fresh_termux_bundle
+        and _tui_need_npm_install(tui_dir)
+    ):
         npm = _node_bin("npm")
         if not os.environ.get("HERMES_QUIET"):
             print("Installing TUI dependencies…")
+        npm_cwd = _workspace_root(tui_dir)
+        npm_workspace_args: tuple[str, ...] = ()
+        if termux_startup:
+            npm_cwd, npm_workspace_args = _termux_workspace_install_context(
+                tui_dir,
+                include_child_workspaces=True,
+            )
         result = subprocess.run(
-            [npm, "install", "--silent", "--no-fund", "--no-audit", "--progress=false"],
-            cwd=str(_workspace_root(tui_dir)),
+            [
+                npm,
+                "install",
+                *npm_workspace_args,
+                "--silent",
+                "--no-fund",
+                "--no-audit",
+                "--progress=false",
+            ],
+            cwd=str(npm_cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1583,8 +1636,8 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     # Termux cold starts use the freshness check because esbuild startup is
     # expensive on old mobile CPUs.
     should_build = True
-    if _is_termux_startup_environment():
-        should_build = did_install or _tui_need_rebuild(tui_dir)
+    if termux_startup:
+        should_build = did_install or termux_need_rebuild
 
     if should_build:
         npm = _node_bin("npm")
@@ -2562,6 +2615,8 @@ def select_provider_and_model(args=None):
                 "api_key": entry.get("api_key", ""),
                 "key_env": entry.get("key_env", ""),
                 "model": entry.get("model", ""),
+                "models": entry.get("models", {}),
+                "discover_models": entry.get("discover_models", True),
                 "api_mode": entry.get("api_mode", ""),
                 "provider_key": provider_key,
                 "api_key_ref": _lookup_ref(
@@ -4744,17 +4799,45 @@ def _model_flow_named_custom(config, provider_info):
         api_key = os.environ.get(key_env, "")
     config_api_key = _custom_provider_api_key_config_value(provider_info, api_key)
 
+    # Honor ``discover_models: false`` (default True) — when discovery is
+    # disabled, use the configured ``models:`` list verbatim and skip the
+    # live /models probe. This lets operators restrict the picker to the
+    # subset their plan actually serves instead of the endpoint's full
+    # catalog (#18726: Baidu Qianfan returns 100+ models for a 2-3 model
+    # plan). Same semantics as the slash-command picker (model_switch.py
+    # sections 3 & 4): default discovers, false keeps the explicit list.
+    discover = provider_info.get("discover_models", True)
+    if isinstance(discover, str):
+        discover = discover.lower() not in {"false", "no", "0"}
+    configured_models: list[str] = []
+    cfg_models = provider_info.get("models", {})
+    if isinstance(cfg_models, dict):
+        configured_models = [str(m) for m in cfg_models if str(m).strip()]
+    elif isinstance(cfg_models, list):
+        configured_models = [
+            str(m) for m in cfg_models if isinstance(m, str) and m.strip()
+        ]
+
     print(f"  Provider: {name}")
     print(f"  URL:      {base_url}")
     if saved_model:
         print(f"  Current:  {saved_model}")
     print()
 
-    print("Fetching available models...")
-    fetch_kwargs = {"timeout": 8.0}
-    if api_mode:
-        fetch_kwargs["api_mode"] = api_mode
-    models = fetch_api_models(api_key, base_url, **fetch_kwargs)
+    if not discover and configured_models:
+        # Discovery disabled with an explicit list — use it verbatim, no probe.
+        print(f"Using configured models (discover_models: false): {len(configured_models)}")
+        models = configured_models
+    else:
+        print("Fetching available models...")
+        fetch_kwargs = {"timeout": 8.0}
+        if api_mode:
+            fetch_kwargs["api_mode"] = api_mode
+        models = fetch_api_models(api_key, base_url, **fetch_kwargs)
+        # If the probe came back empty but the operator configured an explicit
+        # list, fall back to it rather than forcing manual entry.
+        if not models and configured_models:
+            models = configured_models
 
     if models:
         default_idx = 0
@@ -6569,7 +6652,9 @@ def cmd_import(args):
 
 
 def _print_version_info(*, check_updates: bool = True) -> None:
-    print(f"Hermes Agent v{__version__} ({__release_date__})")
+    from hermes_cli.banner import format_banner_version_label
+
+    print(format_banner_version_label())
     print(f"Project: {PROJECT_ROOT}")
 
     # Show Python version
@@ -7009,10 +7094,14 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             if text:
                 _say(text)
 
+    npm_cwd = _workspace_root(web_dir)
+    npm_workspace_args: tuple[str, ...] = ()
+    if _is_termux_startup_environment():
+        npm_cwd, npm_workspace_args = _termux_workspace_install_context(web_dir)
     r1 = _run_npm_install_deterministic(
         npm,
-        _workspace_root(web_dir),
-        extra_args=("--silent",),
+        npm_cwd,
+        extra_args=(*npm_workspace_args, "--silent"),
     )
     if r1.returncode != 0:
         _say(
@@ -11592,7 +11681,8 @@ def cmd_profile(args):
                 )
                 print(f"Skills:         {p.skill_count} installed")
                 if p.alias_path:
-                    print(f"Alias:          {p.name} → hermes -p {p.name}")
+                    alias_display = p.alias_name or p.name
+                    print(f"Alias:          {alias_display} → hermes -p {p.name}")
                 break
         print()
         return
@@ -11624,7 +11714,7 @@ def cmd_profile(args):
             name = p.name
             model = (p.model or "—")[:26]
             gw = "running" if p.gateway_running else "stopped"
-            alias = p.name if p.alias_path else "—"
+            alias = (p.alias_name or p.name) if p.alias_path else "—"
             if p.is_default:
                 alias = "—"
             if p.distribution_name:
@@ -11874,6 +11964,8 @@ def cmd_profile(args):
             _check_gateway_running,
             _count_skills,
             _read_distribution_meta,
+            _get_wrapper_dir,
+            find_alias_for_profile,
         )
 
         if not profile_exists(name):
@@ -11884,7 +11976,7 @@ def cmd_profile(args):
         gw = _check_gateway_running(profile_dir)
         skills = _count_skills(profile_dir)
         dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
-        wrapper = _get_wrapper_dir() / name
+        alias_name = find_alias_for_profile(name)
 
         print(f"\nProfile: {name}")
         print(f"Path:    {profile_dir}")
@@ -11903,8 +11995,10 @@ def cmd_profile(args):
             if dist_source:
                 print(f"Installed from: {dist_source}")
             print(f"  (run `hermes profile info {name}` for full manifest)")
-        if wrapper.exists():
-            print(f"Alias:   {wrapper}")
+        if alias_name:
+            is_windows = sys.platform == "win32"
+            wrapper = _get_wrapper_dir() / (f"{alias_name}.bat" if is_windows else alias_name)
+            print(f"Alias:   {alias_name} → hermes -p {name}  ({wrapper})")
         print()
 
     elif action == "alias":
@@ -14651,12 +14745,36 @@ Examples:
         help="Platform to apply to (default: cli)",
     )
 
+    # hermes tools post-setup <key>
+    tools_postsetup_p = tools_sub.add_parser(
+        "post-setup",
+        help="Run a provider's post-setup install hook (npm/pip/binary)",
+        description=(
+            "Run the install/bootstrap hook a tool backend declares — the\n"
+            "same step `hermes tools` runs after you pick a provider that\n"
+            "needs extra dependencies (browser Chromium, Camofox, cua-driver,\n"
+            "KittenTTS/Piper, ddgs, Spotify, Langfuse, xAI). Stable,\n"
+            "non-interactive target the dashboard spawns to drive backend\n"
+            "setup. Keys: agent_browser, camofox, cua_driver, kittentts,\n"
+            "piper, ddgs, spotify, langfuse, xai_grok."
+        ),
+    )
+    tools_postsetup_p.add_argument(
+        "post_setup_key",
+        metavar="KEY",
+        help="Post-setup hook key (e.g. agent_browser, camofox, kittentts)",
+    )
+
     def cmd_tools(args):
         action = getattr(args, "tools_action", None)
         if action in {"list", "disable", "enable"}:
             from hermes_cli.tools_config import tools_disable_enable_command
 
             tools_disable_enable_command(args)
+        elif action == "post-setup":
+            from hermes_cli.tools_config import run_post_setup_command
+
+            sys.exit(run_post_setup_command(args))
         else:
             _require_tty("tools")
             from hermes_cli.tools_config import tools_command

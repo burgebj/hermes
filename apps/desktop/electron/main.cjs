@@ -28,6 +28,7 @@ const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = requ
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
+const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const {
   authModeFromStatus,
   buildGatewayWsUrl,
@@ -407,8 +408,13 @@ function previewFileMetadata(filePath, mimeType) {
 }
 
 app.setName(APP_NAME)
+// Seed the native About panel with the live Hermes version. This is refreshed
+// on every open via the explicit "About" menu handler (refreshAboutPanel), so
+// an in-place `hermes update` mid-session is reflected without an app restart;
+// the seed here just covers the first open and any non-menu invocation path.
 app.setAboutPanelOptions({
   applicationName: APP_NAME,
+  applicationVersion: resolveHermesVersion(),
   copyright: 'Copyright © 2026 Nous Research'
 })
 
@@ -1313,6 +1319,136 @@ function resolveUpdaterBinary() {
   return fileExists(candidate) ? candidate : null
 }
 
+function repairMacUpdaterHelper(updater) {
+  if (!IS_MAC || !updater) return
+
+  try {
+    execFileSync('/usr/bin/xattr', ['-cr', updater], { stdio: 'ignore' })
+  } catch (err) {
+    rememberLog(`[updates] macOS updater helper quarantine repair skipped: ${err.message}`)
+  }
+
+  try {
+    execFileSync('/usr/bin/codesign', ['--verify', updater], { stdio: 'ignore' })
+    return
+  } catch {
+    // Unsigned or invalid helper. Apply a local ad-hoc signature so Gatekeeper
+    // does not block the staged updater before it can run.
+  }
+
+  try {
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', updater], { stdio: 'ignore' })
+    rememberLog('[updates] repaired macOS updater helper signature')
+  } catch (err) {
+    rememberLog(`[updates] macOS updater helper signature repair skipped: ${err.message}`)
+  }
+}
+
+// Path to the venv shim whose lock decides whether `hermes update` can write
+// fresh entry points. On Windows this is the file the running backend
+// `hermes.exe` holds open; on POSIX it's never mandatory-locked.
+function venvHermesShimPath(updateRoot) {
+  return IS_WINDOWS
+    ? path.join(updateRoot, 'venv', 'Scripts', 'hermes.exe')
+    : path.join(updateRoot, 'venv', 'bin', 'hermes')
+}
+
+// Best-effort lock probe mirroring the Rust updater's is_locked(): a running
+// .exe on Windows refuses an O_RDWR open with a sharing violation. On POSIX
+// this practically always succeeds (no mandatory locking), so it returns false
+// — correct, since the shim-contention brick is Windows-only.
+function isShimLocked(shimPath) {
+  if (!IS_WINDOWS) return false
+  let fd
+  try {
+    fd = fs.openSync(shimPath, 'r+')
+    return false
+  } catch (err) {
+    // ENOENT ⇒ not there ⇒ nothing locking it. Anything else (EBUSY/EPERM/
+    // EACCES) on Windows means a live handle holds it.
+    return err && err.code !== 'ENOENT'
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        void 0
+      }
+    }
+  }
+}
+
+// Force-kill the entire process TREE rooted at each PID. Node's child.kill()
+// only signals the direct child, so on Windows a backend `hermes.exe` that
+// spawned its own grandchildren (a `hermes` REPL, a pty terminal session, the
+// gateway) would survive and keep the venv shim locked. taskkill /T /F reaps
+// the whole tree synchronously. Windows-only: this is called solely from the
+// Windows shim-unlock path, and the backend is NOT spawned detached (so it's
+// not a process-group leader — a POSIX negative-pgid kill would be meaningless
+// here anyway). POSIX teardown stays with the existing before-quit SIGTERM.
+function forceKillProcessTree(pid) {
+  if (!IS_WINDOWS) return
+  if (!Number.isInteger(pid) || pid <= 0) return
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+  } catch {
+    // Already gone, or no permission — best effort; the unlock wait below is
+    // the real gate.
+  }
+}
+
+// Before handing off the update on Windows, the desktop MUST stop every backend
+// it spawned and WAIT for the venv shim to actually unlock. The old code did
+// `hermesProcess.kill('SIGTERM')` + `app.quit()` fire-and-forget: SIGTERM on
+// Windows doesn't reap the backend's grandchildren, and quit didn't wait for
+// teardown, so the updater raced a still-locked `hermes.exe`, the quarantine
+// rename failed, uv's `pip install` hit "Access is denied", and the git path
+// bailed into a full ZIP re-download that ALSO couldn't write the locked shim —
+// a half-applied install (ryanc's update.log). Here we tree-kill the primary +
+// pool backends and poll the shim until it's writable (or a bounded timeout),
+// so by the time we spawn the updater the lock is genuinely gone.
+//
+// Windows-only: the venv-shim mandatory lock is a Windows phenomenon. On
+// macOS/Linux there's no REPLACE-on-running-exe block, the existing before-quit
+// SIGTERM + app.quit() teardown already works (the macOS path is flawless), and
+// aggressively SIGKILL-ing the backend here would be an untested behavior change
+// for no benefit. So we no-op off Windows and leave that path exactly as it was.
+async function releaseBackendLockForUpdate(updateRoot) {
+  if (!IS_WINDOWS) return { unlocked: true }
+
+  // Collect every backend PID the desktop owns: primary window backend + pool.
+  const pids = []
+  if (hermesProcess && Number.isInteger(hermesProcess.pid)) pids.push(hermesProcess.pid)
+  for (const entry of backendPool.values()) {
+    if (entry.process && Number.isInteger(entry.process.pid)) pids.push(entry.process.pid)
+  }
+
+  // Graceful first (lets Python flush), then tree-kill to catch grandchildren.
+  if (hermesProcess && !hermesProcess.killed) {
+    try {
+      hermesProcess.kill('SIGTERM')
+    } catch {
+      void 0
+    }
+  }
+  stopAllPoolBackends()
+  for (const pid of pids) forceKillProcessTree(pid)
+
+  const shim = venvHermesShimPath(updateRoot)
+  const deadlineMs = Date.now() + 15000
+  while (Date.now() < deadlineMs) {
+    if (!isShimLocked(shim)) {
+      rememberLog('[updates] venv shim unlocked; safe to hand off the update')
+      return { unlocked: true }
+    }
+    await new Promise(r => setTimeout(r, 300))
+  }
+  // Timed out: the updater's own wait_for_venv_free + force-kill is the second
+  // line of defense, and we pass --force so the guard won't dead-end. Log it.
+  rememberLog('[updates] venv shim still locked after 15s; handing off anyway (updater will force)')
+  return { unlocked: false }
+}
+
 // applyUpdates — hand off to the installer's --update flow, then exit.
 //
 // The desktop is a pure consumer: it does NOT git pull / pip install / rebuild
@@ -1368,6 +1504,7 @@ async function applyUpdates(opts = {}) {
     }
 
     emitUpdateProgress({ stage: 'restart', message: 'Handing off to the Hermes updater…', percent: 100 })
+    repairMacUpdaterHelper(updater)
 
     const updateRoot = resolveUpdateRoot()
     const { branch: configuredBranch } = readDesktopUpdateConfig()
@@ -1378,6 +1515,12 @@ async function applyUpdates(opts = {}) {
       updaterArgs.push('--target-app', targetApp)
     }
     const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
+
+    // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
+    // spawn the updater. Without this the updater races a still-locked
+    // hermes.exe (held by the backend child / its grandchildren) and the update
+    // bricks. See releaseBackendLockForUpdate for the full failure analysis.
+    await releaseBackendLockForUpdate(updateRoot)
 
     // Detached so the updater outlives this process — it needs us GONE before
     // `hermes update` will run (the venv shim is locked while we live).
@@ -2843,7 +2986,7 @@ function buildApplicationMenu() {
     template.push({
       label: APP_NAME,
       submenu: [
-        { role: 'about', label: `About ${APP_NAME}` },
+        { label: `About ${APP_NAME}`, click: () => showAboutPanelFresh() },
         checkForUpdatesItem,
         { type: 'separator' },
         { role: 'services' },
@@ -3356,7 +3499,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
       return
     }
-    const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
+    const body = serializeJsonBody(options.body)
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     const request = electronNet.request({
@@ -3366,8 +3509,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       useSessionCookies: true,
       redirect: 'follow'
     })
-    request.setHeader('Content-Type', 'application/json')
-    if (body) request.setHeader('Content-Length', String(body.length))
+    setJsonRequestHeaders(request)
 
     let timedOut = false
     const timer = setTimeout(() => {
@@ -3796,6 +3938,44 @@ async function resolveRemoteBackend(profile) {
   const authMode = normAuthMode(config.remote?.authMode)
   const token = authMode === 'oauth' ? null : decryptDesktopSecret(config.remote?.token)
   return buildRemoteConnection(config.remote?.url, authMode, token, 'settings')
+}
+
+// A remote profile's sessions live on its remote host's state.db, not on a local
+// file the primary can open — so reads for it must route to the remote backend,
+// not the local-disk fast path. These three helpers drive that (see
+// interceptSessionReadForRemote).
+function profileHasRemoteOverride(profile) {
+  return Boolean(profileRemoteOverride(readDesktopConnectionConfig(), profile))
+}
+
+function configuredRemoteProfileNames() {
+  const config = readDesktopConnectionConfig()
+  return Object.keys(config.profiles || {}).filter(name => profileRemoteOverride(config, name))
+}
+
+// True when the app is in app-global remote mode (Settings → "All profiles" →
+// Remote, or the env override): a SINGLE remote backend serves every profile via
+// ?profile=. Distinct from per-profile overrides — here there's one host for all.
+function globalRemoteActive() {
+  if (process.env.HERMES_DESKTOP_REMOTE_URL) {
+    return true
+  }
+  return readDesktopConnectionConfig().mode === 'remote'
+}
+
+// GET a profile's resolved backend (remote pool or local primary), parsed JSON.
+async function fetchJsonForProfile(profile, path) {
+  return requestJsonForProfile(profile, path, 'GET')
+}
+
+// Issue an arbitrary method against a profile's resolved backend, parsed JSON.
+async function requestJsonForProfile(profile, path, method, body) {
+  const conn = await ensureBackend(profile)
+  const url = `${conn.baseUrl}${path}`
+  const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
+  return conn.authMode === 'oauth'
+    ? fetchJsonViaOauthSession(url, opts)
+    : fetchJson(url, conn.token, opts)
 }
 
 async function probeRemoteAuthMode(rawUrl) {
@@ -4587,7 +4767,145 @@ ipcMain.handle('hermes:requestMicrophoneAccess', async () => {
   return systemPreferences.askForMediaAccess('microphone')
 })
 
+// Re-route remote-profile session requests to the owning remote backend. Returns
+// `undefined` when not interceptable (caller takes the normal local path), else
+// the response. Reads tag the profile as ?profile=<name>; mutations carry it in
+// request.profile. Either way, a remote profile's session lives only on its
+// remote host, so the request must go there (where it serves its own state.db).
+//   GET    /api/profiles/sessions        → splice each remote profile's rows in
+//   GET    /api/sessions/{id}[/messages] → read from remote
+//   DELETE /api/sessions/{id}            → delete on remote
+//   PATCH  /api/sessions/{id}            → rename/archive on remote
+async function interceptSessionRequestForRemote(request) {
+  if (typeof request?.path !== 'string') {
+    return undefined
+  }
+  const method = (request.method || 'GET').toUpperCase()
+
+  let parsed
+  try {
+    parsed = new URL(request.path, 'http://x')
+  } catch {
+    return undefined
+  }
+  const { pathname, searchParams } = parsed
+
+  if (method === 'GET' && pathname === '/api/profiles/sessions') {
+    const remoteProfiles = configuredRemoteProfileNames()
+    if (remoteProfiles.length === 0) {
+      return undefined // no remote profiles → local fast path
+    }
+    const requested = (searchParams.get('profile') || 'all').trim() || 'all'
+    if (requested !== 'all') {
+      return profileHasRemoteOverride(requested) ? remoteSessionList(requested, searchParams) : undefined
+    }
+    return mergeRemoteProfileSessions(searchParams, remoteProfiles)
+  }
+
+  // Per-session read/mutation. Owner is in ?profile= (reads) or request.profile
+  // (mutations). Two remote shapes:
+  //  - per-profile override: route to that profile's own remote, sans profile
+  //    param (it serves its own state.db natively).
+  //  - global remote mode: ONE backend serves every profile via ?profile=, so
+  //    route there and KEEP the profile param so it opens the right state.db.
+  if (/^\/api\/sessions\/[^/]+(\/messages)?$/.test(pathname)) {
+    const profile = (searchParams.get('profile') || request.profile || '').trim()
+    if (!profile) {
+      return undefined
+    }
+    if (profileHasRemoteOverride(profile)) {
+      if (method === 'GET') {
+        return fetchJsonForProfile(profile, pathname)
+      }
+      const body = request.body && typeof request.body === 'object' ? { ...request.body } : request.body
+      if (body) delete body.profile
+      return requestJsonForProfile(profile, pathname, method, body)
+    }
+    if (globalRemoteActive()) {
+      // Single global backend: keep ?profile= so it opens the right state.db.
+      const sep = pathname.includes('?') ? '&' : '?'
+      const path = `${pathname}${sep}profile=${encodeURIComponent(profile)}`
+      if (method === 'GET') {
+        return fetchJsonForProfile(null, path)
+      }
+      const body = request.body && typeof request.body === 'object' ? { ...request.body, profile } : { profile }
+      return requestJsonForProfile(null, path, method, body)
+    }
+    return undefined
+  }
+
+  return undefined
+}
+
+const rowsOf = data => (Array.isArray(data?.sessions) ? data.sessions : [])
+
+// A remote profile's session list, read from its remote host and tagged with the
+// desktop-facing profile name (the remote's /api/sessions doesn't know it).
+async function remoteSessionList(profile, searchParams) {
+  const qs = new URLSearchParams(searchParams)
+  qs.delete('profile') // remote serves its own db; no cross-profile read there
+  const data = await fetchJsonForProfile(profile, `/api/sessions?${qs}`)
+  for (const s of rowsOf(data)) {
+    s.profile = profile
+    s.is_default_profile = false
+  }
+  return { ...data, sessions: rowsOf(data) }
+}
+
+// Unified list: primary's local aggregate, with each remote profile's stale local
+// rows/totals swapped for the remote's real ones, re-sorted by recency and
+// re-windowed to the requested page. A dead remote contributes nothing rather
+// than breaking the sidebar.
+async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
+  const limit = Math.max(1, Number(searchParams.get('limit')) || 20)
+  const offset = Math.max(0, Number(searchParams.get('offset')) || 0)
+  const order = searchParams.get('order') === 'created' ? 'started_at' : 'last_active'
+
+  const primary = await ensureBackend(null)
+  const base = await fetchJson(`${primary.baseUrl}/api/profiles/sessions?${searchParams}`, primary.token, {
+    method: 'GET',
+    timeoutMs: DEFAULT_FETCH_TIMEOUT_MS
+  }).catch(() => ({ sessions: [], total: 0, profile_totals: {} }))
+
+  // Over-fetch each remote from offset 0 (limit+offset rows) so the merged window
+  // is correct for this page — mirrors the primary's per-profile over-fetch.
+  const remoteParams = new URLSearchParams(searchParams)
+  remoteParams.set('limit', String(limit + offset))
+  remoteParams.set('offset', '0')
+
+  const remoteSet = new Set(remoteProfiles)
+  const merged = rowsOf(base).filter(s => !remoteSet.has(s?.profile))
+  const profileTotals = { ...(base.profile_totals || {}) }
+  let total = (Number(base.total) || 0) - remoteProfiles.reduce((n, p) => n + (profileTotals[p] || 0), 0)
+
+  // Swap each remote profile's stale local rows/total for the remote's real ones.
+  await Promise.all(remoteProfiles.map(async name => {
+    const list = await remoteSessionList(name, remoteParams).catch(() => null)
+    if (!list) {
+      delete profileTotals[name] // dead remote → drop its stale local total too
+      return
+    }
+    const rows = rowsOf(list)
+    merged.push(...rows)
+    profileTotals[name] = Number(list.total) || rows.length
+    total += profileTotals[name]
+  }))
+
+  const recency = s => s?.[order] ?? s?.started_at ?? 0
+  merged.sort((a, b) => recency(b) - recency(a))
+  return { ...base, sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
+}
+
 ipcMain.handle('hermes:api', async (_event, request) => {
+  // Remote-profile session requests would otherwise hit the local primary off
+  // each profile's on-disk state.db — fine for local profiles, but a remote
+  // profile's sessions live on its remote host, so the UI's IDs 404 (or mutations
+  // no-op) the moment they run there. Route reads + mutations to the remote.
+  const rerouted = await interceptSessionRequestForRemote(request)
+  if (rerouted !== undefined) {
+    return rerouted
+  }
+
   const connection = await ensureBackend(request?.profile)
   const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
   const url = `${connection.baseUrl}${request.path}`
@@ -5058,6 +5376,19 @@ function resolveHermesVersion() {
     // Fall through to the Electron app version below.
   }
   return app.getVersion()
+}
+
+// Re-resolve the live Hermes version and push it into the native About panel
+// just before showing it, so an in-place `hermes update` is reflected without
+// an app restart. macOS only — `showAboutPanel()` is a no-op elsewhere, and the
+// other platforms don't use this menu item.
+function showAboutPanelFresh() {
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    applicationVersion: resolveHermesVersion(),
+    copyright: 'Copyright © 2026 Nous Research'
+  })
+  app.showAboutPanel()
 }
 
 ipcMain.handle('hermes:version', async () => ({
