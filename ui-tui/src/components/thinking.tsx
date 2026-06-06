@@ -49,6 +49,7 @@ const fmtElapsed = (ms: number) => {
 
 type TreeBranch = 'mid' | 'last'
 type TreeRails = readonly boolean[]
+type ModifierMouseEvent = { ctrlKey?: boolean; shiftKey?: boolean } | undefined
 
 const nextTreeRails = (rails: TreeRails, branch: TreeBranch) => [...rails, branch === 'mid']
 
@@ -249,7 +250,7 @@ function Chevron({
   const color = tone === 'error' ? t.color.error : tone === 'warn' ? t.color.warn : t.color.muted
 
   return (
-    <Box onClick={(e: any) => onClick(!!e?.shiftKey || !!e?.ctrlKey)}>
+    <Box onClick={(e: ModifierMouseEvent) => onClick(!!e?.shiftKey || !!e?.ctrlKey)}>
       <Text color={color} dim={tone === 'dim'}>
         <Text color={t.color.accent}>{open ? '▾ ' : '▸ '}</Text>
         {title}
@@ -1003,7 +1004,7 @@ export const ToolTrail = memo(function ToolTrail({
     panels.push({
       header: (
         <Box
-          onClick={(e: any) => {
+          onClick={(e: ModifierMouseEvent) => {
             if (e?.shiftKey || e?.ctrlKey) {
               expandAll()
             } else {
