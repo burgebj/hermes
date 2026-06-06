@@ -29,6 +29,15 @@ from agent.anthropic_adapter import (
 from agent.transports import get_transport
 
 
+@pytest.fixture(autouse=True)
+def no_real_macos_keychain(monkeypatch):
+    """Keep auth-resolution tests isolated from the developer's Keychain."""
+    monkeypatch.setattr(
+        "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+        lambda: None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -194,13 +203,6 @@ class TestBuildAnthropicClient:
 
 
 class TestReadClaudeCodeCredentials:
-    @pytest.fixture(autouse=True)
-    def no_keychain(self, monkeypatch):
-        monkeypatch.setattr(
-            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
-            lambda: None,
-        )
-
     def test_reads_valid_credentials(self, tmp_path, monkeypatch):
         cred_file = tmp_path / ".claude" / ".credentials.json"
         cred_file.parent.mkdir(parents=True)
@@ -1546,6 +1548,26 @@ class TestNormalizeResponse:
         )
         assert nr.content is None
         assert len(nr.tool_calls) == 1
+
+    def test_null_content_does_not_raise(self):
+        # Some Anthropic-compatible endpoints (Kimi For Coding observed in
+        # the wild on api.kimi.com/coding for certain prompt shapes — large
+        # cache-only hits or trailing-assistant messages) return HTTP 200
+        # with ``content: null`` and ``stop_reason: "end_turn"`` instead of
+        # the spec-required (possibly empty) list.  ``normalize_response``
+        # must not raise; the downstream ``validate_response`` then
+        # correctly classifies the response as malformed and the agent
+        # loop falls back without burning the retry budget on TypeError.
+        resp = SimpleNamespace(
+            content=None,
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=10, output_tokens=1),
+        )
+        nr = get_transport("anthropic_messages").normalize_response(resp)
+        assert nr.content is None
+        assert nr.tool_calls is None
+        assert nr.reasoning is None
+        assert nr.finish_reason == "stop"
 
 
 # ---------------------------------------------------------------------------

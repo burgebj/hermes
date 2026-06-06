@@ -95,7 +95,16 @@ class AnthropicTransport(ProviderTransport):
         reasoning_details = []
         tool_calls = []
 
-        for block in response.content:
+        # Defend against non-spec responses where ``content`` is ``None``
+        # instead of an (empty) list.  Kimi For Coding (api.kimi.com/coding)
+        # has been observed to return ``{"content": null, "stop_reason":
+        # "end_turn", "output_tokens": 1}`` for some prompt shapes (e.g.
+        # large cache-only hits, or messages ending with assistant) — the
+        # downstream ``validate_response`` already correctly classifies
+        # this as malformed, but iterating ``None`` here raises
+        # ``TypeError`` and burns the per-call retry budget before the
+        # validator ever gets to see the response.
+        for block in (response.content or []):
             if block.type == "text":
                 text_parts.append(block.text)
             elif block.type == "thinking":
