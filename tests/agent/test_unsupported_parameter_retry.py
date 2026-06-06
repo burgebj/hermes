@@ -115,6 +115,43 @@ class TestMaxTokensRetryHardening:
         # Only the initial attempt — no retry because the gate blocked it
         assert client.chat.completions.create.call_count == 1
 
+    def test_sync_openai_retry_preserves_max_completion_tokens(self):
+        """Direct OpenAI retry must swap max_tokens to max_completion_tokens.
+
+        Some OpenAI models reject ``max_tokens`` and require
+        ``max_completion_tokens``.  The retry branch used to pop both token
+        kwargs and retry without any output cap, which regressed auxiliary
+        compression/title/search calls on OpenAI-hosted models.
+        """
+        client = MagicMock()
+        client.base_url = "https://api.openai.com/v1"
+        response = _dummy_response()
+        client.chat.completions.create.side_effect = [
+            RuntimeError("HTTP 400: Unsupported parameter: max_tokens"),
+            response,
+        ]
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("openai-codex", "gpt-5.5", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client",
+                  return_value=(client, "gpt-5.5")),
+            patch("agent.auxiliary_client._validate_llm_response",
+                  side_effect=lambda resp, _task: resp),
+        ):
+            result = call_llm(
+                task="session_search",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=2048,
+            )
+
+        assert result is response
+        assert client.chat.completions.create.call_count == 2
+        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
+        retry_kwargs = client.chat.completions.create.call_args_list[1].kwargs
+        assert first_kwargs["max_tokens"] == 2048
+        assert "max_tokens" not in retry_kwargs
+        assert retry_kwargs["max_completion_tokens"] == 2048
 
     @pytest.mark.asyncio
     async def test_async_max_tokens_retry_skipped_when_max_tokens_is_none(self):
@@ -140,3 +177,35 @@ class TestMaxTokensRetryHardening:
 
         assert client.chat.completions.create.call_count == 1
 
+
+    @pytest.mark.asyncio
+    async def test_async_openai_retry_preserves_max_completion_tokens(self):
+        client = MagicMock()
+        client.base_url = "https://api.openai.com/v1"
+        response = _dummy_response()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            RuntimeError("HTTP 400: Unsupported parameter: max_tokens"),
+            response,
+        ])
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("openai-codex", "gpt-5.5", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client",
+                  return_value=(client, "gpt-5.5")),
+            patch("agent.auxiliary_client._validate_llm_response",
+                  side_effect=lambda resp, _task: resp),
+        ):
+            result = await async_call_llm(
+                task="session_search",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=2048,
+            )
+
+        assert result is response
+        assert client.chat.completions.create.call_count == 2
+        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
+        retry_kwargs = client.chat.completions.create.call_args_list[1].kwargs
+        assert first_kwargs["max_tokens"] == 2048
+        assert "max_tokens" not in retry_kwargs
+        assert retry_kwargs["max_completion_tokens"] == 2048
