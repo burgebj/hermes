@@ -8653,7 +8653,12 @@ class GatewayRunner:
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
                 # pre-run + prepend description).  See agent/image_routing.py.
-                _img_mode = self._decide_image_input_mode()
+                # Pass session_key so per-session ``/model`` overrides (e.g. a
+                # WeChat session switched to a text-only Xiaomi MiMo model) win
+                # over config.yaml's default — otherwise the routing decides
+                # against config-default capabilities and the actual API call
+                # uses the session-override model, producing 400s like #21119.
+                _img_mode = self._decide_image_input_mode(session_key=session_key)
                 if _img_mode == "native":
                     # Defer attachment to the run_conversation call site.
                     pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
@@ -15700,15 +15705,23 @@ class GatewayRunner:
         ctx = copy_context()
         return await loop.run_in_executor(None, ctx.run, func, *args)
 
-    def _decide_image_input_mode(self) -> str:
+    def _decide_image_input_mode(self, session_key: Optional[str] = None) -> str:
         """Resolve the image-input routing for the currently active model.
 
         Returns ``"native"`` (attach pixels on the user turn) or ``"text"``
         (pre-analyze with vision_analyze and prepend the description). See
         agent/image_routing.py for the full decision table.
 
-        The active provider/model are read from config.yaml so the decision
-        tracks ``/model`` switches automatically on the next message.
+        Per-session ``/model`` overrides (stored in
+        ``self._session_model_overrides``) take precedence over config.yaml's
+        ``model.default`` when ``session_key`` is provided. This matters
+        because the actual API call dispatches on the session-active model;
+        if routing decided on the config default's capabilities, a session
+        switched to a text-only model would still get native ``image_url``
+        parts the endpoint rejects (e.g. Xiaomi MiMo's text-only variants
+        return ``400 unknown variant image_url, expected text`` — #21119).
+        Falling back to config.yaml here also keeps callers without a
+        session_key (admin paths, tests) working as before.
         """
         try:
             from agent.image_routing import decide_image_input_mode
@@ -15716,8 +15729,21 @@ class GatewayRunner:
             from hermes_cli.config import load_config
 
             cfg = load_config()
-            provider = _read_main_provider()
-            model = _read_main_model()
+            provider = ""
+            model = ""
+            if session_key:
+                override = self._session_model_overrides.get(session_key) or {}
+                if isinstance(override, dict):
+                    raw_provider = override.get("provider")
+                    raw_model = override.get("model")
+                    if isinstance(raw_provider, str):
+                        provider = raw_provider.strip().lower()
+                    if isinstance(raw_model, str):
+                        model = raw_model.strip()
+            if not provider:
+                provider = _read_main_provider()
+            if not model:
+                model = _read_main_model()
             return decide_image_input_mode(provider, model, cfg)
         except Exception as exc:
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
