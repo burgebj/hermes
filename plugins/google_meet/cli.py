@@ -19,12 +19,38 @@ from typing import Optional
 
 from hermes_constants import get_hermes_home
 
-from plugins.google_meet import process_manager as pm
-from plugins.google_meet.meet_bot import _is_safe_meet_url
+# Lazy imports — deferred to avoid circular dependency at CLI discovery time.
+# (cli.py is loaded standalone during argparse setup, before the full plugin.)
+def _pm():
+    from plugins.google_meet import process_manager
+    return process_manager
+
+def _is_safe_meet_url(url: str) -> bool:
+    from plugins.google_meet.meet_bot import _is_safe_meet_url as _fn
+    return _fn(url)
 
 
 def _auth_state_path() -> Path:
     return Path(get_hermes_home()) / "workspace" / "meetings" / "auth.json"
+
+
+# Metadata consumed by discover_bundled_plugin_cli_commands() at argparse
+# setup time (before the plugin is fully loaded).
+CLI_META = {
+    "name": "meet",
+    "help": "Google Meet bot — join, transcribe, speak, follow up",
+    "description": (
+        "Let Hermes join a Google Meet call, scrape live captions into a\n"
+        "transcript, optionally speak in realtime, and do followup work.\n\n"
+        "Quick start:\n"
+        "  hermes meet install      # install Playwright + Chromium\n"
+        "  hermes meet auth         # sign in to Google once\n"
+        "  hermes meet join <url>   # join a call\n"
+        "  hermes meet status       # check bot state\n"
+        "  hermes meet transcript   # read captions\n"
+        "  hermes meet stop         # leave\n"
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +432,7 @@ def _cmd_join(
         return 0 if res.get("ok") else 1
 
     auth = _auth_state_path()
-    res = pm.start(
+    res = _pm().start(
         url=url,
         headed=headed,
         guest_name=guest_name,
@@ -443,19 +469,19 @@ def _cmd_say(text: str, node: Optional[str] = None) -> int:
         print(json.dumps({"node": entry.get("name"), **res}, indent=2))
         return 0 if res.get("ok") else 1
 
-    res = pm.enqueue_say(text)
+    res = _pm().enqueue_say(text)
     print(json.dumps(res, indent=2))
     return 0 if res.get("ok") else 1
 
 
 def _cmd_status() -> int:
-    res = pm.status()
+    res = _pm().status()
     print(json.dumps(res, indent=2))
     return 0 if res.get("ok") else 1
 
 
 def _cmd_transcript(last: Optional[int]) -> int:
-    res = pm.transcript(last=last)
+    res = _pm().transcript(last=last)
     if not res.get("ok"):
         print(json.dumps(res, indent=2))
         return 1
@@ -465,7 +491,7 @@ def _cmd_transcript(last: Optional[int]) -> int:
 
 
 def _cmd_stop() -> int:
-    res = pm.stop(reason="hermes meet stop")
+    res = _pm().stop(reason="hermes meet stop")
     print(json.dumps(res, indent=2))
     return 0 if res.get("ok") else 1
 

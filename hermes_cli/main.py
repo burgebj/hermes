@@ -14580,6 +14580,24 @@ Examples:
         except Exception as _exc:
             logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
 
+    try:
+        from hermes_cli.plugins import discover_bundled_plugin_cli_commands
+
+        for cmd_info in discover_bundled_plugin_cli_commands():
+            if cmd_info["name"] in (subparsers.choices or {}):
+                continue  # already registered (e.g. by a user plugin override)
+            plugin_parser = subparsers.add_parser(
+                cmd_info["name"],
+                help=cmd_info["help"],
+                description=cmd_info.get("description", ""),
+                formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+            )
+            cmd_info["setup_fn"](plugin_parser)
+            if cmd_info.get("handler_fn"):
+                plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("Bundled plugin CLI discovery failed: %s", _exc)
+
     # =========================================================================
     # curator command — background skill maintenance
     # =========================================================================

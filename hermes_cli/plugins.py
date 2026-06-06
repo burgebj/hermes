@@ -64,6 +64,72 @@ def get_bundled_plugins_dir() -> Path:
         return Path(env_override)
     return Path(__file__).resolve().parent.parent / "plugins"
 
+def discover_bundled_plugin_cli_commands() -> List[dict]:
+    """Return CLI command descriptors for enabled bundled standalone plugins.
+
+    Scans each enabled bundled plugin directory for a ``cli.py`` that
+    exports both a ``CLI_META`` dict and a ``register_cli(subparser)``
+    function.  Only lightweight-imports ``cli.py`` — the full plugin is
+    not loaded.  Safe to call during argparse setup at startup.
+
+    Returns a list of dicts with keys:
+        name, help, description, setup_fn, handler_fn (optional)
+    """
+    results: List[dict] = []
+    bundled = get_bundled_plugins_dir()
+    if not bundled.is_dir():
+        return results
+
+    enabled = _get_enabled_plugins()
+    disabled = _get_disabled_plugins()
+
+    for plugin_dir in sorted(bundled.iterdir()):
+        if not plugin_dir.is_dir():
+            continue
+        # Skip memory/context_engine/platforms — handled elsewhere
+        if plugin_dir.name in ("memory", "context_engine", "platforms", "__pycache__"):
+            continue
+        cli_file = plugin_dir / "cli.py"
+        if not cli_file.exists():
+            continue
+
+        plugin_name = plugin_dir.name
+        if plugin_name in disabled:
+            continue
+        if enabled is not None and plugin_name not in enabled:
+            continue
+
+        module_name = f"plugins.{plugin_name}.cli"
+        try:
+            import importlib.util as _ilu
+            if module_name in sys.modules:
+                cli_mod = sys.modules[module_name]
+            else:
+                spec = _ilu.spec_from_file_location(module_name, str(cli_file))
+                if not spec or not spec.loader:
+                    continue
+                cli_mod = _ilu.module_from_spec(spec)
+                sys.modules[module_name] = cli_mod
+                spec.loader.exec_module(cli_mod)
+
+            meta = getattr(cli_mod, "CLI_META", None)
+            register_fn = getattr(cli_mod, "register_cli", None)
+            if not (isinstance(meta, dict) and callable(register_fn)):
+                continue
+
+            results.append({
+                "name": meta["name"],
+                "help": meta.get("help", f"{plugin_name} plugin"),
+                "description": meta.get("description", ""),
+                "setup_fn": register_fn,
+                "handler_fn": getattr(cli_mod, "meet_command", None),
+            })
+        except Exception:
+            pass
+
+    return results
+
+
 try:
     import yaml
 except ImportError:  # pragma: no cover – yaml is optional at import time
