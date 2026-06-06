@@ -2410,6 +2410,28 @@ class TestNewEndpoints:
             "top_skills": [],
         }
 
+    def test_analytics_models(self):
+        resp = self.client.get("/api/analytics/models?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "models" in data
+        assert "totals" in data
+        assert "distinct_models" in data["totals"]
+        assert data["period_days"] == 7
+
+    def test_analytics_routes_require_session_token(self):
+        from starlette.testclient import TestClient
+        from hermes_cli.web_server import app
+
+        unauth_client = TestClient(app)
+
+        for path in (
+            "/api/analytics/usage?days=7",
+            "/api/analytics/models?days=7",
+        ):
+            resp = unauth_client.get(path)
+            assert resp.status_code == 401
+
     def test_analytics_usage_includes_skill_breakdown(self):
         from hermes_state import SessionDB
 
