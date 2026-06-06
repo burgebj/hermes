@@ -858,6 +858,15 @@ def switch_model(
                                 new_model = mid
                                 resolved_in_current_catalog = True
                                 break
+        # --- Step d.5: Check user-defined providers for the requested model ---
+        if target_provider == current_provider and not resolved_alias and user_providers and isinstance(user_providers, dict):
+            for ep_name, ep_cfg in user_providers.items():
+                if isinstance(ep_cfg, dict):
+                    _p_models = ep_cfg.get("models", [])
+                    _p_default = ep_cfg.get("default_model", "")
+                    if new_model == _p_default or (isinstance(_p_models, list) and new_model in _p_models):
+                        target_provider = ep_name
+                        break                      
 
         # --- Step e: detect_provider_for_model() as last resort ---
         _base = current_base_url or ""
