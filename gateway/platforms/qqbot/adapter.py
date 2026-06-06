@@ -197,6 +197,13 @@ class QQAdapter(BasePlatformAdapter):
         """Return True only when the QQ WebSocket transport is usable."""
         return bool(self._running and self._ws and not self._ws.closed)
 
+    def _ensure_heartbeat_task(self) -> None:
+        """Start the heartbeat loop if it is missing or already finished."""
+        if not self._running:
+            return
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.QQBOT)
 
@@ -671,6 +678,7 @@ class QQAdapter(BasePlatformAdapter):
             gateway_url = await self._get_gateway_url()
             await self._open_ws(gateway_url)
             self._mark_connected()
+            self._ensure_heartbeat_task()
             logger.info("[%s] Reconnected", self._log_tag)
             return True
         except Exception as exc:
@@ -694,7 +702,10 @@ class QQAdapter(BasePlatformAdapter):
             elif msg.type == aiohttp.WSMsgType.CLOSE:
                 raise QQCloseError(msg.data, msg.extra)
             elif msg.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
-                raise RuntimeError("WebSocket closed")
+                code = self._ws.close_code if self._ws else None
+                exc = self._ws.exception() if self._ws else None
+                reason = str(exc) if exc else "WebSocket closed"
+                raise QQCloseError(code, reason)
 
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeats (QQ Gateway expects op 1 heartbeat with latest seq).
@@ -796,6 +807,7 @@ class QQAdapter(BasePlatformAdapter):
             loop = asyncio.get_running_loop()
             return loop.create_task(coro)
         except RuntimeError:
+            coro.close()
             return None
 
     def _dispatch_payload(self, payload: Dict[str, Any]) -> None:

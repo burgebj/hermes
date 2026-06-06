@@ -478,6 +478,64 @@ class TestReadyHandling:
 
 
 # ---------------------------------------------------------------------------
+# Reconnect lifecycle
+# ---------------------------------------------------------------------------
+
+class TestReconnectLifecycle:
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+        return QQAdapter(_make_config(**extra))
+
+    def test_is_connected_requires_open_websocket(self):
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._running = True
+        assert adapter.is_connected is False
+
+        adapter._ws = mock.Mock(closed=False)
+        assert adapter.is_connected is True
+
+        adapter._ws.closed = True
+        assert adapter.is_connected is False
+
+    def test_transport_disconnect_preserves_listener_lifecycle(self):
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._running = True
+
+        adapter._write_runtime_status_safe = mock.Mock()
+        adapter._mark_transport_disconnected()
+
+        assert adapter._running is True
+        adapter._write_runtime_status_safe.assert_called_once_with(
+            "disconnected",
+            platform_state="disconnected",
+            error_code=None,
+            error_message=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconnect_restarts_finished_heartbeat_task(self):
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._running = True
+        adapter._heartbeat_interval = 60.0
+        adapter._heartbeat_task = asyncio.create_task(asyncio.sleep(0))
+        await adapter._heartbeat_task
+
+        adapter._ensure_token = mock.AsyncMock()
+        adapter._get_gateway_url = mock.AsyncMock(return_value="wss://example.test/gateway")
+        adapter._open_ws = mock.AsyncMock()
+        adapter._mark_connected = mock.Mock()
+
+        result = await adapter._reconnect(0)
+
+        assert result is True
+        assert adapter._heartbeat_task is not None
+        assert not adapter._heartbeat_task.done()
+        adapter._heartbeat_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await adapter._heartbeat_task
+
+
+# ---------------------------------------------------------------------------
 # _parse_json
 # ---------------------------------------------------------------------------
 
