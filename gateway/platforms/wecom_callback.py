@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket as _socket
 import time
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,60 @@ DEFAULT_PORT = 8645
 DEFAULT_PATH = "/wecom/callback"
 ACCESS_TOKEN_TTL_SECONDS = 7200
 MESSAGE_DEDUP_TTL_SECONDS = 300
+MAX_CALLBACK_BODY_BYTES = 256 * 1024
+MAX_DECRYPTED_XML_CHARS = 128 * 1024
+_UNSAFE_XML_MARKERS = ("<!DOCTYPE", "<!ENTITY")
+_ENCRYPT_TAG_RE = re.compile(
+    r"<Encrypt(?:\s[^>]*)?>\s*(?:<!\[CDATA\[(.*?)\]\]>|([^<]*))\s*</Encrypt>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+class WeComCallbackXMLError(WeComCryptoError):
+    """Raised when inbound WeCom XML is malformed or unsafe to parse."""
+
+
+def _ensure_safe_xml_text(xml_text: str, *, max_chars: int, label: str) -> None:
+    """Reject oversized XML or dangerous declarations before parsing."""
+    if len(xml_text) > max_chars:
+        raise WeComCallbackXMLError(
+            f"{label} exceeds safe size limit ({len(xml_text)} > {max_chars})"
+        )
+
+    upper_text = xml_text.upper()
+    for marker in _UNSAFE_XML_MARKERS:
+        if marker in upper_text:
+            raise WeComCallbackXMLError(
+                f"{label} contains unsafe XML declaration: {marker}"
+            )
+
+
+def _extract_encrypt_payload(xml_text: str) -> str:
+    """Extract the callback Encrypt field without invoking an XML parser."""
+    _ensure_safe_xml_text(
+        xml_text,
+        max_chars=MAX_CALLBACK_BODY_BYTES,
+        label="callback XML",
+    )
+
+    match = _ENCRYPT_TAG_RE.search(xml_text)
+    if not match:
+        raise WeComCallbackXMLError("callback XML is missing Encrypt element")
+
+    encrypted = (match.group(1) or match.group(2) or "").strip()
+    if not encrypted:
+        raise WeComCallbackXMLError("callback XML contains an empty Encrypt element")
+
+    return encrypted
+
+
+def _parse_safe_xml(xml_text: str, *, max_chars: int, label: str) -> ET.Element:
+    """Parse XML after applying cheap pre-parse guards."""
+    _ensure_safe_xml_text(xml_text, max_chars=max_chars, label=label)
+    try:
+        return ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise WeComCallbackXMLError(f"invalid {label}: {exc}") from exc
 
 
 def check_wecom_callback_requirements() -> bool:
@@ -273,7 +328,17 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         msg_signature = request.query.get("msg_signature", "")
         timestamp = request.query.get("timestamp", "")
         nonce = request.query.get("nonce", "")
-        body = await request.text()
+        if (request.content_length or 0) > MAX_CALLBACK_BODY_BYTES:
+            return web.Response(status=413, text="callback payload too large")
+
+        body_bytes = await request.read()
+        if len(body_bytes) > MAX_CALLBACK_BODY_BYTES:
+            return web.Response(status=413, text="callback payload too large")
+
+        try:
+            body = body_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return web.Response(status=400, text="invalid callback payload")
 
         for app in self._apps:
             try:
@@ -332,13 +397,16 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self, app: Dict[str, Any], body: str,
         msg_signature: str, timestamp: str, nonce: str,
     ) -> str:
-        root = ET.fromstring(body)
-        encrypt = root.findtext("Encrypt", default="")
+        encrypt = _extract_encrypt_payload(body)
         crypt = self._crypt_for_app(app)
         return crypt.decrypt(msg_signature, timestamp, nonce, encrypt).decode("utf-8")
 
     def _build_event(self, app: Dict[str, Any], xml_text: str) -> Optional[MessageEvent]:
-        root = ET.fromstring(xml_text)
+        root = _parse_safe_xml(
+            xml_text,
+            max_chars=MAX_DECRYPTED_XML_CHARS,
+            label="decrypted WeCom XML",
+        )
         msg_type = (root.findtext("MsgType") or "").lower()
         # Silently acknowledge lifecycle events.
         if msg_type == "event":

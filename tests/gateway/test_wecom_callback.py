@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from gateway.config import PlatformConfig
-from gateway.platforms.wecom_callback import WecomCallbackAdapter
+from gateway.platforms.wecom_callback import WeComCallbackXMLError, WecomCallbackAdapter
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt
 
 
@@ -89,6 +89,19 @@ class TestWecomCallbackEventConstruction:
         event = adapter._build_event(_app(), xml_text)
         assert event is None
 
+    def test_build_event_rejects_unsafe_xml(self):
+        adapter = WecomCallbackAdapter(_config())
+        xml_text = """<!DOCTYPE xml [<!ENTITY xxe "boom">]>
+        <xml>
+          <ToUserName>ww1234567890</ToUserName>
+          <FromUserName>zhangsan</FromUserName>
+          <MsgType>text</MsgType>
+          <Content>&xxe;</Content>
+        </xml>
+        """
+        with pytest.raises(WeComCallbackXMLError):
+            adapter._build_event(_app(), xml_text)
+
 
 class TestWecomCallbackRouting:
     def test_user_app_key_scopes_across_corps(self):
@@ -151,6 +164,44 @@ class TestWecomCallbackRouting:
 
         assert result.success is True
         assert calls["json"]["agentid"] == 1001
+
+    def test_decrypt_request_extracts_encrypt_without_raw_xml_parse(self, monkeypatch):
+        adapter = WecomCallbackAdapter(_config())
+        app = _app()
+        crypt = WXBizMsgCrypt(app["token"], app["encoding_aes_key"], app["corp_id"])
+        encrypted_xml = crypt.encrypt(
+            "<xml><Content>hello</Content></xml>",
+            nonce="nonce123",
+            timestamp="123456",
+        )
+        root = ET.fromstring(encrypted_xml)
+
+        def fail_fromstring(_value):
+            raise AssertionError("raw callback XML should not be parsed with ElementTree")
+
+        monkeypatch.setattr("gateway.platforms.wecom_callback.ET.fromstring", fail_fromstring)
+
+        decrypted = adapter._decrypt_request(
+            app,
+            encrypted_xml,
+            root.findtext("MsgSignature", default=""),
+            root.findtext("TimeStamp", default=""),
+            root.findtext("Nonce", default=""),
+        )
+
+        assert "<Content>hello</Content>" in decrypted
+
+    def test_decrypt_request_rejects_unsafe_callback_xml(self):
+        adapter = WecomCallbackAdapter(_config())
+        app = _app()
+        raw_xml = """<!DOCTYPE xml [<!ENTITY xxe "boom">]>
+        <xml>
+          <Encrypt><![CDATA[ciphertext]]></Encrypt>
+        </xml>
+        """
+
+        with pytest.raises(WeComCallbackXMLError):
+            adapter._decrypt_request(app, raw_xml, "sig", "1", "n")
 
 
 class TestWecomCallbackSendTokenRefresh:
