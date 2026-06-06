@@ -320,6 +320,8 @@ def init_agent(
         # AWS Bedrock — auto-detect from provider name or base URL
         # (bedrock-runtime.<region>.amazonaws.com).
         agent.api_mode = "bedrock_converse"
+    elif agent.provider == "copilot-acp":
+        agent.api_mode = "codex_responses"
     else:
         agent.api_mode = "chat_completions"
 
