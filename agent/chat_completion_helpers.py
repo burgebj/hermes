@@ -103,6 +103,59 @@ def estimate_request_context_tokens(api_payload: Any) -> int:
     return _chars(api_payload) // 4
 
 
+def _is_known_local_inference_endpoint(base_url: str | None) -> bool:
+    """Return True only for local endpoints that are known inference servers."""
+    if not base_url or not is_local_endpoint(base_url):
+        return False
+
+    try:
+        parsed_port = urlparse(base_url).port
+    except Exception:
+        parsed_port = None
+
+    return parsed_port in (11434, 8080, 1234) or "omlx" in base_url.lower()
+
+
+def _compute_stream_stale_timeout(agent, api_kwargs: dict) -> float:
+    """Compute the stale-stream timeout for the current streaming request."""
+    cfg_stale = get_provider_stale_timeout(agent.provider, agent.model)
+    stream_stale_timeout_env = os.getenv("HERMES_STREAM_STALE_TIMEOUT")
+
+    if cfg_stale is not None:
+        stream_stale_timeout_base = cfg_stale
+        allow_local_inference_disable = False
+    else:
+        stream_stale_timeout_base = (
+            float(stream_stale_timeout_env)
+            if stream_stale_timeout_env
+            else 180.0
+        )
+        allow_local_inference_disable = stream_stale_timeout_env is None
+
+    # Local inference servers can take minutes for prefill on large contexts.
+    # Disable the stale detector only for known local inference endpoints. A
+    # generic localhost/cloud relay should keep the normal timeout so real
+    # provider hangs still surface.
+    if (
+        allow_local_inference_disable
+        and _is_known_local_inference_endpoint(getattr(agent, "base_url", ""))
+    ):
+        logger.debug(
+            "Local inference provider detected (%s) — stale stream timeout disabled",
+            getattr(agent, "base_url", ""),
+        )
+        return float("inf")
+
+    # Scale the stale timeout for large contexts: slow models (like Opus)
+    # can legitimately think for minutes before producing the first token.
+    est_tokens = estimate_request_context_tokens(api_kwargs)
+    if est_tokens > 100_000:
+        return max(stream_stale_timeout_base, 300.0)
+    if est_tokens > 50_000:
+        return max(stream_stale_timeout_base, 240.0)
+    return stream_stale_timeout_base
+
+
 def _is_openai_codex_backend(agent) -> bool:
     base_url_lower = str(getattr(agent, "_base_url_lower", "") or "")
     base_url_hostname = str(getattr(agent, "_base_url_hostname", "") or "")
@@ -1067,7 +1120,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # Pass base_url and api_key from fallback config so custom
         # endpoints (e.g. Ollama Cloud) resolve correctly instead of
         # falling through to OpenRouter defaults.
-        fb_base_url_hint = (fb.get("base_url") or "").strip() or None
+        fb_base_url_hint = os.path.expandvars((fb.get("base_url") or "").strip()) or None
         fb_api_key_hint = (fb.get("api_key") or "").strip() or None
         if not fb_api_key_hint:
             # key_env and api_key_env are both documented aliases (see
@@ -2288,31 +2341,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         finally:
             _close_request_client_once("stream_request_complete")
 
-    # Provider-configured stale timeout takes priority over env default.
-    _cfg_stale = get_provider_stale_timeout(agent.provider, agent.model)
-    if _cfg_stale is not None:
-        _stream_stale_timeout_base = _cfg_stale
-    else:
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
-    # Local providers (Ollama, oMLX, llama-cpp) can take 300+ seconds
-    # for prefill on large contexts.  Disable the stale detector unless
-    # the user explicitly set HERMES_STREAM_STALE_TIMEOUT.
-    if _stream_stale_timeout_base == 180.0 and agent.base_url and is_local_endpoint(agent.base_url):
-        _stream_stale_timeout = float("inf")
-        logger.debug("Local provider detected (%s) — stale stream timeout disabled", agent.base_url)
-    else:
-        # Scale the stale timeout for large contexts: slow models (like Opus)
-        # can legitimately think for minutes before producing the first token
-        # when the context is large.  Without this, the stale detector kills
-        # healthy connections during the model's thinking phase, producing
-        # spurious RemoteProtocolError ("peer closed connection").
-        _est_tokens = estimate_request_context_tokens(api_kwargs)
-        if _est_tokens > 100_000:
-            _stream_stale_timeout = max(_stream_stale_timeout_base, 300.0)
-        elif _est_tokens > 50_000:
-            _stream_stale_timeout = max(_stream_stale_timeout_base, 240.0)
-        else:
-            _stream_stale_timeout = _stream_stale_timeout_base
+    _stream_stale_timeout = _compute_stream_stale_timeout(agent, api_kwargs)
 
     t = threading.Thread(target=_call, daemon=True)
     t.start()

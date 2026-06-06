@@ -8,8 +8,13 @@ kills during long prefill phases.
 
 import os
 import pytest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent.chat_completion_helpers import (
+    _compute_stream_stale_timeout,
+    _is_known_local_inference_endpoint,
+)
 from agent.model_metadata import is_local_endpoint
 
 
@@ -71,6 +76,69 @@ class TestLocalStreamReadTimeout:
             if _stream_read_timeout == 120.0 and base_url and is_local_endpoint(base_url):
                 _stream_read_timeout = _base_timeout
             assert _stream_read_timeout == 120.0
+
+
+class TestLocalStreamStaleTimeout:
+    """Verify stale-stream timeout is disabled only for known local inference."""
+
+    @pytest.mark.parametrize("base_url", [
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://10.0.0.5:1234/v1",
+        "http://localhost:5555/omlx/v1",
+    ])
+    def test_known_local_inference_endpoints_disable_default_stale_timeout(
+        self, base_url, monkeypatch
+    ):
+        monkeypatch.delenv("HERMES_STREAM_STALE_TIMEOUT", raising=False)
+        monkeypatch.setattr(
+            "agent.chat_completion_helpers.get_provider_stale_timeout",
+            lambda provider, model: None,
+        )
+        agent = SimpleNamespace(provider="custom", model="local-model", base_url=base_url)
+
+        assert _is_known_local_inference_endpoint(base_url) is True
+        assert _compute_stream_stale_timeout(agent, {"messages": []}) == float("inf")
+
+    def test_generic_local_relay_keeps_default_stale_timeout(self, monkeypatch):
+        monkeypatch.delenv("HERMES_STREAM_STALE_TIMEOUT", raising=False)
+        monkeypatch.setattr(
+            "agent.chat_completion_helpers.get_provider_stale_timeout",
+            lambda provider, model: None,
+        )
+        base_url = "http://127.0.0.1:9999/v1"
+        agent = SimpleNamespace(provider="custom", model="cloud-proxy", base_url=base_url)
+
+        assert _is_known_local_inference_endpoint(base_url) is False
+        assert _compute_stream_stale_timeout(agent, {"messages": []}) == 180.0
+
+    def test_env_override_keeps_stale_timeout_even_for_known_local(self, monkeypatch):
+        monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "180")
+        monkeypatch.setattr(
+            "agent.chat_completion_helpers.get_provider_stale_timeout",
+            lambda provider, model: None,
+        )
+        agent = SimpleNamespace(
+            provider="custom",
+            model="local-model",
+            base_url="http://localhost:11434/v1",
+        )
+
+        assert _compute_stream_stale_timeout(agent, {"messages": []}) == 180.0
+
+    def test_provider_stale_timeout_keeps_precedence_for_known_local(self, monkeypatch):
+        monkeypatch.delenv("HERMES_STREAM_STALE_TIMEOUT", raising=False)
+        monkeypatch.setattr(
+            "agent.chat_completion_helpers.get_provider_stale_timeout",
+            lambda provider, model: 240.0,
+        )
+        agent = SimpleNamespace(
+            provider="custom",
+            model="local-model",
+            base_url="http://localhost:11434/v1",
+        )
+
+        assert _compute_stream_stale_timeout(agent, {"messages": []}) == 240.0
 
 
 class TestIsLocalEndpoint:

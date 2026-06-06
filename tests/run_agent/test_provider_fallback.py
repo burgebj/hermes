@@ -182,6 +182,32 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert mock_rpc.call_args.kwargs["explicit_api_key"] == "env-secret"
 
+    def test_expands_env_vars_in_fallback_base_url(self):
+        fbs = [
+            {
+                "provider": "custom",
+                "model": "fallback-model",
+                "base_url": "${FALLBACK_BASE_URL}/v1",
+                "api_key": "fallback-key",
+            }
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        with (
+            patch.dict("os.environ", {"FALLBACK_BASE_URL": "http://127.0.0.1:8090"}, clear=False),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(
+                        base_url="http://127.0.0.1:8090/v1",
+                        api_key="fallback-key",
+                    ),
+                    "fallback-model",
+                ),
+            ) as mock_rpc,
+        ):
+            assert agent._try_activate_fallback() is True
+            assert mock_rpc.call_args.kwargs["explicit_base_url"] == "http://127.0.0.1:8090/v1"
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 
