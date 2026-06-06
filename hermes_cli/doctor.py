@@ -2004,13 +2004,24 @@ def run_doctor(args):
     _active_memory_provider = ""
     try:
         import yaml as _yaml
+    except ImportError:
+        _yaml = None  # type: ignore[assignment]
+    if _yaml is not None:
         _mem_cfg_path = HERMES_HOME / "config.yaml"
         if _mem_cfg_path.exists():
-            with open(_mem_cfg_path, encoding="utf-8") as _f:
-                _raw_cfg = _yaml.safe_load(_f) or {}
-            _active_memory_provider = (_raw_cfg.get("memory") or {}).get("provider", "")
-    except Exception:
-        pass
+            try:
+                with open(_mem_cfg_path, encoding="utf-8") as _f:
+                    _raw_cfg = _yaml.safe_load(_f) or {}
+                _active_memory_provider = (_raw_cfg.get("memory") or {}).get("provider", "")
+            except (OSError, _yaml.YAMLError) as exc:
+                # config.yaml exists but can't be read/parsed — surface the
+                # failure here so the user sees it rather than silently
+                # falling through to "Built-in memory active", which is a
+                # misleading false-OK when the config file is actually broken.
+                check_warn(
+                    "config.yaml unreadable",
+                    f"memory provider detection skipped — {type(exc).__name__}: {exc}",
+                )
 
     if not _active_memory_provider:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")

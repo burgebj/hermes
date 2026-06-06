@@ -323,6 +323,45 @@ class TestDoctorMemoryProviderSection:
         assert "Memory Provider" in out
         assert "Built-in memory active" not in out
 
+    def test_malformed_config_yaml_shows_warn_not_false_ok(self, monkeypatch, tmp_path):
+        """A corrupt config.yaml must produce a visible warning in doctor output
+        instead of silently falling through to 'Built-in memory active', which
+        would be a false-OK when the operator's memory provider config is
+        actually broken (ag08)."""
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            "memory: {bad yaml [unclosed", encoding="utf-8"
+        )
+
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", tmp_path / "project")
+        monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+        (tmp_path / "project").mkdir(exist_ok=True)
+
+        fake_model_tools = types.SimpleNamespace(
+            check_tool_availability=lambda *a, **kw: ([], []),
+            TOOLSET_REQUIREMENTS={},
+        )
+        monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+        try:
+            from hermes_cli import auth as _auth_mod
+            monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+            monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+        except Exception:
+            pass
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor_mod.run_doctor(Namespace(fix=False))
+        out = buf.getvalue()
+
+        # Warning must be visible — the key regression is that the failure is
+        # no longer silently swallowed with no output at all.
+        assert "config.yaml unreadable" in out, (
+            "Expected warning about unreadable config.yaml; got:\n" + out
+        )
+
 
 def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
