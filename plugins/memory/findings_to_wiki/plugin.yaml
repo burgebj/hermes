@@ -1,0 +1,5 @@
+name: findings-to-wiki
+version: 0.2.0
+description: "Auto-saves turn facts to MEMORY.md and detects structured research findings (Prism, ADR, analysis) for wiki ingestion. Configurable patterns and paths."
+hooks:
+  - on_session_end
