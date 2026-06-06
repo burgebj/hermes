@@ -1646,6 +1646,34 @@ def _sync_session_key_after_compress(
             pass
 
 
+def _rewrite_session_history(session: dict, messages: list | None = None) -> None:
+    """Persist an in-memory history rewrite and realign agent transcript state."""
+
+    if messages is None:
+        with session["history_lock"]:
+            messages = list(session.get("history", []))
+    else:
+        messages = list(messages)
+
+    session_key = str(session.get("session_key", "") or "")
+    db = _get_db()
+    if db is not None and session_key:
+        try:
+            db.replace_messages(session_key, messages)
+        except Exception:
+            logger.debug(
+                "Failed to rewrite TUI transcript for %s", session_key, exc_info=True
+            )
+
+    agent = session.get("agent")
+    if agent is None:
+        return
+    if hasattr(agent, "_session_messages"):
+        agent._session_messages = list(messages)
+    if hasattr(agent, "_last_flushed_db_idx"):
+        agent._last_flushed_db_idx = len(messages)
+
+
 def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
@@ -3753,6 +3781,11 @@ def _(rid, params: dict) -> dict:
             removed += 1
         if removed:
             session["history_version"] = int(session.get("history_version", 0)) + 1
+            rewritten = list(history)
+        else:
+            rewritten = None
+    if rewritten is not None:
+        _rewrite_session_history(session, rewritten)
     return _ok(rid, {"removed": removed})
 
 
@@ -3823,6 +3856,7 @@ def _(rid, params: dict) -> dict:
             )
             agent = session["agent"]
             _sync_session_key_after_compress(sid, session)
+            _rewrite_session_history(session, messages)
             summary = summarize_manual_compression(
                 before_messages, messages, before_tokens, after_tokens
             )
@@ -7771,6 +7805,11 @@ def _(rid, params: dict) -> dict:
                         session["history_version"] = (
                             int(session.get("history_version", 0)) + 1
                         )
+                        rewritten = list(history)
+                    else:
+                        rewritten = None
+                if rewritten is not None:
+                    _rewrite_session_history(session, rewritten)
                 result["history_removed"] = removed
             return result
 
