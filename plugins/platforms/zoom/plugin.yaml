@@ -1,0 +1,15 @@
+name: zoom-platform
+kind: platform
+version: 0.1.0
+description: >
+  Zoom Team Chat gateway adapter for Hermes Agent.
+  Receives Zoom webhook events, validates signatures, normalizes Team Chat
+  messages into Hermes MessageEvents, and can send bot replies back through
+  Zoom's chat APIs.
+author: NousResearch
+requires_env:
+  - ZOOM_ACCOUNT_ID
+  - ZOOM_CLIENT_ID
+  - ZOOM_CLIENT_SECRET
+  - ZOOM_CHAT_BOT_JID
+  - ZOOM_WEBHOOK_SECRET_TOKEN

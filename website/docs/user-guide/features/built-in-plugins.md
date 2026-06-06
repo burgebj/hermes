@@ -60,6 +60,8 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `observability/langfuse` | hooks | Trace turns / LLM calls / tools to [Langfuse](https://langfuse.com) |
 | `spotify` | backend (7 tools) | Native Spotify playback, queue, search, playlists, albums, library |
 | `google_meet` | standalone | Join Meet calls, live-caption transcription, optional realtime duplex audio |
+| `zoom_meeting` | standalone | Zoom meeting intelligence: metadata fetch, webhook transcript capture, summaries, artifacts |
+| `platforms/zoom` | platform | Zoom Team Chat gateway adapter: webhook ingress, auth, outbound bot replies |
 | `image_gen/openai` | image backend | OpenAI `gpt-image-2` image generation backend (alternative to FAL) |
 | `image_gen/openai-codex` | image backend | OpenAI image generation via Codex OAuth |
 | `image_gen/xai` | image backend | xAI `grok-2-image` backend |
@@ -230,6 +232,49 @@ The agent kicks off the meeting join, streams the transcription back into its co
 **When to use it:** recurring standups where you want a bot to transcribe + summarize for async attendees; deposition-style interviews where you want structured notes; any case where you'd otherwise need Fireflies / Otter / Grain. When you'd rather not have an AI listening in — don't enable it.
 
 **Disabling:** `hermes plugins disable google_meet`. Any cached transcripts and recordings stay in `~/.hermes/cache/google_meet/` until you remove them.
+
+### zoom_meeting
+
+Adds a **Zoom meeting intelligence** surface without trying to impersonate a meeting participant yet. The plugin is built around Zoom's official-ish server-side surfaces: server-to-server OAuth, REST meeting metadata, webhook event ingestion, and transcript-like event capture.
+
+**What it adds:**
+
+- `hermes zoom watch <meeting_id>` — initialize a local meeting workspace
+- webhook receiver for lifecycle and transcript-like events
+- durable state under `~/.hermes/cache/zoom/meetings/<meeting_id>/`
+- deterministic markdown and JSON artifacts
+- transcript-derived action items, decisions, and open questions
+
+**Typical use:** seed a meeting workspace with a known meeting ID, point Zoom webhooks or RTMS-like transcript events at Hermes, then let the agent summarize and follow up after the call.
+
+**CLI examples:**
+
+```bash
+hermes plugins enable zoom_meeting
+hermes zoom auth-check
+hermes zoom watch 123456789
+hermes zoom transcript 123456789 --last 40
+hermes zoom summary 123456789
+hermes zoom action-items 123456789
+```
+
+**Current scope:** this plugin does not yet join a Zoom call as a live participant or speak into it. It is the substrate for those later phases.
+
+### platforms/zoom
+
+Adds a **Zoom Team Chat** gateway adapter so Hermes can receive and send Team Chat messages through Zoom.
+
+**What it adds:**
+
+- webhook server for Zoom Team Chat events
+- Zoom webhook URL-validation and signature verification
+- message normalization into Hermes gateway `MessageEvent`s
+- outbound bot replies using server-to-server OAuth + bot JID
+- gateway setup/discovery integration
+
+**Use it when:** you want Hermes accessible from Zoom Team Chat the way Hermes can already be exposed on Teams, IRC, Telegram, Slack, and similar messaging surfaces.
+
+See [Zoom Team Chat](/docs/user-guide/features/zoom-team-chat) for the full runbook and live verification checklist.
 
 ### hermes-achievements
 
