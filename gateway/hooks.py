@@ -55,11 +55,40 @@ class HookRegistry:
     def _register_builtin_hooks(self) -> None:
         """Register built-in hooks that are always active.
 
-        Currently empty — no shipped built-in hooks. Kept as the extension
-        point for future always-on gateway hooks so they drop in without
-        re-plumbing discover_and_load().
+        Built-in hooks live in ``gateway/builtin_hooks/`` and are
+        registered automatically on gateway startup — no user config
+        or hook directory layout required.
         """
-        return
+        import importlib
+        import pathlib
+
+        builtin_dir = pathlib.Path(__file__).resolve().parent / "builtin_hooks"
+        if not builtin_dir.is_dir():
+            return
+
+        for py_file in sorted(builtin_dir.glob("*.py")):
+            name = py_file.stem
+            if name.startswith("_") or name == "__init__":
+                continue
+            try:
+                module = importlib.import_module(
+                    f"gateway.builtin_hooks.{name}"
+                )
+                handle_fn = getattr(module, "handle", None)
+                if handle_fn is None:
+                    continue
+                events = getattr(module, "EVENTS", ["gateway:startup"])
+                for event in events:
+                    self._handlers.setdefault(event, []).append(handle_fn)
+                description = getattr(module, "DESCRIPTION", "")
+                self._loaded_hooks.append({
+                    "name": name,
+                    "description": description,
+                    "events": events,
+                    "builtin": True,
+                })
+            except Exception:
+                pass
 
     def discover_and_load(self) -> None:
         """
