@@ -825,6 +825,21 @@ def _classify_by_status(
         )
 
     if status_code == 429:
+        # Some providers (OpenAI) return billing exhaustion as HTTP 429
+        # with a structured error code rather than HTTP 402.
+        # Check the code before classifying as a transient rate limit —
+        # a depleted account will never recover from retries.
+        if error_code and error_code.lower() in {
+            "insufficient_quota",
+            "billing_not_active",
+            "payment_required",
+        }:
+            return result_fn(
+                FailoverReason.billing,
+                retryable=False,
+                should_rotate_credential=True,
+                should_fallback=True,
+            )
         # Already checked long_context_tier above; this is a normal rate limit
         return result_fn(
             FailoverReason.rate_limit,

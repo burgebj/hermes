@@ -308,6 +308,49 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.rate_limit
         assert result.should_fallback is True
 
+    def test_429_insufficient_quota_classified_as_billing(self):
+        """OpenAI returns insufficient_quota as HTTP 429, not 402.
+
+        The 429 branch must check the error code before returning rate_limit —
+        a depleted account will never recover from retries.
+        Confirmed via production logs: error_type=APIError, code=insufficient_quota.
+        """
+        e = MockAPIError(
+            "You exceeded your current quota, please check your plan and "
+            "billing details.",
+            status_code=429,
+            body={"error": {"code": "insufficient_quota", "message":
+                  "You exceeded your current quota"}},
+        )
+        result = classify_api_error(e, provider="openai")
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+        assert result.should_rotate_credential is True
+        assert result.should_fallback is True
+
+    def test_429_billing_not_active_classified_as_billing(self):
+        """billing_not_active via 429 must route to billing, not rate_limit."""
+        e = MockAPIError(
+            "Account billing is not active",
+            status_code=429,
+            body={"error": {"code": "billing_not_active", "message":
+                  "Account billing is not active"}},
+        )
+        result = classify_api_error(e, provider="openai")
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+
+    def test_429_normal_rate_limit_unaffected(self):
+        """429 with a non-billing error code must still classify as rate_limit."""
+        e = MockAPIError(
+            "Rate limit exceeded",
+            status_code=429,
+            body={"error": {"code": "rate_limit_exceeded"}},
+        )
+        result = classify_api_error(e, provider="openai")
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+
     def test_alibaba_rate_increased_too_quickly(self):
         """Alibaba/DashScope returns a unique throttling message.
 
