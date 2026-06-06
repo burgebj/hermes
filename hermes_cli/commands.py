@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -1166,6 +1167,9 @@ class SlashCommandCompleter(Completer):
         self._file_cache: list[str] = []
         self._file_cache_time: float = 0.0
         self._file_cache_cwd: str = ""
+        self._file_cache_lock = threading.Lock()
+        self._file_cache_refreshing = False
+        self._file_cache_refresh_cwd = ""
 
     def _command_allowed(self, slash_command: str) -> bool:
         if self._command_filter is None:
@@ -1392,17 +1396,8 @@ class SlashCommandCompleter(Completer):
         query = word[1:]  # strip the @
         yield from self._fuzzy_file_completions(word, query, limit)
 
-    def _get_project_files(self) -> list[str]:
-        """Return cached list of project files (refreshed every 5s)."""
-        cwd = os.getcwd()
-        now = time.monotonic()
-        if (
-            self._file_cache
-            and self._file_cache_cwd == cwd
-            and now - self._file_cache_time < 5.0
-        ):
-            return self._file_cache
-
+    def _scan_project_files(self, cwd: str) -> list[str]:
+        """Scan project files for fuzzy @ completions."""
         files: list[str] = []
         # Try rg first (fast, respects .gitignore), then fd, then find.
         for cmd in [
@@ -1427,10 +1422,60 @@ class SlashCommandCompleter(Completer):
                     break
             except (subprocess.TimeoutExpired, OSError):
                 continue
+        return files
 
-        self._file_cache = files
-        self._file_cache_time = now
-        self._file_cache_cwd = cwd
+    def _refresh_project_files(self, cwd: str) -> None:
+        """Refresh the project file cache for a given cwd."""
+        try:
+            files = self._scan_project_files(cwd)
+            now = time.monotonic()
+            with self._file_cache_lock:
+                self._file_cache = files
+                self._file_cache_time = now
+                self._file_cache_cwd = cwd
+        finally:
+            with self._file_cache_lock:
+                if self._file_cache_refresh_cwd == cwd:
+                    self._file_cache_refreshing = False
+                    self._file_cache_refresh_cwd = ""
+
+    def refresh_project_files_async(self, cwd: str | None = None) -> bool:
+        """Kick off a background refresh if one is not already in flight."""
+        target_cwd = cwd or os.getcwd()
+        with self._file_cache_lock:
+            if self._file_cache_refreshing and self._file_cache_refresh_cwd == target_cwd:
+                return False
+            self._file_cache_refreshing = True
+            self._file_cache_refresh_cwd = target_cwd
+        thread = threading.Thread(
+            target=self._refresh_project_files,
+            args=(target_cwd,),
+            name="hermes-cli-file-cache-refresh",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _get_project_files(self) -> list[str]:
+        """Return cached list of project files, refreshing stale entries asynchronously."""
+        cwd = os.getcwd()
+        now = time.monotonic()
+        with self._file_cache_lock:
+            cached_files = list(self._file_cache)
+            cache_cwd = self._file_cache_cwd
+            cache_time = self._file_cache_time
+
+        if cached_files and cache_cwd == cwd:
+            if now - cache_time < 5.0:
+                return cached_files
+            self.refresh_project_files_async(cwd)
+            return cached_files
+
+        files = self._scan_project_files(cwd)
+        with self._file_cache_lock:
+            self._file_cache = files
+            self._file_cache_time = time.monotonic()
+            self._file_cache_cwd = cwd
         return files
 
     @staticmethod

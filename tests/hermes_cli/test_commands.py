@@ -1,5 +1,8 @@
 """Tests for the central command registry and autocomplete."""
 
+import time
+
+from prompt_toolkit.completion import ThreadedCompleter
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
@@ -730,8 +733,34 @@ class TestGhostText:
         completer = SlashCommandCompleter(command_filter=lambda cmd: cmd != "/fast")
         assert _suggestion("/fa", completer=completer) is None
 
+    def test_threaded_completer_uses_base_completer_for_ghost_text(self):
+        base_completer = SlashCommandCompleter(command_filter=lambda cmd: cmd != "/fast")
+        threaded = ThreadedCompleter(base_completer)
+        assert list(threaded.get_completions(Document("/he"), CompleteEvent(completion_requested=True)))
+        assert _suggestion("/fa", completer=base_completer) is None
+
     def test_no_suggestion_for_non_slash(self):
         assert _suggestion("hello") is None
+
+
+class TestProjectFileCache:
+    def test_returns_stale_cache_while_refreshing_in_background(self, monkeypatch):
+        completer = SlashCommandCompleter()
+        completer._file_cache = ["cached.py"]
+        completer._file_cache_cwd = "/tmp/project"
+        completer._file_cache_time = time.monotonic() - 10.0
+
+        refresh_calls: list[str] = []
+        monkeypatch.setattr("hermes_cli.commands.os.getcwd", lambda: "/tmp/project")
+
+        def fake_refresh(cwd: str | None = None) -> bool:
+            refresh_calls.append(cwd or "")
+            return True
+
+        monkeypatch.setattr(completer, "refresh_project_files_async", fake_refresh)
+
+        assert completer._get_project_files() == ["cached.py"]
+        assert refresh_calls == ["/tmp/project"]
 
 
 # ---------------------------------------------------------------------------
