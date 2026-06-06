@@ -157,7 +157,15 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _secure_dir(path: Path):
-    """Set directory to owner-only access (0700). No-op on Windows."""
+    """Set directory to owner-only access (0700). No-op on Windows.
+    
+    Skipped when HERMES_SKIP_PERMISSIONS_SETUP is set, which is useful
+    for multi-container deployments where the data directory is shared
+    between containers running as different UIDs.
+    """
+    # Skip permission setup when explicitly requested (e.g., multi-container setups)
+    if os.environ.get("HERMES_SKIP_PERMISSIONS_SETUP", "").lower() in ("1", "true", "yes"):
+        return
     try:
         os.chmod(path, 0o700)
     except (OSError, NotImplementedError):
