@@ -102,6 +102,7 @@ _PLATFORM_MAP = {
     "windows": "win32",
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 _REMOTE_ENV_BACKENDS = frozenset(
     {"docker", "singularity", "modal", "ssh", "daytona"}
 )
@@ -565,6 +566,31 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
+def _is_legacy_skill_md_candidate(found_md: Path, search_dir: Path) -> bool:
+    """Return True if ``found_md`` should count as a legacy flat skill file.
+
+    Legacy one-file skills may still exist as ``<name>.md`` files, but support
+    files inside a directory skill (references/templates/assets/scripts) are
+    linked-file content, not independently loadable skills. Including them in
+    the broad fallback search makes bare skill names spuriously ambiguous when a
+    support file preserves details under ``references/<skill-name>.md``.
+    """
+    if found_md.name == "SKILL.md":
+        return False
+
+    try:
+        rel_parts = found_md.relative_to(search_dir).parts
+    except ValueError:
+        rel_parts = found_md.parts
+
+    parent_parts = rel_parts[:-1]
+    if any(part in _EXCLUDED_SKILL_DIRS for part in parent_parts):
+        return False
+    if any(part in _SKILL_SUPPORT_DIRS for part in parent_parts):
+        return False
+    return True
+
+
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     """Recursively find all skills in ~/.hermes/skills/ and external dirs.
 
@@ -982,8 +1008,11 @@ def skill_view(
                     _record(found_skill_md.parent, found_skill_md)
 
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
+            # Linked support files inside directory skills are intentionally
+            # ignored so references/<skill-name>.md does not collide with the
+            # real directory skill of the same name.
             for found_md in search_dir.rglob(f"{name}.md"):
-                if found_md.name != "SKILL.md":
+                if _is_legacy_skill_md_candidate(found_md, search_dir):
                     _record(None, found_md)
 
         if len(candidates) > 1:

@@ -1205,6 +1205,38 @@ class TestSkillViewCollisionDetection:
         assert result["success"] is True
         assert "LOCAL VERSION" in result["content"]
 
+    def test_reference_file_named_like_skill_does_not_collide(self, tmp_path):
+        """Support files in references/ are not legacy skill candidates.
+
+        Slimmed router skills commonly preserve detailed leaf-skill notes under
+        references/<skill-name>.md. Loading the real skill by its bare name
+        should not become ambiguous just because a reference file shares the
+        same basename.
+        """
+        local_dir = tmp_path / "local"
+        external_dir = tmp_path / "external"
+        local_dir.mkdir()
+        external_dir.mkdir()
+
+        _make_skill(
+            local_dir,
+            "support-name",
+            category="devops",
+            body="REAL SKILL BODY",
+        )
+        reference_dir = local_dir / "devops" / "umbrella" / "references"
+        reference_dir.mkdir(parents=True)
+        (reference_dir / "support-name.md").write_text("REFERENCE ONLY")
+
+        p1, p2 = self._patch_dirs(local_dir, [external_dir])
+        with p1, p2:
+            raw = skill_view("support-name")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "REAL SKILL BODY" in result["content"]
+        assert "REFERENCE ONLY" not in result["content"]
+
     def test_external_skill_resolves_when_no_collision(self, tmp_path):
         """External-only skills still resolve normally when there's no
         local skill of the same name."""
