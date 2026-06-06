@@ -373,6 +373,29 @@ class TestSkillView:
         assert result["name"] == "my-skill"
         assert "Step 1" in result["content"]
 
+    def test_view_resolves_frontmatter_name_when_directory_differs(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_dir = tmp_path / "brainstorming"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: superpowers-brainstorming\n"
+                "description: Brainstorming workflow.\n"
+                "---\n\n"
+                "# Brainstorming\n\n"
+                "Explore options first.\n",
+                encoding="utf-8",
+            )
+
+            listed = json.loads(skills_list())
+            raw = skill_view("superpowers-brainstorming")
+
+        result = json.loads(raw)
+        assert "superpowers-brainstorming" in {s["name"] for s in listed["skills"]}
+        assert result["success"] is True
+        assert result["name"] == "superpowers-brainstorming"
+        assert "Explore options first" in result["content"]
+
     def test_skill_view_applies_template_vars(self, tmp_path):
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),

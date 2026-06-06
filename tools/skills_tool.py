@@ -977,8 +977,22 @@ def skill_view(
 
             # Strategy 2: recursive by directory name (catches nested skills
             # like "foundations/runtime/explore-codebase" called by bare name).
+            # Also match the SKILL.md frontmatter name. Discovery/listing uses
+            # frontmatter `name:` as the canonical skill identifier, so viewing
+            # must resolve the same identifier even when the directory is named
+            # differently (for example plugin/external skills with
+            # skills/brainstorming/SKILL.md declaring name: superpowers-brainstorming).
             for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
                 if found_skill_md.parent.name == name:
+                    _record(found_skill_md.parent, found_skill_md)
+                    continue
+                try:
+                    probe_content = found_skill_md.read_text(encoding="utf-8")[:4000]
+                    probe_frontmatter, _ = _parse_frontmatter(probe_content)
+                    probe_name = str(probe_frontmatter.get("name", ""))[:MAX_NAME_LENGTH]
+                except Exception:
+                    probe_name = ""
+                if probe_name == name:
                     _record(found_skill_md.parent, found_skill_md)
 
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
