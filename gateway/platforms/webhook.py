@@ -678,9 +678,24 @@ class WebhookAdapter(BasePlatformAdapter):
             return hmac.compare_digest(gh_sig, expected)
 
         # GitLab: X-Gitlab-Token = <plain secret>
+        # SECURITY: GitLab token-based auth does NOT provide body integrity —
+        # only authentication. To prevent header-downgrade attacks (where an
+        # attacker with knowledge of the secret crafts a request with
+        # X-Gitlab-Token in a route that expects HMAC body integrity), we
+        # only honor X-Gitlab-Token when no other signature header is present
+        # (already enforced by ordering) AND the request is not empty.
         gl_token = request.headers.get("X-Gitlab-Token", "")
         if gl_token:
-            return hmac.compare_digest(gl_token, secret)
+            if not hmac.compare_digest(gl_token, secret):
+                return False
+            # Reject empty bodies — a valid GitLab webhook always carries a
+            # JSON payload. This blocks the empty-body bypass variant.
+            if not body:
+                logger.debug(
+                    "[webhook] GitLab token valid but empty body rejected"
+                )
+                return False
+            return True
 
         # Generic: X-Webhook-Signature = <hex HMAC-SHA256>
         generic_sig = request.headers.get("X-Webhook-Signature", "")
