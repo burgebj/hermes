@@ -229,6 +229,13 @@ class TestToolsetConsistency:
         # silently let a platform diverge so far that nothing is shared).
         assert len(core) > 20, f"Suspiciously small shared core: {len(core)} tools"
 
+    def test_telegram_platform_includes_native_group_ops(self):
+        telegram_tools = set(resolve_toolset("hermes-telegram"))
+        whatsapp_tools = set(resolve_toolset("hermes-whatsapp"))
+
+        assert "telegram_group_ops" in telegram_tools
+        assert "telegram_group_ops" not in whatsapp_tools
+
 
 class TestPluginToolsets:
     def test_get_all_toolsets_includes_plugin_toolset(self, monkeypatch):

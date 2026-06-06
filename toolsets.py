@@ -191,6 +191,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "telegram_group_ops": {
+        "description": "Telegram native group operations: polls, stop-poll, pins, unpins, and capability discovery",
+        "tools": ["telegram_group_ops"],
+        "includes": []
+    },
+
     
     "file": {
         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
@@ -415,7 +421,9 @@ TOOLSETS = {
 
     "hermes-telegram": {
         "description": "Telegram bot toolset - full access for personal use (terminal has safety checks)",
-        "tools": _HERMES_CORE_TOOLS,
+        "tools": _HERMES_CORE_TOOLS + [
+            "telegram_group_ops",
+        ],
         "includes": []
     },
     
