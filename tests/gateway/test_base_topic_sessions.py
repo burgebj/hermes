@@ -149,6 +149,99 @@ class TestBasePlatformTopicSessions:
         ]
 
     @pytest.mark.asyncio
+    async def test_process_message_background_stops_typing_before_first_delivery(self):
+        adapter = DummyTelegramAdapter()
+        session_key = build_session_key(_make_event("-1001", "17585").source)
+        typing_started = asyncio.Event()
+        typing_stopped = asyncio.Event()
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "ack"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            typing_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                typing_stopped.set()
+
+        async def assert_typing_stopped_send(chat_id, content, reply_to=None, metadata=None):
+            assert typing_started.is_set()
+            assert typing_stopped.is_set()
+            assert session_key in adapter._active_sessions
+            adapter.sent.append(
+                {
+                    "chat_id": chat_id,
+                    "content": content,
+                    "reply_to": reply_to,
+                    "metadata": metadata,
+                }
+            )
+            return SendResult(success=True, message_id="1")
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+        adapter.send = assert_typing_stopped_send
+
+        event = _make_event("-1001", "17585")
+        await adapter._process_message_background(event, session_key)
+
+        assert adapter.sent[0]["content"] == "ack"
+
+    @pytest.mark.asyncio
+    async def test_message_arriving_during_delivery_is_queued_after_typing_stops(self):
+        adapter = DummyTelegramAdapter()
+        processed = []
+        injected_pending = False
+
+        async def handler(event):
+            processed.append(event.message_id)
+            await asyncio.sleep(0)
+            return f"ack-{event.message_id}"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                pass
+
+        async def send_and_inject_pending(chat_id, content, reply_to=None, metadata=None):
+            nonlocal injected_pending
+            adapter.sent.append(
+                {
+                    "chat_id": chat_id,
+                    "content": content,
+                    "reply_to": reply_to,
+                    "metadata": metadata,
+                }
+            )
+            if content == "ack-1" and not injected_pending:
+                injected_pending = True
+                await adapter.handle_message(_make_event("-1001", "17585", message_id="2"))
+            return SendResult(success=True, message_id=content)
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+        adapter.send = send_and_inject_pending
+
+        first = _make_event("-1001", "17585", message_id="1")
+        session_key = build_session_key(first.source)
+        await adapter._process_message_background(first, session_key)
+
+        for _ in range(50):
+            if (
+                processed == ["1", "2"]
+                and len(adapter.sent) == 2
+                and session_key not in adapter._active_sessions
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+        assert processed == ["1", "2"]
+        assert [item["content"] for item in adapter.sent] == ["ack-1", "ack-2"]
+
+    @pytest.mark.asyncio
     async def test_process_message_background_marks_total_send_failure_unsuccessful(self):
         adapter = DummyTelegramAdapter()
 

@@ -4070,6 +4070,15 @@ class BasePlatformAdapter(ABC):
                 # typing task is already cancelled; if the parent task is also
                 # cancelling, let this message-processing task unwind now.
                 pass
+
+        typing_stopped_for_delivery = False
+
+        async def _stop_typing_before_delivery() -> None:
+            nonlocal typing_stopped_for_delivery
+            if typing_stopped_for_delivery:
+                return
+            typing_stopped_for_delivery = True
+            await _stop_typing_task()
         
         try:
             await self._run_processing_hook("on_processing_start", event)
@@ -4185,6 +4194,18 @@ class BasePlatformAdapter(ABC):
                             _tts_path = tts_data.get("file_path")
                     except Exception as tts_err:
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
+
+                # Stop typing before first delivery (#25210) only for normal
+                # replies. Bypass commands (/model, /status, …) routed here as a
+                # fresh message produce an instant response — stopping typing
+                # before that send adds an await hop that upstream's
+                # test_command_cancels_active_task_and_unblocks_follow_up timing
+                # (2x sleep(0)) cannot absorb. Their typing is torn down at the
+                # processing-coroutine tail instead; the animation never shows
+                # for an instant command reply anyway.
+                if (_tts_path or text_content or images or media_files or local_files) \
+                        and not event.get_command():
+                    await _stop_typing_before_delivery()
 
                 # Play TTS audio before text (voice-first experience)
                 _tts_caption_delivered = False
