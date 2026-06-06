@@ -4772,13 +4772,17 @@ class GatewayRunner:
         # paths). Chat-originated /restart already has a precise reply target
         # in .restart_notify.json, so keep that lifecycle in the originating
         # chat/topic instead of also leaking it to the configured home channel.
-        if planned_restart_notification_pending:
+        should_send_home_startup = self._should_send_home_channel_startup_notifications(
+            planned_restart_notification_pending=planned_restart_notification_pending,
+        )
+        if should_send_home_startup:
             try:
                 await self._send_home_channel_startup_notifications(
                     skip_targets=None,
                 )
             finally:
-                _clear_planned_restart_notification()
+                if planned_restart_notification_pending:
+                    _clear_planned_restart_notification()
 
         # Automatically continue fresh sessions that were interrupted by the
         # previous gateway restart/shutdown.  The resume_pending flag is cleared
@@ -15667,6 +15671,23 @@ class GatewayRunner:
                 )
 
         return delivered
+
+    def _should_send_home_channel_startup_notifications(
+        self,
+        *,
+        planned_restart_notification_pending: bool,
+    ) -> bool:
+        """Return whether this startup should emit home-channel online pings.
+
+        Current main sends the generic home-channel online ping for non-chat
+        planned/service restarts. Operators can opt into the same thread-aware
+        ping for ordinary Docker/systemd/reboot cold starts via
+        ``gateway_startup_notification`` while keeping the default quiet.
+        """
+        return bool(
+            planned_restart_notification_pending
+            or getattr(self.config, "gateway_startup_notification", False)
+        )
 
     def _set_session_env(self, context: SessionContext) -> list:
         """Set session context variables for the current async task.
