@@ -639,10 +639,44 @@ class WhatsAppAdapter(BasePlatformAdapter):
             except Exception:
                 pass  # Bridge not running, start a new one
             
-            # Kill any orphaned bridge from a previous gateway run
+            # Kill any orphaned bridge from a previous gateway run and wait
+            # until the port is actually free.  A fixed sleep is not enough
+            # — the dying process may linger, causing the new bridge to fail
+            # to bind and exit silently while /health still reaches the old
+            # bridge.  This race makes connect() report success (from the
+            # old bridge's /health) while _bridge_process is already dead.
             _kill_stale_bridge_by_pidfile(self._session_path)
             _kill_port_process(self._bridge_port)
-            await asyncio.sleep(1)
+            for _wait in range(10):
+                await asyncio.sleep(0.5)
+                if _IS_WINDOWS:
+                    try:
+                        result = subprocess.run(
+                            ["netstat", "-ano", "-p", "TCP"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if not any(
+                            f":{self._bridge_port}" in line and "LISTENING" in line
+                            for line in result.stdout.splitlines()
+                        ):
+                            break
+                    except Exception:
+                        break
+                else:
+                    try:
+                        result = subprocess.run(
+                            ["fuser", f"{self._bridge_port}/tcp"],
+                            capture_output=True, timeout=2,
+                        )
+                        if result.returncode != 0:
+                            break
+                    except Exception:
+                        break
+            else:
+                logger.warning(
+                    "[%s] Port %d still occupied after 5s — proceeding anyway",
+                    self.name, self._bridge_port,
+                )
             
             # Start the bridge process in its own process group.
             # Route output to a log file so QR codes, errors, and reconnection
@@ -739,12 +773,39 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     print(f"[{self.name}]   Bridge log: {self._bridge_log}")
                     print(f"[{self.name}]   If session expired, re-pair: hermes whatsapp")
             
+            # Verify the bridge subprocess we started is still alive.  If it
+            # failed to bind (e.g. port was still occupied by a dying orphan)
+            # the /health check above may have reached the OLD bridge while
+            # our child exited silently.
+            if self._bridge_process.poll() is not None:
+                print(f"[{self.name}] Bridge process exited during startup (code {self._bridge_process.returncode})")
+                print(f"[{self.name}] Check log: {self._bridge_log}")
+                self._close_bridge_log()
+                return False
+
             # Create a persistent HTTP session for all bridge communication
             self._http_session = aiohttp.ClientSession()
 
+            # Verify the persistent session can reach the bridge before
+            # handing off to the poll loop.  Catches cases where the bridge
+            # port was reachable via a dying orphan during the health check
+            # but is gone by the time polling starts.
+            try:
+                async with self._http_session.get(
+                    f"http://127.0.0.1:{self._bridge_port}/health",
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as warmup_resp:
+                    await warmup_resp.json()
+            except Exception as warmup_err:
+                logger.warning("[%s] Bridge unreachable after connect: %s", self.name, warmup_err)
+                await self._http_session.close()
+                self._http_session = None
+                self._close_bridge_log()
+                return False
+
             # Start message polling task
             self._poll_task = asyncio.create_task(self._poll_messages())
-            
+
             self._mark_connected()
             print(f"[{self.name}] Bridge started on port {self._bridge_port}")
             return True
