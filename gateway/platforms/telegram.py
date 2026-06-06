@@ -278,6 +278,15 @@ def _render_table_block_for_telegram(table_block: list[str]) -> str:
     return "\n\n".join(rendered_groups)
 
 
+
+
+def _normalize_chat_id(chat_id: str):
+    """Return int chat IDs as int, preserving Telegram @username targets."""
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        return chat_id
+
 def _wrap_markdown_tables(text: str) -> str:
     """Rewrite GFM-style pipe tables into Telegram-friendly bullet groups.
 
@@ -1875,6 +1884,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 ]
             
             message_ids = []
+            chat_id_arg = _normalize_chat_id(chat_id)
             thread_id = self._metadata_thread_id(metadata)
             requested_thread_id = self._message_thread_id_for_send(thread_id)
             used_thread_fallback = False
@@ -1943,7 +1953,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         # Try Markdown first, fall back to plain text if it fails
                         try:
                             msg = await self._bot.send_message(
-                                chat_id=int(chat_id),
+                                chat_id=chat_id_arg,
                                 text=chunk,
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
@@ -1957,7 +1967,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
                                 plain_chunk = _strip_mdv2(chunk)
                                 msg = await self._bot.send_message(
-                                    chat_id=int(chat_id),
+                                    chat_id=chat_id_arg,
                                     text=plain_chunk,
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
@@ -2181,9 +2191,10 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
         try:
+            chat_id_arg = _normalize_chat_id(chat_id)
             if not finalize:
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=chat_id_arg,
                     message_id=int(message_id),
                     text=content,
                 )
@@ -2192,7 +2203,7 @@ class TelegramAdapter(BasePlatformAdapter):
             formatted = self.format_message(content)
             try:
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=chat_id_arg,
                     message_id=int(message_id),
                     text=formatted,
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -2203,7 +2214,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     return SendResult(success=True, message_id=message_id)
                 # Fallback: retry without markdown formatting
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=chat_id_arg,
                     message_id=int(message_id),
                     text=content,
                 )
@@ -2239,7 +2250,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 await asyncio.sleep(wait)
                 try:
                     await self._bot.edit_message_text(
-                        chat_id=int(chat_id),
+                        chat_id=chat_id_arg,
                         message_id=int(message_id),
                         text=content,
                     )
