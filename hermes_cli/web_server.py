@@ -263,6 +263,19 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
 
+    # Operator-configured reverse-proxy hostnames. This is intentionally
+    # narrow and explicit so localhost binds can be safely published through
+    # a trusted private proxy such as Tailscale Serve without switching the
+    # dashboard to all-interface/insecure mode.
+    extra_hosts_raw = os.environ.get("HERMES_DASHBOARD_ALLOWED_HOSTS", "")
+    extra_hosts = {
+        item.strip().lower().rsplit(":", 1)[0]
+        for item in extra_hosts_raw.split(",")
+        if item.strip()
+    }
+    if host_only in extra_hosts:
+        return True
+
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
     # defence can protect that mode; rely on operator network controls.
