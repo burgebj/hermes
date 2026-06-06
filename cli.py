@@ -12654,6 +12654,19 @@ class HermesCLI:
                 self.session_id = self.agent.session_id
                 self._pending_title = None
 
+            # Sync CLI-visible model/provider from agent state.  The agent's
+            # _try_activate_fallback() may have switched to a fallback model
+            # during this turn; propagate that back so /model, session headers,
+            # and any non-status-bar displays show the actually active model.
+            agent = getattr(self, "agent", None)
+            if agent is not None:
+                _active_model = getattr(agent, "model", None)
+                _active_provider = getattr(agent, "provider", None)
+                if _active_model and _active_model != self.model:
+                    self.model = _active_model
+                if _active_provider and _active_provider != getattr(self, "provider", None):
+                    self.provider = _active_provider
+
             # Get the final response
             response = result.get("final_response", "") if result else ""
 
