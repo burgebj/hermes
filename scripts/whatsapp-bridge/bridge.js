@@ -16,6 +16,8 @@
  *
  * Usage:
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
+ *   node bridge.js --pair-only
+ *   node bridge.js --pair-with-number "+15551234567"
  */
 
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
@@ -29,6 +31,11 @@ import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import {
+  formatPairingCodeForDisplay,
+  parsePairWithNumberArg,
+  validateE164ForPairing,
+} from './pairing-args.js';
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -48,7 +55,31 @@ const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.herme
 const IMAGE_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'image_cache');
 const DOCUMENT_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'document_cache');
 const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
-const PAIR_ONLY = args.includes('--pair-only');
+const PAIR_ONLY_QR = args.includes('--pair-only');
+const pairWithNumberParse = parsePairWithNumberArg(process.argv);
+if (pairWithNumberParse.error) {
+  console.error(pairWithNumberParse.error);
+  process.exit(1);
+}
+const PAIR_PHONE_MODE = Boolean(pairWithNumberParse.found && pairWithNumberParse.value);
+/** Digits-only phone for Baileys (no '+'); see pairing-args.js */
+let BAILEYS_PAIR_PHONE_DIGITS = '';
+if (PAIR_PHONE_MODE) {
+  const v = validateE164ForPairing(pairWithNumberParse.value);
+  if (!v.ok) {
+    console.error(v.error);
+    process.exit(1);
+  }
+  BAILEYS_PAIR_PHONE_DIGITS = v.digits;
+}
+
+if (PAIR_PHONE_MODE && PAIR_ONLY_QR) {
+  console.warn(
+    'Warning: --pair-only (QR pairing) is ignored when --pair-with-number is provided.',
+  );
+}
+
+const PAIR_EXIT_MODE = PAIR_ONLY_QR || PAIR_PHONE_MODE;
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
@@ -177,6 +208,9 @@ const MAX_RECENT_IDS = 50;
 let sock = null;
 let connectionState = 'disconnected';
 
+/** Ensures pairing-code request runs at most once across reconnect attempts. */
+let pairPhoneCredentialRequestStarted = false;
+
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
@@ -203,7 +237,7 @@ async function startSocket() {
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !PAIR_PHONE_MODE) {
       console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
       qrcode.generate(qr, { small: true });
       console.log('\nWaiting for scan...\n');
@@ -228,13 +262,49 @@ async function startSocket() {
     } else if (connection === 'open') {
       connectionState = 'connected';
       console.log('✅ WhatsApp connected!');
-      if (PAIR_ONLY) {
-        console.log('✅ Pairing complete. Credentials saved.');
+      if (PAIR_EXIT_MODE) {
+        if (PAIR_PHONE_MODE) {
+          console.log('✓ Paired successfully. Auth saved.');
+        } else {
+          console.log('✅ Pairing complete. Credentials saved.');
+        }
         // Give Baileys a moment to flush creds, then exit cleanly
         setTimeout(() => process.exit(0), 2000);
       }
     }
   });
+
+  if (PAIR_PHONE_MODE && !pairPhoneCredentialRequestStarted) {
+    pairPhoneCredentialRequestStarted = true;
+    (async () => {
+      try {
+        if (typeof sock.requestPairingCode !== 'function') {
+          console.error(
+            '[bridge] Baileys does not expose sock.requestPairingCode(). Upgrade @whiskeysockets/baileys to a release that supports phone-number pairing (6.x+).',
+          );
+          process.exit(1);
+        }
+        await sock.waitForSocketOpen();
+        if (sock.authState.creds.registered) {
+          return;
+        }
+        const rawCode = await sock.requestPairingCode(BAILEYS_PAIR_PHONE_DIGITS);
+        const display = formatPairingCodeForDisplay(rawCode);
+        console.log(`\nPairing code: ${display}\n`);
+        console.log('On your phone:');
+        console.log(`  1. Open WhatsApp`);
+        console.log(`  2. Settings → Linked Devices → Link a Device → "Link with phone number instead"`);
+        console.log(`  3. Enter: ${display}\n`);
+        console.log('Waiting for pairing to complete...\n');
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        console.error(
+          `[bridge] Failed to request WhatsApp pairing code (check network coverage and phone number): ${msg}`,
+        );
+        process.exit(1);
+      }
+    })();
+  }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // In self-chat mode, your own messages commonly arrive as 'append' rather
@@ -704,9 +774,13 @@ app.get('/health', (req, res) => {
 });
 
 // Start
-if (PAIR_ONLY) {
-  // Pair-only mode: just connect, show QR, save creds, exit. No HTTP server.
-  console.log('📱 WhatsApp pairing mode');
+if (PAIR_EXIT_MODE) {
+  // Pair-only mode: QR or phone pairing code — no HTTP server, exit once connected.
+  console.log(
+    PAIR_PHONE_MODE
+      ? '📱 WhatsApp pairing mode (pairing code / phone number)'
+      : '📱 WhatsApp pairing mode (QR code)',
+  );
   console.log(`📁 Session: ${SESSION_DIR}`);
   console.log();
   startSocket();
