@@ -250,6 +250,7 @@ class TestTelegramApprovalCallback:
         query.message = MagicMock()
         query.message.chat_id = 12345
         query.from_user = MagicMock()
+        query.from_user.id = 8315299369
         query.from_user.first_name = "Norbert"
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock()
@@ -369,6 +370,7 @@ class TestTelegramApprovalCallback:
         query.message = MagicMock()
         query.message.chat_id = 12345
         query.from_user = MagicMock()
+        query.from_user.id = 8315299369
         query.from_user.first_name = "Alice"
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock()
@@ -431,6 +433,7 @@ class TestTelegramApprovalCallback:
         query.message = MagicMock()
         query.message.chat_id = 12345
         query.from_user = MagicMock()
+        query.from_user.id = 8315299369
         query.from_user.first_name = "Bob"
         query.answer = AsyncMock()
 
