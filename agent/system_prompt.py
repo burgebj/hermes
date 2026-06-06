@@ -337,10 +337,29 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y')}"
     if agent.pass_session_id and agent.session_id:
         timestamp_line += f"\nSession ID: {agent.session_id}"
-    if agent.model:
-        timestamp_line += f"\nModel: {agent.model}"
-    if agent.provider:
-        timestamp_line += f"\nProvider: {agent.provider}"
+    # Resolve the active model and provider at prompt-build time so the header
+    # stays accurate after mid-session model switches (config edit + gateway
+    # restart, session resume, etc.).  agent.model / agent.provider are frozen
+    # at AIAgent construction and go stale when the runtime picks a new model.
+    # Prefer the live config values; fall back to the agent instance attrs so
+    # the header is never silently empty.  Ref: issue #40026.
+    _live_model = agent.model
+    _live_provider = agent.provider
+    try:
+        from hermes_cli.config import load_config as _lc
+        _cfg = _lc()
+        _m = (_cfg.get("model") or {}).get("default") or ""
+        _p = (_cfg.get("model") or {}).get("provider") or ""
+        if _m:
+            _live_model = _m
+        if _p:
+            _live_provider = _p
+    except Exception:
+        pass  # keep agent instance values on any config-load failure
+    if _live_model:
+        timestamp_line += f"\nModel: {_live_model}"
+    if _live_provider:
+        timestamp_line += f"\nProvider: {_live_provider}"
     volatile_parts.append(timestamp_line)
 
     return {
