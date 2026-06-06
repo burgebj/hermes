@@ -741,6 +741,29 @@ class DingTalkAdapter(BasePlatformAdapter):
                             parts.append(item.text)
                     content = " ".join(parts).strip()
 
+        # Handle audio message recognition (DingTalk provides ASR result)
+        if not content:
+            msg_type_str = getattr(message, "message_type", "") or ""
+            if msg_type_str == "audio":
+                extensions = getattr(message, "extensions", {}) or {}
+                # SDK puts unrecognized fields (including 'content' for audio) in extensions dict
+                audio_content = extensions.get("content", {})
+                if isinstance(audio_content, dict):
+                    content = (audio_content.get("recognition") or "").strip()
+                # Fallback: 'recognition' might be at top level of extensions on some SDK versions
+                if not content:
+                    content = (extensions.get("recognition") or "").strip()
+                # If DingTalk's server-side ASR is not available, still let the message
+                # through so the user gets a reply (empty text + AUDIO msgtype would be
+                # dropped by the skips-empty-message gate in _on_message).
+                if not content:
+                    content = "[Voice message — transcription unavailable]"
+                logger.info(
+                    "Audio message extensions keys=%s recognition=%r",
+                    list(extensions.keys()) if extensions else "empty",
+                    content if content else "(empty)",
+                )
+
         # Do NOT strip "@bot" from the text.  The mention is a routing
         # signal (delivered structurally via callback `isInAtList`), and
         # regex-stripping @handles would collateral-damage e-mails
@@ -813,6 +836,11 @@ class DingTalkAdapter(BasePlatformAdapter):
                 if any("image" in t for t in media_types)
                 else MessageType.TEXT
             )
+        elif msg_type_str == "audio":
+            # DingTalk provides ASR via recognition field — extract in _extract_text.
+            # Do NOT add raw downloadCode to media_urls (it's not a local file path,
+            # and the STT pipeline in run.py would try to open it as a file).
+            msg_type = MessageType.AUDIO
 
         return msg_type, media_urls, media_types
 
@@ -1441,6 +1469,9 @@ class _IncomingHandler(
             data = message.data
             if isinstance(data, str):
                 data = json.loads(data)
+
+            # DEBUG: log raw msgtype to diagnose audio message delivery
+            logger.info("[%s] Stream raw msgtype=%s", self._adapter.name, data.get("msgtype", "?") if isinstance(data, dict) else "non-dict")
 
             # Parse dict into ChatbotMessage using SDK's from_dict
             chatbot_msg = ChatbotMessage.from_dict(data)
