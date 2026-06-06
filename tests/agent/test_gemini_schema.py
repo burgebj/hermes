@@ -102,6 +102,44 @@ class TestSanitizeGeminiSchema:
         assert cleaned["items"]["type"] == "integer"
         assert "enum" not in cleaned["items"]
 
+    def test_prunes_required_entries_without_properties(self):
+        """Gemini rejects required names that are not defined properties."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "query": {"type": "string"},
+            },
+            "required": ["action", "missing", 123, "query"],
+        }
+        cleaned = sanitize_gemini_schema(schema)
+        assert cleaned["required"] == ["action", "query"]
+
+    def test_drops_required_when_no_entries_survive(self):
+        schema = {
+            "type": "object",
+            "properties": {"action": {"type": "string"}},
+            "required": ["missing"],
+        }
+        cleaned = sanitize_gemini_schema(schema)
+        assert "required" not in cleaned
+
+    def test_prunes_nested_required_entries(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "object",
+                    "properties": {"channel_id": {"type": "string"}},
+                    "required": ["channel_id", "guild_id"],
+                },
+            },
+            "required": ["filters"],
+        }
+        cleaned = sanitize_gemini_schema(schema)
+        assert cleaned["required"] == ["filters"]
+        assert cleaned["properties"]["filters"]["required"] == ["channel_id"]
+
     def test_non_dict_input_returns_empty(self):
         assert sanitize_gemini_schema(None) == {}
         assert sanitize_gemini_schema("not a schema") == {}
@@ -127,7 +165,7 @@ class TestSanitizeGeminiToolParameters:
                     "(create_thread, default 1440).",
                 },
             },
-            "required": ["action"],
+            "required": ["action", "missing"],
         }
         cleaned = sanitize_gemini_tool_parameters(params)
         aad = cleaned["properties"]["auto_archive_duration"]
@@ -138,3 +176,5 @@ class TestSanitizeGeminiToolParameters:
         assert "1440" in aad["description"]
         # And the string-enum sibling is untouched.
         assert cleaned["properties"]["action"]["enum"] == ["create_thread"]
+        # Stale required names from richer JSON schemas are pruned as well.
+        assert cleaned["required"] == ["action"]

@@ -87,6 +87,22 @@ def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
         if any(not isinstance(item, str) for item in enum_val):
             cleaned.pop("enum", None)
 
+    required_val = cleaned.get("required")
+    properties_val = cleaned.get("properties")
+    if "required" in cleaned:
+        if not isinstance(required_val, list) or not isinstance(properties_val, dict):
+            cleaned.pop("required", None)
+        else:
+            valid_required = [
+                name
+                for name in required_val
+                if isinstance(name, str) and name in properties_val
+            ]
+            if valid_required:
+                cleaned["required"] = valid_required
+            else:
+                cleaned.pop("required", None)
+
     return cleaned
 
 
