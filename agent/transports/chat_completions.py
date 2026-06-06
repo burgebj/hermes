@@ -637,6 +637,48 @@ class ChatCompletionsTransport(ProviderTransport):
                     )
                 )
 
+            # Recover from a Gemma 4 chat-template leak: vLLM's harmony parser
+            # for Gemma 4 sometimes structures the tool call (so ``tool_calls``
+            # is populated) but lets the model's quote markers (``<|"|>`` in
+            # full and partial forms) escape into ``tool_call.arguments`` as
+            # literal characters. Hermes' downstream ``json.loads(arguments)``
+            # then fails and the run gets surfaced as
+            # ``Response truncated (finish_reason='length')`` even though the
+            # upstream actually returned ``finish_reason: 'tool_calls'``
+            # cleanly with no token cap hit. Strip the leaked markers so the
+            # JSON parses again, but only when the original was unparseable
+            # AND the cleaned version IS parseable — never silently mutate
+            # already-valid arguments.
+            if tool_calls:
+                import json as _json_for_validation
+
+                def _strip_gemma4_quote_markers(s: str) -> str:
+                    if not s or "<|" not in s:
+                        return s
+                    return (s
+                            .replace('"<|\\"|"', '"')   # full open:  "<|\"|" -> "
+                            .replace('<|\\"', '"')       # full close: <|\"   -> "
+                            .replace('"<|', '"')         # bare open:  "<|     -> "
+                            .replace('<|"', '"'))        # bare close: <|"     -> "
+
+                for tc in tool_calls:
+                    args_str = tc.arguments
+                    if not args_str or "<|" not in args_str:
+                        continue
+                    try:
+                        _json_for_validation.loads(args_str)
+                        continue  # already valid
+                    except (ValueError, TypeError):
+                        pass
+                    cleaned = _strip_gemma4_quote_markers(args_str)
+                    if cleaned == args_str:
+                        continue
+                    try:
+                        _json_for_validation.loads(cleaned)
+                    except (ValueError, TypeError):
+                        continue  # cleaned still broken, leave original
+                    tc.arguments = cleaned
+
         usage = None
         if hasattr(response, "usage") and response.usage:
             u = response.usage

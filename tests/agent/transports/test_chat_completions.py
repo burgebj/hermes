@@ -844,6 +844,108 @@ class TestChatCompletionsNormalize:
         assert nr.provider_data == {"reasoning_content": "model-extra scratchpad"}
 
 
+class TestChatCompletionsGemma4ArgsSanitization:
+    """Recovery from Gemma 4 chat-template markers leaking into structured
+    tool_call.arguments (the upstream emits ``finish_reason='tool_calls'``
+    cleanly, but the JSON inside ``arguments`` is corrupted by ``<|"|>``
+    and partial variants). Hermes' downstream ``json.loads`` would otherwise
+    fail and the run would be reported as length-truncated.
+
+    The sanitizer is conservative: it only rewrites ``arguments`` when the
+    original is unparseable AND the cleaned variant IS parseable.
+    """
+
+    def _resp(self, args: str):
+        tc = SimpleNamespace(
+            id="call_x",
+            function=SimpleNamespace(name="terminal", arguments=args),
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=None, tool_calls=[tc], reasoning_content=None),
+                finish_reason="tool_calls",
+            )],
+            usage=None,
+        )
+
+    def test_full_open_and_close_markers_stripped(self, transport):
+        # Real-world payload shape (kanban_complete with metadata.findings).
+        bad = (
+            '{"metadata": {"findings": [{"date": "<|\\"|"2023-09-18<|\\", '
+            '"identifier": "<|\\"|"BOE-A-2023-19616<|\\"}]}, '
+            '"task_id": "t_8345a55c"}'
+        )
+        nr = transport.normalize_response(self._resp(bad))
+        import json
+        parsed = json.loads(nr.tool_calls[0].arguments)
+        assert parsed["task_id"] == "t_8345a55c"
+        assert parsed["metadata"]["findings"][0]["date"] == "2023-09-18"
+        assert parsed["metadata"]["findings"][0]["identifier"] == "BOE-A-2023-19616"
+
+    def test_bare_marker_only_args_left_intact(self, transport):
+        # Bare ``<|`` markers without inner escaped quote do NOT break JSON
+        # parsing — the value is just an unusual literal string. The strict
+        # sanitizer must NOT touch already-valid args, even if they look
+        # cosmetically off; downstream callers may legitimately use ``<|``.
+        ok = '{"command": "<|grep -l Justicia<|"}'
+        import json
+        json.loads(ok)  # confirm it parses fine before we hand it in
+        nr = transport.normalize_response(self._resp(ok))
+        assert nr.tool_calls[0].arguments == ok
+
+    def test_full_marker_with_bare_close_recovered(self, transport):
+        # Real-world variant: full ``<|"|>`` open marker (which DOES break
+        # JSON because the inner escaped quote terminates the string early)
+        # paired with a bare ``<|"`` close on the same value.
+        bad = '{"y": "<|\\"|"hello<|\\"}'
+        nr = transport.normalize_response(self._resp(bad))
+        import json
+        parsed = json.loads(nr.tool_calls[0].arguments)
+        assert parsed["y"] == "hello"
+
+    def test_already_valid_args_not_mutated(self, transport):
+        good = '{"command": "ls -la"}'
+        nr = transport.normalize_response(self._resp(good))
+        # Identity preserved — no spurious rewrite of clean payloads.
+        assert nr.tool_calls[0].arguments == good
+
+    def test_args_without_markers_not_inspected(self, transport):
+        # Does not contain "<|" — sanitizer skips entirely. Even if the JSON
+        # were broken for unrelated reasons, we leave it alone so downstream
+        # surfaces the real error.
+        broken_unrelated = '{"command": "ls",,}'
+        nr = transport.normalize_response(self._resp(broken_unrelated))
+        assert nr.tool_calls[0].arguments == broken_unrelated
+
+    def test_unrecoverable_args_left_for_downstream(self, transport):
+        # Marker present but the cleaned version is still not valid JSON.
+        # Sanitizer must NOT half-mutate — leave the original so the real
+        # downstream error is surfaced rather than masked.
+        bad = '{"command": "<|"}, "extra": <|>}'
+        nr = transport.normalize_response(self._resp(bad))
+        assert nr.tool_calls[0].arguments == bad
+
+    def test_multiple_tool_calls_each_handled_independently(self, transport):
+        clean_args = '{"x": 1}'
+        # Full marker open — actually breaks JSON parse, so sanitizer fires.
+        dirty_args = '{"y": "<|\\"|"hello<|\\"}'
+        tcs = [
+            SimpleNamespace(id="a", function=SimpleNamespace(name="t1", arguments=clean_args)),
+            SimpleNamespace(id="b", function=SimpleNamespace(name="t2", arguments=dirty_args)),
+        ]
+        r = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=None, tool_calls=tcs, reasoning_content=None),
+                finish_reason="tool_calls",
+            )],
+            usage=None,
+        )
+        nr = transport.normalize_response(r)
+        import json
+        assert nr.tool_calls[0].arguments == clean_args
+        assert json.loads(nr.tool_calls[1].arguments) == {"y": "hello"}
+
+
 class TestChatCompletionsCacheStats:
 
     def test_no_usage(self, transport):
