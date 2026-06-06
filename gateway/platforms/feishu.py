@@ -3836,7 +3836,7 @@ class FeishuAdapter(BasePlatformAdapter):
     @staticmethod
     def _resolve_source_chat_type(*, chat_info: Dict[str, Any], event_chat_type: str) -> str:
         resolved = str(chat_info.get("type") or "").strip().lower()
-        if resolved in {"group", "forum"}:
+        if resolved in {"dm", "group", "forum"}:
             return resolved
         if event_chat_type == "p2p":
             return "dm"
