@@ -758,6 +758,21 @@ def build_anthropic_client(
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
+    # Apply any extra headers from HERMES_ANTHROPIC_EXTRA_HEADERS env var.
+    # This allows custom providers (e.g. brconnector) to require specific
+    # User-Agent strings without modifying provider-specific code.
+    # Format: JSON object string, e.g. '{"User-Agent": "claude-code-cli/2.1.52"}'
+    _extra_headers_raw = os.environ.get("HERMES_ANTHROPIC_EXTRA_HEADERS", "").strip()
+    if _extra_headers_raw:
+        try:
+            import json as _json
+            _extra_headers = _json.loads(_extra_headers_raw)
+            if isinstance(_extra_headers, dict) and _extra_headers:
+                existing = kwargs.get("default_headers", {})
+                kwargs["default_headers"] = {**existing, **_extra_headers}
+        except Exception:
+            pass  # Silently ignore malformed JSON to avoid breaking the client
+
     return _anthropic_sdk.Anthropic(**kwargs)
 
 

@@ -193,6 +193,49 @@ class TestBuildAnthropicClient:
             assert "context-1m-2025-08-07" in betas
 
 
+    def test_extra_headers_env_var_merges_into_default_headers(self, monkeypatch):
+        """HERMES_ANTHROPIC_EXTRA_HEADERS merges into default_headers for regular API keys."""
+        monkeypatch.setenv(
+            "HERMES_ANTHROPIC_EXTRA_HEADERS",
+            '{"User-Agent": "claude-code-cli/2.1.52"}',
+        )
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-some-regular-key")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["default_headers"]["User-Agent"] == "claude-code-cli/2.1.52"
+            # Common betas must still be present alongside the extra header
+            assert "anthropic-beta" in kwargs["default_headers"]
+
+    def test_extra_headers_env_var_overrides_existing_header(self, monkeypatch):
+        """HERMES_ANTHROPIC_EXTRA_HEADERS can override an existing default_headers entry."""
+        monkeypatch.setenv(
+            "HERMES_ANTHROPIC_EXTRA_HEADERS",
+            '{"anthropic-beta": "my-custom-beta"}',
+        )
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-some-regular-key")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["default_headers"]["anthropic-beta"] == "my-custom-beta"
+
+    def test_extra_headers_env_var_invalid_json_is_ignored(self, monkeypatch):
+        """Malformed HERMES_ANTHROPIC_EXTRA_HEADERS must not break client creation."""
+        monkeypatch.setenv("HERMES_ANTHROPIC_EXTRA_HEADERS", "not-valid-json")
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-some-regular-key")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            # Client is still created; default_headers contains betas as normal
+            assert "default_headers" in kwargs
+            assert "anthropic-beta" in kwargs["default_headers"]
+
+    def test_extra_headers_env_var_not_set(self, monkeypatch):
+        """When HERMES_ANTHROPIC_EXTRA_HEADERS is absent, behaviour is unchanged."""
+        monkeypatch.delenv("HERMES_ANTHROPIC_EXTRA_HEADERS", raising=False)
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-some-regular-key")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert "User-Agent" not in kwargs.get("default_headers", {})
+
+
 class TestReadClaudeCodeCredentials:
     @pytest.fixture(autouse=True)
     def no_keychain(self, monkeypatch):
