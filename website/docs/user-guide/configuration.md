@@ -1196,6 +1196,7 @@ This controls both the `text_to_speech` tool and spoken replies in voice mode (`
 display:
   tool_progress: all      # off | new | all | verbose
   tool_progress_command: false  # Enable /verbose slash command in messaging gateway
+  cleanup_progress: false # Gateway: delete temporary progress/status bubbles after successful final delivery
   platforms: {}           # Per-platform display overrides (see below)
   tool_progress_overrides: {}  # DEPRECATED — use display.platforms instead
   interim_assistant_messages: true  # Gateway: send natural mid-turn assistant updates as separate messages
@@ -1253,6 +1254,22 @@ display:
 
 In the CLI, cycle through these modes with `/verbose`. To use `/verbose` in messaging platforms (Telegram, Discord, Slack, etc.), set `tool_progress_command: true` in the `display` section above. The command will then cycle the mode and save to config.
 
+### Progress cleanup (gateway only)
+
+When `display.cleanup_progress: true`, Hermes keeps live progress visible during long gateway turns, then deletes temporary progress/status bubbles after the final response is delivered successfully. This covers tool-progress bubbles, long-running "Still working..." notices, and context-pressure status messages.
+
+Cleanup is best-effort and only works on adapters that support message deletion. Today that mainly means Telegram. Failed runs skip cleanup so the progress bubbles remain as breadcrumbs for debugging.
+
+You can set this globally or per platform:
+
+```yaml
+display:
+  cleanup_progress: false
+  platforms:
+    telegram:
+      cleanup_progress: true
+```
+
 ### Runtime-metadata footer (gateway only)
 
 When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
@@ -1286,6 +1303,7 @@ display:
       tool_progress: 'off'    # silence progress on Signal
     telegram:
       tool_progress: verbose  # detailed progress on Telegram
+      cleanup_progress: true  # delete temporary progress/status bubbles after success
     slack:
       tool_progress: 'off'    # quiet in shared Slack workspace
 ```
