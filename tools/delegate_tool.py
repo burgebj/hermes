@@ -603,6 +603,7 @@ def check_delegate_requirements() -> bool:
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
+    skill_content: Optional[str] = None,
     *,
     workspace_path: Optional[str] = None,
     role: str = "leaf",
@@ -624,6 +625,8 @@ def _build_child_system_prompt(
     ]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
+    if skill_content and skill_content.strip():
+        parts.append(f"\n{skill_content}")
     if workspace_path and str(workspace_path).strip():
         parts.append(
             "\nWORKSPACE PATH:\n"
@@ -906,6 +909,7 @@ def _build_child_agent(
     goal: str,
     context: Optional[str],
     toolsets: Optional[List[str]],
+    skills: Optional[List[str]],
     model: Optional[str],
     max_iterations: int,
     task_count: int,
@@ -1002,9 +1006,29 @@ def _build_child_agent(
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
+    
+    # Load skill content if skills parameter is provided
+    skill_content = ""
+    if skills:
+        try:
+            from tools.skills_tool import skill_view
+            for skill_name in skills:
+                result = skill_view(skill_name, preprocess=False)
+                try:
+                    parsed = json.loads(result)
+                    if parsed.get("success"):
+                        skill_content += f"\n\n## Skill: {skill_name}\n{parsed.get('content', '')}"
+                    else:
+                        logger.warning(f"Failed to load skill '{skill_name}': {parsed.get('error')}")
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning(f"Failed to parse skill '{skill_name}' result: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to load skills: {e}")
+    
     child_prompt = _build_child_system_prompt(
         goal,
         context,
+        skill_content=skill_content,
         workspace_path=workspace_hint,
         role=effective_role,
         max_spawn_depth=max_spawn,
@@ -1969,6 +1993,7 @@ def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    skills: Optional[List[str]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
@@ -2068,7 +2093,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "skills": skills, "role": top_role}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2109,11 +2134,14 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Per-task skills override top-level skills, fall back to top-level
+            task_skills = t.get("skills") if "skills" in t else skills
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
+                skills=task_skills,
                 model=creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
