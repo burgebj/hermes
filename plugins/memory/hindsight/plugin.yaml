@@ -3,6 +3,8 @@ version: 1.0.0
 description: "Hindsight — long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval."
 pip_dependencies:
   - "hindsight-client>=0.4.22"
+  - "hindsight-embed>=0.5.0"
+  - "hindsight-all>=0.5.0"
 requires_env: []
 hooks:
   - on_session_end
