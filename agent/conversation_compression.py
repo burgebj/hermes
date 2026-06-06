@@ -176,14 +176,31 @@ def check_compression_model_feasibility(agent: Any) -> None:
             # the raw messages plus a small summarisation instruction.
             old_threshold = threshold
             new_threshold = aux_context
-            agent.context_compressor.threshold_tokens = new_threshold
-            # Keep threshold_percent in sync so future main-model
-            # context_length changes (update_model) re-derive from a
-            # sensible number rather than the original too-high value.
             main_ctx = agent.context_compressor.context_length
-            if main_ctx:
-                agent.context_compressor.threshold_percent = (
-                    new_threshold / main_ctx
+            # This is a runtime safety clamp, not an explicit user/config
+            # absolute-threshold override.  Do not create or mutate
+            # threshold_tokens_override here: that value must continue to mean
+            # "the user's configured absolute threshold" and survive later
+            # model switches/restores unchanged.
+            if hasattr(agent.context_compressor, "apply_runtime_threshold_cap"):
+                agent.context_compressor.apply_runtime_threshold_cap(
+                    new_threshold,
+                    update_percent=True,
+                )
+            else:
+                agent.context_compressor.threshold_tokens = new_threshold
+                if hasattr(agent.context_compressor, "tail_token_budget"):
+                    agent.context_compressor.tail_token_budget = int(
+                        new_threshold
+                        * getattr(agent.context_compressor, "summary_target_ratio", 0.20)
+                    )
+                if main_ctx:
+                    agent.context_compressor.threshold_percent = (
+                        new_threshold / main_ctx
+                    )
+            if isinstance(getattr(agent, "_primary_runtime", None), dict):
+                agent._primary_runtime["compressor_threshold_tokens"] = (
+                    agent.context_compressor.threshold_tokens
                 )
             safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
             # Build human-readable "model (provider)" labels for both
