@@ -29,6 +29,7 @@ import shutil
 import sys
 import json
 import re
+import subprocess
 import concurrent.futures
 import base64
 import atexit
@@ -3118,6 +3119,10 @@ class HermesCLI:
         self.resume_display = CLI_CONFIG["display"].get("resume_display", "full")
         # bell_on_complete: play terminal bell (\a) when agent finishes a response
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
+        # answer_bell: optional external one-shot notifier when a terminal answer is ready.
+        self.answer_bell = CLI_CONFIG["display"].get("answer_bell", {})
+        if not isinstance(self.answer_bell, dict):
+            self.answer_bell = {"enabled": bool(self.answer_bell)}
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
         _configure_output_history(
@@ -9005,7 +9010,7 @@ class HermesCLI:
         elif canonical == "compress":
             self._manual_compress(cmd_original)
         elif canonical == "usage":
-            self._show_usage()
+            self._show_usage(cmd_original)
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "copy":
@@ -10534,13 +10539,43 @@ class HermesCLI:
         self._pending_relaunch = ["update"]
         return True
 
-    def _show_usage(self):
+    def _show_usage(self, command: str = "/usage"):
         """Show rate limits (if available) and session token usage."""
         if not self.agent:
             print("(._.) No active agent -- send a message first.")
             return
 
         agent = self.agent
+        parts = (command or "/usage").split()
+        show_last = len(parts) > 1 and parts[1].strip().lower() in {"last", "--last"}
+        if show_last:
+            usage = getattr(agent, "last_turn_usage", None) or {}
+            if not usage:
+                print("(._.) No last-turn usage data yet -- send a message first.")
+                return
+            print("  📊 Last Turn Usage")
+            print(f"  {'─' * 40}")
+            print(f"  Model:                     {usage.get('model') or agent.model}")
+            print(f"  Input tokens:              {int(usage.get('input_tokens') or 0):>10,}")
+            if usage.get("cache_read_tokens"):
+                print(f"  Cache read tokens:         {int(usage.get('cache_read_tokens') or 0):>10,}")
+            if usage.get("cache_write_tokens"):
+                print(f"  Cache write tokens:        {int(usage.get('cache_write_tokens') or 0):>10,}")
+            print(f"  Output tokens:             {int(usage.get('output_tokens') or 0):>10,}")
+            if usage.get("reasoning_tokens"):
+                print(f"  ↳ Reasoning (subset):      {int(usage.get('reasoning_tokens') or 0):>10,}")
+            print(f"  Prompt tokens:             {int(usage.get('prompt_tokens') or 0):>10,}")
+            print(f"  Completion tokens:         {int(usage.get('completion_tokens') or 0):>10,}")
+            print(f"  Total tokens:              {int(usage.get('total_tokens') or 0):>10,}")
+            print(f"  API calls:                 {int(usage.get('api_calls') or 0):>10,}")
+            last_prompt = int(usage.get("last_prompt_tokens") or 0)
+            ctx_len = int(usage.get("context_length") or 0)
+            if last_prompt or ctx_len:
+                pct = min(100, (last_prompt / ctx_len * 100)) if ctx_len else 0
+                print(f"  {'─' * 40}")
+                print(f"  Current context:  {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
+            return
+
         calls = agent.session_api_calls
 
         if calls == 0:
@@ -12118,6 +12153,50 @@ class HermesCLI:
             except Exception:
                 pass
 
+    def _send_answer_bell(self, response: str, result: Optional[dict] = None) -> None:
+        """Fire a tiny external notification after a terminal answer is ready.
+
+        This is intentionally dumb: no answer text, no logs, no blocking. The
+        configured command decides where to send the bell (Discord webhook/bot,
+        OS notification, etc.). Failures are logged only so notifications never
+        break the chat loop.
+        """
+        cfg = self.answer_bell if isinstance(getattr(self, "answer_bell", None), dict) else {}
+        if not cfg.get("enabled"):
+            return
+        if not response:
+            return
+        if result and result.get("response_previewed"):
+            return
+
+        cmd = (
+            os.environ.get("HERMES_ANSWER_BELL_CMD")
+            or cfg.get("command")
+            or str(Path.home() / ".local" / "bin" / "hermes-discord-bell")
+        )
+        cmd = str(cmd).strip()
+        if not cmd:
+            return
+        cmd = os.path.expanduser(cmd)
+
+        message = str(cfg.get("message") or os.environ.get("HERMES_ANSWER_BELL_MESSAGE") or "끝")
+        env = os.environ.copy()
+        env.setdefault("HERMES_HOME", str(_hermes_home))
+        env["HERMES_ANSWER_BELL_MESSAGE"] = message
+        env["HERMES_ANSWER_BELL_SESSION"] = str(getattr(self, "session_id", "") or "")
+
+        try:
+            subprocess.Popen(
+                [cmd],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            logger.debug("answer bell command failed to start: %s", exc)
+
     def chat(self, message, images: list = None) -> Optional[str]:
         """
         Send a message to the agent and get a response.
@@ -12146,6 +12225,24 @@ class HermesCLI:
         # this to True. Early returns (credential refresh failure, etc.)
         # leave it False, which is correct — those aren't user interrupts.
         self._last_turn_interrupted = False
+
+        # LLM-free attach pre-router. A first-turn message like
+        # "너는 DASHBOARD 세션이야" only needs a tiny repo/git snapshot; do
+        # this before credential refresh, agent init, system prompt build, tool
+        # schema load, or skill/docs reads.
+        if isinstance(message, str) and not images and not self.conversation_history:
+            try:
+                from hermes_cli.attach_light import render_attach_light_status
+                from hermes_cli.config import load_config
+                _attach = render_attach_light_status(message, config=load_config(), cwd=os.getcwd())
+            except Exception:
+                _attach = None
+            if _attach is not None:
+                response = _attach.response
+                self.conversation_history.append({"role": "user", "content": message})
+                self.conversation_history.append({"role": "assistant", "content": response})
+                print(response)
+                return response
 
         # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
@@ -12675,6 +12772,11 @@ class HermesCLI:
                         width=self._scrollback_box_width(),
                     ))
 
+
+            # Fire external answer-ready bell (Discord webhook/bot, OS notify, etc.)
+            # after the terminal answer is ready. This intentionally sends only
+            # a tiny configured message (default: 끝), never the answer content.
+            self._send_answer_bell(response, result)
 
             # Play terminal bell when agent finishes (if enabled).
             # Works over SSH — the bell propagates to the user's terminal.

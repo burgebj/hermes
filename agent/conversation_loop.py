@@ -498,6 +498,22 @@ def run_conversation(
     # Initialize conversation (copy to avoid mutating the caller's list)
     messages = list(conversation_history) if conversation_history else []
 
+    _usage_counter_fields = {
+        "input_tokens": "session_input_tokens",
+        "output_tokens": "session_output_tokens",
+        "cache_read_tokens": "session_cache_read_tokens",
+        "cache_write_tokens": "session_cache_write_tokens",
+        "reasoning_tokens": "session_reasoning_tokens",
+        "prompt_tokens": "session_prompt_tokens",
+        "completion_tokens": "session_completion_tokens",
+        "total_tokens": "session_total_tokens",
+        "session_api_calls": "session_api_calls",
+    }
+    _turn_usage_start = {
+        key: int(getattr(agent, attr, 0) or 0)
+        for key, attr in _usage_counter_fields.items()
+    }
+
     # Hydrate todo store from conversation history (gateway creates a fresh
     # AIAgent per message, so the in-memory store is empty -- we need to
     # recover the todo state from the most recent todo tool response in history)
@@ -2014,6 +2030,53 @@ def run_conversation(
                             f"{cached:,}/{prompt:,} tokens "
                             f"({hit_pct:.0f}% hit, {written:,} written)"
                         )
+                else:
+                    # Some provider/SDK recovery paths can return a valid
+                    # assistant response without usage metadata (notably Codex
+                    # null-output stream recovery).  Do not invent billable
+                    # token counters, but do keep context-pressure tracking and
+                    # API-call accounting moving from the same preflight request
+                    # estimate used for compression decisions.  Otherwise the
+                    # TUI status bar remains pinned at 0/<ctx> even though a
+                    # real request was just sent.
+                    _estimated_prompt_tokens = max(0, int(approx_request_tokens or approx_tokens or 0))
+                    if _estimated_prompt_tokens:
+                        agent.context_compressor.update_from_response({
+                            "prompt_tokens": _estimated_prompt_tokens,
+                            "completion_tokens": 0,
+                            "total_tokens": _estimated_prompt_tokens,
+                        })
+                    agent.session_api_calls += 1
+                    logger.info(
+                        "API call #%d: model=%s provider=%s usage=missing context_estimate=%d latency=%.1fs",
+                        agent.session_api_calls,
+                        agent.model,
+                        agent.provider or "unknown",
+                        _estimated_prompt_tokens,
+                        api_duration,
+                    )
+                    if agent._session_db and agent.session_id:
+                        try:
+                            if not agent._session_db_created:
+                                agent._ensure_db_session()
+                            agent._session_db.update_token_counts(
+                                agent.session_id,
+                                input_tokens=0,
+                                output_tokens=0,
+                                cache_read_tokens=0,
+                                cache_write_tokens=0,
+                                reasoning_tokens=0,
+                                api_call_count=1,
+                                model=agent.model,
+                                billing_provider=agent.provider,
+                                billing_base_url=agent.base_url,
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                "No-usage API-call persistence failed (session=%s): %s",
+                                agent.session_id,
+                                e,
+                            )
                 
                 has_retried_429 = False  # Reset on success
                 # Note: don't clear the retry buffer here — an "API call
@@ -4782,6 +4845,21 @@ def run_conversation(
             break
 
     # Build result with interrupt info if applicable
+    _turn_usage = {}
+    for _key, _attr in _usage_counter_fields.items():
+        _turn_usage[_key] = max(0, int(getattr(agent, _attr, 0) or 0) - _turn_usage_start.get(_key, 0))
+    _turn_usage["api_calls"] = api_call_count
+    _turn_usage.pop("session_api_calls", None)
+    _turn_usage["model"] = agent.model
+    _turn_usage["provider"] = agent.provider
+    _turn_usage["last_prompt_tokens"] = getattr(agent.context_compressor, "last_prompt_tokens", 0) or 0
+    _turn_usage["context_length"] = getattr(agent.context_compressor, "context_length", 0) or 0
+    _turn_usage["message_count"] = len(messages)
+    try:
+        agent.last_turn_usage = dict(_turn_usage)
+    except Exception:
+        pass
+
     result = {
         "final_response": final_response,
         "last_reasoning": last_reasoning,
@@ -4809,6 +4887,7 @@ def run_conversation(
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,
         "cost_source": agent.session_cost_source,
+        "last_turn_usage": dict(_turn_usage),
         "session_id": agent.session_id,
     }
     if agent._tool_guardrail_halt_decision is not None:

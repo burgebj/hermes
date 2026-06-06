@@ -805,6 +805,11 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    "attach_light": {
+        # Optional directories scanned by the LLM-free attach pre-router for
+        # messages like "너는 DASHBOARD 세션이야" / "DASHBOARD 붙어".
+        "project_roots": [],
+    },
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).
@@ -1364,6 +1369,11 @@ DEFAULT_CONFIG = {
         # dashboard. Set false to suppress the hint.
         "tui_agents_nudge": True,
         "bell_on_complete": False,
+        "answer_bell": {
+            "enabled": False,
+            "command": "~/.local/bin/hermes-discord-bell",
+            "message": "끝",
+        },
         "show_reasoning": False,
         "streaming": False,
         "timestamps": False,      # Show [HH:MM] on user and assistant labels
