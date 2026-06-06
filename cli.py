@@ -3090,6 +3090,7 @@ class HermesCLI:
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        no_skills_index: bool = False,
     ):
         """
         Initialize the Hermes CLI.
@@ -3293,7 +3294,15 @@ class HermesCLI:
         # pass skip_context_files=True and skip_memory=True to AIAgent so
         # AGENTS.md/SOUL.md/.cursorrules and persistent memory are not loaded.
         self.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
-        
+        # --no-skills-index: suppress <available_skills> block from system prompt.
+        # Implied by ignore_rules (--ignore-rules already strips all user context).
+        # Also honoured via HERMES_NO_SKILLS_INDEX=1 env var.
+        self.no_skills_index = (
+            no_skills_index
+            or self.ignore_rules
+            or os.environ.get("HERMES_NO_SKILLS_INDEX", "").lower() in ("1", "true", "yes")
+        )
+
         # Ephemeral system prompt: env var takes precedence, then config
         self.system_prompt = (
             os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
@@ -5259,6 +5268,7 @@ class HermesCLI:
                 pass_session_id=self.pass_session_id,
                 skip_context_files=self.ignore_rules,
                 skip_memory=self.ignore_rules,
+                skip_skills_index=self.no_skills_index,
                 tool_progress_callback=self._on_tool_progress,
                 tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
                 tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
@@ -15721,6 +15731,7 @@ def main(
     pass_session_id: bool = False,
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    no_skills_index: bool = False,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -15840,6 +15851,7 @@ def main(
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
+        no_skills_index=no_skills_index,
     )
 
     if parsed_skills:
