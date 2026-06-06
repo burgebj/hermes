@@ -169,6 +169,47 @@ class MemoryStore:
             "user": self._render_block("user", sanitized_user),
         }
 
+    def get_readout(self) -> dict:
+        """Return current memory state for display by platform handlers.
+
+        Re-reads from disk to pick up writes from other sessions, then
+        returns a structured dict with entries, character counts, limits,
+        and percentages for both stores.
+
+        Returns:
+            {
+                "memory": {
+                    "entries": [...],
+                    "char_count": int,
+                    "char_limit": int,
+                    "pct": int,
+                },
+                "user": {
+                    "entries": [...],
+                    "char_count": int,
+                    "char_limit": int,
+                    "pct": int,
+                },
+            }
+        """
+        self.load_from_disk()
+
+        def _build(target: str, entries: list) -> dict:
+            count = len(ENTRY_DELIMITER.join(entries)) if entries else 0
+            limit = self._char_limit(target)
+            pct = min(100, int((count / limit) * 100)) if limit > 0 else 0
+            return {
+                "entries": entries,
+                "char_count": count,
+                "char_limit": limit,
+                "pct": pct,
+            }
+
+        return {
+            "memory": _build("memory", self.memory_entries),
+            "user": _build("user", self.user_entries),
+        }
+
     @staticmethod
     def _sanitize_entries_for_snapshot(entries: List[str], filename: str) -> List[str]:
         """Return ``entries`` with any threat-matching entry replaced by a placeholder.
@@ -597,6 +638,46 @@ class MemoryStore:
                 raise
         except (OSError, IOError) as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
+
+
+def parse_memory_command(args_str: str) -> dict:
+    """Parse /memory command arguments.
+
+    V1 (read-only):
+        ""          -> {"action": "read", "target": "all"}
+        "memory"    -> {"action": "read", "target": "memory"}
+        "user"      -> {"action": "read", "target": "user"}
+
+    V2 (future write):
+        "remove memory 3"  -> {"action": "remove", "target": "memory", "index": 3}
+        "remove user 1"    -> {"action": "remove", "target": "user", "index": 1}
+
+    Returns:
+        {"action": str, "target": str, ...} or {"error": str}
+    """
+    args = (args_str or "").strip().lower().split()
+
+    if not args:
+        return {"action": "read", "target": "all"}
+
+    if args[0] in ("memory", "user"):
+        return {"action": "read", "target": args[0]}
+
+    if args[0] == "remove":
+        if len(args) < 3:
+            return {"error": "Usage: /memory remove memory|user <entry-number>"}
+        target = args[1]
+        if target not in ("memory", "user"):
+            return {"error": f"Unknown target '{target}'. Use 'memory' or 'user'."}
+        try:
+            index = int(args[2])
+        except ValueError:
+            return {"error": f"'{args[2]}' is not a valid entry number."}
+        if index < 1:
+            return {"error": "Entry number must be 1 or greater."}
+        return {"action": "remove", "target": target, "index": index}
+
+    return {"error": f"Unknown subcommand '{args[0]}'. Use: /memory [memory|user]"}
 
 
 def memory_tool(

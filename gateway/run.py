@@ -8210,6 +8210,9 @@ class GatewayRunner:
         if canonical == "profile":
             return await self._handle_profile_command(event)
 
+        if canonical == "memory":
+            return await self._handle_memory_command(event)
+
         if canonical == "whoami":
             return await self._handle_whoami_command(event)
 
@@ -10252,6 +10255,34 @@ class GatewayRunner:
         ]
 
         return "\n".join(lines)
+
+    async def _handle_memory_command(self, event: MessageEvent) -> str:
+        """Handle /memory — show persistent memory contents (MEMORY.md + USER.md)."""
+        from tools.memory_tool import MemoryStore, parse_memory_command
+        from tools.memory_format import format_memory_markdown, format_memory_plain
+
+        args_str = (event.get_command_args() or "").strip()
+        parsed = parse_memory_command(args_str)
+
+        if "error" in parsed:
+            return parsed["error"]
+
+        if parsed.get("action") != "read":
+            return "Only /memory and /memory [memory|user] are supported here."
+
+        try:
+            store = MemoryStore()
+            data = store.get_readout()
+        except Exception as exc:
+            return f"Couldn't read memory: {exc}"
+
+        # iMessage clients (Sendblue cloud-relay) auto-format underscores as
+        # italic markers and strip them from the rendered message, mangling
+        # identifiers like image_url -> imageurl. Fall back to plain text on
+        # that platform; everything else gets markdown.
+        if event.source.platform == Platform.SENDBLUE:
+            return format_memory_plain(data, parsed["target"])
+        return format_memory_markdown(data, parsed["target"])
 
 
     def _check_slash_access(
