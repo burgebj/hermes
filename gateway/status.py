@@ -360,7 +360,22 @@ def _pid_exists(pid: int) -> bool:
     """
     try:
         import psutil  # type: ignore
-        return bool(psutil.pid_exists(int(pid)))
+        if not psutil.pid_exists(int(pid)):
+            return False
+        # On POSIX, os.kill(pid, 0) and psutil.pid_exists() return True for
+        # zombie processes (the kernel keeps the PID until the parent wait()s).
+        # A zombie is not "alive" — it can't be signalled and its resources are
+        # gone.  Callers that decide whether to SIGTERM/SIGKILL based on this
+        # check would otherwise try to signal a corpse and sleep the full
+        # graceful-shutdown timeout for nothing.
+        if not _IS_WINDOWS:
+            try:
+                return psutil.Process(int(pid)).status() != psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                return False
+            except psutil.AccessDenied:
+                return True  # process exists but status unreadable
+        return True
     except ImportError:
         pass  # Fall through to stdlib fallback.
 

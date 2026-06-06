@@ -359,6 +359,75 @@ class TestGatewayRuntimeStatus:
         assert payload["platforms"]["discord"]["error_message"] is None
 
 
+class TestPidExists:
+    """Tests for _pid_exists zombie-detection fix."""
+
+    def test_zombie_returns_false(self, monkeypatch):
+        """On POSIX, a zombie process should return False — it's not alive."""
+        import psutil as _real_psutil
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+
+        class FakeProcess:
+            def status(self):
+                return _real_psutil.STATUS_ZOMBIE
+
+        monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+        monkeypatch.setattr("psutil.Process", lambda pid: FakeProcess())
+
+        assert status._pid_exists(999) is False
+
+    def test_running_process_returns_true(self, monkeypatch):
+        """A normally running process should return True."""
+        import psutil as _real_psutil
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+
+        class FakeProcess:
+            def status(self):
+                return _real_psutil.STATUS_RUNNING
+
+        monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+        monkeypatch.setattr("psutil.Process", lambda pid: FakeProcess())
+
+        assert status._pid_exists(999) is True
+
+    def test_nonexistent_pid_returns_false(self, monkeypatch):
+        """A PID that doesn't exist should return False."""
+        monkeypatch.setattr("psutil.pid_exists", lambda pid: False)
+
+        assert status._pid_exists(999) is False
+
+    def test_race_pid_exits_between_check_and_process(self, monkeypatch):
+        """pid_exists returns True but Process() raises NoSuchProcess (race)."""
+        import psutil as _real_psutil
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+        monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+        monkeypatch.setattr(
+            "psutil.Process",
+            lambda pid: (_ for _ in ()).throw(_real_psutil.NoSuchProcess(pid)),
+        )
+
+        assert status._pid_exists(999) is False
+
+    def test_windows_skips_zombie_check(self, monkeypatch):
+        """On Windows there are no zombies — psutil.pid_exists is the final answer."""
+        monkeypatch.setattr(status, "_IS_WINDOWS", True)
+        monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+
+        assert status._pid_exists(999) is True
+
+    def test_access_denied_returns_true(self, monkeypatch):
+        """If status() raises AccessDenied, assume alive — can't prove otherwise."""
+        import psutil as _real_psutil
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+        monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+        monkeypatch.setattr(
+            "psutil.Process",
+            lambda pid: (_ for _ in ()).throw(_real_psutil.AccessDenied(pid)),
+        )
+
+        assert status._pid_exists(999) is True
+
+
 class TestTerminatePid:
     def test_force_uses_taskkill_on_windows(self, monkeypatch):
         calls = []
