@@ -580,6 +580,31 @@ terminal(command="hermes chat -q 'Research GRPO papers and write summary to ~/re
 terminal(command="hermes chat -q 'Set up CI/CD for ~/myapp'", background=true)
 ```
 
+### Fire-and-Forget Dispatch Pattern
+
+If you want a sub-agent to keep running after the current turn returns, launch a
+fresh Hermes session in the background instead of waiting on `delegate_task`:
+
+```
+terminal(
+  command="hermes chat -q 'Search restaurants in Yangpu and save the shortlist to ~/tmp/yangpu.md' --quiet 2>&1",
+  background=true,
+  notify_on_complete=true,
+  timeout=120
+)
+```
+
+Why this works:
+
+- the main turn returns quickly with an acknowledgment
+- the child runs as a fully independent Hermes session
+- `notify_on_complete=true` injects completion output on the next turn without
+  manual polling
+- the background session survives even if the parent turn has already ended
+
+Use this when you want "fire-and-forget" behavior. Use `delegate_task` when the
+parent must block and consume the child summary before continuing.
+
 ### Interactive PTY Mode (via tmux)
 
 Hermes uses prompt_toolkit, which requires a real terminal. Use tmux for interactive spawning:
@@ -632,7 +657,7 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Prefer `delegate_task` for quick subtasks** — less overhead than spawning a full process
 - **Use `-w` (worktree mode)** when spawning agents that edit code — prevents git conflicts
 - **Set timeouts** for one-shot mode — complex tasks can take 5-10 minutes
-- **Use `hermes chat -q` for fire-and-forget** — no PTY needed
+- **Use `hermes chat -q` + `background=true` + `notify_on_complete=true` for fire-and-forget** — no PTY needed
 - **Use tmux for interactive sessions** — raw PTY mode has `\r` vs `\n` issues with prompt_toolkit
 - **For scheduled tasks**, use the `cronjob` tool instead of spawning — handles delivery and retry
 
