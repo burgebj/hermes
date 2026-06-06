@@ -16,8 +16,9 @@ from typing import List, Optional, Callable
 
 
 # Maximum number of predefined choices the agent can offer.
-# A 5th "Other (type your answer)" option is always appended by the UI.
-MAX_CHOICES = 4
+# An "Other (type your answer)" option is always appended by the UI, so
+# the user sees at most MAX_CHOICES + 1 actionable buttons.
+MAX_CHOICES = 10
 
 
 def clarify_tool(
@@ -89,8 +90,8 @@ CLARIFY_SCHEMA = {
     "description": (
         "Ask the user a question when you need clarification, feedback, or a "
         "decision before proceeding. Supports two modes:\n\n"
-        "1. **Multiple choice** — provide up to 4 choices. The user picks one "
-        "or types their own answer via a 5th 'Other' option.\n"
+        "1. **Multiple choice** — provide up to 10 choices. The user picks one "
+        "or types their own answer via the appended 'Other' option.\n"
         "2. **Open-ended** — omit choices entirely. The user types a free-form "
         "response.\n\n"
         "Use this tool when:\n"
@@ -114,7 +115,7 @@ CLARIFY_SCHEMA = {
                 "items": {"type": "string"},
                 "maxItems": MAX_CHOICES,
                 "description": (
-                    "Up to 4 answer choices. Omit this parameter entirely to "
+                    "Up to 10 answer choices. Omit this parameter entirely to "
                     "ask an open-ended question. When provided, the UI "
                     "automatically appends an 'Other (type your answer)' option."
                 ),
