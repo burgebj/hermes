@@ -2129,6 +2129,70 @@ class TestResponsesStreaming:
                 assert '"output": [{"type": "input_text", "text": "{\\"content\\":\\"hello\\"}"}]' in body
 
     @pytest.mark.asyncio
+    async def test_response_completed_omits_repeated_large_tool_outputs(self, adapter):
+        """The terminal response.completed SSE event must stay below client line limits.
+
+        Tool outputs are already sent as response.output_item events while the
+        stream is active. Repeating every large tool result again in the final
+        response.completed line can exceed Python http.client's 128 KiB line
+        cap used by Open WebUI.
+        """
+        app = _create_app(adapter)
+        large_result = "x" * 70_000
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                start_cb = kwargs.get("tool_start_callback")
+                complete_cb = kwargs.get("tool_complete_callback")
+                text_cb = kwargs.get("stream_delta_callback")
+                for idx in range(2):
+                    call_id = f"call_{idx}"
+                    if start_cb:
+                        start_cb(call_id, "read_file", {"path": f"/tmp/{idx}.txt"})
+                    if complete_cb:
+                        complete_cb(call_id, "read_file", {"path": f"/tmp/{idx}.txt"}, large_result)
+                if text_cb:
+                    text_cb("done")
+                return (
+                    {"final_response": "done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={"model": "hermes-agent", "input": "read big files", "stream": True},
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+        completed_payload = None
+        completed_line = None
+        for line in body.splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = json.loads(line[len("data: "):])
+            if payload.get("type") == "response.completed":
+                completed_payload = payload
+                completed_line = line
+                break
+
+        assert completed_payload is not None
+        assert completed_line is not None
+        assert len(completed_line.encode()) < 131_072
+        assert large_result in body
+        assert large_result not in json.dumps(completed_payload)
+        tool_outputs = [
+            item
+            for item in completed_payload["response"]["output"]
+            if item.get("type") == "function_call_output"
+        ]
+        assert tool_outputs
+        assert all(item["output"][0]["text"].startswith("[omitted") for item in tool_outputs)
+        stored = adapter._response_store.get(completed_payload["response"]["id"])
+        assert stored is not None
+        assert large_result in json.dumps(stored["response"])
+
+    @pytest.mark.asyncio
     async def test_streamed_response_is_stored_for_get(self, adapter):
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
