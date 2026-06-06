@@ -29,6 +29,7 @@ import shutil
 import sys
 import json
 import re
+import sqlite3
 import concurrent.futures
 import base64
 import atexit
@@ -3674,6 +3675,53 @@ class HermesCLI:
         emoji = "⏱" if live else "⏲"
         return f"{emoji} {time_str}"
 
+    # ── RTK savings (read from rtk tracking DB) ──────────────────────
+    _rtk_cache = None          # (saved_tokens, cmd_count, avg_pct, timestamp)
+    _rtk_cache_ttl = 5.0       # seconds between DB reads
+
+    def _rtk_savings(self) -> Optional[Dict[str, Any]]:
+        """Read RTK token savings from the tracking database.
+
+        Returns dict with 'saved', 'count', 'avg_pct' or None if rtk is
+        unavailable.  Cached for ``_rtk_cache_ttl`` seconds to avoid hitting
+        SQLite on every status-bar refresh.
+        """
+        try:
+            import time as _time
+            now = _time.monotonic()
+            cached = HermesCLI._rtk_cache
+            if cached and (now - cached[3]) < HermesCLI._rtk_cache_ttl:
+                return {"saved": cached[0], "count": cached[1], "avg_pct": cached[2]} if cached[0] > 0 else None
+
+            xdg = os.environ.get("XDG_DATA_HOME", "")
+            db_path = Path(xdg) / "rtk" / "history.db" if xdg else Path.home() / ".local" / "share" / "rtk" / "history.db"
+            if not db_path.exists():
+                HermesCLI._rtk_cache = (0, 0, 0.0, now)
+                return None
+
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
+            try:
+                cur = conn.execute(
+                    "SELECT COALESCE(SUM(saved_tokens),0),"
+                    " COUNT(*),"
+                    " COALESCE(ROUND(AVG(savings_pct),1),0.0)"
+                    " FROM commands"
+                )
+                row = cur.fetchone()
+            finally:
+                conn.close()
+            saved, count, avg_pct = row[0], row[1], row[2]
+            HermesCLI._rtk_cache = (saved, count, avg_pct, now)
+            return {"saved": saved, "count": count, "avg_pct": avg_pct} if saved > 0 else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fmt_rtk_tokens(n: int) -> str:
+        if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+        if n >= 1_000: return f"{n/1_000:.1f}K"
+        return str(n)
+
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
         # Prefer the agent's model name — it updates on fallback.
         # self.model reflects the originally configured model and never
@@ -3743,6 +3791,17 @@ class HermesCLI:
         snapshot["session_completion_tokens"] = getattr(agent, "session_completion_tokens", 0) or 0
         snapshot["session_total_tokens"] = getattr(agent, "session_total_tokens", 0) or 0
         snapshot["session_api_calls"] = getattr(agent, "session_api_calls", 0) or 0
+
+        # ── RTK savings ──
+        rtk = self._rtk_savings()
+        if rtk:
+            snapshot["rtk_saved"] = rtk["saved"]
+            snapshot["rtk_count"] = rtk["count"]
+            snapshot["rtk_avg_pct"] = rtk["avg_pct"]
+        else:
+            snapshot["rtk_saved"] = 0
+            snapshot["rtk_count"] = 0
+            snapshot["rtk_avg_pct"] = 0.0
 
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
@@ -3983,6 +4042,9 @@ class HermesCLI:
                 if bg_proc_count:
                     parts.append(f"⚙ {bg_proc_count}")
                 parts.append(duration_label)
+                rtk_saved = snapshot.get("rtk_saved", 0)
+                if rtk_saved > 0:
+                    parts.append(f"⟡ {HermesCLI._fmt_rtk_tokens(rtk_saved)}")
                 if yolo_active:
                     parts.append("⚠ YOLO")
                 return self._trim_status_bar_text(" · ".join(parts), width)
@@ -4008,6 +4070,11 @@ class HermesCLI:
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
                 parts.append(prompt_elapsed)
+            # ── RTK savings in status bar ──
+            rtk_saved = snapshot.get("rtk_saved", 0)
+            if rtk_saved > 0:
+                rtk_label = f"⟡ {HermesCLI._fmt_rtk_tokens(rtk_saved)}/{snapshot.get('rtk_avg_pct', 0)}%"
+                parts.append(rtk_label)
             if yolo_active:
                 parts.append("⚠ YOLO")
             return self._trim_status_bar_text(" │ ".join(parts), width)
@@ -4065,6 +4132,11 @@ class HermesCLI:
                         ("class:status-bar-dim", " · "),
                         ("class:status-bar-dim", duration_label),
                     ])
+                    rtk_saved = snapshot.get("rtk_saved", 0)
+                    if rtk_saved > 0:
+                        rtk_label = f"⟡ {HermesCLI._fmt_rtk_tokens(rtk_saved)}"
+                        frags.append(("class:status-bar-dim", " · "))
+                        frags.append(("class:status-bar-strong", rtk_label))
                     if yolo_active:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append(("class:status-bar-yolo", "⚠ YOLO"))
@@ -4109,6 +4181,12 @@ class HermesCLI:
                     if prompt_elapsed:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-dim", prompt_elapsed))
+                    # ── RTK savings (compact: ⟡ 432K/21%) ──
+                    rtk_saved = snapshot.get("rtk_saved", 0)
+                    if rtk_saved > 0:
+                        rtk_label = f"⟡ {HermesCLI._fmt_rtk_tokens(rtk_saved)}/{snapshot.get('rtk_avg_pct', 0)}%"
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-strong", rtk_label))
                     if yolo_active:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-yolo", "⚠ YOLO"))
