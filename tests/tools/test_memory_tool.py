@@ -375,6 +375,66 @@ class TestMemoryStorePersistence:
         store.load_from_disk()
         assert len(store.memory_entries) == 2
 
+    def test_dedup_with_exact_duplicates(self, tmp_path, monkeypatch):
+        """load_from_disk deduplicates exact-string duplicates returned by _read_file.
+
+        We monkeypatch _read_file to return pre-stripped duplicates, ensuring
+        the dedup logic in load_from_disk itself is exercised (not just
+        _read_file's stripping behavior).
+        """
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            MemoryStore, "_read_file",
+            lambda self, path: [
+                "the same content", "the same content", "unique entry"
+            ] if path.name == "MEMORY.md" else [],
+        )
+        store = MemoryStore()
+        store.load_from_disk()
+        assert len(store.memory_entries) == 2
+        assert store.memory_entries[0] == "the same content"
+
+    def test_dedup_preserves_first_occurrence(self, tmp_path, monkeypatch):
+        """When duplicates exist, the first (oldest) entry is kept."""
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            MemoryStore, "_read_file",
+            lambda self, path: [
+                "original version", "original version"
+            ] if path.name == "MEMORY.md" else [],
+        )
+        store = MemoryStore()
+        store.load_from_disk()
+        assert len(store.memory_entries) == 1
+        assert store.memory_entries[0] == "original version"
+
+    def test_dedup_no_duplicates_passes_through(self, tmp_path, monkeypatch):
+        """When _read_file returns unique entries, all are preserved."""
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            MemoryStore, "_read_file",
+            lambda self, path: [
+                "entry A", "entry B", "entry C"
+            ] if path.name == "MEMORY.md" else [],
+        )
+        store = MemoryStore()
+        store.load_from_disk()
+        assert len(store.memory_entries) == 3
+
+    def test_user_entries_also_deduplicated(self, tmp_path, monkeypatch):
+        """USER.md dedup uses the same identity-based logic."""
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            MemoryStore, "_read_file",
+            lambda self, path: [
+                "I like pie", "I like pie", "I like cake"
+            ] if path.name == "USER.md" else [],
+        )
+        store = MemoryStore()
+        store.load_from_disk()
+        assert len(store.user_entries) == 2
+        assert store.user_entries[0] == "I like pie"
+
 
 class TestMemoryStoreSnapshot:
     def test_snapshot_frozen_at_load(self, store):
