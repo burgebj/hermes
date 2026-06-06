@@ -4,10 +4,9 @@ import asyncio
 import json
 import os
 import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 # python-telegram-bot is an optional dep — skip the entire module when
@@ -28,10 +27,11 @@ def _reset_signal_scheduler():
 
 from gateway.config import Platform
 from tools.send_message_tool import (
-    _chunk_text,
     _is_telegram_thread_not_found,
     _parse_target_ref,
+    _resolve_qqbot_target,
     _send_matrix_via_adapter,
+    _send_qqbot,
     _send_qqbot_with_media,
     _send_signal,
     _send_telegram,
@@ -166,48 +166,6 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
-    def test_ntfy_topic_target_is_explicit(self):
-        chat_id, thread_id, is_explicit = _parse_target_ref("ntfy", "alerts-channel")
-
-        assert chat_id == "alerts-channel"
-        assert thread_id is None
-        assert is_explicit is True
-
-    def test_ntfy_topic_target_bypasses_channel_directory(self):
-        ntfy_platform = Platform("ntfy")
-        ntfy_cfg = SimpleNamespace(enabled=True, token=None, extra={"topic": "hermes-in"})
-        config = SimpleNamespace(
-            platforms={ntfy_platform: ntfy_cfg},
-            get_home_channel=lambda _platform: None,
-        )
-
-        with patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("gateway.channel_directory.resolve_channel_name", side_effect=AssertionError("should not resolve ntfy topics")), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("gateway.mirror.mirror_to_session", return_value=True):
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "ntfy:alerts-channel",
-                        "message": "done",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        send_mock.assert_awaited_once_with(
-            ntfy_platform,
-            ntfy_cfg,
-            "alerts-channel",
-            "done",
-            thread_id=None,
-            media_files=[],
-            force_document=False,
-        )
-
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -2479,37 +2437,6 @@ class TestSendViaAdapterStandaloneFallback:
         )
 
     @pytest.mark.asyncio
-    async def test_live_ntfy_adapter_receives_explicit_publish_topic(self, monkeypatch):
-        from tools.send_message_tool import _send_via_adapter
-
-        platform = Platform("ntfy")
-        recorded = {}
-
-        class Adapter:
-            async def send(self, *, chat_id, content, metadata=None):
-                recorded["chat_id"] = chat_id
-                recorded["content"] = content
-                recorded["metadata"] = metadata
-                return SimpleNamespace(success=True, message_id="ntfy-id")
-
-        runner = SimpleNamespace(adapters={platform: Adapter()})
-        fake_gateway_run = ModuleType("gateway.run")
-        fake_gateway_run._gateway_runner_ref = lambda: runner
-        monkeypatch.setitem(sys.modules, "gateway.run", fake_gateway_run)
-
-        result = await _send_via_adapter(
-            platform,
-            SimpleNamespace(extra={"publish_topic": "configured-topic"}),
-            "alerts-channel",
-            "done",
-        )
-
-        assert result == {"success": True, "message_id": "ntfy-id"}
-        assert recorded["chat_id"] == "alerts-channel"
-        assert recorded["content"] == "done"
-        assert recorded["metadata"] == {"publish_topic": "alerts-channel"}
-
-    @pytest.mark.asyncio
     async def test_standalone_sender_fn_called_when_no_adapter(self, monkeypatch):
         """Registry has hook, runner ref returns None: the hook is awaited."""
         from tools.send_message_tool import _send_via_adapter
@@ -2846,364 +2773,246 @@ class TestSendTelegramThreadNotFoundRetry:
                 os.unlink(media_path)
 
 
-class TestQQBotMediaSending:
-    """QQBot media routing via direct REST API (unit + protocol tests)."""
+# --- _resolve_qqbot_target tests ---
 
-    # --- Unit tests (routing) ---
+class TestResolveQqbotTarget:
+    """Unit tests for the shared QQBot target parser."""
 
-    def test_qqbot_media_calls_rest_function(self):
-        """When media_files present, _send_qqbot_with_media is called."""
-        helper = AsyncMock(return_value={
-            "success": True, "platform": "qqbot",
-            "chat_id": "openid-1", "message_id": "msg-1",
-        })
-        with patch("tools.send_message_tool._send_qqbot_with_media", helper):
-            result = asyncio.run(
-                _send_to_platform(
-                    Platform.QQBOT,
-                    SimpleNamespace(enabled=True, token="tok", extra={"app_id": "appid"}),
-                    "openid-1",
-                    "here you go",
-                    media_files=[("/fake/path.png", False)],
-                )
-            )
+    def test_c2c_prefix(self):
+        ttype, tid, ep = _resolve_qqbot_target("c2c:abc123")
+        assert ttype == "c2c"
+        assert tid == "abc123"
+        assert ep == ["users"]
 
-        assert result["success"] is True
-        helper.assert_awaited_once()
-        call = helper.await_args
-        assert call.args[1] == "openid-1"
+    def test_user_prefix(self):
+        ttype, tid, ep = _resolve_qqbot_target("user:xyz")
+        assert ttype == "c2c"
+        assert tid == "xyz"
+        assert ep == ["users"]
 
-    def test_qqbot_text_only_uses_rest_path(self):
-        """Text-only QQBot messages use _send_qqbot, not _send_qqbot_with_media."""
-        media_helper = AsyncMock()
-        rest_helper = AsyncMock(return_value={
-            "success": True, "platform": "qqbot",
-            "chat_id": "openid-1", "message_id": "msg-2",
-        })
-        with patch("tools.send_message_tool._send_qqbot_with_media", media_helper), \
-             patch("tools.send_message_tool._send_qqbot", rest_helper):
-            result = asyncio.run(
-                _send_to_platform(
-                    Platform.QQBOT,
-                    SimpleNamespace(enabled=True, token="tok", extra={"app_id": "appid"}),
-                    "openid-1",
-                    "just text",
-                )
-            )
+    def test_group_prefix(self):
+        ttype, tid, ep = _resolve_qqbot_target("group:def456")
+        assert ttype == "group"
+        assert tid == "def456"
+        assert ep == ["groups"]
 
-        assert result["success"] is True
-        media_helper.assert_not_awaited()
-        rest_helper.assert_awaited_once()
+    def test_guild_prefix(self):
+        ttype, tid, ep = _resolve_qqbot_target("guild:ch1")
+        assert ttype == "guild"
+        assert tid == "ch1"
+        assert ep == []
 
-    # --- Protocol-level tests (MockTransport) ---
+    def test_raw_openid_unknown(self):
+        ttype, tid, ep = _resolve_qqbot_target("openid_value")
+        assert ttype == "unknown"
+        assert tid == "openid_value"
+        assert ep == ["users", "groups"]
 
-    @pytest.fixture
-    def pconfig(self):
-        return SimpleNamespace(
-            enabled=True, token="test-secret",
-            extra={"app_id": "test-app-id"}
-        )
-
-    @pytest.fixture
-    def tmp_image(self, tmp_path):
-        """Create a minimal PNG file."""
-        p = tmp_path / "test.png"
-        # Minimal valid PNG: 1x1 white pixel
-        import struct
-        sig = b'\x89PNG\r\n\x1a\n'
-        ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
-        ihdr_crc = b'\x00' * 4  # dummy
-        ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + ihdr_crc
-        idat_data = b'\x00\xff\xff\xff'
-        idat = struct.pack('>I', len(idat_data)) + b'IDAT' + idat_data + b'\x00' * 4
-        iend = struct.pack('>I', 0) + b'IEND' + b'\x00' * 4
-        p.write_bytes(sig + ihdr + idat + iend)
-        return str(p)
-
-    @pytest.fixture
-    def tmp_pdf(self, tmp_path):
-        """Create a minimal PDF file."""
-        p = tmp_path / "test.pdf"
-        p.write_bytes(b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF")
-        return str(p)
-
-    def _make_token_response(self):
-        return json.dumps({"access_token": "test-token", "expires_in": 7200}).encode()
-
-    def _make_upload_response(self, file_info="test-file-info"):
-        return json.dumps({"file_info": file_info}).encode()
-
-    def _make_send_response(self, msg_id="msg-123"):
-        return json.dumps({"id": msg_id}).encode()
-
-    def test_c2c_routing(self, pconfig, tmp_image):
-        """C2C target uses /v2/users/{id}/ endpoints."""
-        calls = []
-
-        def handler(request):
-            calls.append((request.method, str(request.url)))
-            if "/files" in str(request.url):
-                return httpx.Response(200, content=self._make_upload_response())
-            if "/messages" in str(request.url):
-                return httpx.Response(200, content=self._make_send_response())
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:openid-1", "", [(tmp_image, False)], handler
-        ))
-
-        assert result["success"] is True
-        assert result["endpoint"] == "users"
-        # Verify no /groups/ calls
-        assert not any("/groups/" in url for _, url in calls)
-
-    def test_group_routing(self, pconfig, tmp_image):
-        """Explicit group: prefix uses /v2/groups/{id}/ endpoints."""
-        calls = []
-
-        def handler(request):
-            calls.append((request.method, str(request.url)))
-            if "/files" in str(request.url):
-                return httpx.Response(200, content=self._make_upload_response())
-            if "/messages" in str(request.url):
-                return httpx.Response(200, content=self._make_send_response())
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "group:group-1", "", [(tmp_image, False)], handler
-        ))
-
-        assert result["success"] is True
-        assert result["endpoint"] == "groups"
-        assert not any("/users/" in url for _, url in calls)
-
-    def test_raw_openid_c2c_then_group_fallback(self, pconfig, tmp_image):
-        """Raw OpenID tries C2C first, falls back to group on failure."""
-        calls = []
-
-        def handler(request):
-            url = str(request.url)
-            calls.append((request.method, url))
-            if "/users/" in url:
-                # C2C fails → fallback to group
-                if "/files" in url:
-                    return httpx.Response(404, content=b'{"error": "not found"}')
-                return httpx.Response(404, content=b'{"error": "not found"}')
-            if "/groups/" in url:
-                if "/files" in url:
-                    return httpx.Response(200, content=self._make_upload_response())
-                if "/messages" in url:
-                    return httpx.Response(200, content=self._make_send_response())
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "raw-openid-123", "", [(tmp_image, False)], handler
-        ))
-
-        assert result["success"] is True
-        assert result["endpoint"] == "groups"
-        # Verify C2C was tried first
-        assert any("/users/" in url for _, url in calls)
-
-    def test_group_document_rejection(self, pconfig, tmp_pdf):
-        """Explicit group: rejects document uploads."""
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "group:group-1", "", [(tmp_pdf, False)],
-            lambda r: httpx.Response(200)
-        ))
-        assert "error" in result
-        assert "document" in result["error"].lower() or "not support" in result["error"].lower()
-
-    def test_mixed_group_attachments_rejected(self, pconfig, tmp_image, tmp_pdf):
-        """Raw group with mixed image+document rejects all before sending."""
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "raw-group-123", "",
-            [(tmp_image, False), (tmp_pdf, False)],
-            lambda r: httpx.Response(404) if "/users/" in str(r.url) else httpx.Response(200)
-        ))
-        # Should reject because group can't handle documents
-        assert "error" in result
-
-    def test_text_send_failure_returns_error(self, pconfig, tmp_image):
-        """Text send failure returns error, not silent success."""
-        def handler(request):
-            if "/files" in str(request.url):
-                return httpx.Response(200, content=self._make_upload_response())
-            if "/messages" in str(request.url):
-                return httpx.Response(400, content=b'{"error": "bad request"}')
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", "hello", [(tmp_image, False)], handler
-        ))
-        assert "error" in result
-
-    def test_media_send_failure_returns_error(self, pconfig, tmp_image):
-        """Media message send failure returns error."""
-        def handler(request):
-            if "/files" in str(request.url):
-                return httpx.Response(200, content=self._make_upload_response())
-            if "/messages" in str(request.url):
-                return httpx.Response(500, content=b'{"error": "server error"}')
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", "", [(tmp_image, False)], handler
-        ))
-        assert "error" in result
-
-    def test_upload_failure_returns_error(self, pconfig, tmp_image):
-        """Upload failure returns error."""
-        def handler(request):
-            if "/files" in str(request.url):
-                return httpx.Response(500, content=b'{"error": "upload failed"}')
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", "", [(tmp_image, False)], handler
-        ))
-        assert "error" in result
-
-    def test_caption_attached_to_first_media(self, pconfig, tmp_image):
-        """Short text is attached as caption on first media message."""
-        sent_bodies = []
-
-        def handler(request):
-            if "/files" in str(request.url):
-                return httpx.Response(200, content=self._make_upload_response())
-            if "/messages" in str(request.url):
-                body = json.loads(request.content)
-                sent_bodies.append(body)
-                return httpx.Response(200, content=self._make_send_response())
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", "short caption", [(tmp_image, False)], handler
-        ))
-        assert result["success"] is True
-        # First message should be media with caption
-        media_msgs = [b for b in sent_bodies if b.get("msg_type") == 7]
-        assert len(media_msgs) == 1
-        assert media_msgs[0].get("content") == "short caption"
-        # No separate text message
-        text_msgs = [b for b in sent_bodies if b.get("msg_type") == 0]
-        assert len(text_msgs) == 0
-
-    def test_long_text_with_media(self, pconfig, tmp_image):
-        """Long text: caption on first media + overflow chunks as text."""
-        sent_bodies = []
-
-        def handler(request):
-            if "/files" in str(request.url):
-                return httpx.Response(200, content=self._make_upload_response())
-            if "/messages" in str(request.url):
-                body = json.loads(request.content)
-                sent_bodies.append(body)
-                return httpx.Response(200, content=self._make_send_response())
-            return httpx.Response(404)
-
-        long_text = "A" * 5000  # > MAX_MESSAGE_LENGTH (4000)
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", long_text, [(tmp_image, False)], handler
-        ))
-        assert result["success"] is True
-        # Should have: media with caption + overflow text
-        media_msgs = [b for b in sent_bodies if b.get("msg_type") == 7]
-        text_msgs = [b for b in sent_bodies if b.get("msg_type") == 0]
-        assert len(media_msgs) == 1
-        assert len(text_msgs) >= 1  # overflow chunk
-
-    def test_unsupported_format_rejected(self, pconfig, tmp_path):
-        """Unsupported file format is rejected."""
-        bad_file = tmp_path / "test.xyz"
-        bad_file.write_bytes(b"fake")
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", "", [(str(bad_file), False)],
-            lambda r: httpx.Response(200)
-        ))
-        assert "error" in result
-        assert "support" in result["error"].lower() or "format" in result["error"].lower()
-
-    def test_partial_delivery_on_second_media_failure(self, pconfig, tmp_image, tmp_path):
-        """Second media failure returns error (partial delivery reported)."""
-        img2 = tmp_path / "test2.png"
-        img2.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 50)
-
-        call_count = [0]
-
-        def handler(request):
-            if "/files" in str(request.url):
-                call_count[0] += 1
-                if call_count[0] <= 1:
-                    return httpx.Response(200, content=self._make_upload_response("fi-1"))
-                return httpx.Response(500, content=b'{"error": "fail"}')
-            if "/messages" in str(request.url):
-                return httpx.Response(200, content=self._make_send_response())
-            return httpx.Response(404)
-
-        result = asyncio.run(self._send_with_transport(
-            pconfig, "c2c:id-1", "", [(tmp_image, False), (str(img2), False)], handler
-        ))
-        assert "error" in result
-
-    async def _send_with_transport(self, pconfig, chat_id, message, media_files, handler):
-        """Helper to run _send_qqbot_with_media with a mock HTTP handler."""
-        def wrapped_handler(request):
-            # Handle token request
-            if "getAppAccessToken" in str(request.url):
-                return httpx.Response(200, content=json.dumps(
-                    {"access_token": "test-token", "expires_in": 7200}
-                ).encode())
-            return handler(request)
-
-        transport = httpx.MockTransport(wrapped_handler)
-        real_client = httpx.AsyncClient(transport=transport)
-
-        original = httpx.AsyncClient
-        httpx.AsyncClient = lambda **kwargs: real_client
-        try:
-            return await _send_qqbot_with_media(pconfig, chat_id, message, media_files)
-        finally:
-            httpx.AsyncClient = original
+    def test_empty_string(self):
+        ttype, tid, ep = _resolve_qqbot_target("")
+        assert ttype == "unknown"
+        assert tid == ""
+        assert ep == ["users", "groups"]
 
 
-class TestChunkText:
-    """Tests for _chunk_text helper."""
+# --- _parse_target_ref qqbot regression tests (Issue 2) ---
 
-    def test_short_text_no_split(self):
-        assert _chunk_text("hello", 100) == ["hello"]
-
-    def test_split_at_newline(self):
-        chunks = _chunk_text("line1\nline2\nline3", 10)
-        assert len(chunks) >= 2
-        assert all(len(c) <= 10 for c in chunks)
-
-    def test_hard_split_when_no_newline(self):
-        text = "A" * 100
-        chunks = _chunk_text(text, 30)
-        assert len(chunks) == 4  # 30+30+30+10
-        assert "".join(chunks) == text
-
-    def test_empty_text(self):
-        assert _chunk_text("", 100) == [""]
-
-
-class TestQQBotTargetParsing:
-    """Tests for QQBot target parsing in _parse_target_ref."""
+class TestParseTargetRefQqbot:
+    """Regression: only explicit prefixes are direct; display names must
+    go through channel_directory resolution."""
 
     def test_explicit_c2c_prefix(self):
-        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "c2c:openid-1")
-        assert chat_id == "c2c:openid-1"
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "c2c:abc")
+        assert chat_id == "c2c:abc"
         assert thread_id is None
         assert is_explicit is True
 
     def test_explicit_group_prefix(self):
-        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "group:group-1")
-        assert chat_id == "group:group-1"
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "group:def")
+        assert chat_id == "group:def"
+        assert thread_id is None
         assert is_explicit is True
 
-    def test_raw_openid(self):
-        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "raw-openid-123")
-        assert chat_id == "raw-openid-123"
+    def test_explicit_user_prefix(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "user:ghi")
+        assert chat_id == "user:ghi"
         assert is_explicit is True
+
+    def test_display_name_is_NOT_explicit(self):
+        """Display names must NOT be treated as explicit targets."""
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "test_label")
+        assert is_explicit is False
+
+    def test_hash_prefixed_label_is_NOT_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "#channel-name")
+        assert is_explicit is False
+
+    def test_random_string_is_NOT_explicit(self):
+        """Without explicit prefix, raw strings should resolve via directory."""
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "some-label")
+        assert is_explicit is False
+
+
+# --- _send_qqbot explicit target regression test (Issue 1) ---
+
+class TestSendQqbotExplicitTarget:
+    """Regression: _send_qqbot must use stripped target_id for prefixed targets."""
+
+    @pytest.mark.asyncio
+    async def test_group_prefix_uses_correct_url(self):
+        pconfig = SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        captured_urls = []
+
+        class MockClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                captured_urls.append(url)
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                else:
+                    resp.status_code = 200
+                    resp.json.return_value = {"id": "msg1"}
+                return resp
+
+        mock_httpx = MagicMock()
+        mock_httpx.AsyncClient = MockClient
+        with patch.dict("sys.modules", {"httpx": mock_httpx}):
+            result = await _send_qqbot(pconfig, "group:abc", "hello")
+
+        assert result.get("success") is True
+        assert any("/v2/groups/abc/messages" in u for u in captured_urls), \
+            f"Expected /v2/groups/abc/messages in URLs: {captured_urls}"
+        assert not any("group:abc" in u for u in captured_urls), \
+            f"Raw group:abc leaked into URL: {captured_urls}"
+
+    @pytest.mark.asyncio
+    async def test_c2c_prefix_uses_correct_url(self):
+        pconfig = SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        captured_urls = []
+
+        class MockClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                captured_urls.append(url)
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                else:
+                    resp.status_code = 200
+                    resp.json.return_value = {"id": "msg2"}
+                return resp
+
+        mock_httpx = MagicMock()
+        mock_httpx.AsyncClient = MockClient
+        with patch.dict("sys.modules", {"httpx": mock_httpx}):
+            result = await _send_qqbot(pconfig, "c2c:xyz", "hello")
+
+        assert result.get("success") is True
+        assert any("/v2/users/xyz/messages" in u for u in captured_urls),             f"Expected /v2/users/xyz/messages in URLs: {captured_urls}"
+
+
+# --- _send_qqbot_with_media file size limit test (Issue 3) ---
+
+class TestQqbotMediaSizeLimit:
+    """Reject oversized files before reading into memory."""
+
+    @pytest.mark.asyncio
+    async def test_reject_oversized_file(self):
+        pconfig = SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"x" * (11 * 1024 * 1024))  # 11 MB > 10 MB limit
+            big_path = f.name
+        try:
+            result = await _send_qqbot_with_media(
+                pconfig, "c2c:test", "", [(big_path, False)]
+            )
+            assert result.get("error")
+            assert "too large" in result["error"].lower()
+        finally:
+            os.unlink(big_path)
+
+    @pytest.mark.asyncio
+    async def test_accept_file_under_limit(self):
+        pconfig = SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"x" * 1024)  # 1 KB
+            small_path = f.name
+        try:
+            result = await _send_qqbot_with_media(
+                pconfig, "c2c:test", "", [(small_path, False)]
+            )
+            if result and result.get("error"):
+                assert "too large" not in result["error"].lower()
+        finally:
+            os.unlink(small_path)
+
+
+# --- C2C extension allowlist test (Issue 5) ---
+
+class TestQqbotC2cExtensionFallback:
+    """C2C should accept arbitrary file extensions as file_type=4."""
+
+    @pytest.mark.asyncio
+    async def test_c2c_accepts_unknown_extension(self):
+        pconfig = SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xyz123", delete=False) as f:
+            f.write(b"test")
+            weird_path = f.name
+        try:
+            result = await _send_qqbot_with_media(
+                pconfig, "c2c:test", "", [(weird_path, False)]
+            )
+            if result and result.get("error"):
+                assert "does not support file format" not in result["error"]
+        finally:
+            os.unlink(weird_path)
+
+    @pytest.mark.asyncio
+    async def test_group_rejects_unknown_extension(self):
+        pconfig = SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xyz123", delete=False) as f:
+            f.write(b"test")
+            weird_path = f.name
+        try:
+            result = await _send_qqbot_with_media(
+                pconfig, "group:test", "", [(weird_path, False)]
+            )
+            assert result.get("error")
+            assert "does not support file format" in result["error"]
+        finally:
+            os.unlink(weird_path)

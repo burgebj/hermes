@@ -59,6 +59,10 @@ _QQBOT_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 _QQBOT_VIDEO_EXTS = {".mp4"}
 _QQBOT_VOICE_EXTS = {".silk", ".wav", ".mp3", ".flac"}
 _QQBOT_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"}
+# QQ Bot API inline upload limit — Base64 expands ~33%, and the JSON body
+# must fit in a single request.  Reject files above this raw size before
+# reading them into memory.
+_MAX_QQBOT_INLINE_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 # Telegram's Bot API sendAudio only accepts MP3 / M4A. Other audio
 # formats either route through sendVoice (Opus/OGG) or fall back to
 # document delivery.
@@ -402,12 +406,11 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
     if platform_name == "qqbot":
-        # QQBot explicit targets: "c2c:<openid>", "group:<openid>", or raw OpenID
+        # QQBot explicit targets: "c2c:<openid>", "user:<openid>", "group:<openid>"
+        # Only explicit prefixes are treated as direct IDs; everything else goes
+        # through channel_directory name resolution (e.g. display names, labels).
         ref = target_ref.strip()
         if ref.startswith(("c2c:", "user:", "group:")):
-            return ref, None, True
-        # Raw OpenID — treat as explicit (will resolve via C2C-then-group fallback)
-        if ref and not ref.startswith("#"):
             return ref, None, True
     if platform_name == "ntfy":
         topic = target_ref.strip()
@@ -1716,6 +1719,30 @@ def _check_send_message():
         return False
 
 
+def _resolve_qqbot_target(chat_id: str):
+    """Resolve a QQBot chat_id into (target_type, target_id, endpoint_order).
+
+    Handles explicit prefixes (c2c:, user:, group:) and raw OpenIDs.
+    Returns (target_type, target_id, ep_order) where:
+      - target_type: "c2c" | "group" | "unknown"
+      - target_id: stripped bare ID
+      - ep_order: list of endpoint prefixes to try
+    """
+    target_type = "unknown"
+    target_id = str(chat_id)
+    if ":" in target_id:
+        prefix, raw_id = target_id.split(":", 1)
+        prefix = prefix.lower()
+        if prefix in {"c2c", "user"}:
+            return "c2c", raw_id, ["users"]
+        elif prefix == "group":
+            return "group", raw_id, ["groups"]
+        elif prefix == "guild":
+            return "guild", raw_id, []  # unsupported for media
+    # Raw OpenID — try C2C first, fallback to group
+    return "unknown", target_id, ["users", "groups"]
+
+
 async def _send_qqbot(pconfig, chat_id, message):
     """Send via QQBot using the REST API directly (no WebSocket needed).
 
@@ -1735,6 +1762,8 @@ async def _send_qqbot(pconfig, chat_id, message):
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 
+    target_type, target_id, ep_order = _resolve_qqbot_target(chat_id)
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             # Step 1: Get access token
@@ -1747,43 +1776,36 @@ async def _send_qqbot(pconfig, chat_id, message):
             token_data = token_resp.json()
             access_token = token_data.get("access_token")
             if not access_token:
-                return _error(f"QQBot: no access_token in response")
+                return _error("QQBot: no access_token in response")
 
             # Step 2: Send message via REST
-            # QQ Bot API has separate endpoints for channels, C2C, and groups.
-            # We try them in order: channel first, then fallback to C2C.
             headers = {
                 "Authorization": f"QQBot {access_token}",
                 "Content-Type": "application/json",
             }
             payload = {"content": message[:4000], "msg_type": 0}
 
-            # Try channel endpoint first (works for guild channels)
-            url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
-            resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code in {200, 201}:
-                data = resp.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
-                        "message_id": data.get("id")}
+            # For guild channels or unknown targets, try channel endpoint first
+            if target_type != "c2c" and target_type != "group":
+                url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code in {200, 201}:
+                    data = resp.json()
+                    return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                            "message_id": data.get("id")}
 
-            # If channel endpoint failed (likely "频道不存在"), try C2C endpoint
-            url_c2c = f"https://api.sgroup.qq.com/v2/users/{chat_id}/messages"
-            resp_c2c = await client.post(url_c2c, json=payload, headers=headers)
-            if resp_c2c.status_code in {200, 201}:
-                data = resp_c2c.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
-                        "message_id": data.get("id")}
+            # Try resolved endpoints (C2C / group)
+            errors = []
+            for ep in ep_order:
+                url = f"https://api.sgroup.qq.com/v2/{ep}/{target_id}/messages"
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code in {200, 201}:
+                    data = resp.json()
+                    return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                            "message_id": data.get("id")}
+                errors.append(f"{ep}={resp.status_code}")
 
-            # If C2C also failed, try group endpoint
-            url_group = f"https://api.sgroup.qq.com/v2/groups/{chat_id}/messages"
-            resp_group = await client.post(url_group, json=payload, headers=headers)
-            if resp_group.status_code in {200, 201}:
-                data = resp_group.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
-                        "message_id": data.get("id")}
-
-            # All endpoints failed — return the most informative error
-            return _error(f"QQBot send failed: channel={resp.status_code} c2c={resp_c2c.status_code} group={resp_group.status_code}")
+            return _error(f"QQBot send failed: {' '.join(errors)}")
     except Exception as e:
         return _error(f"QQBot send failed: {e}")
 
@@ -1827,19 +1849,9 @@ async def _send_qqbot_with_media(pconfig, chat_id, message, media_files):
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 
     # --- Resolve target type from chat_id ---
-    target_type = "unknown"  # c2c | group | guild | unknown
-    target_id = str(chat_id)
-    if ":" in target_id:
-        prefix, raw_id = target_id.split(":", 1)
-        prefix = prefix.lower()
-        if prefix in {"c2c", "user"}:
-            target_type = "c2c"
-            target_id = raw_id
-        elif prefix == "group":
-            target_type = "group"
-            target_id = raw_id
-        elif prefix == "guild":
-            return _error("QQBot MEDIA delivery is only supported for C2C and group chats, not guild channels")
+    target_type, target_id, ep_order = _resolve_qqbot_target(chat_id)
+    if target_type == "guild":
+        return _error("QQBot MEDIA delivery is only supported for C2C and group chats, not guild channels")
 
     # --- Classify each media file with QQBot-specific validation ---
     media_items = []
@@ -1858,9 +1870,23 @@ async def _send_qqbot_with_media(pconfig, chat_id, message, media_files):
         elif ext in _QQBOT_DOC_EXTS or ext in _IMAGE_EXTS or ext in _VIDEO_EXTS:
             # Cross-platform formats: accept for C2C, will reject for group
             file_type = MEDIA_TYPE_FILE
+        elif target_type != "group":
+            # C2C: allow any file as generic document (file_type=4)
+            file_type = MEDIA_TYPE_FILE
         else:
             return _error(f"QQBot does not support file format: {ext} ({Path(media_path).name})")
         media_items.append((media_path, file_type, is_voice))
+
+    # --- Reject oversized files before reading into memory ---
+    for media_path, _, _ in media_items:
+        file_size = os.path.getsize(media_path)
+        if file_size > _MAX_QQBOT_INLINE_UPLOAD_BYTES:
+            size_mb = file_size / (1024 * 1024)
+            limit_mb = _MAX_QQBOT_INLINE_UPLOAD_BYTES / (1024 * 1024)
+            return _error(
+                f"File too large for QQBot inline upload: {Path(media_path).name} "
+                f"({size_mb:.1f} MB > {limit_mb:.0f} MB limit)"
+            )
 
     # --- Validate: group cannot have documents ---
     if target_type == "group":
@@ -1875,17 +1901,9 @@ async def _send_qqbot_with_media(pconfig, chat_id, message, media_files):
     # --- Chunk long text ---
     text_chunks = []
     if message.strip():
-        text_chunks = _chunk_text(message, MAX_MESSAGE_LENGTH)
+        text_chunks = _split_text(message, MAX_MESSAGE_LENGTH)
         if not text_chunks:
             text_chunks = [message[:MAX_MESSAGE_LENGTH]]
-
-    # --- Determine endpoint order ---
-    if target_type == "group":
-        ep_order = ["groups"]
-    elif target_type == "c2c":
-        ep_order = ["users"]
-    else:
-        ep_order = ["users", "groups"]
 
     try:
         async with httpx.AsyncClient(timeout=FILE_UPLOAD_TIMEOUT) as client:
@@ -2027,8 +2045,12 @@ async def _send_qqbot_with_media(pconfig, chat_id, message, media_files):
         return _error(f"QQBot send failed: {e}")
 
 
-def _chunk_text(text: str, max_length: int) -> list:
-    """Split text into chunks respecting max_length, preserving code blocks."""
+def _split_text(text: str, max_length: int) -> list:
+    """Split text into chunks respecting max_length.
+
+    Attempts to break at newlines for readability. Does NOT preserve
+    markdown structures (code blocks, tables) across chunk boundaries.
+    """
     if len(text) <= max_length:
         return [text]
 
