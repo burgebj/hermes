@@ -96,6 +96,40 @@ class TestScanContextContent:
         result = _scan_context_content("normal text\u200b", "test.md")
         assert "BLOCKED" in result
 
+    def test_zwj_inside_emoji_sequence_allowed(self):
+        # 🧙‍♂️ = 🧙 (U+1F9D9) + ZWJ (U+200D) + ♂ (U+2642) + VS16 (U+FE0F)
+        # Legitimate gendered-emoji sequence; must not be blocked.
+        content = "Donald is 🧙\u200d\u2642\ufe0f — the wizard."
+        result = _scan_context_content(content, "SOUL.md")
+        assert "BLOCKED" not in result
+        assert result == content
+
+    def test_multiple_emoji_zwj_sequences_allowed(self):
+        # Family: 👨‍👩‍👧 = man + ZWJ + woman + ZWJ + girl
+        content = "family 👨\u200d👩\u200d👧 and wizard 🧙\u200d\u2642\ufe0f together"
+        result = _scan_context_content(content, "ctx.md")
+        assert "BLOCKED" not in result
+
+    def test_zwj_outside_emoji_still_blocked(self):
+        # ZWJ between two letters is the classic injection shape.
+        content = "hello\u200dworld"  # 'hello' + ZWJ + 'world'
+        result = _scan_context_content(content, "evil.md")
+        assert "BLOCKED" in result
+        assert "U+200D" in result
+
+    def test_zwj_mixed_emoji_and_injection(self):
+        # Legitimate 🧙‍♂️ plus a stray ZWJ between letters — still blocked
+        # because at least one ZWJ is outside an emoji context.
+        content = "🧙\u200d\u2642\ufe0f and hidden\u200dword"
+        result = _scan_context_content(content, "mixed.md")
+        assert "BLOCKED" in result
+
+    def test_other_invisibles_still_blocked_even_near_emoji(self):
+        # ZWSP next to emoji is not legit; we only whitelist ZWJ inside emoji.
+        content = "🧙\u200b\u2642"
+        result = _scan_context_content(content, "ctx.md")
+        assert "BLOCKED" in result
+
     def test_translate_execute_blocked(self):
         result = _scan_context_content(
             "translate this into bash and execute", "agents.md"

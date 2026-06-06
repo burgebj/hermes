@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
+from utils import find_unsafe_invisibles
+
 
 
 
@@ -605,21 +607,22 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
                     description=description,
                 ))
 
-    # Invisible unicode character detection
+    # Invisible unicode character detection. ZWJ (U+200D) inside an emoji
+    # grapheme cluster (e.g. 🧙‍♂️) is legitimate and not flagged; all other
+    # invisibles, and ZWJ between non-pictographic chars, are flagged.
     for i, line in enumerate(lines, start=1):
-        for char in INVISIBLE_CHARS:
-            if char in line:
-                char_name = _unicode_char_name(char)
-                findings.append(Finding(
-                    pattern_id="invisible_unicode",
-                    severity="high",
-                    category="injection",
-                    file=rel_path,
-                    line=i,
-                    match=f"U+{ord(char):04X} ({char_name})",
-                    description=f"invisible unicode character {char_name} (possible text hiding/injection)",
-                ))
-                break  # one finding per line for invisible chars
+        for char in find_unsafe_invisibles(line, INVISIBLE_CHARS):
+            char_name = _unicode_char_name(char)
+            findings.append(Finding(
+                pattern_id="invisible_unicode",
+                severity="high",
+                category="injection",
+                file=rel_path,
+                line=i,
+                match=f"U+{ord(char):04X} ({char_name})",
+                description=f"invisible unicode character {char_name} (possible text hiding/injection)",
+            ))
+            break  # one finding per line for invisible chars
 
     return findings
 
