@@ -3298,6 +3298,32 @@ class BasePlatformAdapter(ABC):
             return response.text, int(ttl or 0)
         return response, 0
 
+    def _redact_outbound(self, content: Optional[str]) -> Optional[str]:
+        """Scrub secrets from an outbound message body before delivery.
+
+        The startup banner promises that "chat responses are scrubbed before
+        delivery" when ``HERMES_REDACT_SECRETS`` is on (#23810).  Logs were
+        already covered via :class:`agent.redact.RedactingFormatter`, but
+        actual outbound message bytes were not — an LLM that echoed a token
+        in its reply would deliver it verbatim to Telegram/Discord/Slack.
+
+        Centralising the call here means every send/edit retry, fallback,
+        and delivery notice in :meth:`_send_with_retry` inherits the same
+        protection.  Honours the global toggle (``HERMES_REDACT_SECRETS`` /
+        ``security.redact_secrets``); a no-op when redaction is disabled or
+        when ``content`` is empty / non-textual.
+        """
+        if not content or not isinstance(content, str):
+            return content
+        try:
+            from agent.redact import redact_sensitive_text
+        except Exception:
+            return content
+        try:
+            return redact_sensitive_text(content)
+        except Exception:
+            return content
+
     async def _send_with_retry(
         self,
         chat_id: str,
@@ -3315,6 +3341,10 @@ class BasePlatformAdapter(ABC):
         network errors, sends the user a brief delivery-failure notice so they
         know to retry rather than waiting indefinitely.
         """
+
+        # Scrub secrets ONCE up front so every retry, fallback, and notice
+        # below inherits the redacted payload — no second pass needed (#23810).
+        content = self._redact_outbound(content) or ""
 
         result = await self.send(
             chat_id=chat_id,
@@ -4435,13 +4465,18 @@ class BasePlatformAdapter(ABC):
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
                 _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
+                # str(e) can carry a secret-shaped substring (e.g. an
+                # auth error from a misconfigured provider) — scrub
+                # before delivery so the radio-silence notice never
+                # becomes the leak channel (#23810).
+                error_body = self._redact_outbound(
+                    f"Sorry, I encountered an error ({error_type}).\n"
+                    f"{error_detail}\n"
+                    "Try again or use /reset to start a fresh session."
+                ) or ""
                 await self.send(
                     chat_id=event.source.chat_id,
-                    content=(
-                        f"Sorry, I encountered an error ({error_type}).\n"
-                        f"{error_detail}\n"
-                        "Try again or use /reset to start a fresh session."
-                    ),
+                    content=error_body,
                     metadata=_thread_metadata,
                 )
             except Exception:
