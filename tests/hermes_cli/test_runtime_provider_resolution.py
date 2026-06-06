@@ -2705,3 +2705,41 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# --- Anthropic config.yaml api_key tests (#7579) ---
+
+def test_anthropic_config_api_key_is_used(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_requested_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "load_pool", lambda *a: (_ for _ in ()).throw(Exception("no pool")))
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "anthropic", "api_key": "sk-ant-config"})
+    resolved = rp.resolve_runtime_provider()
+    assert resolved["api_key"] == "sk-ant-config"
+    assert resolved["source"] == "config"
+
+def test_anthropic_config_api_key_falls_back_to_env(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_requested_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "load_pool", lambda *a: (_ for _ in ()).throw(Exception("no pool")))
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "anthropic"})
+    monkeypatch.setattr("agent.anthropic_adapter.resolve_anthropic_token", lambda: "sk-ant-env")
+    resolved = rp.resolve_runtime_provider()
+    assert resolved["api_key"] == "sk-ant-env"
+    assert resolved["source"] == "env"
+
+def test_anthropic_config_api_key_no_cross_provider_leak(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_requested_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "load_pool", lambda *a: (_ for _ in ()).throw(Exception("no pool")))
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "openrouter", "api_key": "sk-or-leak"})
+    monkeypatch.setattr("agent.anthropic_adapter.resolve_anthropic_token", lambda: "sk-ant-env")
+    resolved = rp.resolve_runtime_provider()
+    assert resolved["api_key"] == "sk-ant-env"
+    assert resolved["api_key"] != "sk-or-leak"
