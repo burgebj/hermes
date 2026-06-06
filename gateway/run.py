@@ -4085,9 +4085,17 @@ class GatewayRunner:
             return
 
         cmd = " ".join(shlex.quote(part) for part in hermes_cmd)
+        log_path = _hermes_home / "logs" / "gateway.log"
+        # Use ``gateway run --replace`` instead of ``gateway restart`` to
+        # avoid the CLI restart handler which calls run_gateway() in the
+        # foreground and blocks the detached subprocess forever.  The
+        # ``--replace`` flag ensures any lingering gateway process is killed
+        # before the new one starts.  ``nohup ... &`` daemonizes the new
+        # gateway so it survives after this subprocess exits.
         shell_cmd = (
             f"while kill -0 {current_pid} 2>/dev/null; do sleep 0.2; done; "
-            f"{cmd} gateway restart"
+            f"nohup {cmd} gateway run --replace"
+            f" >> {shlex.quote(str(log_path))} 2>&1 &"
         )
         setsid_bin = shutil.which("setsid")
         if setsid_bin:
