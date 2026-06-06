@@ -3316,7 +3316,7 @@ class TestQqbotProtocolLevel:
 
     @pytest.mark.asyncio
     async def test_c2c_to_group_fallback(self):
-        """C2C upload fails -> fallback to group endpoint."""
+        """C2C upload returns 404 -> fallback to group endpoint."""
         captured = []
 
         class FallbackClient:
@@ -3333,8 +3333,8 @@ class TestQqbotProtocolLevel:
                     resp.status_code = 200
                     resp.json.return_value = {"access_token": "tok"}
                 elif "/users/" in url and "/files" in url:
-                    resp.status_code = 403
-                    resp.text = "forbidden"
+                    resp.status_code = 404
+                    resp.text = "not found"
                 elif "/groups/" in url and "/files" in url:
                     resp.status_code = 200
                     resp.json.return_value = {"file_info": "fi"}
@@ -3519,11 +3519,10 @@ class TestQqbotProtocolLevel:
         assert "guild:" not in msg_reqs[0]["url"]
 
     @pytest.mark.asyncio
-    async def test_403_triggers_endpoint_fallback(self):
-        """B2: 403 (target-type mismatch) should fall back to next endpoint."""
-        captured = []
+    async def test_403_does_not_trigger_fallback(self):
+        """B2: 403 (permission/scope failure) should NOT fall back — surface immediately."""
 
-        class FallbackClient:
+        class NoFallbackClient:
             def __init__(self, **kw):
                 pass
             async def __aenter__(self):
@@ -3531,24 +3530,20 @@ class TestQqbotProtocolLevel:
             async def __aexit__(self, *a):
                 pass
             async def post(self, url, **kw):
-                captured.append({"url": url, **kw})
                 resp = MagicMock()
                 if "getAppAccessToken" in url:
                     resp.status_code = 200
                     resp.json.return_value = {"access_token": "tok"}
-                elif "/files" in url and "/v2/users/" in url:
-                    resp.status_code = 403  # target mismatch → fallback
-                    resp.text = "forbidden"
-                elif "/files" in url and "/v2/groups/" in url:
-                    resp.status_code = 200
-                    resp.json.return_value = {"file_info": "fi"}
+                elif "/files" in url:
+                    resp.status_code = 403
+                    resp.text = "permission denied"
                 else:
                     resp.status_code = 200
                     resp.json.return_value = {"id": "msg_123"}
                 return resp
 
         mock_mod = MagicMock()
-        mock_mod.AsyncClient = FallbackClient
+        mock_mod.AsyncClient = NoFallbackClient
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(b"\x89PNG")
@@ -3558,11 +3553,8 @@ class TestQqbotProtocolLevel:
                 result = await _send_qqbot_with_media(
                     self._make_pconfig(), "raw_openid", "", [(img_path, False)]
                 )
-            assert result.get("success"), f"Expected success but got: {result}"
-            # Verify both endpoints were tried
-            upload_urls = [r["url"] for r in captured if "/files" in r["url"]]
-            assert any("/v2/users/" in u for u in upload_urls), "Should try users first"
-            assert any("/v2/groups/" in u for u in upload_urls), "Should fall back to groups"
+            assert "error" in result, f"Expected 403 error but got success: {result}"
+            assert "403" in result["error"], f"Error should mention 403: {result}"
         finally:
             os.unlink(img_path)
 

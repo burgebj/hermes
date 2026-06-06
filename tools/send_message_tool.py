@@ -2057,11 +2057,13 @@ async def _send_qqbot_with_media(pconfig, chat_id, message, media_files):
 def _is_endpoint_mismatch(status_code: int) -> bool:
     """Return True if the HTTP status likely indicates a target-type mismatch.
 
-    Only 403 (forbidden on wrong target type) and 404 (target not found)
-    should trigger cross-endpoint fallback.  Authentication failures (401),
-    rate limits (429), server errors (5xx), and other codes surface immediately.
+    Only 404 (target not found) triggers cross-endpoint fallback.
+    403 is intentionally excluded — it can represent genuine permission,
+    scope, or policy failures unrelated to target type.  Authentication
+    failures (401), rate limits (429), server errors (5xx), and other
+    codes surface immediately.
     """
-    return status_code in {403, 404}
+    return status_code == 404
 
 
 def _split_text(text: str, max_length: int) -> list:
