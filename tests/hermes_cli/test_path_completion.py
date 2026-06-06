@@ -59,6 +59,52 @@ class TestExtractPathWord:
     def test_just_tilde_slash(self):
         assert SlashCommandCompleter._extract_path_word("~/") == "~/"
 
+    def test_relative_path_with_space(self):
+        # Walks back across the space because the tail "Documents/" still
+        # needs an anchor and "./My Documents/" supplies it.
+        assert (
+            SlashCommandCompleter._extract_path_word("./My Documents/")
+            == "./My Documents/"
+        )
+
+    def test_relative_path_with_space_after_prefix(self):
+        assert (
+            SlashCommandCompleter._extract_path_word("look at ./My Documents/")
+            == "./My Documents/"
+        )
+
+    def test_absolute_path_with_space(self):
+        assert (
+            SlashCommandCompleter._extract_path_word("cd /etc/My Files/")
+            == "/etc/My Files/"
+        )
+
+    def test_home_path_with_space(self):
+        assert (
+            SlashCommandCompleter._extract_path_word("edit ~/My Notes/todo.md")
+            == "~/My Notes/todo.md"
+        )
+
+    def test_multiple_spaces_in_anchored_path(self):
+        assert (
+            SlashCommandCompleter._extract_path_word(
+                "open ./My Documents/Sub Folder/file.py"
+            )
+            == "./My Documents/Sub Folder/file.py"
+        )
+
+    def test_anchored_prefix_extends_across_space(self):
+        # Whole token starting at the anchor is returned, including the space.
+        # Path-completion downstream will listdir the parent and produce no
+        # results if the directory doesn't exist — harmless either way.
+        assert (
+            SlashCommandCompleter._extract_path_word("./src/foo bar.py")
+            == "./src/foo bar.py"
+        )
+
+    def test_unanchored_trailing_word_returns_none(self):
+        assert SlashCommandCompleter._extract_path_word("write hello world") is None
+
 
 class TestPathCompletions:
     def test_lists_current_directory(self, tmp_path):

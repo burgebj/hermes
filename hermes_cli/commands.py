@@ -1225,20 +1225,32 @@ class SlashCommandCompleter(Completer):
         current word doesn't look like a path.  A word is path-like when
         it starts with ``./``, ``../``, ``~/``, ``/``, or contains a
         ``/`` separator (e.g. ``src/main.py``).
+
+        Paths with an anchored prefix (``./``, ``../``, ``~/``, ``/``) may
+        legitimately contain spaces — e.g. ``./My Documents/``. To capture
+        those, find the rightmost anchor that sits at the start of the
+        line or directly after a space and treat everything from there to
+        the cursor as the path. Without such an anchor, fall back to the
+        last space-delimited token (matches mid-string ``src/utils/x.py``).
         """
         if not text:
             return None
-        # Walk backwards to find the start of the current "word".
-        # Words are delimited by spaces, but paths can contain almost anything.
-        i = len(text) - 1
-        while i >= 0 and text[i] != " ":
-            i -= 1
-        word = text[i + 1:]
-        if not word:
-            return None
-        # Only trigger path completion for path-like tokens
-        if word.startswith(("./", "../", "~/", "/")) or "/" in word:
-            return word
+        _ANCHORS = ("./", "../", "~/", "/")
+        # Rightmost anchor preceded by start-of-string or a space.
+        anchor_pos = -1
+        for anchor in _ANCHORS:
+            idx = text.rfind(anchor)
+            while idx != -1:
+                if idx == 0 or text[idx - 1] == " ":
+                    if idx > anchor_pos:
+                        anchor_pos = idx
+                    break
+                idx = text.rfind(anchor, 0, idx)
+        if anchor_pos != -1:
+            return text[anchor_pos:]
+        last = text.rsplit(" ", 1)[-1]
+        if last and "/" in last:
+            return last
         return None
 
     @staticmethod
