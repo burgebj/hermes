@@ -1267,6 +1267,7 @@ AUTHOR_MAP = {
     "1700913+pearjelly@users.noreply.github.com": "pearjelly",  # PR #25388 salvage (feishu ws connect override sync)
     "100820567+raymaylee@users.noreply.github.com": "raymaylee",  # PR #25394 salvage (context compaction status)
     "122434621+Tianyu199509@users.noreply.github.com": "Tianyu199509",  # PR #25421 salvage (gateway PID Windows)
+    "ericbaruch@gmail.com": "BaruchEric",
     "58224596+HxT9@users.noreply.github.com": "HxT9",  # PR #25760 salvage (web sync-assets cross-platform)
     "120411712+evgyur@users.noreply.github.com": "evgyur",  # PR #25651 salvage (docs media session context)
     "36507055+AsoTora@users.noreply.github.com": "AsoTora",  # PR #25624 salvage (MCP auth no-retry)
