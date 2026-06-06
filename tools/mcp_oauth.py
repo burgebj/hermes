@@ -481,13 +481,16 @@ async def _wait_for_callback() -> tuple[str, str | None]:
     # Start a temporary server on the known port
     try:
         server = HTTPServer(("127.0.0.1", _oauth_port), handler_cls)
-    except OSError:
-        # Port already in use — the server from build_oauth_auth is running.
-        # Fall back to polling the server started by build_oauth_auth.
+    except OSError as _port_exc:
+        # Port is in use — either a concurrent OAuth flow with the same fixed
+        # redirect_port, or a TOCTOU race on the free-port selection. Raise a
+        # clear, actionable error instead of the misleading "complete in browser" message.
         raise OAuthNonInteractiveError(
+            f"OAuth callback server could not bind port {_oauth_port}: {_port_exc}. "
+            "If you configured a fixed redirect_port, ensure it is not in use. "
+            "Use redirect_port: 0 (the default) to auto-select a free port."
+        ) from _port_exc
             "OAuth callback timed out — could not bind callback port. "
-            "Complete the authorization in a browser first, then retry."
-        )
 
     server_thread = threading.Thread(target=server.handle_request, daemon=True)
     server_thread.start()
