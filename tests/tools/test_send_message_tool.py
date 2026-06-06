@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -166,6 +166,48 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_ntfy_topic_target_is_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("ntfy", "alerts-channel")
+
+        assert chat_id == "alerts-channel"
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_ntfy_topic_target_bypasses_channel_directory(self):
+        ntfy_platform = Platform("ntfy")
+        ntfy_cfg = SimpleNamespace(enabled=True, token=None, extra={"topic": "hermes-in"})
+        config = SimpleNamespace(
+            platforms={ntfy_platform: ntfy_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("gateway.channel_directory.resolve_channel_name", side_effect=AssertionError("should not resolve ntfy topics")), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "ntfy:alerts-channel",
+                        "message": "done",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            ntfy_platform,
+            ntfy_cfg,
+            "alerts-channel",
+            "done",
+            thread_id=None,
+            media_files=[],
+            force_document=False,
+        )
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -2437,6 +2479,37 @@ class TestSendViaAdapterStandaloneFallback:
         )
 
     @pytest.mark.asyncio
+    async def test_live_ntfy_adapter_receives_exPLICIT_publish_topic(self, monkeypatch):
+        from tools.send_message_tool import _send_via_adapter
+
+        platform = Platform("ntfy")
+        recorded = {}
+
+        class Adapter:
+            async def send(self, *, chat_id, content, metadata=None):
+                recorded["chat_id"] = chat_id
+                recorded["content"] = content
+                recorded["metadata"] = metadata
+                return SimpleNamespace(success=True, message_id="ntfy-id")
+
+        runner = SimpleNamespace(adapters={platform: Adapter()})
+        fake_gateway_run = ModuleType("gateway.run")
+        fake_gateway_run._gateway_runner_ref = lambda: runner
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_gateway_run)
+
+        result = await _send_via_adapter(
+            platform,
+            SimpleNamespace(extra={"publish_topic": "configured-topic"}),
+            "alerts-channel",
+            "done",
+        )
+
+        assert result == {"success": True, "message_id": "ntfy-id"}
+        assert recorded["chat_id"] == "alerts-channel"
+        assert recorded["content"] == "done"
+        assert recorded["metadata"] == {"publish_topic": "alerts-channel"}
+
+    @pytest.mark.asyncio
     async def test_standalone_sender_fn_called_when_no_adapter(self, monkeypatch):
         """Registry has hook, runner ref returns None: the hook is awaited."""
         from tools.send_message_tool import _send_via_adapter
@@ -2956,20 +3029,45 @@ class TestQqbotMediaSizeLimit:
 
     @pytest.mark.asyncio
     async def test_accept_file_under_limit(self):
+        """Files under limit should pass size check and reach the upload stage."""
         pconfig = SimpleNamespace(
             token="test_token",
             extra={"app_id": "id", "client_secret": "secret"},
         )
+        captured = []
+
+        class MockClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                captured.append(url)
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                else:
+                    resp.status_code = 200
+                    resp.json.return_value = {"file_info": "fi"}
+                return resp
+
+        mock_httpx = MagicMock()
+        mock_httpx.AsyncClient = MockClient
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(b"x" * 1024)  # 1 KB
             small_path = f.name
         try:
-            result = await _send_qqbot_with_media(
-                pconfig, "c2c:test", "", [(small_path, False)]
-            )
-            if result and result.get("error"):
-                assert "too large" not in result["error"].lower()
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                result = await _send_qqbot_with_media(
+                    pconfig, "c2c:test", "", [(small_path, False)]
+                )
+            # Verify the file was actually uploaded (not just "no error")
+            upload_urls = [u for u in captured if "/files" in u]
+            assert len(upload_urls) == 1, f"Expected 1 upload, got {len(upload_urls)}"
         finally:
             os.unlink(small_path)
 
@@ -3016,3 +3114,387 @@ class TestQqbotC2cExtensionFallback:
             assert "does not support file format" in result["error"]
         finally:
             os.unlink(weird_path)
+
+
+# --- E2E regression tests: QQBot OpenID fallback (Issue 2) ---
+
+class TestQqbotOpenIdFallback:
+    """E2E: raw OpenID fallback after directory miss; display-name takes precedence."""
+
+    def test_raw_openid_fallback_after_directory_miss(self):
+        """QQBot raw OpenID should fall back to direct send when directory misses."""
+        qqbot_platform = Platform("qqbot")
+        qqbot_cfg = SimpleNamespace(
+            enabled=True, token="tok",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        config = SimpleNamespace(
+            platforms={qqbot_platform: qqbot_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config),              patch("tools.interrupt.is_interrupted", return_value=False),              patch("gateway.channel_directory.resolve_channel_name", return_value=None),              patch("model_tools._run_async", side_effect=_run_async_immediately),              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(
+                 return_value={"success": True, "platform": "qqbot"}
+             )) as send_mock,              patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "qqbot:abc123def",
+                    "message": "hello",
+                })
+            )
+
+        assert result.get("success") is True
+        send_mock.assert_awaited_once()
+        call_args = send_mock.call_args
+        assert call_args[0][2] == "abc123def"  # chat_id = raw OpenID
+
+    def test_display_name_resolution_takes_precedence(self):
+        """QQBot display name should resolve via directory, not fall back to raw ID."""
+        qqbot_platform = Platform("qqbot")
+        qqbot_cfg = SimpleNamespace(
+            enabled=True, token="tok",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        config = SimpleNamespace(
+            platforms={qqbot_platform: qqbot_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config),              patch("tools.interrupt.is_interrupted", return_value=False),              patch("gateway.channel_directory.resolve_channel_name",
+                   return_value="c2c:resolved_openid"),              patch("model_tools._run_async", side_effect=_run_async_immediately),              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(
+                 return_value={"success": True, "platform": "qqbot"}
+             )) as send_mock,              patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "qqbot:my-friend",
+                    "message": "hello",
+                })
+            )
+
+        assert result.get("success") is True
+        call_args = send_mock.call_args
+        # Directory resolved "my-friend" -> "c2c:resolved_openid" -> chat_id = "c2c:resolved_openid"
+        assert call_args[0][2] == "c2c:resolved_openid"
+
+    def test_non_ascii_display_name_errors_on_miss(self):
+        """Non-ASCII display name should error on directory miss, not fallback."""
+        qqbot_platform = Platform("qqbot")
+        qqbot_cfg = SimpleNamespace(
+            enabled=True, token="tok",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+        config = SimpleNamespace(
+            platforms={qqbot_platform: qqbot_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("gateway.channel_directory.resolve_channel_name", return_value=None):
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "qqbot:\u6211\u7684\u597d\u53cb",
+                    "message": "hello",
+                })
+            )
+
+        assert "error" in result
+        assert "Could not resolve" in result["error"]
+
+
+# --- Protocol-level tests with mocked HTTP transport ---
+
+class TestQqbotProtocolLevel:
+    """Protocol-level tests verifying HTTP request fields via MockClient."""
+
+    @staticmethod
+    def _make_pconfig():
+        return SimpleNamespace(
+            token="test_token",
+            extra={"app_id": "id", "client_secret": "secret"},
+        )
+
+    @staticmethod
+    def _mock_httpx(captured_requests):
+        """Create a mock httpx module that captures all POST requests."""
+
+        class MockClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                captured_requests.append({"url": url, **kw})
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                elif "/files" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"file_info": "test_file_info"}
+                else:
+                    resp.status_code = 200
+                    resp.json.return_value = {"id": "msg_123"}
+                return resp
+
+        mock_mod = MagicMock()
+        mock_mod.AsyncClient = MockClient
+        return mock_mod
+
+    @pytest.mark.asyncio
+    async def test_upload_url_contains_target_id(self):
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:openid123", "", [(img_path, False)]
+                )
+            upload_reqs = [r for r in captured if "/files" in r["url"]]
+            assert len(upload_reqs) == 1
+            assert "/v2/users/openid123/files" in upload_reqs[0]["url"]
+        finally:
+            os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_upload_body_fields(self):
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:openid123", "caption", [(img_path, False)]
+                )
+            upload_reqs = [r for r in captured if "/files" in r["url"]]
+            body = upload_reqs[0]["json"]
+            assert body["file_type"] == 1  # MEDIA_TYPE_IMAGE
+            assert "file_data" in body
+            assert body["srv_send_msg"] is False
+        finally:
+            os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_message_body_fields(self):
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:openid123", "hello", [(img_path, False)]
+                )
+            msg_reqs = [r for r in captured if "/messages" in r["url"]]
+            assert len(msg_reqs) >= 1
+            body = msg_reqs[0]["json"]
+            assert body["msg_type"] == 7
+            assert body["content"] == "hello"
+            assert body["media"]["file_info"] == "test_file_info"
+        finally:
+            os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_c2c_to_group_fallback(self):
+        """C2C upload fails -> fallback to group endpoint."""
+        captured = []
+
+        class FallbackClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                captured.append({"url": url, **kw})
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                elif "/users/" in url and "/files" in url:
+                    resp.status_code = 403
+                    resp.text = "forbidden"
+                elif "/groups/" in url and "/files" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"file_info": "fi"}
+                elif "/groups/" in url and "/messages" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"id": "msg_g"}
+                else:
+                    resp.status_code = 400
+                    resp.text = "bad"
+                return resp
+
+        mock_mod = MagicMock()
+        mock_mod.AsyncClient = FallbackClient
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_mod}):
+                result = await _send_qqbot_with_media(
+                    self._make_pconfig(), "openid123", "", [(img_path, False)]
+                )
+            assert result.get("success") is True
+            urls = [r["url"] for r in captured]
+            assert any("/v2/users/openid123/files" in u for u in urls), "Should try C2C first"
+            assert any("/v2/groups/openid123/files" in u for u in urls), "Should fallback to group"
+        finally:
+            os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_group_document_rejection_before_upload(self):
+        """Group target + document -> rejected before any upload attempt."""
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF")
+            pdf_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                result = await _send_qqbot_with_media(
+                    self._make_pconfig(), "group:gid123", "", [(pdf_path, False)]
+                )
+            assert result.get("error")
+            assert "does not support document" in result["error"].lower() or "rejected" in result["error"].lower()
+            upload_reqs = [r for r in captured if "/files" in r["url"]]
+            assert len(upload_reqs) == 0, "Should reject before upload"
+        finally:
+            os.unlink(pdf_path)
+
+    @pytest.mark.asyncio
+    async def test_multiple_media_files(self):
+        """Multiple files: each uploaded and sent."""
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        import tempfile
+        paths = []
+        for suffix in [".png", ".png"]:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                f.write(b"\x89PNG")
+                paths.append(f.name)
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                result = await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:oid", "",
+                    [(paths[0], False), (paths[1], False)]
+                )
+            upload_reqs = [r for r in captured if "/files" in r["url"]]
+            assert len(upload_reqs) == 2
+            msg_reqs = [r for r in captured if "/messages" in r["url"]]
+            assert len(msg_reqs) == 2
+        finally:
+            for p in paths:
+                os.unlink(p)
+
+    @pytest.mark.asyncio
+    async def test_long_caption_overflow(self):
+        """Long text -> first chunk on media, overflow as separate messages."""
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            long_text = "x" * 5000  # > MAX_MESSAGE_LENGTH (4000)
+            with patch.dict("sys.modules", {"httpx": mock_httpx}):
+                await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:oid", long_text, [(img_path, False)]
+                )
+            msg_reqs = [r for r in captured if "/messages" in r["url"]]
+            assert len(msg_reqs) >= 2, "Should have media msg + overflow text msg"
+        finally:
+            os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_upload_failure_propagation(self):
+        """Upload returns non-200 -> error returned."""
+        class FailClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                else:
+                    resp.status_code = 500
+                    resp.text = "internal server error"
+                return resp
+
+        mock_mod = MagicMock()
+        mock_mod.AsyncClient = FailClient
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_mod}):
+                result = await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:oid", "", [(img_path, False)]
+                )
+            assert result.get("error")
+            assert "500" in result["error"]
+        finally:
+            os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_message_send_failure_propagation(self):
+        """Message POST returns non-200 -> error returned."""
+        class MsgFailClient:
+            def __init__(self, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+            async def post(self, url, **kw):
+                resp = MagicMock()
+                if "getAppAccessToken" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"access_token": "tok"}
+                elif "/files" in url:
+                    resp.status_code = 200
+                    resp.json.return_value = {"file_info": "fi"}
+                else:
+                    resp.status_code = 429
+                    resp.text = "rate limited"
+                return resp
+
+        mock_mod = MagicMock()
+        mock_mod.AsyncClient = MsgFailClient
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG")
+            img_path = f.name
+        try:
+            with patch.dict("sys.modules", {"httpx": mock_mod}):
+                result = await _send_qqbot_with_media(
+                    self._make_pconfig(), "c2c:oid", "hi", [(img_path, False)]
+                )
+            assert result.get("error")
+            assert "429" in result["error"]
+        finally:
+            os.unlink(img_path)

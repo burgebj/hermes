@@ -57,12 +57,13 @@ _VOICE_EXTS = {".ogg", ".opus"}
 # QQ Bot API supported formats (narrower than cross-platform sets)
 _QQBOT_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 _QQBOT_VIDEO_EXTS = {".mp4"}
-_QQBOT_VOICE_EXTS = {".silk", ".wav", ".mp3", ".flac"}
+_QQBOT_VOICE_EXTS = {".silk", ".wav"}
 _QQBOT_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"}
-# QQ Bot API inline upload limit — Base64 expands ~33%, and the JSON body
-# must fit in a single request.  Reject files above this raw size before
-# reading them into memory.
-_MAX_QQBOT_INLINE_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+# QQ Bot API inline-base64 upload cap.  The API accepts a JSON body with
+# a base64-encoded file_data field; the practical raw-file limit is ~7.5 MB
+# (base64 expands to ~10 MB in the JSON body).  For larger files the adapter
+# uses chunked upload (up to ~100 MB).
+_MAX_QQBOT_INLINE_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB base64 body
 # Telegram's Bot API sendAudio only accepts MP3 / M4A. Other audio
 # formats either route through sendVoice (Opus/OGG) or fall back to
 # document delivery.
@@ -209,6 +210,11 @@ def _handle_send(args):
             resolved = resolve_channel_name(platform_name, target_ref)
             if resolved:
                 chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
+            elif platform_name == "qqbot" and target_ref.isascii():
+                # QQBot raw OpenID fallback: directory miss is expected for
+                # raw OpenIDs that aren't in the channel directory.
+                # Display names (non-ASCII) still error on directory miss.
+                chat_id, thread_id = target_ref, None
             else:
                 return json.dumps({
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
