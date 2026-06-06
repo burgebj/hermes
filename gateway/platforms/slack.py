@@ -104,6 +104,203 @@ def check_slack_requirements() -> bool:
     return ensure_and_bind("platform.slack", _import, globals(), prompt=False)
 
 
+# --- Markdown table detection / rendering -------------------------------
+#
+# Slack's mrkdwn does not render GitHub-flavored markdown tables — the
+# pipe characters survive as literal text and the columns smear into
+# unreadable lines.  Block Kit has no public ``table`` block either, so
+# the practical fix (used by every other agent that handles this) is to
+# convert detected tables into a monospace-aligned preformatted block
+# (triple-backticks).  Slack renders that as a code block where columns
+# line up, which is the closest thing to a "real table" available on
+# the platform today.  See #26947.
+
+# Header / body row: at least one ``|`` separator after optional leading
+# whitespace, content on the line.  We deliberately accept lines that
+# don't START with ``|`` (some authors omit the leading pipe) but the
+# separator row check below is strict enough to reject false positives.
+_MD_TABLE_ROW_RE = re.compile(r"^\s*\|?.*\|.*\|?\s*$")
+
+# Separator row: every cell is either ``---``, ``:---``, ``---:``, or
+# ``:---:`` (alignment hints), with at least three dashes, optional
+# surrounding whitespace, and at least one ``|`` separator.  This is
+# what disambiguates a table from arbitrary text that happens to
+# contain pipes (e.g. a logical-OR snippet).
+_MD_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+
+
+def _split_md_table_row(line: str) -> list:
+    """Split a markdown table row into trimmed cell strings.
+
+    Handles both leading-pipe (``| a | b |``) and headerless (``a | b``)
+    forms.  Backslash-escaped pipes (``\\|``) are preserved as literal
+    pipes inside the cell.
+    """
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    # Split on ``|`` but keep escaped ``\|`` intact.
+    parts = re.split(r"(?<!\\)\|", stripped)
+    return [p.replace("\\|", "|").strip() for p in parts]
+
+
+def _parse_md_alignments(separator_cells: list) -> list:
+    """Map separator cells (``:---``, ``---:``, ``:---:``, ``---``) to
+    ``"left"``, ``"right"``, ``"center"``, or ``"left"`` (default)."""
+    alignments = []
+    for cell in separator_cells:
+        c = cell.strip()
+        has_left = c.startswith(":")
+        has_right = c.endswith(":")
+        if has_left and has_right:
+            alignments.append("center")
+        elif has_right:
+            alignments.append("right")
+        else:
+            alignments.append("left")
+    return alignments
+
+
+def _pad_cell(text: str, width: int, alignment: str) -> str:
+    if alignment == "right":
+        return text.rjust(width)
+    if alignment == "center":
+        return text.center(width)
+    return text.ljust(width)
+
+
+def _render_md_table_as_monospace(header: list, body_rows: list,
+                                  alignments: list) -> str:
+    """Format a parsed table as a column-padded monospace block.
+
+    Returns a string wrapped in triple backticks so Slack renders it
+    as preformatted text.  No language tag is emitted: a language hint
+    would survive the round-trip and confuse syntax-highlighting code.
+    """
+    # Equalise column count across all rows (pad short rows with "").
+    col_count = max(
+        [len(header)] + [len(r) for r in body_rows] + [len(alignments)]
+    )
+    header = header + [""] * (col_count - len(header))
+    alignments = alignments + ["left"] * (col_count - len(alignments))
+    padded_body = [r + [""] * (col_count - len(r)) for r in body_rows]
+
+    # Column widths use visual width of each cell.  We don't compute
+    # East-Asian wide-char width — Slack renders the monospace block in
+    # a fixed-width font where each character still occupies one cell,
+    # so ``len`` is the right metric.
+    widths = [
+        max(len(header[i]), *(len(r[i]) for r in padded_body))
+        if padded_body
+        else len(header[i])
+        for i in range(col_count)
+    ]
+
+    def _fmt_row(cells: list) -> str:
+        return "| " + " | ".join(
+            _pad_cell(cells[i], widths[i], alignments[i])
+            for i in range(col_count)
+        ) + " |"
+
+    separator = "|" + "|".join("-" * (w + 2) for w in widths) + "|"
+
+    lines = [_fmt_row(header), separator]
+    lines.extend(_fmt_row(r) for r in padded_body)
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def _convert_markdown_tables_to_monospace(text: str) -> str:
+    """Replace GFM markdown tables in ``text`` with monospace code blocks.
+
+    A "table" is a header row, followed by a separator row of dashes
+    (with optional alignment colons), followed by zero or more body
+    rows.  Anything that doesn't satisfy the separator-row regex is
+    left untouched, so prose containing literal pipes is preserved.
+
+    Tables that fall inside a fenced code block ought to remain as
+    literal markdown — we don't want to "fix" a code sample showing
+    a markdown table.  ``format_message`` calls this helper BEFORE its
+    own code-block protection pass, so we handle the fenced-region
+    exclusion ourselves here.
+    """
+    if not text or "|" not in text:
+        return text
+
+    # Mask fenced code regions so we don't reformat tables inside them.
+    fenced_spans: list = []
+
+    def _mask_fence(m):
+        fenced_spans.append(m.group(0))
+        return f"\x00MDFENCE{len(fenced_spans) - 1}\x00"
+
+    masked = re.sub(
+        r"```(?:[^\n]*\n)?[\s\S]*?```", _mask_fence, text,
+    )
+
+    lines = masked.split("\n")
+    out: list = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # A table needs at least header + separator on the next line.
+        if (
+            i + 1 < len(lines)
+            and _MD_TABLE_ROW_RE.match(line)
+            and "|" in line
+            and _MD_TABLE_SEPARATOR_RE.match(lines[i + 1])
+        ):
+            header_cells = _split_md_table_row(line)
+            alignments = _parse_md_alignments(
+                _split_md_table_row(lines[i + 1])
+            )
+            body: list = []
+            j = i + 2
+            while (
+                j < len(lines)
+                and _MD_TABLE_ROW_RE.match(lines[j])
+                and "|" in lines[j]
+                and lines[j].strip()
+            ):
+                body.append(_split_md_table_row(lines[j]))
+                j += 1
+            # Require at least 2 columns — a single-column "table" is
+            # almost certainly a false positive (a bulleted list of
+            # piped items, log lines, etc.).
+            if len(header_cells) >= 2:
+                out.append(
+                    _render_md_table_as_monospace(header_cells, body, alignments)
+                )
+                i = j
+                continue
+        out.append(line)
+        i += 1
+
+    rebuilt = "\n".join(out)
+
+    # Restore the fenced regions we masked above.
+    def _unmask(m):
+        idx = int(m.group(1))
+        return fenced_spans[idx] if 0 <= idx < len(fenced_spans) else m.group(0)
+
+    return re.sub(r"\x00MDFENCE(\d+)\x00", _unmask, rebuilt)
+
+
+def _markdown_tables_enabled() -> bool:
+    """Whether to auto-convert markdown tables to monospace blocks.
+
+    Defaults to ``True``.  Operators who already post-process their
+    agent output for Slack can opt out via
+    ``SLACK_RENDER_MARKDOWN_TABLES=false`` without redeploying code.
+    """
+    return os.getenv("SLACK_RENDER_MARKDOWN_TABLES", "true").lower() not in {
+        "false", "0", "no", "off",
+    }
+
+
 def _extract_text_from_slack_blocks(blocks: list) -> str:
     """Extract readable text from Slack Block Kit blocks, including quoted/forwarded content.
 
@@ -1522,6 +1719,15 @@ class SlackAdapter(BasePlatformAdapter):
             return key
 
         text = content
+
+        # 0) Convert GFM markdown tables into monospace code blocks.
+        #    Slack's mrkdwn has no native table rendering and the public
+        #    Block Kit API has no ``table`` block, so the universally-
+        #    compatible fix is a column-padded triple-backtick block.
+        #    We do this BEFORE step 1 so the generated code fences are
+        #    then protected like any other fenced block.  See #26947.
+        if _markdown_tables_enabled():
+            text = _convert_markdown_tables_to_monospace(text)
 
         # 1) Protect fenced code blocks (``` ... ```)
         text = re.sub(
