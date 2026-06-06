@@ -141,13 +141,7 @@ async def test_reconnect_success_resets_error_count():
     assert adapter._polling_network_error_count == 0
 
     # Clean up the heartbeat-probe task scheduled after a successful reconnect.
-    pending = [t for t in adapter._background_tasks if not t.done()]
-    for t in pending:
-        t.cancel()
-        try:
-            await t
-        except (asyncio.CancelledError, Exception):
-            pass
+    await _cancel_pending_background_tasks(adapter)
 
 
 @pytest.mark.asyncio
@@ -194,6 +188,15 @@ def _make_mock_app():
     mock_app.updater = mock_updater
     mock_app.bot = mock_bot
     return mock_app, mock_polling_req
+
+
+async def _cancel_pending_background_tasks(adapter: TelegramAdapter) -> None:
+    for task in [task for task in adapter._background_tasks if not task.done()]:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @pytest.mark.asyncio
@@ -285,6 +288,60 @@ async def test_conflict_retry_also_drains_polling_connections():
     mock_polling_req.shutdown.assert_called_once()
     mock_polling_req.initialize.assert_called_once()
     mock_app.updater.start_polling.assert_called_once()
+
+    # Clean up the heartbeat-probe task scheduled after a successful retry.
+    await _cancel_pending_background_tasks(adapter)
+
+
+@pytest.mark.asyncio
+async def test_conflict_retry_drops_pending_updates_and_preserves_callback():
+    """Conflict retries must clear stale updates without losing the error callback."""
+    adapter = _make_adapter()
+    callback = lambda error: None
+    adapter._polling_error_callback_ref = callback
+
+    mock_app, _ = _make_mock_app()
+    adapter._app = mock_app
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await adapter._handle_polling_conflict(
+            Exception("Conflict: terminated by other getUpdates request")
+        )
+
+    mock_app.updater.start_polling.assert_awaited_once()
+    kwargs = mock_app.updater.start_polling.await_args.kwargs
+    assert kwargs["drop_pending_updates"] is True
+    assert kwargs["error_callback"] is callback
+
+    # Clean up the heartbeat-probe task scheduled after a successful retry.
+    await _cancel_pending_background_tasks(adapter)
+
+
+@pytest.mark.asyncio
+async def test_conflict_retry_schedules_heartbeat_probe_on_success():
+    """Successful conflict recovery must verify that polling is truly live."""
+    adapter = _make_adapter()
+    adapter._polling_error_callback_ref = lambda error: None
+
+    mock_app, _ = _make_mock_app()
+    adapter._app = mock_app
+
+    async def never_finishes_probe():
+        await asyncio.Event().wait()
+
+    adapter._verify_polling_after_reconnect = never_finishes_probe
+    initial_count = len(adapter._background_tasks)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await adapter._handle_polling_conflict(
+            Exception("Conflict: terminated by other getUpdates request")
+        )
+
+    assert len(adapter._background_tasks) > initial_count, (
+        "Expected a heartbeat probe task after successful conflict retry"
+    )
+
+    await _cancel_pending_background_tasks(adapter)
 
 
 @pytest.mark.asyncio
@@ -466,10 +523,4 @@ async def test_reconnect_schedules_heartbeat_probe_on_success():
     )
 
     # Clean up.
-    pending = [t for t in adapter._background_tasks if not t.done()]
-    for t in pending:
-        t.cancel()
-        try:
-            await t
-        except (asyncio.CancelledError, Exception):
-            pass
+    await _cancel_pending_background_tasks(adapter)

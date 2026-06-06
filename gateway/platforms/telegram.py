@@ -1120,7 +1120,7 @@ class TelegramAdapter(BasePlatformAdapter):
             try:
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=False,
+                    drop_pending_updates=True,
                     error_callback=self._polling_error_callback_ref,
                 )
                 logger.info(
@@ -1128,6 +1128,13 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
                 )
                 self._polling_conflict_count = 0  # reset counter on success
+                # Schedule a verification probe (same pattern as network error
+                # recovery) to detect a wedged updater that reports running=True
+                # but has a dead consumer task — regression guard for #40691.
+                if not self.has_fatal_error:
+                    probe = asyncio.ensure_future(self._verify_polling_after_reconnect())
+                    self._background_tasks.add(probe)
+                    probe.add_done_callback(self._background_tasks.discard)
                 return
             except Exception as retry_err:
                 logger.warning(
