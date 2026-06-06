@@ -8202,6 +8202,38 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
     if not status.stdout.strip():
         return None
 
+    # If an environment variable lists known build-time patched files, treat
+    # them as allowed dirty files (do not abort update).  The env var should be
+    # a comma/colon/semicolon/space separated list of path patterns.
+    ignore_env = os.getenv("HERMES_AGENT_GIT_IGNORE", "").strip()
+    if ignore_env:
+        import fnmatch
+
+        patterns = [p.strip() for p in ignore_env.replace(';', ',').replace(':', ',').split(',') if p.strip()]
+        if patterns:
+            dirty_lines = [l for l in status.stdout.strip().splitlines() if l.strip()]
+            dirty_paths = []
+            for line in dirty_lines:
+                parts = line.split(None, 1)
+                path = parts[1].strip() if len(parts) > 1 else line.strip()
+                dirty_paths.append(path)
+
+            not_allowed = [p for p in dirty_paths if not any(fnmatch.fnmatch(p, pat) for pat in patterns)]
+            if not not_allowed:
+                # Only allowed patched files are dirty — mark them skip-worktree so
+                # future `git status` will ignore them, and continue the update.
+                ok = True
+                for p in set(dirty_paths):
+                    try:
+                        subprocess.run(git_cmd + ["update-index", "--skip-worktree", p], cwd=cwd, check=True)
+                        print("→ Marked " + p + " skip-worktree (allowed patched file)")
+                    except Exception:
+                        ok = False
+                        break
+                if ok:
+                    print("→ Only known build-time patched files were dirty; continuing without stashing.")
+                    return None
+
     # If the index has unmerged entries (e.g. from an interrupted merge/rebase),
     # git stash will fail with "needs merge / could not write index".  Clear the
     # conflict state with `git reset` so the stash can proceed.  Working-tree
