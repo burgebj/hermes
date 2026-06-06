@@ -338,6 +338,12 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "deepseek-chat",
         "deepseek-reasoner",
     ],
+    "avian": [
+        "deepseek-v3.2",
+        "kimi-k2.5",
+        "glm-5",
+        "minimax-m2.5",
+    ],
     "xiaomi": [
         "mimo-v2.5-pro",
         "mimo-v2.5",
@@ -940,6 +946,8 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("opencode-go",    "OpenCode Go",              "OpenCode Go (Open models subscription)"),
     ProviderEntry("bedrock",        "AWS Bedrock",              "AWS Bedrock (Claude, Nova, Llama, DeepSeek; IAM or API key)"),
     ProviderEntry("azure-foundry",  "Azure Foundry",            "Azure Foundry (OpenAI-style or Anthropic-style endpoint, your Azure AI deployment)"),
+    ProviderEntry("avian",          "Avian",                    "Avian (frontier open-source models, OpenAI-compatible API)"),
+    ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway"),
     ProviderEntry("qwen-oauth",     "Qwen OAuth (Portal)",      "Qwen OAuth (Reuses local Qwen CLI login)"),
 ]
 
@@ -1102,6 +1110,7 @@ _PROVIDER_ALIASES = {
     "claude": "anthropic",
     "claude-code": "anthropic",
     "deep-seek": "deepseek",
+    "avian.io": "avian", "avianion": "avian",
     "opencode": "opencode-zen",
     "zen": "opencode-zen",
     "go": "opencode-go",

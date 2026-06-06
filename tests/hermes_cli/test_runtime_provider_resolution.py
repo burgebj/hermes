@@ -1023,6 +1023,28 @@ def test_resolve_requested_provider_precedence(monkeypatch):
     assert rp.resolve_requested_provider() == "auto"
 
 
+def test_avian_runtime_resolution(monkeypatch):
+    """Avian provider resolves with chat_completions API mode."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "avian")
+    monkeypatch.setattr(
+        rp,
+        "resolve_api_key_provider_credentials",
+        lambda provider: {
+            "provider": provider,
+            "api_key": "avian-test-key",
+            "base_url": "https://api.avian.io/v1",
+            "source": "env",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="avian")
+
+    assert resolved["provider"] == "avian"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "https://api.avian.io/v1"
+    assert resolved["api_key"] == "avian-test-key"
+
+
 # ── api_mode config override tests ──────────────────────────────────────
 
 

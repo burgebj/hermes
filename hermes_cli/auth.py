@@ -346,6 +346,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("DEEPSEEK_API_KEY",),
         base_url_env_var="DEEPSEEK_BASE_URL",
     ),
+    "avian": ProviderConfig(
+        id="avian",
+        name="Avian",
+        auth_type="api_key",
+        inference_base_url="https://api.avian.io/v1",
+        api_key_env_vars=("AVIAN_API_KEY",),
+        base_url_env_var="AVIAN_BASE_URL",
+    ),
     "xai": ProviderConfig(
         id="xai",
         name="xAI",
@@ -1502,6 +1510,7 @@ def resolve_provider(
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
+        "avian.io": "avian", "avianion": "avian",
         "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
         "tencent": "tencent-tokenhub", "tokenhub": "tencent-tokenhub",
         "tencent-cloud": "tencent-tokenhub", "tencentmaas": "tencent-tokenhub",
