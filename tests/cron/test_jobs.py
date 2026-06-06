@@ -849,6 +849,76 @@ class TestGetDueJobs:
         assert recovered_dt > now
 
 
+    def test_cron_next_run_offset_migration_is_rescheduled_not_fired(self, tmp_cron_dir, monkeypatch):
+        current_tz = timezone(timedelta(hours=2))
+        now = datetime(2026, 5, 19, 13, 2, 0, tzinfo=current_tz)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        # A 21:00 cron was stored while Hermes/system local time was UTC+10.
+        # After the host moves to UTC+02, that absolute timestamp converts to
+        # 13:00+02.  At 13:02+02 the old code considered it due and fired, even
+        # though the user's local wall-clock cron intent is still 21:00.
+        save_jobs(
+            [{
+                "id": "cron-tz-migrate",
+                "name": "Migrated local cron",
+                "prompt": "...",
+                "schedule": {"kind": "cron", "expr": "0 21 * * 2", "display": "0 21 * * 2"},
+                "schedule_display": "0 21 * * 2",
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-05-12T21:00:00+10:00",
+                "next_run_at": "2026-05-19T21:00:00+10:00",
+                "last_run_at": "2026-05-12T21:00:00+10:00",
+                "last_status": "ok",
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
+        )
+
+        assert get_due_jobs() == []
+        repaired = datetime.fromisoformat(get_job("cron-tz-migrate")["next_run_at"])
+        assert repaired == datetime(2026, 5, 19, 21, 0, 0, tzinfo=current_tz)
+
+    def test_cron_offset_migration_does_not_repair_already_passed_wall_time(self, tmp_cron_dir, monkeypatch):
+        current_tz = timezone(timedelta(hours=2))
+        now = datetime(2026, 5, 19, 13, 2, 0, tzinfo=current_tz)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        save_jobs(
+            [{
+                "id": "cron-tz-missed",
+                "name": "Migrated missed cron",
+                "prompt": "...",
+                "schedule": {"kind": "cron", "expr": "0 9 * * 2", "display": "0 9 * * 2"},
+                "schedule_display": "0 9 * * 2",
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-05-12T09:00:00+10:00",
+                "next_run_at": "2026-05-19T09:00:00+10:00",
+                "last_run_at": "2026-05-12T09:00:00+10:00",
+                "last_status": "ok",
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
+        )
+
+        # The wall-clock time has already passed, so this follows the existing
+        # stale-run fast-forward behavior instead of the timezone-migration
+        # repair path for future wall-clock runs.
+        assert get_due_jobs() == []
+        repaired = datetime.fromisoformat(get_job("cron-tz-missed")["next_run_at"])
+        assert repaired == datetime(2026, 5, 26, 9, 0, 0, tzinfo=current_tz)
+
+
 class TestEnabledToolsets:
     def test_enabled_toolsets_stored(self, tmp_cron_dir):
         job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=["web", "terminal"])

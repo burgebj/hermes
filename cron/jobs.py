@@ -314,6 +314,26 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt.astimezone(target_tz)
 
 
+def _timezone_offset_mismatch(stored: datetime, current: datetime) -> bool:
+    """Return True when a stored aware timestamp uses a different UTC offset."""
+    if stored.tzinfo is None or current.tzinfo is None:
+        return False
+    return stored.utcoffset() != current.utcoffset()
+
+
+def _stored_wall_clock_is_future(stored: datetime, current: datetime) -> bool:
+    """Return True when the stored local wall-clock time has not arrived yet.
+
+    Cron schedules express local wall-clock intent. If Hermes/system local time
+    changes after next_run_at was persisted, an old offset can make a future
+    wall-clock run look due at the converted absolute time (for example
+    21:00+10 becomes 13:00+02). Comparing naive wall-clock values lets us
+    distinguish that migration case from a genuinely missed run whose scheduled
+    wall time has already passed.
+    """
+    return stored.replace(tzinfo=None) > current.replace(tzinfo=None)
+
+
 def _recoverable_oneshot_run_at(
     schedule: Dict[str, Any],
     now: datetime,
@@ -1073,10 +1093,35 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                     needs_save = True
                     break
 
-        next_run_dt = _ensure_aware(datetime.fromisoformat(next_run))
+        raw_next_run_dt = datetime.fromisoformat(next_run)
+        schedule = job.get("schedule", {})
+        kind = schedule.get("kind")
+
+        next_run_dt = _ensure_aware(raw_next_run_dt)
+        if (
+            kind == "cron"
+            and next_run_dt <= now
+            and _timezone_offset_mismatch(raw_next_run_dt, now)
+            and _stored_wall_clock_is_future(raw_next_run_dt, now)
+        ):
+            new_next = compute_next_run(schedule, now.isoformat())
+            if new_next:
+                logger.info(
+                    "Job '%s' next_run_at offset changed (%s -> %s). "
+                    "Recomputing cron run to preserve local wall-clock intent: %s",
+                    job.get("name", job["id"]),
+                    raw_next_run_dt.utcoffset(),
+                    now.utcoffset(),
+                    new_next,
+                )
+                for rj in raw_jobs:
+                    if rj["id"] == job["id"]:
+                        rj["next_run_at"] = new_next
+                        needs_save = True
+                        break
+                continue
+
         if next_run_dt <= now:
-            schedule = job.get("schedule", {})
-            kind = schedule.get("kind")
 
             # For recurring jobs, check if the scheduled time is stale
             # (gateway was down and missed the window). Fast-forward to
