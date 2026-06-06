@@ -835,6 +835,12 @@ class TestPromptBuilderConstants:
         assert "Markdown" in hint
         assert "absolute" in hint
 
+    def test_platform_hints_whatsapp_clarifies_image_markdown_exception(self):
+        hint = PLATFORM_HINTS["whatsapp"]
+        assert "normal text formatting" in hint
+        assert "The one exception is image" in hint
+        assert "![alt](url)" in hint
+
 
 # =========================================================================
 # Environment hints
