@@ -30,6 +30,7 @@ from gateway.platforms.api_server import (
     ResponseStore,
     _IdempotencyCache,
     _derive_chat_session_id,
+    _preserve_history_message,
     check_api_server_requirements,
     cors_middleware,
     security_headers_middleware,
@@ -48,6 +49,80 @@ class TestCheckRequirements:
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", False)
     def test_returns_false_without_aiohttp(self):
         assert check_api_server_requirements() is False
+
+
+# ---------------------------------------------------------------------------
+# History message preservation
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryMessagePreservation:
+    def test_preserves_allowed_fields_by_role_with_deep_copies(self):
+        original = {
+            "role": "assistant",
+            "content": "raw",
+            "name": "model-a",
+            "reasoning": {"encrypted": ["blob"]},
+            "reasoning_content": "opaque",
+            "reasoning_details": [{"type": "reasoning", "signature": "sig"}],
+            "codex_reasoning_items": [{"id": "r1"}],
+            "codex_message_items": [{"id": "m1"}],
+            "tool_calls": [{"id": "call_1", "function": {"name": "lookup"}}],
+            "finish_reason": "tool_calls",
+            "tool_call_id": "not-for-assistant",
+            "metadata": {"drop": True},
+        }
+
+        normalized = _preserve_history_message(original, "normalized")
+
+        assert normalized["role"] == "assistant"
+        assert normalized["content"] == "normalized"
+        assert normalized["name"] == "model-a"
+        assert normalized["reasoning"] == {"encrypted": ["blob"]}
+        assert normalized["reasoning_content"] == "opaque"
+        assert normalized["reasoning_details"] == [{"type": "reasoning", "signature": "sig"}]
+        assert normalized["codex_reasoning_items"] == [{"id": "r1"}]
+        assert normalized["codex_message_items"] == [{"id": "m1"}]
+        assert normalized["tool_calls"] == [{"id": "call_1", "function": {"name": "lookup"}}]
+        assert normalized["finish_reason"] == "tool_calls"
+        assert "tool_call_id" not in normalized
+        assert "metadata" not in normalized
+
+        original["reasoning"]["encrypted"].append("mutated")
+        original["tool_calls"][0]["function"]["name"] = "changed"
+        assert normalized["reasoning"] == {"encrypted": ["blob"]}
+        assert normalized["tool_calls"][0]["function"]["name"] == "lookup"
+
+    def test_preserves_tool_and_default_role_allowlists(self):
+        tool_msg = _preserve_history_message(
+            {
+                "role": "tool",
+                "content": "raw",
+                "name": "tool-name",
+                "tool_call_id": "call_1",
+                "tool_name": "lookup",
+                "reasoning": "drop",
+            },
+            "result",
+        )
+        user_msg = _preserve_history_message(
+            {"role": "user", "content": "raw", "name": "alice", "reasoning": "drop"},
+            "hello",
+        )
+        custom_msg = _preserve_history_message(
+            {"role": "developer", "content": "raw", "name": "dev", "tool_calls": []},
+            "note",
+        )
+
+        assert tool_msg == {
+            "role": "tool",
+            "content": "result",
+            "name": "tool-name",
+            "tool_call_id": "call_1",
+            "tool_name": "lookup",
+        }
+        assert user_msg == {"role": "user", "content": "hello", "name": "alice"}
+        assert custom_msg == {"role": "developer", "content": "note", "name": "dev"}
 
 
 # ---------------------------------------------------------------------------
@@ -1394,6 +1469,77 @@ class TestChatCompletionsEndpoint:
             assert call_kwargs["conversation_history"][1] == {"role": "assistant", "content": "2"}
 
     @pytest.mark.asyncio
+    async def test_continuity_fields_and_tool_messages_preserved_in_history(self, adapter):
+        """Request-body history keeps role-appropriate continuity metadata."""
+        mock_result = {"final_response": "done", "messages": [], "api_calls": 1}
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [
+                            {"role": "user", "content": "search", "name": "alice", "reasoning": "drop"},
+                            {
+                                "role": "assistant",
+                                "content": "",
+                                "name": "model-a",
+                                "reasoning": {"encrypted": "blob"},
+                                "reasoning_content": "opaque",
+                                "reasoning_details": [{"type": "reasoning", "signature": "sig"}],
+                                "codex_reasoning_items": [{"id": "r1"}],
+                                "codex_message_items": [{"id": "m1"}],
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": "{}"},
+                                    }
+                                ],
+                                "finish_reason": "tool_calls",
+                                "tool_call_id": "drop",
+                            },
+                            {
+                                "role": "tool",
+                                "content": "lookup result",
+                                "name": "lookup-result",
+                                "tool_call_id": "call_1",
+                                "tool_name": "lookup",
+                                "reasoning": "drop",
+                            },
+                            {"role": "user", "content": "summarize", "name": "bob"},
+                        ],
+                    },
+                )
+
+        assert resp.status == 200
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs["user_message"] == "summarize"
+        history = call_kwargs["conversation_history"]
+        assert history[0] == {"role": "user", "content": "search", "name": "alice"}
+        assert history[1]["role"] == "assistant"
+        assert history[1]["content"] == ""
+        assert history[1]["name"] == "model-a"
+        assert history[1]["reasoning"] == {"encrypted": "blob"}
+        assert history[1]["reasoning_content"] == "opaque"
+        assert history[1]["reasoning_details"] == [{"type": "reasoning", "signature": "sig"}]
+        assert history[1]["codex_reasoning_items"] == [{"id": "r1"}]
+        assert history[1]["codex_message_items"] == [{"id": "m1"}]
+        assert history[1]["tool_calls"][0]["id"] == "call_1"
+        assert history[1]["finish_reason"] == "tool_calls"
+        assert "tool_call_id" not in history[1]
+        assert history[2] == {
+            "role": "tool",
+            "content": "lookup result",
+            "name": "lookup-result",
+            "tool_call_id": "call_1",
+            "tool_name": "lookup",
+        }
+
+    @pytest.mark.asyncio
     async def test_agent_error_returns_500(self, adapter):
         """Agent exception returns 500."""
         app = _create_app(adapter)
@@ -1960,6 +2106,134 @@ class TestResponsesEndpoint:
                 json={"model": "hermes-agent", "input": 42},
             )
             assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_explicit_conversation_history_preserves_continuity_fields(self, adapter):
+        """Explicit Responses history keeps assistant and tool continuity metadata."""
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+        conversation_history = [
+            {
+                "role": "assistant",
+                "content": "thinking",
+                "name": "model-a",
+                "reasoning": {"encrypted": "blob"},
+                "reasoning_content": "opaque",
+                "reasoning_details": [{"type": "reasoning", "signature": "sig"}],
+                "codex_reasoning_items": [{"id": "r1"}],
+                "codex_message_items": [{"id": "m1"}],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+                "finish_reason": "tool_calls",
+                "tool_call_id": "drop",
+            },
+            {
+                "role": "tool",
+                "content": "lookup result",
+                "name": "lookup-result",
+                "tool_call_id": "call_1",
+                "tool_name": "lookup",
+                "reasoning": "drop",
+            },
+            {"role": "user", "content": "prior", "name": "alice", "tool_calls": []},
+        ]
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "follow up",
+                        "conversation_history": conversation_history,
+                    },
+                )
+
+        assert resp.status == 200
+        history = mock_run.call_args.kwargs["conversation_history"]
+        assert history[0]["role"] == "assistant"
+        assert history[0]["name"] == "model-a"
+        assert history[0]["reasoning"] == {"encrypted": "blob"}
+        assert history[0]["reasoning_content"] == "opaque"
+        assert history[0]["reasoning_details"] == [{"type": "reasoning", "signature": "sig"}]
+        assert history[0]["codex_reasoning_items"] == [{"id": "r1"}]
+        assert history[0]["codex_message_items"] == [{"id": "m1"}]
+        assert history[0]["tool_calls"][0]["id"] == "call_1"
+        assert history[0]["finish_reason"] == "tool_calls"
+        assert "tool_call_id" not in history[0]
+        assert history[1] == {
+            "role": "tool",
+            "content": "lookup result",
+            "name": "lookup-result",
+            "tool_call_id": "call_1",
+            "tool_name": "lookup",
+        }
+        assert history[2] == {"role": "user", "content": "prior", "name": "alice"}
+
+    @pytest.mark.asyncio
+    async def test_multimessage_input_preserves_continuity_fields(self, adapter):
+        """Responses multi-message input keeps prior assistant/tool metadata."""
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": [
+                            {
+                                "role": "assistant",
+                                "content": "",
+                                "name": "model-a",
+                                "reasoning": {"encrypted": "blob"},
+                                "reasoning_content": "opaque",
+                                "reasoning_details": [{"type": "reasoning", "signature": "sig"}],
+                                "codex_reasoning_items": [{"id": "r2"}],
+                                "codex_message_items": [{"id": "m2"}],
+                                "tool_calls": [{"id": "call_2", "type": "function"}],
+                                "finish_reason": "tool_calls",
+                            },
+                            {
+                                "role": "tool",
+                                "content": "tool result",
+                                "name": "lookup-result",
+                                "tool_call_id": "call_2",
+                                "tool_name": "lookup",
+                            },
+                            {"role": "user", "content": "continue", "name": "alice"},
+                        ],
+                    },
+                )
+
+        assert resp.status == 200
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs["user_message"] == "continue"
+        history = call_kwargs["conversation_history"]
+        assert history[0]["role"] == "assistant"
+        assert history[0]["name"] == "model-a"
+        assert history[0]["reasoning"] == {"encrypted": "blob"}
+        assert history[0]["reasoning_content"] == "opaque"
+        assert history[0]["reasoning_details"] == [{"type": "reasoning", "signature": "sig"}]
+        assert history[0]["codex_reasoning_items"] == [{"id": "r2"}]
+        assert history[0]["codex_message_items"] == [{"id": "m2"}]
+        assert history[0]["tool_calls"] == [{"id": "call_2", "type": "function"}]
+        assert history[0]["finish_reason"] == "tool_calls"
+        assert history[1] == {
+            "role": "tool",
+            "content": "tool result",
+            "name": "lookup-result",
+            "tool_call_id": "call_2",
+            "tool_name": "lookup",
+        }
 
 
 class TestResponsesStreaming:
@@ -3207,6 +3481,176 @@ class TestConversationParameter:
                     "conversation": "my-chat",
                 })
                 assert resp3.status == 200
+
+
+# ---------------------------------------------------------------------------
+# /v1/runs endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestRunsEndpoint:
+    @pytest.mark.asyncio
+    async def test_multimessage_fallback_history_preserves_continuity_fields(self, adapter):
+        """Runs multi-message input keeps prior assistant/tool metadata."""
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        loop = asyncio.get_running_loop()
+        captured = {}
+        called = asyncio.Event()
+
+        mock_agent = MagicMock()
+
+        def _run_conversation(*, user_message, conversation_history, task_id):
+            captured["user_message"] = user_message
+            captured["conversation_history"] = conversation_history
+            captured["task_id"] = task_id
+            loop.call_soon_threadsafe(called.set)
+            return {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        mock_agent.run_conversation.side_effect = _run_conversation
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "model": "hermes-agent",
+                        "input": [
+                            {
+                                "role": "assistant",
+                                "content": None,
+                                "name": "model-a",
+                                "reasoning": {"encrypted": "blob"},
+                                "reasoning_content": "opaque",
+                                "reasoning_details": [{"type": "reasoning", "signature": "sig"}],
+                                "codex_reasoning_items": [{"id": "r1"}],
+                                "codex_message_items": [{"id": "m1"}],
+                                "tool_calls": [{"id": "call_1", "type": "function"}],
+                                "finish_reason": "tool_calls",
+                            },
+                            {
+                                "role": "tool",
+                                "content": "tool result",
+                                "name": "lookup-result",
+                                "tool_call_id": "call_1",
+                                "tool_name": "lookup",
+                                "reasoning": "drop",
+                            },
+                            {"role": "user", "content": "final prompt"},
+                        ],
+                    },
+                )
+                assert resp.status == 202
+                run_id = (await resp.json())["run_id"]
+                task = adapter._active_run_tasks.get(run_id)
+                await asyncio.wait_for(called.wait(), timeout=2)
+                if task is not None:
+                    await asyncio.wait_for(task, timeout=2)
+
+        assert captured["user_message"] == "final prompt"
+        history = captured["conversation_history"]
+        assert history[0]["role"] == "assistant"
+        assert history[0]["content"] == ""
+        assert history[0]["name"] == "model-a"
+        assert history[0]["reasoning"] == {"encrypted": "blob"}
+        assert history[0]["reasoning_content"] == "opaque"
+        assert history[0]["reasoning_details"] == [{"type": "reasoning", "signature": "sig"}]
+        assert history[0]["codex_reasoning_items"] == [{"id": "r1"}]
+        assert history[0]["codex_message_items"] == [{"id": "m1"}]
+        assert history[0]["tool_calls"] == [{"id": "call_1", "type": "function"}]
+        assert history[0]["finish_reason"] == "tool_calls"
+        assert history[1] == {
+            "role": "tool",
+            "content": "tool result",
+            "name": "lookup-result",
+            "tool_call_id": "call_1",
+            "tool_name": "lookup",
+        }
+
+    @pytest.mark.asyncio
+    async def test_explicit_conversation_history_preserves_continuity_fields(self, adapter):
+        """Explicit Runs history keeps assistant and tool continuity metadata."""
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        loop = asyncio.get_running_loop()
+        captured = {}
+        called = asyncio.Event()
+
+        mock_agent = MagicMock()
+
+        def _run_conversation(*, user_message, conversation_history, task_id):
+            captured["user_message"] = user_message
+            captured["conversation_history"] = conversation_history
+            captured["task_id"] = task_id
+            loop.call_soon_threadsafe(called.set)
+            return {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        mock_agent.run_conversation.side_effect = _run_conversation
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        history = [
+            {
+                "role": "assistant",
+                "content": "thinking",
+                "name": "model-a",
+                "reasoning": {"encrypted": "blob"},
+                "reasoning_content": "opaque",
+                "reasoning_details": [{"type": "reasoning", "signature": "sig"}],
+                "codex_reasoning_items": [{"id": "r2"}],
+                "codex_message_items": [{"id": "m2"}],
+                "tool_calls": [{"id": "call_2", "type": "function"}],
+                "finish_reason": "tool_calls",
+            },
+            {
+                "role": "tool",
+                "content": "tool result",
+                "name": "lookup-result",
+                "tool_call_id": "call_2",
+                "tool_name": "lookup",
+            },
+        ]
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "final prompt",
+                        "conversation_history": history,
+                    },
+                )
+                assert resp.status == 202
+                run_id = (await resp.json())["run_id"]
+                task = adapter._active_run_tasks.get(run_id)
+                await asyncio.wait_for(called.wait(), timeout=2)
+                if task is not None:
+                    await asyncio.wait_for(task, timeout=2)
+
+        assert captured["user_message"] == "final prompt"
+        captured_history = captured["conversation_history"]
+        assert captured_history[0]["role"] == "assistant"
+        assert captured_history[0]["content"] == "thinking"
+        assert captured_history[0]["name"] == "model-a"
+        assert captured_history[0]["reasoning"] == {"encrypted": "blob"}
+        assert captured_history[0]["reasoning_content"] == "opaque"
+        assert captured_history[0]["reasoning_details"] == [{"type": "reasoning", "signature": "sig"}]
+        assert captured_history[0]["codex_reasoning_items"] == [{"id": "r2"}]
+        assert captured_history[0]["codex_message_items"] == [{"id": "m2"}]
+        assert captured_history[0]["tool_calls"] == [{"id": "call_2", "type": "function"}]
+        assert captured_history[0]["finish_reason"] == "tool_calls"
+        assert captured_history[1] == {
+            "role": "tool",
+            "content": "tool result",
+            "name": "lookup-result",
+            "tool_call_id": "call_2",
+            "tool_name": "lookup",
+        }
 
 
 # ---------------------------------------------------------------------------
