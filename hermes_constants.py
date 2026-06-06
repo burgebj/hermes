@@ -469,3 +469,7 @@ FINISH_REASON_LENGTH = "length"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
+
+OPENPATHS_BASE_URL = "https://openpaths.io/v1"
+OPENPATHS_MODELS_URL = f"{OPENPATHS_BASE_URL}/models"
+OPENPATHS_CHAT_URL = f"{OPENPATHS_BASE_URL}/chat/completions"

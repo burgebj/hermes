@@ -44,7 +44,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
-from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
+from hermes_constants import OPENPATHS_BASE_URL, OPENROUTER_BASE_URL, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
 from utils import atomic_replace, atomic_yaml_write, is_truthy_value
 
@@ -228,6 +228,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "openpaths": ProviderConfig(
+        id="openpaths",
+        name="OpenPaths",
+        auth_type="api_key",
+        inference_base_url=OPENPATHS_BASE_URL,
+        api_key_env_vars=("OPENPATHS_API_KEY",),
+        base_url_env_var="OPENPATHS_BASE_URL",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -1482,6 +1490,7 @@ def resolve_provider(
     # Normalize provider aliases
     _PROVIDER_ALIASES = {
         "glm": "zai", "z-ai": "zai", "z.ai": "zai", "zhipu": "zai",
+        "openpath": "openpaths", "open-paths": "openpaths", "open-path": "openpaths",
         "google": "gemini", "google-gemini": "gemini", "google-ai-studio": "gemini",
         "x-ai": "xai", "x.ai": "xai", "grok": "xai",
         "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth",
@@ -1557,6 +1566,9 @@ def resolve_provider(
                 return active
     except Exception as e:
         logger.debug("Could not detect active auth provider: %s", e)
+
+    if has_usable_secret(os.getenv("OPENPATHS_API_KEY")):
+        return "openpaths"
 
     if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
         return "openrouter"
