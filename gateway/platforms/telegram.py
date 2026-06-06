@@ -1894,6 +1894,11 @@ class TelegramAdapter(BasePlatformAdapter):
             except (ImportError, AttributeError):
                 _TimedOut = None  # type: ignore[assignment,misc]
 
+            try:
+                from telegram.error import ChatMigrated as _ChatMigrated
+            except (ImportError, AttributeError):
+                _ChatMigrated = None  # type: ignore[assignment,misc]
+
             for i, chunk in enumerate(chunks):
                 retried_thread_not_found = False
                 metadata_reply_to = self._metadata_reply_to_message_id(metadata)
@@ -2059,6 +2064,14 @@ class TelegramAdapter(BasePlatformAdapter):
                         else:
                             raise
                     except Exception as send_err:
+                        if _ChatMigrated and isinstance(send_err, _ChatMigrated):
+                            new_chat_id = send_err.new_chat_id
+                            logger.warning(
+                                "[%s] Group migrated to supergroup, updating chat_id %s -> %s and retrying",
+                                self.name, chat_id, new_chat_id,
+                            )
+                            chat_id = str(new_chat_id)
+                            continue
                         retry_after = getattr(send_err, "retry_after", None)
                         if retry_after is not None or "retry after" in str(send_err).lower():
                             if _send_attempt < 2:
