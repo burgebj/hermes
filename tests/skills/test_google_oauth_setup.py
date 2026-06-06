@@ -32,10 +32,10 @@ class FakeCredentials:
                 "https://www.googleapis.com/auth/gmail.send",
                 "https://www.googleapis.com/auth/gmail.modify",
                 "https://www.googleapis.com/auth/calendar",
-                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive",
                 "https://www.googleapis.com/auth/contacts.readonly",
                 "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/documents.readonly",
+                "https://www.googleapis.com/auth/documents",
             ],
         }
 
@@ -119,6 +119,7 @@ def setup_module(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "CLIENT_SECRET_PATH", tmp_path / "google_client_secret.json")
     monkeypatch.setattr(module, "TOKEN_PATH", tmp_path / "google_token.json")
     monkeypatch.setattr(module, "PENDING_AUTH_PATH", tmp_path / "google_oauth_pending.json", raising=False)
+    monkeypatch.setattr(module, "LAST_AUTH_URL_PATH", tmp_path / "google_oauth_last_url.txt", raising=False)
 
     client_secret = {
         "installed": {
@@ -146,6 +147,97 @@ class TestGetAuthUrl:
         flow = FakeFlow.created[-1]
         assert flow.autogenerate_code_verifier is True
         assert flow.authorization_kwargs == {"access_type": "offline", "prompt": "consent"}
+
+    def test_json_auth_url_for_calendar_is_parseable_and_saves_last_url(self, setup_module, capsys):
+        setup_module.get_auth_url("calendar", "json")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["auth_url"] == "https://auth.example/authorize?state=generated-state"
+        assert payload["services"] == ["calendar"]
+        assert payload["scopes"] == setup_module.CALENDAR_SCOPES
+        assert setup_module.LAST_AUTH_URL_PATH.read_text() == payload["auth_url"]
+
+        saved = json.loads(setup_module.PENDING_AUTH_PATH.read_text())
+        assert saved["services"] == ["calendar"]
+        assert saved["requested_scopes"] == setup_module.CALENDAR_SCOPES
+
+
+class TestScopeMetadata:
+    def test_empty_granted_scopes_are_reported_missing_for_requested_services(self, setup_module):
+        missing = setup_module._missing_scopes_from_payload(
+            {
+                "services": ["calendar"],
+                "requested_scopes": setup_module.CALENDAR_SCOPES,
+                "scopes": [],
+            }
+        )
+
+        assert missing == setup_module.CALENDAR_SCOPES
+
+    def test_check_auth_refresh_preserves_service_metadata(self, setup_module, monkeypatch):
+        class RefreshingCredentials:
+            valid = False
+            expired = True
+            refresh_token = "refresh-token"
+
+            @classmethod
+            def from_authorized_user_file(cls, path):
+                return cls()
+
+            def refresh(self, request):
+                self.valid = True
+
+            def to_json(self):
+                return json.dumps(
+                    {
+                        "token": "new-access-token",
+                        "refresh_token": "refresh-token",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                        "scopes": setup_module.CALENDAR_SCOPES,
+                    }
+                )
+
+        credentials_module = types.ModuleType("google.oauth2.credentials")
+        credentials_module.Credentials = RefreshingCredentials
+        oauth2_module = types.ModuleType("google.oauth2")
+        oauth2_module.credentials = credentials_module
+        google_module = sys.modules.get("google") or types.ModuleType("google")
+        google_module.oauth2 = oauth2_module
+        transport_requests_module = types.ModuleType("google.auth.transport.requests")
+        transport_requests_module.Request = lambda: object()
+        transport_module = types.ModuleType("google.auth.transport")
+        transport_module.requests = transport_requests_module
+        auth_module = types.ModuleType("google.auth")
+        auth_module.transport = transport_module
+
+        monkeypatch.setitem(sys.modules, "google", google_module)
+        monkeypatch.setitem(sys.modules, "google.oauth2", oauth2_module)
+        monkeypatch.setitem(sys.modules, "google.oauth2.credentials", credentials_module)
+        monkeypatch.setitem(sys.modules, "google.auth", auth_module)
+        monkeypatch.setitem(sys.modules, "google.auth.transport", transport_module)
+        monkeypatch.setitem(sys.modules, "google.auth.transport.requests", transport_requests_module)
+
+        setup_module.TOKEN_PATH.write_text(
+            json.dumps(
+                {
+                    "token": "expired-access-token",
+                    "refresh_token": "refresh-token",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "client_id": "client-id",
+                    "client_secret": "client-secret",
+                    "scopes": setup_module.CALENDAR_SCOPES,
+                    "services": ["calendar"],
+                    "requested_scopes": setup_module.CALENDAR_SCOPES,
+                }
+            )
+        )
+
+        assert setup_module.check_auth() is True
+        saved = json.loads(setup_module.TOKEN_PATH.read_text())
+        assert saved["services"] == ["calendar"]
+        assert saved["requested_scopes"] == setup_module.CALENDAR_SCOPES
 
 
 class TestExchangeAuthCode:
@@ -256,6 +348,130 @@ class TestExchangeAuthCode:
         assert setup_module.TOKEN_PATH.exists()
         # Pending auth is cleaned up
         assert not setup_module.PENDING_AUTH_PATH.exists()
+
+    def test_json_output_contains_warnings_without_plain_text_prefix(self, setup_module, capsys):
+        setup_module.PENDING_AUTH_PATH.write_text(
+            json.dumps(
+                {
+                    "state": "saved-state",
+                    "code_verifier": "saved-verifier",
+                    "services": ["all"],
+                    "requested_scopes": setup_module.SCOPES,
+                }
+            )
+        )
+        FakeFlow.credentials_payload = {
+            "token": "access-token",
+            "refresh_token": "refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "scopes": setup_module.CALENDAR_SCOPES,
+        }
+
+        setup_module.exchange_auth_code("4/test-auth-code", "json")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "authenticated"
+        assert payload["missing_scopes"]
+        assert payload["warnings"]
+        assert setup_module.TOKEN_PATH.exists()
+
+    def test_json_exchange_failure_returns_fresh_auth_url(self, setup_module, capsys):
+        setup_module.PENDING_AUTH_PATH.write_text(
+            json.dumps(
+                {
+                    "state": "saved-state",
+                    "code_verifier": "saved-verifier",
+                    "services": ["calendar"],
+                    "requested_scopes": setup_module.CALENDAR_SCOPES,
+                }
+            )
+        )
+        FakeFlow.fetch_error = Exception("invalid_grant: expired code")
+
+        with pytest.raises(SystemExit) as excinfo:
+            setup_module.exchange_auth_code("4/test-auth-code", "json")
+
+        assert excinfo.value.code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["error"] == "token_exchange_failed"
+        assert payload["services"] == ["calendar"]
+        assert payload["fresh_auth_url"] == "https://auth.example/authorize?state=generated-state"
+        assert setup_module.PENDING_AUTH_PATH.exists()
+
+
+class TestRevoke:
+    def test_revoke_uses_stored_refresh_token_for_narrow_scope_token(self, setup_module, monkeypatch, capsys):
+        setup_module.TOKEN_PATH.write_text(
+            json.dumps(
+                {
+                    "token": "expired-access-token",
+                    "refresh_token": "refresh-token",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "client_id": "client-id",
+                    "client_secret": "client-secret",
+                    "scopes": setup_module.CALENDAR_SCOPES,
+                    "services": ["calendar"],
+                    "requested_scopes": setup_module.CALENDAR_SCOPES,
+                }
+            )
+        )
+        setup_module.PENDING_AUTH_PATH.write_text("{}")
+
+        class ExpiredNarrowCredentials:
+            token = "expired-access-token"
+            expired = True
+            refresh_token = "refresh-token"
+
+            @classmethod
+            def from_authorized_user_file(cls, path, scopes=None):
+                return cls()
+
+            def refresh(self, request):
+                raise Exception("invalid_scope")
+
+        credentials_module = types.ModuleType("google.oauth2.credentials")
+        credentials_module.Credentials = ExpiredNarrowCredentials
+        oauth2_module = types.ModuleType("google.oauth2")
+        oauth2_module.credentials = credentials_module
+        google_module = sys.modules.get("google") or types.ModuleType("google")
+        google_module.oauth2 = oauth2_module
+        transport_requests_module = types.ModuleType("google.auth.transport.requests")
+        transport_requests_module.Request = lambda: object()
+        transport_module = types.ModuleType("google.auth.transport")
+        transport_module.requests = transport_requests_module
+        auth_module = types.ModuleType("google.auth")
+        auth_module.transport = transport_module
+        monkeypatch.setitem(sys.modules, "google", google_module)
+        monkeypatch.setitem(sys.modules, "google.oauth2", oauth2_module)
+        monkeypatch.setitem(sys.modules, "google.oauth2.credentials", credentials_module)
+        monkeypatch.setitem(sys.modules, "google.auth", auth_module)
+        monkeypatch.setitem(sys.modules, "google.auth.transport", transport_module)
+        monkeypatch.setitem(sys.modules, "google.auth.transport.requests", transport_requests_module)
+
+        calls = []
+
+        def fake_urlopen(request, *args, **kwargs):
+            calls.append(request.full_url)
+
+            class Response:
+                def close(self):
+                    pass
+
+            return Response()
+
+        import urllib.request
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        setup_module.revoke()
+
+        assert calls == ["https://oauth2.googleapis.com/revoke?token=refresh-token"]
+        assert not setup_module.TOKEN_PATH.exists()
+        assert not setup_module.PENDING_AUTH_PATH.exists()
+        assert "Token revoked with Google" in capsys.readouterr().out
 
 
 class TestHermesConstantsFallback:
