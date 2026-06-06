@@ -12307,6 +12307,90 @@ def _render_distribution_plan(plan) -> None:
         )
 
 
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with the given PID is still alive.
+
+    On Linux, checks /proc/<pid>.  On macOS and other Unix, uses
+    ``ps -p <pid>`` which exits non-zero if the process does not exist.
+    Returns False on any error (permission denied, etc.).
+    """
+    if sys.platform == "win32":
+        # Windows: use tasklist to check if PID exists.
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            # tasklist output contains the PID in its lines if the process exists.
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+    elif sys.platform == "darwin" or sys.platform.startswith("freebsd"):
+        # macOS / FreeBSD: ps -p exits 1 if PID not found.
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid)],
+                capture_output=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+    else:
+        # Linux: check /proc/<pid> existence.
+        return os.path.exists(f"/proc/{pid}")
+
+
+def _get_process_cmdline(pid: int) -> str:
+    """Get the command line of a process by PID.
+
+    On Linux, reads /proc/<pid>/cmdline.  On macOS and other Unix,
+    uses ``ps -p <pid> -o command=``.  Returns an empty string on any error.
+    """
+    try:
+        if sys.platform == "win32":
+            # Windows: use wmic to get command line.
+            result = subprocess.run(
+                ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/FORMAT:LIST"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            for line in result.stdout.split("\n"):
+                if line.startswith("CommandLine="):
+                    return line[len("CommandLine="):].strip()
+            return ""
+        elif sys.platform == "darwin" or sys.platform.startswith("freebsd"):
+            # macOS / FreeBSD: use ps.
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+            return ""
+        else:
+            # Linux: read /proc/<pid>/cmdline.
+            cmdline_path = f"/proc/{pid}/cmdline"
+            if os.path.exists(cmdline_path):
+                with open(cmdline_path, "rb") as f:
+                    return (
+                        f.read()
+                        .replace(b"\x00", b" ")
+                        .decode("utf-8", errors="replace")
+                        .strip()
+                    )
+            return ""
+    except Exception:
+        return ""
+
+
 def _report_dashboard_status() -> int:
     """Print ``hermes dashboard`` PIDs and return the count.
 
@@ -12320,28 +12404,29 @@ def _report_dashboard_status() -> int:
         print("No hermes dashboard processes running.")
         return 0
 
-    print(f"{len(pids)} hermes dashboard process(es) running:")
+    # Re-verify each PID to filter out any stale entries (e.g. zombie
+    # processes, reused PIDs on macOS).  _find_stale_dashboard_pids() already
+    # does a fresh scan via ps, but a PID may disappear between that scan and
+    # this display loop — especially on macOS where /proc/ does not exist and
+    # we cannot fall back to cmdline reads.  Skipping verification would show
+    # phantom PIDs that no longer exist (#24150).
+    alive_pids: list[int] = []
     for pid in pids:
-        # Best-effort: show the full cmdline so users can tell profiles apart.
-        cmdline = ""
-        try:
-            if sys.platform != "win32":
-                cmdline_path = f"/proc/{pid}/cmdline"
-                if os.path.exists(cmdline_path):
-                    with open(cmdline_path, "rb") as f:
-                        cmdline = (
-                            f.read()
-                            .replace(b"\x00", b" ")
-                            .decode("utf-8", errors="replace")
-                            .strip()
-                        )
-        except (OSError, ValueError):
-            pass
+        if _is_process_alive(pid):
+            alive_pids.append(pid)
+
+    if not alive_pids:
+        print("No hermes dashboard processes running.")
+        return 0
+
+    print(f"{len(alive_pids)} hermes dashboard process(es) running:")
+    for pid in alive_pids:
+        cmdline = _get_process_cmdline(pid)
         if cmdline:
             print(f"    PID {pid}: {cmdline}")
         else:
             print(f"    PID {pid}")
-    return len(pids)
+    return len(alive_pids)
 
 
 def cmd_dashboard(args):

@@ -41,6 +41,10 @@ class TestDashboardStatus:
     def test_status_with_processes(self, capsys):
         with patch("hermes_cli.main._find_stale_dashboard_pids",
                    return_value=[12345, 12346]), \
+             patch("hermes_cli.main._is_process_alive", return_value=True), \
+             patch("hermes_cli.main._get_process_cmdline",
+                   side_effect=["/usr/bin/hermes dashboard --port 9119",
+                                "/usr/bin/hermes dashboard --port 9120"]), \
              pytest.raises(SystemExit) as exc:
             cmd_dashboard(_ns(status=True))
         # Status is informational — always exits 0.
@@ -49,6 +53,25 @@ class TestDashboardStatus:
         assert "2 hermes dashboard process(es) running" in out
         assert "PID 12345" in out
         assert "PID 12346" in out
+
+    def test_status_filters_stale_pids(self, capsys):
+        """Stale PIDs (processes that vanished between scan and display) are
+        silently dropped from the report instead of shown as phantom entries
+        (#24150 on macOS where /proc/ does not exist)."""
+        with patch("hermes_cli.main._find_stale_dashboard_pids",
+                   return_value=[12345, 99999]), \
+             patch("hermes_cli.main._is_process_alive",
+                   side_effect=lambda pid: pid == 12345), \
+             patch("hermes_cli.main._get_process_cmdline",
+                   return_value="/usr/bin/hermes dashboard --port 9119"), \
+             pytest.raises(SystemExit) as exc:
+            cmd_dashboard(_ns(status=True))
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        # Only the alive PID (12345) should appear; 99999 is dropped.
+        assert "1 hermes dashboard process(es) running" in out
+        assert "PID 12345" in out
+        assert "99999" not in out
 
     def test_status_does_not_try_to_import_fastapi(self):
         """`--status` must not require dashboard runtime deps — it's a
@@ -179,3 +202,115 @@ class TestArgparseWiring:
              pytest.raises(SystemExit) as exc:
             mod.cmd_dashboard(_ns(status=True))
         assert exc.value.code == 0
+
+
+class TestIsProcessAlive:
+    """Tests for _is_process_alive() cross-platform verification."""
+
+    def test_linux_proc_exists(self):
+        """On Linux, return True when /proc/<pid> exists."""
+        from hermes_cli.main import _is_process_alive
+        with patch("sys.platform", "linux"):
+            with patch("os.path.exists", return_value=True):
+                assert _is_process_alive(1) is True
+
+    def test_linux_proc_missing(self):
+        """On Linux, return False when /proc/<pid> does not exist."""
+        from hermes_cli.main import _is_process_alive
+        with patch("sys.platform", "linux"):
+            with patch("os.path.exists", return_value=False):
+                assert _is_process_alive(99999) is False
+
+    def test_macos_ps_returns_alive(self):
+        """On macOS, return True when ps -p returns 0."""
+        from hermes_cli.main import _is_process_alive
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                assert _is_process_alive(1) is True
+                mock_run.assert_called_once()
+                args = mock_run.call_args[0][0]
+                assert args[0] == "ps" and args[1] == "-p"
+
+    def test_macos_ps_returns_dead(self):
+        """On macOS, return False when ps -p returns non-zero."""
+        from hermes_cli.main import _is_process_alive
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=1)
+                assert _is_process_alive(99999) is False
+
+    def test_windows_tasklist_found(self):
+        """On Windows, return True when tasklist output contains the PID."""
+        from hermes_cli.main import _is_process_alive
+        with patch("sys.platform", "win32"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout=" 1234\n 5678\n",
+                )
+                assert _is_process_alive(1234) is True
+
+    def test_windows_tasklist_not_found(self):
+        """On Windows, return False when tasklist output does not contain the PID."""
+        from hermes_cli.main import _is_process_alive
+        with patch("sys.platform", "win32"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout=" 1234\n 5678\n",
+                )
+                assert _is_process_alive(99999) is False
+
+
+class TestGetProcessCmdline:
+    """Tests for _get_process_cmdline() cross-platform retrieval."""
+
+    def test_linux_proc_cmdline(self):
+        """On Linux, read /proc/<pid>/cmdline and decode it."""
+        from hermes_cli.main import _get_process_cmdline
+        with patch("sys.platform", "linux"):
+            with patch("os.path.exists", return_value=True):
+                with patch("builtins.open", MagicMock()) as mock_open:
+                    mock_open.return_value.__enter__.return_value.read.return_value = (
+                        b"hermes\x00dashboard\x00--port\x009119"
+                    )
+                    result = _get_process_cmdline(12345)
+                    assert "hermes" in result
+                    assert "dashboard" in result
+
+    def test_macos_ps_command(self):
+        """On macOS, use ps -p <pid> -o command=."""
+        from hermes_cli.main import _get_process_cmdline
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout=" /usr/bin/hermes dashboard --port 9119\n",
+                )
+                result = _get_process_cmdline(12345)
+                assert "hermes" in result
+                mock_run.assert_called_once()
+                args = mock_run.call_args[0][0]
+                assert "-p" in args and "-o" in args and "command=" in args
+
+    def test_macos_ps_returns_empty_on_error(self):
+        """On macOS, return empty string when ps fails."""
+        from hermes_cli.main import _get_process_cmdline
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=1, stdout="")
+                assert _get_process_cmdline(99999) == ""
+
+    def test_windows_wmic_commandline(self):
+        """On Windows, use wmic to get command line."""
+        from hermes_cli.main import _get_process_cmdline
+        with patch("sys.platform", "win32"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="CommandLine=C:\\hermes.exe dashboard --port 9119\n",
+                )
+                result = _get_process_cmdline(12345)
+                assert "hermes" in result.lower()
+
