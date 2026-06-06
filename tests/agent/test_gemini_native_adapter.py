@@ -52,6 +52,24 @@ def test_build_native_request_preserves_thought_signature_on_tool_replay():
     assert parts[0]["thoughtSignature"] == "sig-123"
 
 
+def test_build_native_request_includes_role_on_system_instruction():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Hello"},
+        ],
+        tools=[],
+        tool_choice=None,
+    )
+
+    assert request["systemInstruction"] == {
+        "role": "system",
+        "parts": [{"text": "Be concise."}],
+    }
+
+
 def test_build_native_request_uses_original_function_name_for_tool_result():
     from agent.gemini_native_adapter import build_gemini_request
 
