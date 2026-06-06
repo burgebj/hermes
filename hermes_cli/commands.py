@@ -1230,10 +1230,31 @@ class SlashCommandCompleter(Completer):
             return None
         # Walk backwards to find the start of the current "word".
         # Words are delimited by spaces, but paths can contain almost anything.
+        # When a space is part of a path (e.g. "My Documents/file.txt"), the
+        # word immediately after the space contains a "/" — keep walking and
+        # record the last known path-like boundary.
         i = len(text) - 1
-        while i >= 0 and text[i] != " ":
-            i -= 1
-        word = text[i + 1:]
+        last_path_start = None
+        while i >= 0:
+            if text[i] != " ":
+                i -= 1
+            else:
+                # Check if the word after this space is path-like
+                j = i + 1
+                while j < len(text) and text[j] != " ":
+                    j += 1
+                nxt = text[i + 1:j]
+                if "/" in nxt or nxt.startswith("~"):
+                    last_path_start = i + 1
+                    i -= 1
+                else:
+                    break
+        # Use the last recorded path boundary if we walked past the path,
+        # otherwise use the word directly after the space we stopped at.
+        if last_path_start is not None:
+            word = text[last_path_start:]
+        else:
+            word = text[i + 1:]
         if not word:
             return None
         # Only trigger path completion for path-like tokens
