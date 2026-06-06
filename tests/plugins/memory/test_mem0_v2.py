@@ -12,6 +12,13 @@ import pytest
 from plugins.memory.mem0 import Mem0MemoryProvider
 
 
+@pytest.fixture(autouse=True)
+def clean_mem0_env(monkeypatch):
+    """Keep developer shell/profile Mem0 settings from changing unit-test mode."""
+    for key in ("MEM0_BACKEND", "MEM0_API_KEY", "MEM0_BASE_URL", "MEM0_USER_ID", "MEM0_AGENT_ID"):
+        monkeypatch.delenv(key, raising=False)
+
+
 class FakeClientV2:
     """Fake Mem0 client that returns v2-style dict responses and captures call kwargs."""
 
@@ -215,6 +222,134 @@ def test_save_config_sets_owner_only_permissions(tmp_path):
     assert config_file.exists()
     mode = stat.S_IMODE(config_file.stat().st_mode)
     assert mode == 0o600, f"Expected 0o600 (owner-only), got {oct(mode)}"
+
+
+class TestMem0LocalRest:
+    """Self-hosted Mem0 REST backend maps provider calls to HTTP-compatible requests."""
+
+    def _make_provider(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("MEM0_BACKEND", "local_rest")
+        monkeypatch.setenv("MEM0_API_KEY", "local-key")
+        monkeypatch.setenv("MEM0_BASE_URL", "http://localhost:8888/")
+        monkeypatch.setenv("MEM0_USER_ID", "u123")
+        monkeypatch.setenv("MEM0_AGENT_ID", "hermes")
+        provider = Mem0MemoryProvider()
+        provider.initialize("test-session")
+        calls = []
+
+        def fake_local_request(method, path, body=None, query=None):
+            calls.append({"method": method, "path": path, "body": body, "query": query})
+            if path == "/search":
+                return {"results": [{"memory": "local result", "score": 0.7}]}
+            if method == "GET" and path == "/memories":
+                return {"results": [{"memory": "profile memory"}]}
+            return {"ok": True}
+
+        monkeypatch.setattr(provider, "_local_request", fake_local_request)
+        return provider, calls
+
+    def test_initialize_reads_local_rest_config(self, monkeypatch, tmp_path):
+        provider, _ = self._make_provider(monkeypatch, tmp_path)
+
+        assert provider._backend == "local_rest"
+        assert provider._base_url == "http://localhost:8888/"
+        assert provider._user_id == "u123"
+        assert provider._agent_id == "hermes"
+
+    def test_local_rest_does_not_require_cloud_client(self, monkeypatch, tmp_path):
+        provider, _ = self._make_provider(monkeypatch, tmp_path)
+
+        assert provider._get_client() is None
+
+    def test_local_rest_search_posts_filters_body_without_rerank(self, monkeypatch, tmp_path):
+        provider, calls = self._make_provider(monkeypatch, tmp_path)
+
+        result = json.loads(provider.handle_tool_call(
+            "mem0_search", {"query": "hello", "top_k": 3, "rerank": True}
+        ))
+
+        assert result["count"] == 1
+        assert calls[-1] == {
+            "method": "POST",
+            "path": "/search",
+            "body": {"query": "hello", "filters": {"user_id": "u123"}, "top_k": 3},
+            "query": None,
+        }
+        assert "rerank" not in calls[-1]["body"]
+
+    def test_local_rest_profile_gets_memories_with_user_query(self, monkeypatch, tmp_path):
+        provider, calls = self._make_provider(monkeypatch, tmp_path)
+
+        result = json.loads(provider.handle_tool_call("mem0_profile", {}))
+
+        assert result["count"] == 1
+        assert "profile memory" in result["result"]
+        assert calls[-1] == {
+            "method": "GET",
+            "path": "/memories",
+            "body": None,
+            "query": {"user_id": "u123"},
+        }
+
+    def test_local_rest_conclude_posts_verbatim_memory(self, monkeypatch, tmp_path):
+        provider, calls = self._make_provider(monkeypatch, tmp_path)
+
+        result = json.loads(provider.handle_tool_call(
+            "mem0_conclude", {"conclusion": "user likes local memory"}
+        ))
+
+        assert result["result"] == "Fact stored."
+        assert calls[-1] == {
+            "method": "POST",
+            "path": "/memories",
+            "body": {
+                "messages": [{"role": "user", "content": "user likes local memory"}],
+                "user_id": "u123",
+                "agent_id": "hermes",
+                "infer": False,
+            },
+            "query": None,
+        }
+
+    def test_local_rest_prefetch_and_sync_turn_use_rest(self, monkeypatch, tmp_path):
+        provider, calls = self._make_provider(monkeypatch, tmp_path)
+
+        provider.queue_prefetch("hello")
+        provider._prefetch_thread.join(timeout=2)
+        assert "local result" in provider.prefetch("hello")
+
+        provider.sync_turn("user said this", "assistant replied", session_id="s1")
+        provider._sync_thread.join(timeout=2)
+
+        assert calls[0] == {
+            "method": "POST",
+            "path": "/search",
+            "body": {"query": "hello", "filters": {"user_id": "u123"}, "top_k": 5},
+            "query": None,
+        }
+        assert calls[1] == {
+            "method": "POST",
+            "path": "/memories",
+            "body": {
+                "messages": [
+                    {"role": "user", "content": "user said this"},
+                    {"role": "assistant", "content": "assistant replied"},
+                ],
+                "user_id": "u123",
+                "agent_id": "hermes",
+            },
+            "query": None,
+        }
+
+    def test_local_headers_use_x_api_key(self):
+        provider = Mem0MemoryProvider()
+        provider._api_key = "local-key"
+
+        assert provider._local_headers() == {
+            "Content-Type": "application/json",
+            "X-API-Key": "local-key",
+        }
 
 
 class TestMem0Defaults:

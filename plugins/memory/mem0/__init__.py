@@ -1,12 +1,14 @@
 """Mem0 memory plugin — MemoryProvider interface.
 
 Server-side LLM fact extraction, semantic search with reranking, and
-automatic deduplication via the Mem0 Platform API.
+automatic deduplication via the Mem0 Platform API or a self-hosted Mem0 REST API.
 
 Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
 
 Config via environment variables:
-  MEM0_API_KEY       — Mem0 Platform API key (required)
+  MEM0_BACKEND       — platform or local_rest (default: platform)
+  MEM0_API_KEY       — Mem0 Platform API key, or local X-API-Key when local_rest
+  MEM0_BASE_URL      — local REST base URL when local_rest (default: http://localhost:8888)
   MEM0_USER_ID       — User identifier (default: hermes-user)
   MEM0_AGENT_ID      — Agent identifier (default: hermes)
 
@@ -20,6 +22,9 @@ import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -47,7 +52,9 @@ def _load_config() -> dict:
     from hermes_constants import get_hermes_home
 
     config = {
+        "backend": os.environ.get("MEM0_BACKEND", "platform"),
         "api_key": os.environ.get("MEM0_API_KEY", ""),
+        "base_url": os.environ.get("MEM0_BASE_URL", "http://localhost:8888"),
         "user_id": os.environ.get("MEM0_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
         "rerank": True,
@@ -117,13 +124,15 @@ CONCLUDE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
-    """Mem0 Platform memory with server-side extraction and semantic search."""
+    """Mem0 memory using either the Platform SDK or self-hosted REST API."""
 
     def __init__(self):
         self._config = None
         self._client = None
         self._client_lock = threading.Lock()
         self._api_key = ""
+        self._backend = "platform"
+        self._base_url = "http://localhost:8888"
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._rerank = True
@@ -160,14 +169,48 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def get_config_schema(self):
         return [
-            {"key": "api_key", "description": "Mem0 Platform API key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "backend", "description": "Mem0 backend", "default": "platform", "choices": ["platform", "local_rest"]},
+            {"key": "api_key", "description": "Mem0 API key / local X-API-Key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "base_url", "description": "Local REST base URL", "default": "http://localhost:8888", "when": {"backend": "local_rest"}, "env_var": "MEM0_BASE_URL"},
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
             {"key": "agent_id", "description": "Agent identifier", "default": "hermes"},
             {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
         ]
 
+    def _local_headers(self) -> Dict[str, str]:
+        """Build headers for the self-hosted REST API without logging secrets."""
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["X-API-Key"] = self._api_key
+        return headers
+
+    def _local_request(self, method: str, path: str, body: dict | None = None, query: dict | None = None) -> Any:
+        """Call the local self-hosted Mem0 REST API.
+
+        Hermes' original mem0 plugin uses the cloud SDK.  A local Mem0 server exposes
+        compatible operations over HTTP instead, so this adapter keeps persistent
+        memory local while preserving the MemoryProvider interface.
+        """
+        url = f"{self._base_url.rstrip('/')}{path}"
+        clean_query = {k: v for k, v in (query or {}).items() if v is not None}
+        if clean_query:
+            url += "?" + urllib.parse.urlencode(clean_query)
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=self._local_headers(), method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw else {"ok": True}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Local Mem0 HTTP {exc.code}: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Local Mem0 request failed: {exc}") from exc
+
     def _get_client(self):
         """Thread-safe client accessor with lazy initialization."""
+        if self._backend == "local_rest":
+            return None
         with self._client_lock:
             if self._client is not None:
                 return self._client
@@ -204,6 +247,8 @@ class Mem0MemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
         self._api_key = self._config.get("api_key", "")
+        self._backend = self._config.get("backend", "platform")
+        self._base_url = self._config.get("base_url", "http://localhost:8888")
         # Prefer gateway-provided user_id for per-user memory scoping;
         # fall back to config/env default for CLI (single-user) sessions.
         self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
@@ -251,13 +296,24 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _run():
             try:
-                client = self._get_client()
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=self._rerank,
-                    top_k=5,
-                ))
+                if self._backend == "local_rest":
+                    results = self._unwrap_results(self._local_request(
+                        "POST",
+                        "/search",
+                        {
+                            "query": query,
+                            "filters": self._read_filters(),
+                            "top_k": 5,
+                        },
+                    ))
+                else:
+                    client = self._get_client()
+                    results = self._unwrap_results(client.search(
+                        query=query,
+                        filters=self._read_filters(),
+                        rerank=self._rerank,
+                        top_k=5,
+                    ))
                 if results:
                     lines = [r.get("memory", "") for r in results if r.get("memory")]
                     with self._prefetch_lock:
@@ -277,12 +333,19 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _sync():
             try:
-                client = self._get_client()
                 messages = [
                     {"role": "user", "content": user_content},
                     {"role": "assistant", "content": assistant_content},
                 ]
-                client.add(messages, **self._write_filters())
+                if self._backend == "local_rest":
+                    self._local_request(
+                        "POST",
+                        "/memories",
+                        {"messages": messages, **self._write_filters()},
+                    )
+                else:
+                    client = self._get_client()
+                    client.add(messages, **self._write_filters())
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -311,7 +374,14 @@ class Mem0MemoryProvider(MemoryProvider):
 
         if tool_name == "mem0_profile":
             try:
-                memories = self._unwrap_results(client.get_all(filters=self._read_filters()))
+                if self._backend == "local_rest":
+                    memories = self._unwrap_results(self._local_request(
+                        "GET",
+                        "/memories",
+                        query=self._read_filters(),
+                    ))
+                else:
+                    memories = self._unwrap_results(client.get_all(filters=self._read_filters()))
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No memories stored yet."})
@@ -328,12 +398,23 @@ class Mem0MemoryProvider(MemoryProvider):
             rerank = args.get("rerank", False)
             top_k = min(int(args.get("top_k", 10)), 50)
             try:
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=rerank,
-                    top_k=top_k,
-                ))
+                if self._backend == "local_rest":
+                    results = self._unwrap_results(self._local_request(
+                        "POST",
+                        "/search",
+                        {
+                            "query": query,
+                            "filters": self._read_filters(),
+                            "top_k": top_k,
+                        },
+                    ))
+                else:
+                    results = self._unwrap_results(client.search(
+                        query=query,
+                        filters=self._read_filters(),
+                        rerank=rerank,
+                        top_k=top_k,
+                    ))
                 self._record_success()
                 if not results:
                     return json.dumps({"result": "No relevant memories found."})
@@ -348,11 +429,22 @@ class Mem0MemoryProvider(MemoryProvider):
             if not conclusion:
                 return tool_error("Missing required parameter: conclusion")
             try:
-                client.add(
-                    [{"role": "user", "content": conclusion}],
-                    **self._write_filters(),
-                    infer=False,
-                )
+                if self._backend == "local_rest":
+                    self._local_request(
+                        "POST",
+                        "/memories",
+                        {
+                            "messages": [{"role": "user", "content": conclusion}],
+                            **self._write_filters(),
+                            "infer": False,
+                        },
+                    )
+                else:
+                    client.add(
+                        [{"role": "user", "content": conclusion}],
+                        **self._write_filters(),
+                        infer=False,
+                    )
                 self._record_success()
                 return json.dumps({"result": "Fact stored."})
             except Exception as e:
