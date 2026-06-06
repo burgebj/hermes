@@ -176,9 +176,6 @@ def _terminate_bridge_process(proc, *, force: bool = False) -> None:
     except psutil.NoSuchProcess:
         return
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
