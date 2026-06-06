@@ -1774,8 +1774,9 @@ class TestSendTyping:
         adapter._app.client.assistant_threads_setStatus = AsyncMock(
             side_effect=Exception("missing_scope")
         )
-        # Should not raise
+        # Should not raise or track a status that Slack did not set.
         await adapter.send_typing("C123", metadata={"thread_id": "ts1"})
+        assert ("C123", "ts1") not in adapter._active_status_threads
 
     @pytest.mark.asyncio
     async def test_uses_thread_ts_fallback(self, adapter):
@@ -1801,7 +1802,7 @@ class TestSendTyping:
             thread_ts="parent_ts",
             status="",
         )
-        assert "C123" not in adapter._active_status_threads
+        assert ("C123", "parent_ts") not in adapter._active_status_threads
 
     @pytest.mark.asyncio
     async def test_stop_typing_noop_without_tracked_thread(self, adapter):
@@ -1813,19 +1814,19 @@ class TestSendTyping:
 
     @pytest.mark.asyncio
     async def test_stop_typing_handles_api_error_gracefully(self, adapter):
-        adapter._active_status_threads["C123"] = "parent_ts"
+        adapter._active_status_threads.add(("C123", "parent_ts"))
         adapter._app.client.assistant_threads_setStatus = AsyncMock(
             side_effect=Exception("missing_scope")
         )
 
-        await adapter.stop_typing("C123")
+        await adapter.stop_typing("C123", metadata={"clear_all_threads": True})
 
         adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
             channel_id="C123",
             thread_ts="parent_ts",
             status="",
         )
-        assert "C123" not in adapter._active_status_threads
+        assert ("C123", "parent_ts") not in adapter._active_status_threads
 
     @pytest.mark.asyncio
     async def test_send_clears_status_after_final_post(self, adapter):
@@ -1833,7 +1834,7 @@ class TestSendTyping:
             return_value={"ts": "reply_ts"}
         )
         adapter._app.client.assistant_threads_setStatus = AsyncMock()
-        adapter._active_status_threads["C123"] = "parent_ts"
+        adapter._active_status_threads.add(("C123", "parent_ts"))
 
         result = await adapter.send("C123", "done", metadata={"thread_id": "parent_ts"})
 
@@ -1844,13 +1845,14 @@ class TestSendTyping:
             thread_ts="parent_ts",
             status="",
         )
-        assert "C123" not in adapter._active_status_threads
+        assert ("C123", "parent_ts") not in adapter._active_status_threads
 
     @pytest.mark.asyncio
     async def test_streaming_final_edit_clears_status(self, adapter):
         adapter._app.client.chat_update = AsyncMock()
         adapter._app.client.assistant_threads_setStatus = AsyncMock()
-        adapter._active_status_threads["C123"] = "parent_ts"
+        adapter._active_status_threads.add(("C123", "parent_ts"))
+        adapter._message_thread_ts["reply_ts"] = "parent_ts"
 
         result = await adapter.edit_message(
             "C123",
@@ -1870,13 +1872,13 @@ class TestSendTyping:
             thread_ts="parent_ts",
             status="",
         )
-        assert "C123" not in adapter._active_status_threads
+        assert ("C123", "parent_ts") not in adapter._active_status_threads
 
     @pytest.mark.asyncio
     async def test_streaming_intermediate_edit_keeps_status(self, adapter):
         adapter._app.client.chat_update = AsyncMock()
         adapter._app.client.assistant_threads_setStatus = AsyncMock()
-        adapter._active_status_threads["C123"] = "parent_ts"
+        adapter._active_status_threads.add(("C123", "parent_ts"))
 
         result = await adapter.edit_message(
             "C123",
@@ -1887,7 +1889,57 @@ class TestSendTyping:
 
         assert result.success
         adapter._app.client.assistant_threads_setStatus.assert_not_called()
-        assert adapter._active_status_threads["C123"] == "parent_ts"
+        assert ("C123", "parent_ts") in adapter._active_status_threads
+
+    @pytest.mark.asyncio
+    async def test_clearing_one_thread_keeps_sibling_status(self, adapter):
+        adapter._app.client.chat_update = AsyncMock()
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        adapter._active_status_threads.update({("C123", "t1"), ("C123", "t2")})
+        adapter._message_thread_ts["reply_t1"] = "t1"
+
+        result = await adapter.edit_message(
+            "C123",
+            "reply_t1",
+            "done",
+            finalize=True,
+        )
+
+        assert result.success
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="t1",
+            status="",
+        )
+        assert ("C123", "t1") not in adapter._active_status_threads
+        assert ("C123", "t2") in adapter._active_status_threads
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_without_metadata_does_not_clear_siblings(self, adapter):
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        adapter._active_status_threads.update({("C123", "t1"), ("C123", "t2")})
+
+        await adapter.stop_typing("C123")
+
+        adapter._app.client.assistant_threads_setStatus.assert_not_called()
+        assert adapter._active_status_threads == {("C123", "t1"), ("C123", "t2")}
+
+    @pytest.mark.asyncio
+    async def test_send_failure_clears_exact_status(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(side_effect=Exception("boom"))
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        adapter._active_status_threads.update({("C123", "t1"), ("C123", "t2")})
+
+        result = await adapter.send("C123", "done", metadata={"thread_id": "t1"})
+
+        assert not result.success
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="t1",
+            status="",
+        )
+        assert ("C123", "t1") not in adapter._active_status_threads
+        assert ("C123", "t2") in adapter._active_status_threads
 
 
 # ---------------------------------------------------------------------------

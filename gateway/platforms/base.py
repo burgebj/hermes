@@ -1815,6 +1815,7 @@ class BasePlatformAdapter(ABC):
         # Without the owner-task map, an old task's finally block could delete
         # a newer task's guard, leaving stale busy state.
         self._active_sessions: Dict[str, asyncio.Event] = {}
+        self._active_session_metadata: Dict[str, Optional[Dict[str, Any]]] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
         self._session_tasks: Dict[str, asyncio.Task] = {}
         # Legacy busy_text_mode env var; when unset the runner syncs the
@@ -3128,7 +3129,7 @@ class BasePlatformAdapter(ABC):
             # Cancelling _keep_typing alone won't clean that up.
             if hasattr(self, "stop_typing"):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self._stop_typing_with_metadata(chat_id, metadata=metadata)
                 except Exception:
                     pass
             self._typing_paused.discard(chat_id)
@@ -3145,6 +3146,26 @@ class BasePlatformAdapter(ABC):
         """Resume typing indicator for a chat after approval resolves."""
         self._typing_paused.discard(chat_id)
 
+    async def _stop_typing_with_metadata(self, chat_id: str, metadata=None) -> None:
+        """Call stop_typing, passing metadata only for adapters that accept it."""
+        if not hasattr(self, "stop_typing"):
+            return
+        stop_typing = self.stop_typing
+        try:
+            sig = inspect.signature(stop_typing)
+        except (TypeError, ValueError):
+            sig = None
+        params = sig.parameters if sig is not None else {}
+        accepts_metadata = (
+            sig is None
+            or "metadata" in params
+            or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+        )
+        if accepts_metadata:
+            await stop_typing(chat_id, metadata=metadata)
+        else:
+            await stop_typing(chat_id)
+
     async def interrupt_session_activity(self, session_key: str, chat_id: str) -> None:
         """Signal the active session loop to stop and clear typing immediately."""
         if session_key:
@@ -3152,7 +3173,7 @@ class BasePlatformAdapter(ABC):
             if interrupt_event is not None:
                 interrupt_event.set()
         try:
-            await self.stop_typing(chat_id)
+            await self._stop_typing_with_metadata(chat_id, metadata=self._active_session_metadata.get(session_key))
         except Exception:
             pass
 
@@ -3583,6 +3604,7 @@ class BasePlatformAdapter(ABC):
         if guard is not None and current_guard is not guard:
             return
         del self._active_sessions[session_key]
+        self._active_session_metadata.pop(session_key, None)
 
     def _session_task_is_stale(self, session_key: str) -> bool:
         """Return True if the owner task for ``session_key`` is done/cancelled.
@@ -3623,6 +3645,7 @@ class BasePlatformAdapter(ABC):
             session_key,
         )
         self._active_sessions.pop(session_key, None)
+        self._active_session_metadata.pop(session_key, None)
         self._pending_messages.pop(session_key, None)
         self._session_tasks.pop(session_key, None)
         self._discard_text_debounce(session_key)
@@ -3644,6 +3667,10 @@ class BasePlatformAdapter(ABC):
         """
         guard = interrupt_event or asyncio.Event()
         self._active_sessions[session_key] = guard
+        self._active_session_metadata[session_key] = _thread_metadata_for_source(
+            event.source,
+            _reply_anchor_for_event(event),
+        )
 
         task = asyncio.create_task(self._process_message_background(event, session_key))
         self._session_tasks[session_key] = task
@@ -4047,6 +4074,7 @@ class BasePlatformAdapter(ABC):
         
         # Start continuous typing indicator (refreshes every 2 seconds)
         _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
+        self._active_session_metadata[session_key] = _thread_metadata
         _keep_typing_kwargs = {"metadata": _thread_metadata}
         try:
             _keep_typing_sig = inspect.signature(self._keep_typing)
@@ -4488,7 +4516,7 @@ class BasePlatformAdapter(ABC):
             # that may have been recreated by _keep_typing after the last stop_typing()
             try:
                 if hasattr(self, "stop_typing"):
-                    await self.stop_typing(event.source.chat_id)
+                    await self._stop_typing_with_metadata(event.source.chat_id, metadata=_thread_metadata)
             except Exception:
                 pass
             # Final drain/release boundary: force-flush any timer that missed
@@ -4562,6 +4590,7 @@ class BasePlatformAdapter(ABC):
                 if current_task is not None and self._session_tasks.get(session_key) is current_task:
                     del self._session_tasks[session_key]
                     self._release_session_guard(session_key, guard=interrupt_event)
+                    self._active_session_metadata.pop(session_key, None)
     
     async def cancel_background_tasks(self) -> None:
         """Cancel any in-flight background message-processing tasks.
