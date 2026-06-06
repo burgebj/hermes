@@ -10,6 +10,33 @@
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
 #
+# ----------------------------------------------------------------------------
+# !!! FILE ENCODING REQUIREMENT !!!
+# This file MUST be saved as pure ASCII (or UTF-8 WITHOUT BOM).  A leading
+# UTF-8 BOM (EF BB BF) breaks the one-line installer:
+#
+#   irm <url> | iex
+#       -> The body bytes are decoded into a .NET string that still
+#          contains U+FEFF at position 0.  PowerShell's expression-context
+#          parser (used by Invoke-Expression / [scriptblock]::Create) does
+#          NOT strip that character the way the script-file loader does,
+#          so the `param` keyword is no longer recognised, and the param
+#          block lines below are parsed as bare assignments -- producing
+#          "The assignment expression is not valid" errors (#28141, #27397).
+#
+# !!! param() BLOCK INVARIANTS !!!
+# The param(...) block below MUST be the first non-comment statement in this
+# file, must be a single contiguous block (no duplicated `param(` token, no
+# misplaced `)` splitting the list), and must not be preceded by any
+# executable statement.  PowerShell only recognises `param` in that position;
+# anywhere else the parameter declarations parse as invalid assignments.
+#
+# Direct `.\install.ps1` invocation tolerates a BOM (PowerShell's file host
+# strips it), so the failure only shows up via the canonical one-line
+# installer -- which is exactly the path the README points new users at.
+#
+# When editing this file: keep it ASCII (or UTF-8 *without* BOM), and keep
+# the param() block contiguous.  See tests/scripts/test_install_ps1_encoding.py.
 # ============================================================================
 
 param(
