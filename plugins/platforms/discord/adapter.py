@@ -4026,8 +4026,29 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Respect DISCORD_ALLOW_BOTS for other bots.
                 # For history context, "mentions" is treated as "all" — we are
                 # deciding what context to show, not whether to respond.
-                if getattr(msg.author, "bot", False) and not include_other_bots:
+                is_bot_author = bool(getattr(msg.author, "bot", False))
+                if is_bot_author and not include_other_bots:
                     continue
+
+                # Apply the same allowlist used at message-receipt time to
+                # backfilled human messages.  Without this, any guild member
+                # — including users explicitly excluded from
+                # DISCORD_ALLOWED_USERS / DISCORD_ALLOWED_ROLES — can plant
+                # content in the channel that the bot will later read into
+                # the model's context when an allowlisted user triggers a
+                # response.  That turns the channel into an indirect
+                # prompt-injection surface against the authorized user.
+                # _fetch_channel_context is only invoked from non-DM paths
+                # (see the `not _is_dm` guard at the call site), so passing
+                # is_dm=False here is correct.
+                if not is_bot_author:
+                    if not self._is_allowed_user(
+                        str(msg.author.id),
+                        msg.author,
+                        guild=getattr(channel, "guild", None),
+                        is_dm=False,
+                    ):
+                        continue
 
                 content = getattr(msg, "clean_content", msg.content) or ""
                 if not content and msg.attachments:
@@ -4035,9 +4056,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not content:
                     continue
 
-                name = msg.author.display_name
-                if getattr(msg.author, "bot", False):
+                # Escape the structural delimiters [ and ] so a hostile
+                # display name or message body can't fake "[Recent channel
+                # messages]" headers or "[Username] ..." rows and slip
+                # instructions past the channel-context boundary.
+                def _escape_brackets(s: str) -> str:
+                    return s.replace("[", "\\[").replace("]", "\\]")
+
+                name = _escape_brackets(msg.author.display_name)
+                if is_bot_author:
                     name = f"{name} [bot]"
+                content = _escape_brackets(content)
                 collected.append(f"[{name}] {content}")
 
             if not collected:
