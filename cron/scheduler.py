@@ -155,6 +155,7 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+PAUSE_MARKER = "[PAUSE]"
 
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
@@ -2115,6 +2116,18 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+
+                # Auto-pause: if the agent returned [PAUSE], pause the job
+                # so it won't fire again until manually resumed.  Works with
+                # or without [SILENT] — agent can deliver a final message
+                # then self-pause, or suppress delivery AND pause.
+                if success and PAUSE_MARKER in deliver_content.strip().upper():
+                    logger.info("Job '%s': agent returned %s — pausing job", job["id"], PAUSE_MARKER)
+                    try:
+                        from cron.jobs import pause_job
+                        pause_job(job["id"], reason="Auto-paused: agent returned [PAUSE]")
+                    except Exception as pause_err:
+                        logger.error("Failed to auto-pause job %s: %s", job["id"], pause_err)
                 return True
 
             except Exception as e:
