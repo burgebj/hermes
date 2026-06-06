@@ -477,7 +477,7 @@ class TestToolHandlers:
         p = provider_with_config(retain_tags=["pref", "ui"])
         p.handle_tool_call("hindsight_retain", {"content": "likes dark mode"})
         call_kwargs = p._client.aretain.call_args.kwargs
-        assert call_kwargs["tags"] == ["pref", "ui"]
+        assert call_kwargs["tags"] == ["pref", "ui", "session:test-session", "platform:cli"]
 
     def test_retain_merges_per_call_tags_with_config_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
@@ -486,12 +486,12 @@ class TestToolHandlers:
             {"content": "likes dark mode", "tags": ["client:x", "ui"]},
         )
         call_kwargs = p._client.aretain.call_args.kwargs
-        assert call_kwargs["tags"] == ["pref", "ui", "client:x"]
+        assert call_kwargs["tags"] == ["pref", "ui", "session:test-session", "platform:cli", "client:x"]
 
     def test_retain_without_tags(self, provider):
         provider.handle_tool_call("hindsight_retain", {"content": "hello"})
         call_kwargs = provider._client.aretain.call_args.kwargs
-        assert "tags" not in call_kwargs
+        assert call_kwargs["tags"] == ["session:test-session", "platform:cli"]
 
     def test_retain_missing_content(self, provider):
         result = json.loads(provider.handle_tool_call(
@@ -687,6 +687,7 @@ class TestSyncTurn:
             chat_id="1485316232612941897",
             chat_name="fakeassistantname-forums",
             chat_type="thread",
+            chat_topic="Hindsight Setup 🚀",
             thread_id="1491249007475949698",
             agent_identity="fakeassistantname",
         )
@@ -703,7 +704,15 @@ class TestSyncTurn:
         assert len(call_kwargs["items"]) == 1
         item = call_kwargs["items"][0]
         assert item["context"] == "conversation between Hermes Agent and the User"
-        assert item["tags"] == ["conv", "session1", "session:session-1"]
+        assert item["tags"] == [
+            "conv",
+            "session1",
+            "session:session-1",
+            "platform:discord",
+            "chat:1485316232612941897",
+            "thread:1491249007475949698",
+            "topic:hindsight-setup",
+        ]
         content = json.loads(item["content"])
         assert len(content) == 1
         assert content[0][0]["role"] == "user"
@@ -718,6 +727,7 @@ class TestSyncTurn:
         assert item["metadata"]["chat_id"] == "1485316232612941897"
         assert item["metadata"]["chat_name"] == "fakeassistantname-forums"
         assert item["metadata"]["chat_type"] == "thread"
+        assert item["metadata"]["chat_topic"] == "Hindsight Setup 🚀"
         assert item["metadata"]["thread_id"] == "1491249007475949698"
         assert item["metadata"]["agent_identity"] == "fakeassistantname"
         assert item["metadata"]["turn_index"] == "1"
@@ -739,6 +749,14 @@ class TestSyncTurn:
         assert "conv" in item["tags"]
         assert "session1" in item["tags"]
         assert "session:test-session" in item["tags"]
+        assert "platform:cli" in item["tags"]
+
+    def test_sync_turn_without_topic_keeps_context_tags_compatible(self, provider):
+        provider.sync_turn("hello", "hi")
+        provider._retain_queue.join()
+        item = provider._client.aretain_batch.call_args.kwargs["items"][0]
+        assert item["tags"] == ["session:test-session", "platform:cli"]
+        assert all(not tag.startswith("topic:") for tag in item["tags"])
 
     def test_sync_turn_uses_aretain_batch(self, provider):
         """sync_turn should use aretain_batch with retain_async."""
