@@ -1,7 +1,9 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
+import json
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
 
@@ -340,6 +342,82 @@ class TestNonStringContent:
             "api_key": "codex-token",
             "api_mode": "codex_responses",
         }
+
+
+class TestSummarySerializationRedaction:
+    def test_summary_serialization_force_redacts_message_content_when_global_redaction_disabled(self, monkeypatch):
+        from agent import redact as redact_module
+
+        monkeypatch.setattr(redact_module, "_REDACT_ENABLED", False)
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        secret = "sk-proj-abc123def456ghi789jkl012"
+        serialized = c._serialize_for_summary([
+            {"role": "user", "content": f"Here is my API key: {secret}"},
+            {"role": "tool", "tool_call_id": "call_1", "content": f"Authorization: Bearer {secret}"},
+        ])
+
+        assert secret not in serialized
+        assert "Authorization: Bearer" in serialized
+        assert "***" in serialized
+
+    def test_summary_serialization_force_redacts_tool_call_arguments_when_global_redaction_disabled(self, monkeypatch):
+        from agent import redact as redact_module
+
+        monkeypatch.setattr(redact_module, "_REDACT_ENABLED", False)
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        secret = "sk-proj-abc123def456ghi789jkl012"
+        serialized = c._serialize_for_summary([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": ".env",
+                                "content": f"OPENAI_API_KEY={secret}",
+                            }),
+                        },
+                    }
+                ],
+            }
+        ])
+
+        assert secret not in serialized
+        assert "OPENAI_API_KEY" in serialized
+        assert "***" in serialized
+
+    def test_generate_summary_force_redacts_summary_output_when_global_redaction_disabled(self, monkeypatch):
+        from agent import redact as redact_module
+
+        monkeypatch.setattr(redact_module, "_REDACT_ENABLED", False)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        secret = "sk-proj-abc123def456ghi789jkl012"
+        mock_response.choices[0].message.content = f"summary echoed {secret}"
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            summary = c._generate_summary([
+                {"role": "user", "content": f"use {secret}"},
+                {"role": "assistant", "content": "ok"},
+            ])
+
+        assert summary is not None
+        assert secret not in summary
+        assert "sk-pro..." in summary
 
 
 class TestSummaryFailureCooldown:
