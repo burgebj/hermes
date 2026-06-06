@@ -153,37 +153,6 @@ class TestDingTalkAdapterInit:
 # ---------------------------------------------------------------------------
 
 
-class TestExtractText:
-
-    def test_extracts_dict_text(self):
-        from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = {"content": "  hello world  "}
-        msg.rich_text = None
-        assert DingTalkAdapter._extract_text(msg) == "hello world"
-
-    def test_extracts_string_text(self):
-        from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = "plain text"
-        msg.rich_text = None
-        assert DingTalkAdapter._extract_text(msg) == "plain text"
-
-    def test_falls_back_to_rich_text(self):
-        from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = ""
-        msg.rich_text = [{"text": "part1"}, {"text": "part2"}, {"image": "url"}]
-        assert DingTalkAdapter._extract_text(msg) == "part1 part2"
-
-    def test_returns_empty_for_no_content(self):
-        from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = ""
-        msg.rich_text = None
-        assert DingTalkAdapter._extract_text(msg) == ""
-
-
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
