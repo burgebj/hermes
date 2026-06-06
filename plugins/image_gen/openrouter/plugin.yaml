@@ -1,0 +1,5 @@
+name: openrouter
+version: 1.0.0
+description: "OpenRouter image generation via chat completions (gemini-image, gpt-image-2, etc.). Uses OpenRouter API key from OPENROUTER_API_KEY env var."
+author: custom
+kind: backend
