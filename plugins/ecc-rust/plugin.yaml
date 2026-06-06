@@ -1,0 +1,5 @@
+name: ecc-rust
+version: 1.0.0
+description: "ECC Rust -- Rust patterns, testing, code review, and build error resolution"
+author: "ECC → Hermes migration"
+kind: standalone

@@ -1,0 +1,70 @@
+"""ECC ecc-dart-flutter -- Hermes plugin.
+
+Provides 8 skills:
+  - agent-dart-build-resolver
+  - agent-flutter-reviewer
+  - cmd-flutter-build
+  - cmd-flutter-review
+  - cmd-flutter-test
+  - dart-flutter-patterns
+  - flutter-dart-code-review
+  - rules-dart
+"""
+
+from pathlib import Path
+
+_PLUGIN_DIR = Path(__file__).parent
+_SKILLS_DIR = _PLUGIN_DIR / "skills"
+
+SKILLS = [
+    "agent-dart-build-resolver",
+        "agent-flutter-reviewer",
+        "cmd-flutter-build",
+        "cmd-flutter-review",
+        "cmd-flutter-test",
+        "dart-flutter-patterns",
+        "flutter-dart-code-review",
+        "rules-dart",
+]
+
+
+def register(ctx):
+    """Register all ecc-dart-flutter skills and commands."""
+    for skill in SKILLS:
+        skill_path = _SKILLS_DIR / f"{skill}.md"
+        if skill_path.exists():
+            ctx.register_skill(
+                name=skill,
+                path=skill_path,
+                description=f"ECC: {skill}",
+            )
+
+        # Register /flutter-build slash command
+    def _handle_flutter_build(raw_args: str) -> str:
+        return "---\ndescription: Fix Dart analyzer errors and Flutter build failures incrementally. Invokes the dart-build-resolver agent for minimal, surgical fixes.\n---\n\n# Flutter Build and Fix\n\nThis command invokes the **dart-build-resolver** agent to incrementally fix Dart/Flutter build errors with minimal changes.\n\n## What This Command Does\n\n1. **Run Diagnostics**: Execute `flutter analyze`, `flutter pub get`\n2. **Parse Errors**: Group by file and sort by severity\n3. **Fix Incrementally**: One error at a time\n4. **Verify Each Fix**: Re-run analysis after each change\n5. **Report Summary**: Show what was fixed and what remains\n\n## When to Use\n\nUse `/flutter-build` when:\n- `flutter analyze` reports errors\n- `flutter build` fails for any platform\n- `dart pub get` / `flutter pub get` fails with version conflicts\n- `build_runner` fails to generate code\n- After pulling changes that break the build\n\n## Diagnostic Commands Run\n\n```bash\n# Analysis\nflutter analyze 2>&1\n\n# Dependencies\nflutter pub get 2>&1\n\n# Code generation (if project uses build_runner)\ndart run build_runner build --delete-conflicting-outputs 2>&1\n\n# Platform builds\nflutter build apk 2>&1\nflutter build web 2>&1\n```\n\n## Example Session\n\n````text\nUser: /flutter-build\n\nAgent:\n# Flutter Build Resolution\n\n## Initial Diagnostics\n\n```\n$ flutter analyze\nAnalyzing project...\n\n  error • lib/features/user/data/user_repository_impl.dart:34:16 •\n    A value of type 'String?' can't be assigned to a variable of type 'String'. •\n    invalid_assignment\n\n  error • lib/features/cart/presentation/cart_page.dart:58:5 •\n    The method 'add' isn't defined for the type 'List<Item>'.\n    Try correcting the name to the name of an existing method, or defining a method named 'add'. •\n    undefined_method\n\n2 errors found.\n```\n\n## Fix 1: Null Safety\n\nFile: lib/features/user/data/user_repository_impl.dart:34\nError: A value of type 'String?' can't be assigned to type 'String'\n\nChanged:\n```dart\nfinal id = response.id;\n```\nTo:\n```dart\nfinal id = response.id ?? '';\n```\n\n```\n$ flutter analyze\n1 error found.\n```\n\n## Fix 2: Immutable List\n\nFile: lib/features/cart/presentation/cart_page.dart:58\nError: The method 'add' isn't defined for the type 'List<Item>'\nCause: State holds an unmodifiable list; mutation goes through Cubit\n\nChanged:\n```dart\nstate.items.add(item);\n```\nTo:\n```dart\ncontext.read<CartCubit>().addItem(item);\n// Note: Cubit exposes named methods (addItem, removeItem);\n// .add(event) is the BLoC event API — don't mix them.\n```\n\n```\n$ flutter analyze\nNo issues found!\n```\n\n## Final Verification\n\n```\n$ flutter test\nAll tests passed.\n```\n\n## Summary\n\n| Metric | Count |\n|--------|-------|\n| Analysis errors fixed | 2 |\n| Files modified | 2 |\n| Remaining issues | 0 |\n\nBuild Status: PASS ✓\n````\n\n## Common Errors Fixed\n\n| Error | Typical Fix |\n|-------|-------------|\n| `A value of type 'X?' can't be assigned to 'X'` | Add `?? default` or null guard |\n| `The name 'X' isn't defined` | Add import or fix typo |\n| `Non-nullable instance field must be initialized` | Add initializer or `late` |\n| `Version solving failed` | Adjust version constraints in pubspec.yaml |\n| `Missing concrete implementation of 'X'` | Implement missing interface method |\n| `build_runner: Part of X expected` | Delete stale `.g.dart` and rebuild |\n\n## Fix Strategy\n\n1. **Analysis errors first** — code must be error-free\n2. **Warning triage second** — fix warnings that could cause runtime bugs\n3. **pub conflicts third** — fix dependency resolution\n4. **One fix at a time** — verify each change\n5. **Minimal changes** — don't refactor, just fix\n\n## Stop Conditions\n\nThe agent will stop and report if:\n- Same error persists after 3 attempts\n- Fix introduces more errors\n- Requires architectural changes\n- Package upgrade conflicts need user decision\n\n## Related Commands\n\n- `/flutter-test` — Run tests after build succeeds\n- `/flutter-review` — Review code quality\n- `verification-loop` skill — Full verification loop\n\n## Related\n\n- Agent: `agents/dart-build-resolver.md`\n- Skill: `skills/flutter-dart-code-review/`\n"
+    ctx.register_command(
+        name="flutter-build",
+        handler=_handle_flutter_build,
+        description="ECC /flutter-build command",
+    )
+
+
+    # Register /flutter-review slash command
+    def _handle_flutter_review(raw_args: str) -> str:
+        return "---\ndescription: Review Flutter/Dart code for idiomatic patterns, widget best practices, state management, performance, accessibility, and security. Invokes the flutter-reviewer agent.\n---\n\n# Flutter Code Review\n\nThis command invokes the **flutter-reviewer** agent to review Flutter/Dart code changes.\n\n## What This Command Does\n\n1. **Gather Context**: Review `git diff --staged` and `git diff`\n2. **Inspect Project**: Check `pubspec.yaml`, `analysis_options.yaml`, state management solution\n3. **Security Pre-scan**: Check for hardcoded secrets and critical security issues\n4. **Full Review**: Apply the complete review checklist\n5. **Report Findings**: Output issues grouped by severity with fix guidance\n\n## Prerequisites\n\nBefore running `/flutter-review`, ensure:\n1. **Build passes** — run `/flutter-build` first; a review on broken code is incomplete\n2. **Tests pass** — run `/flutter-test` to confirm no regressions\n3. **No merge conflicts** — resolve all conflicts so the diff reflects only intentional changes\n4. **`flutter analyze` is clean** — fix analyzer warnings before review\n\n## When to Use\n\nUse `/flutter-review` when:\n- Before submitting a PR with Flutter/Dart changes (after build and tests pass)\n- After implementing a new feature to catch issues early\n- When reviewing someone else's Flutter code\n- To audit a widget, state management component, or service class\n- Before a production release\n\n## Review Areas\n\n| Area | Severity |\n|------|----------|\n| Hardcoded secrets, cleartext HTTP | CRITICAL |\n| Architecture violations, state management anti-patterns | CRITICAL |\n| Widget rebuild issues, resource leaks | HIGH |\n| Missing `dispose()`, `BuildContext` after await | HIGH |\n| Dart null safety, missing error/loading states | HIGH |\n| Const propagation, widget composition | HIGH |\n| Performance: expensive work in `build()` | HIGH |\n| Accessibility, semantic labels | MEDIUM |\n| Missing tests for state transitions | HIGH |\n| Hardcoded strings (l10n) | MEDIUM |\n| Pub dependency hygiene | LOW |\n\n## Example Session\n\n````text\nUser: /flutter-review\n\nAgent:\n# Flutter Code Review\n\n## Context\n\nChanged files:\n- lib/features/auth/presentation/login_page.dart\n- lib/features/auth/data/auth_repository_impl.dart\n\nState management: Riverpod (detected from pubspec.yaml)\nArchitecture: feature-first\n\n## Security Pre-scan\n\n✓ No hardcoded secrets detected\n✓ No cleartext HTTP calls\n\n## Review Findings\n\n[HIGH] BuildContext used after async gap without mounted check\nFile: lib/features/auth/presentation/login_page.dart:67\nIssue: `context.go('/home')` called after `await auth.login(...)` with no `mounted` check.\nFix: Add `if (!context.mounted) return;` before any navigation after awaits (Flutter 3.7+).\n\n[HIGH] AsyncValue error state not handled\nFile: lib/features/auth/presentation/login_page.dart:42\nIssue: `ref.watch(authProvider)` switches on loading/data but has no `error` branch.\nFix: Add error case to the switch expression or `when()` call to show a user-facing error message.\n\n[MEDIUM] Hardcoded string not localized\nFile: lib/features/auth/presentation/login_page.dart:89\nIssue: `Text('Login')` — user-visible string not using localization system.\nFix: Use the project's l10n accessor: `Text(context.l10n.loginButton)`.\n\n## Review Summary\n\n| Severity | Count | Status |\n|----------|-------|--------|\n| CRITICAL | 0     | pass   |\n| HIGH     | 2     | block  |\n| MEDIUM   | 1     | info   |\n| LOW      | 0     | note   |\n\nVerdict: BLOCK — HIGH issues must be fixed before merge.\n````\n\n## Approval Criteria\n\n- **Approve**: No CRITICAL or HIGH issues\n- **Block**: Any CRITICAL or HIGH issues must be fixed before merge\n\n## Related Commands\n\n- `/flutter-build` — Fix build errors first\n- `/flutter-test` — Run tests before reviewing\n- `/code-review` — General code review (language-agnostic)\n\n## Related\n\n- Agent: `agents/flutter-reviewer.md`\n- Skill: `skills/flutter-dart-code-review/`\n- Rules: `rules/dart/`\n"
+    ctx.register_command(
+        name="flutter-review",
+        handler=_handle_flutter_review,
+        description="ECC /flutter-review command",
+    )
+
+
+    # Register /flutter-test slash command
+    def _handle_flutter_test(raw_args: str) -> str:
+        return '---\ndescription: Run Flutter/Dart tests, report failures, and incrementally fix test issues. Covers unit, widget, golden, and integration tests.\n---\n\n# Flutter Test\n\nThis command runs the Flutter test suite and reports results. When failures occur, it diagnoses and fixes issues incrementally.\n\n## What This Command Does\n\n1. **Run Tests**: Execute `flutter test` (or scope to changed files)\n2. **Parse Failures**: Identify failing tests by type and cause\n3. **Fix Incrementally**: One failure at a time where possible\n4. **Verify**: Re-run after each fix\n5. **Report**: Show coverage summary and remaining failures\n\n## When to Use\n\nUse `/flutter-test` when:\n- After implementing a feature to verify nothing broke\n- After running `/flutter-build` to ensure tests pass\n- To check test coverage on new code\n- When a specific test file is failing\n- Before submitting a PR\n\n## Commands Run\n\n```bash\n# Run all tests\nflutter test 2>&1\n\n# Run with coverage\nflutter test --coverage 2>&1\n\n# Run specific test file\nflutter test test/unit/domain/usecases/get_user_test.dart 2>&1\n\n# Run tests matching a name pattern\nflutter test --name "CartBloc" 2>&1\n\n# Run integration tests (requires device/emulator)\nflutter test integration_test/ 2>&1\n\n# Update golden files when intentional visual changes are made\nflutter test --update-goldens 2>&1\n```\n\n## Example Session\n\n````text\nUser: /flutter-test\n\nAgent:\n# Flutter Test Run\n\n## Test Execution\n\n```\n$ flutter test\n00:05 +42 -2: Some tests failed.\n\nFAILED: test/unit/data/user_repository_test.dart\n  UserRepository getById\n    returns null when user not found\n    Expected: null\n    Actual: User(id: \'test-id\', name: \'Test User\')\n\nFAILED: test/widget/cart_page_test.dart\n  CartPage\n    shows empty state when cart is empty\n    Expected: exactly one widget with text \'Your cart is empty\'\n    Found: no widget with text \'Your cart is empty\'\n```\n\n## Fix 1: Repository Test\n\nFile: test/unit/data/user_repository_test.dart\nFailure: `getById` returns a user when it should return null for missing ID\n\nRoot cause: Test setup adds a user with ID \'test-id\' but queries with \'missing-id\'.\nFix: Updated test to query with \'missing-id\' — setup was correct, query was wrong.\n\n```\n$ flutter test test/unit/data/user_repository_test.dart\n1 test passed.\n```\n\n## Fix 2: Widget Test\n\nFile: test/widget/cart_page_test.dart\nFailure: Empty state text widget not found\n\nRoot cause: Empty state message was renamed from \'Your cart is empty\' to \'Cart is empty\' in the widget.\nFix: Updated test string to match current widget copy.\n\n```\n$ flutter test test/widget/cart_page_test.dart\n1 test passed.\n```\n\n## Final Run\n\n```\n$ flutter test --coverage\nAll 44 tests passed.\nCoverage: 84.2% (target: 80%)\n```\n\n## Summary\n\n| Metric | Value |\n|--------|-------|\n| Total tests | 44 |\n| Passed | 44 |\n| Failed | 0 |\n| Coverage | 84.2% |\n\nTest Status: PASS ✓\n````\n\n## Common Test Failures\n\n| Failure | Typical Fix |\n|---------|-------------|\n| `Expected: <X> Actual: <Y>` | Update assertion or fix implementation |\n| `Widget not found` | Fix finder selector or update test after widget rename |\n| `Golden file not found` | Run `flutter test --update-goldens` to generate |\n| `Golden mismatch` | Inspect diff; run `--update-goldens` if change was intentional |\n| `MissingPluginException` | Mock platform channel in test setup |\n| `LateInitializationError` | Initialize `late` fields in `setUp()` |\n| `pumpAndSettle timed out` | Replace with explicit `pump(Duration)` calls |\n\n## Related Commands\n\n- `/flutter-build` — Fix build errors before running tests\n- `/flutter-review` — Review code after tests pass\n- `tdd-workflow` skill — Test-driven development workflow\n\n## Related\n\n- Agent: `agents/flutter-reviewer.md`\n- Agent: `agents/dart-build-resolver.md`\n- Skill: `skills/flutter-dart-code-review/`\n- Rules: `rules/dart/testing.md`\n'
+    ctx.register_command(
+        name="flutter-test",
+        handler=_handle_flutter_test,
+        description="ECC /flutter-test command",
+    )
+

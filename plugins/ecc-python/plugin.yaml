@@ -1,0 +1,5 @@
+name: ecc-python
+version: 1.0.0
+description: "ECC Python -- Pythonic patterns, Django, PyTorch, testing, and code review"
+author: "ECC → Hermes migration"
+kind: standalone

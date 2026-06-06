@@ -1,0 +1,5 @@
+name: ecc-documentation
+version: 1.0.0
+description: "ECC Documentation -- docs generation, knowledge capture, and article writing"
+author: "ECC → Hermes migration"
+kind: standalone

@@ -1,0 +1,5 @@
+name: ecc-dotnet
+version: 1.0.0
+description: "ECC .NET -- C# testing, .NET patterns, and code review"
+author: "ECC → Hermes migration"
+kind: standalone

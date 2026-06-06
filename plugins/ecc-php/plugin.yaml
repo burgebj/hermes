@@ -1,0 +1,5 @@
+name: ecc-php
+version: 1.0.0
+description: "ECC PHP -- Laravel patterns, security, TDD, and plugin discovery"
+author: "ECC → Hermes migration"
+kind: standalone

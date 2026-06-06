@@ -1,0 +1,5 @@
+name: ecc-cpp
+version: 1.0.0
+description: "ECC C/C++ -- C++ patterns, testing, code review, and build error resolution"
+author: "ECC → Hermes migration"
+kind: standalone

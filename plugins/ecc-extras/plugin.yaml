@@ -1,0 +1,5 @@
+name: ecc-extras
+version: 1.0.0
+description: "ECC Extras -- niche business domains: healthcare, finance, logistics, legal, SEO, content, and more"
+author: "ECC → Hermes migration"
+kind: standalone

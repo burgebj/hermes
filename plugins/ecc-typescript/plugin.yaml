@@ -1,0 +1,5 @@
+name: ecc-typescript
+version: 1.0.0
+description: "ECC TypeScript/JavaScript -- frontend patterns, Next.js, Nuxt, NestJS, and Bun"
+author: "ECC → Hermes migration"
+kind: standalone

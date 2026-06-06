@@ -1,0 +1,5 @@
+name: ecc-code-review
+version: 1.0.0
+description: "ECC Code Review -- code quality gates, PR review workflows, and static analysis"
+author: "ECC → Hermes migration"
+kind: standalone

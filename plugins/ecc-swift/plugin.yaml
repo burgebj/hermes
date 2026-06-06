@@ -1,0 +1,5 @@
+name: ecc-swift
+version: 1.0.0
+description: "ECC Swift -- Swift concurrency, actor persistence, SwiftUI patterns, and protocol-based DI"
+author: "ECC → Hermes migration"
+kind: standalone

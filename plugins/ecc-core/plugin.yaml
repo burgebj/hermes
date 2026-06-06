@@ -1,0 +1,5 @@
+name: ecc-core
+version: 1.0.0
+description: "ECC Core -- TDD workflow, coding standards, planning, and code review essentials"
+author: "ECC → Hermes migration"
+kind: standalone

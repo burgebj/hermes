@@ -1,0 +1,5 @@
+name: ecc-security
+version: 1.0.0
+description: "ECC Security -- vulnerability review, security patterns, and compliance scanning"
+author: "ECC → Hermes migration"
+kind: standalone

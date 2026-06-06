@@ -1,0 +1,5 @@
+name: ecc-ml-ai
+version: 1.0.0
+description: "ECC ML/AI -- agent engineering, autonomous loops, prompt optimization, GANs, and media generation"
+author: "ECC → Hermes migration"
+kind: standalone

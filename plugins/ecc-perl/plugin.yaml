@@ -1,0 +1,5 @@
+name: ecc-perl
+version: 1.0.0
+description: "ECC Perl -- Perl patterns, security, and testing"
+author: "ECC → Hermes migration"
+kind: standalone

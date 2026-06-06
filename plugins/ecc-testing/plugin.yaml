@@ -1,0 +1,5 @@
+name: ecc-testing
+version: 1.0.0
+description: "ECC Testing -- E2E, benchmarks, evaluation harnesses, and test automation"
+author: "ECC → Hermes migration"
+kind: standalone

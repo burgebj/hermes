@@ -1,0 +1,5 @@
+name: ecc-java-kotlin
+version: 1.0.0
+description: "ECC Java & Kotlin -- Spring Boot, JPA, Kotlin coroutines, Ktor, Android patterns"
+author: "ECC → Hermes migration"
+kind: standalone

@@ -1,0 +1,5 @@
+name: ecc-dart-flutter
+version: 1.0.0
+description: "ECC Dart & Flutter -- Flutter patterns, code review, and build error resolution"
+author: "ECC → Hermes migration"
+kind: standalone

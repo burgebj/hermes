@@ -1,0 +1,5 @@
+name: ecc-devops
+version: 1.0.0
+description: "ECC DevOps -- Docker, deployment, GitHub ops, terminal workflows, and CI/CD patterns"
+author: "ECC → Hermes migration"
+kind: standalone

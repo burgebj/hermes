@@ -1,0 +1,5 @@
+name: ecc-go
+version: 1.0.0
+description: "ECC Go -- Go patterns, testing, code review, and build error resolution"
+author: "ECC → Hermes migration"
+kind: standalone

@@ -1,0 +1,5 @@
+name: ecc-architecture
+version: 1.0.0
+description: "ECC Architecture -- system design, API design, database patterns, and ADRs"
+author: "ECC → Hermes migration"
+kind: standalone
