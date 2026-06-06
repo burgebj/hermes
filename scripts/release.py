@@ -618,6 +618,7 @@ AUTHOR_MAP = {
     "dmayhem93@gmail.com": "dmahan93",
     "fr@tecompanytea.com": "ifrederico",
     "cdanis@gmail.com": "cdanis",
+    "oluwadare1803@gmail.com": "Bennytimz",
     "samherring99@gmail.com": "samherring99",
     "desaiaum08@gmail.com": "Aum08Desai",
     "shannon.sands.1979@gmail.com": "shannonsands",
