@@ -27,6 +27,8 @@ from agent.model_metadata import (
     parse_context_limit_from_error,
     save_context_length,
     fetch_model_metadata,
+    get_openrouter_supported_parameters,
+    openrouter_model_supports_parameter,
     _MODEL_CACHE_TTL,
 )
 
@@ -1024,6 +1026,29 @@ class TestFetchModelMetadata:
         assert result["anthropic/claude-3.5-sonnet"]["context_length"] == 200000
 
     @patch("agent.model_metadata.requests.get")
+    def test_supported_parameters_preserved_across_aliases(self, mock_get):
+        self._reset_cache()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [{
+                "id": "provider/test-model:beta",
+                "canonical_slug": "provider/test-model",
+                "context_length": 123456,
+                "name": "Provider: Test Model",
+                "supported_parameters": ["tools", "reasoning", None, 123],
+            }]
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        result = fetch_model_metadata(force_refresh=True)
+
+        assert result["provider/test-model:beta"]["supported_parameters"] == ["tools", "reasoning"]
+        assert result["test-model:beta"]["supported_parameters"] == ["tools", "reasoning"]
+        assert result["provider/test-model"]["supported_parameters"] == ["tools", "reasoning"]
+        assert result["test-model"]["supported_parameters"] == ["tools", "reasoning"]
+
+    @patch("agent.model_metadata.requests.get")
     def test_provider_prefixed_models_get_bare_aliases(self, mock_get):
         self._reset_cache()
         mock_response = MagicMock()
@@ -1074,6 +1099,60 @@ class TestFetchModelMetadata:
 
         result = fetch_model_metadata(force_refresh=True)
         assert result == {}
+
+
+class TestOpenRouterSupportedParameters:
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_supports_parameter_true_false_and_unknown(self, mock_fetch):
+        mock_fetch.return_value = {
+            "openai/gpt-4o-mini": {"supported_parameters": ["tools"]},
+            "google/gemini-2.5-flash": {"supported_parameters": ["tools", "reasoning"]},
+            "bad/model": {"supported_parameters": "tools,reasoning"},
+        }
+
+        assert openrouter_model_supports_parameter("openai/gpt-4o-mini", "reasoning") is False
+        assert openrouter_model_supports_parameter("google/gemini-2.5-flash", "reasoning") is True
+        assert openrouter_model_supports_parameter("bad/model", "reasoning") is None
+        assert openrouter_model_supports_parameter("missing/model", "reasoning") is None
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_model_lookup_normalizes_case(self, mock_fetch):
+        mock_fetch.return_value = {
+            "google/gemini-2.5-flash": {"supported_parameters": ["tools", "reasoning"]},
+        }
+
+        assert openrouter_model_supports_parameter("  Google/Gemini-2.5-Flash  ", "reasoning") is True
+
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_helper_uses_openrouter_catalog_not_endpoint_metadata(self, mock_fetch, mock_endpoint_fetch):
+        mock_fetch.return_value = {
+            "openai/gpt-4o-mini": {"supported_parameters": ["tools"]},
+        }
+
+        assert get_openrouter_supported_parameters("openai/gpt-4o-mini") == ["tools"]
+        mock_endpoint_fetch.assert_not_called()
+
+    @patch("agent.model_metadata.requests.get")
+    def test_helper_reuses_cached_catalog(self, mock_get):
+        import agent.model_metadata as mm
+        mm._model_metadata_cache = {}
+        mm._model_metadata_cache_time = 0
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [{
+                "id": "google/gemini-2.5-flash",
+                "supported_parameters": ["tools", "reasoning"],
+            }]
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        assert openrouter_model_supports_parameter("google/gemini-2.5-flash", "reasoning") is True
+        assert openrouter_model_supports_parameter("google/gemini-2.5-flash", "tools") is True
+        assert mock_get.call_count == 1
+        mm._model_metadata_cache = {}
+        mm._model_metadata_cache_time = 0
 
 
 # =========================================================================

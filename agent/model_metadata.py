@@ -633,12 +633,15 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
         cache = {}
         for model in data.get("data", []):
             model_id = model.get("id", "")
+            params = model.get("supported_parameters")
             entry = {
                 "context_length": model.get("context_length", 128000),
                 "max_completion_tokens": model.get("top_provider", {}).get("max_completion_tokens", 4096),
                 "name": model.get("name", model_id),
                 "pricing": model.get("pricing", {}),
             }
+            if isinstance(params, list):
+                entry["supported_parameters"] = [str(p) for p in params if isinstance(p, str)]
             _add_model_aliases(cache, model_id, entry)
             canonical = model.get("canonical_slug", "")
             if canonical and canonical != model_id:
@@ -652,6 +655,24 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
     except Exception as e:
         logger.warning(f"Failed to fetch model metadata from OpenRouter: {e}")
         return _model_metadata_cache or {}
+
+
+def get_openrouter_supported_parameters(model: str) -> Optional[List[str]]:
+    """Return OpenRouter-supported request parameters for a model, if known."""
+    # Use fetch_model_metadata(), not fetch_endpoint_model_metadata(); OpenRouter
+    # is intentionally excluded from endpoint metadata probing.
+    metadata = fetch_model_metadata()
+    entry = metadata.get((model or "").strip().lower())
+    params = entry.get("supported_parameters") if isinstance(entry, dict) else None
+    return params if isinstance(params, list) else None
+
+
+def openrouter_model_supports_parameter(model: str, parameter: str) -> Optional[bool]:
+    """Return whether OpenRouter metadata advertises a parameter for this model."""
+    params = get_openrouter_supported_parameters(model)
+    if params is None:
+        return None
+    return parameter in params
 
 
 def fetch_endpoint_model_metadata(

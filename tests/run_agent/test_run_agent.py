@@ -46,6 +46,32 @@ def _make_tool_defs(*names: str) -> list:
     ]
 
 
+def _mock_openrouter_metadata() -> dict[str, dict[str, object]]:
+    return {
+        "anthropic/claude-sonnet-4-20250514": {
+            "supported_parameters": ["tools", "reasoning"],
+        },
+        "qwen/qwen3.5-plus-02-15": {
+            "supported_parameters": ["tools", "reasoning"],
+        },
+        "openai/gpt-4o-mini": {
+            "supported_parameters": ["tools"],
+        },
+        "google/gemini-2.0-flash-001": {
+            "supported_parameters": ["tools"],
+        },
+        "google/gemini-2.5-flash": {
+            "supported_parameters": ["tools", "reasoning"],
+        },
+        "google/gemini-3-flash-preview": {
+            "supported_parameters": ["tools", "reasoning"],
+        },
+        "minimax/minimax-m2.5": {
+            "supported_parameters": ["tools", "reasoning"],
+        },
+    }
+
+
 def test_is_destructive_command_treats_cp_as_mutating():
     assert run_agent._is_destructive_command("cp .env.local .env") is True
 
@@ -63,6 +89,10 @@ def agent():
         ),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
+        patch(
+            "agent.model_metadata.fetch_model_metadata",
+            return_value=_mock_openrouter_metadata(),
+        ),
     ):
         a = AIAgent(
             api_key="test-key-1234567890",
@@ -72,7 +102,7 @@ def agent():
             skip_memory=True,
         )
         a.client = MagicMock()
-        return a
+        yield a
 
 
 @pytest.fixture()
@@ -85,6 +115,10 @@ def agent_with_memory_tool():
         ),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
+        patch(
+            "agent.model_metadata.fetch_model_metadata",
+            return_value=_mock_openrouter_metadata(),
+        ),
     ):
         a = AIAgent(
             api_key="test-k...7890",
@@ -94,7 +128,7 @@ def agent_with_memory_tool():
             skip_memory=True,
         )
         a.client = MagicMock()
-        return a
+        yield a
 
 
 def test_aiagent_reuses_existing_errors_log_handler():
@@ -1668,7 +1702,7 @@ class TestBuildApiKwargs:
 
     def test_reasoning_not_sent_for_unsupported_openrouter_model(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
-        agent.model = "minimax/minimax-m2.5"
+        agent.model = "openai/gpt-4o-mini"
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert "reasoning" not in kwargs.get("extra_body", {})
@@ -1681,12 +1715,48 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
         assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
 
+    def test_reasoning_sent_for_gemini_3_openrouter_model(self, agent):
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.model = "google/gemini-3-flash-preview"
+        messages = [{"role": "user", "content": "hi"}]
+
+        kwargs = agent._build_api_kwargs(messages)
+
+        assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
+
+    def test_reasoning_not_sent_for_openrouter_when_metadata_missing(self, agent):
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.model = "unknown/provider-model"
+        messages = [{"role": "user", "content": "hi"}]
+        with patch("agent.model_metadata.fetch_model_metadata", return_value={}):
+            kwargs = agent._build_api_kwargs(messages)
+        assert "reasoning" not in kwargs.get("extra_body", {})
+
+    def test_reasoning_sent_for_mixed_case_openrouter_model(self, agent):
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.model = "  Google/Gemini-2.5-Flash  "
+        messages = [{"role": "user", "content": "hi"}]
+
+        kwargs = agent._build_api_kwargs(messages)
+
+        assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
+
     def test_reasoning_sent_for_nous_route(self, agent):
         agent.provider = "nous"
         agent.base_url = "https://inference-api.nousresearch.com/v1"
         agent.model = "minimax/minimax-m2.5"
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
+
+    def test_reasoning_sent_for_vercel_ai_gateway(self, agent):
+        agent.base_url = "https://ai-gateway.vercel.sh/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "openai/gpt-4o-mini"
+        messages = [{"role": "user", "content": "hi"}]
+
+        kwargs = agent._build_api_kwargs(messages)
+
         assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
 
     def test_reasoning_sent_for_copilot_gpt5(self, agent):
@@ -3073,7 +3143,7 @@ class TestHandleMaxIterations:
 
     def test_summary_skips_reasoning_for_unsupported_openrouter_model(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
-        agent.model = "minimax/minimax-m2.5"
+        agent.model = "openai/gpt-4o-mini"
         resp = _mock_response(content="Summary")
         agent.client.chat.completions.create.return_value = resp
         agent._cached_system_prompt = "You are helpful."

@@ -37,6 +37,17 @@ def _tool_defs(*names):
     ]
 
 
+def _mock_openrouter_metadata() -> dict[str, dict[str, object]]:
+    return {
+        "anthropic/claude-sonnet-4-20250514": {
+            "supported_parameters": ["tools", "reasoning"],
+        },
+        "openai/gpt-4o-mini": {
+            "supported_parameters": ["tools"],
+        },
+    }
+
+
 def _fake_invoke_jwt() -> str:
     def _part(payload):
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -60,6 +71,7 @@ def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="ht
     monkeypatch.setattr("run_agent.get_tool_definitions", lambda **kw: _tool_defs("web_search", "terminal"))
     monkeypatch.setattr("run_agent.check_toolset_requirements", lambda: {})
     monkeypatch.setattr("run_agent.OpenAI", _FakeOpenAI)
+    monkeypatch.setattr("agent.model_metadata.fetch_model_metadata", lambda: _mock_openrouter_metadata())
     kwargs = dict(
         api_key="test-key",
         base_url=base_url,

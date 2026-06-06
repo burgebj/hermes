@@ -4587,8 +4587,9 @@ class AIAgent:
         """Return True when reasoning extra_body is safe to send for this route/model.
 
         OpenRouter forwards unknown extra_body fields to upstream providers.
-        Some providers/routes reject `reasoning` with 400s, so gate it to
-        known reasoning-capable model families and direct Nous Portal.
+        Some providers/routes reject `reasoning` with 400s, so gate OpenRouter
+        requests by model metadata and keep direct routes on their existing
+        explicit allowlists.
         """
         if base_url_host_matches(self._base_url_lower, "nousresearch.com"):
             return True
@@ -4611,19 +4612,12 @@ class AIAgent:
         if "api.mistral.ai" in self._base_url_lower:
             return False
 
-        model = (self.model or "").lower()
-        reasoning_model_prefixes = (
-            "deepseek/",
-            "anthropic/",
-            "openai/",
-            "x-ai/",
-            "google/gemini-2",
-            "google/gemma-4",
-            "qwen/qwen3",
-            "tencent/hy3-preview",
-            "xiaomi/",
-        )
-        return any(model.startswith(prefix) for prefix in reasoning_model_prefixes)
+        try:
+            from agent.model_metadata import openrouter_model_supports_parameter
+
+            return bool(openrouter_model_supports_parameter(self.model, "reasoning"))
+        except Exception:
+            return False
 
     def _lmstudio_reasoning_options_cached(self) -> list[str]:
         """Probe LM Studio's published reasoning ``allowed_options`` once per
