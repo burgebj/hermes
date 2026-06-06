@@ -15021,7 +15021,20 @@ class GatewayRunner:
 
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
         plural = "plural" if count > 1 else "singular"
-        return t(f"gateway.approve.{choice}_{plural}", count=count)
+
+        # Send confirmation message with skip_stream_finalize to avoid closing
+        # the agent's stream when it resumes. The confirmation is an independent
+        # message that shouldn't interfere with the agent's ongoing output.
+        confirmation_text = t(f"gateway.approve.{choice}_{plural}", count=count)
+        if _adapter:
+            asyncio.create_task(_adapter.send(
+                source.chat_id,
+                confirmation_text,
+                metadata={"skip_stream_finalize": True}
+            ))
+
+        # Return None so the default command handler doesn't send the message again
+        return None
 
     async def _handle_deny_command(self, event: MessageEvent) -> str:
         """Handle /deny command — reject pending dangerous command(s).
@@ -15057,9 +15070,19 @@ class GatewayRunner:
             _adapter.resume_typing_for_chat(source.chat_id)
 
         logger.info("User denied %d dangerous command(s) via /deny", count)
-        if count > 1:
-            return t("gateway.deny.denied_plural", count=count)
-        return t("gateway.deny.denied_singular")
+
+        # Send confirmation message with skip_stream_finalize to avoid closing
+        # the agent's stream when it resumes. Similar to /approve handling.
+        confirmation_text = t("gateway.deny.denied_plural", count=count) if count > 1 else t("gateway.deny.denied_singular")
+        if _adapter:
+            asyncio.create_task(_adapter.send(
+                source.chat_id,
+                confirmation_text,
+                metadata={"skip_stream_finalize": True}
+            ))
+
+        # Return None so the default command handler doesn't send the message again
+        return None
 
     # Built-in messaging platforms where the ``/update`` command is allowed.
     # ACP, API server, and webhooks are programmatic interfaces that should
