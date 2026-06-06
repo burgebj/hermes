@@ -1223,7 +1223,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     session.add_message("user", chunk)
                 for chunk in self._chunk_message(clean_assistant_content, msg_limit):
                     session.add_message("assistant", chunk)
-                self._manager._flush_session(session)
+                self._manager.save(session)
             except Exception as e:
                 logger.debug("Honcho sync_turn failed: %s", e)
 
