@@ -16,6 +16,10 @@ const config: Config = {
   onBrokenLinks: 'warn',
 
   markdown: {
+    // '.md' → CommonMark (lenient: bare <url> autolinks, < N, </path> are legal),
+    // '.mdx' → MDX. Docs are plain Markdown (no .md uses ESM imports or JSX
+    // components), so this is safe and lets translated prose build cleanly.
+    format: 'detect',
     mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
@@ -24,7 +28,7 @@ const config: Config = {
 
   i18n: {
     defaultLocale: 'en',
-    locales: ['en', 'zh-Hans'],
+    locales: ['en', 'zh-Hans', 'ru', 'uk'],
     localeConfigs: {
       en: {
         label: 'English',
@@ -32,6 +36,14 @@ const config: Config = {
       'zh-Hans': {
         label: '简体中文',
         htmlLang: 'zh-Hans',
+      },
+      ru: {
+        label: 'Русский',
+        htmlLang: 'ru',
+      },
+      uk: {
+        label: 'Українська',
+        htmlLang: 'uk',
       },
     },
   },
@@ -43,7 +55,7 @@ const config: Config = {
       /** @type {import("@easyops-cn/docusaurus-search-local").PluginOptions} */
       ({
         hashed: true,
-        language: ['en', 'zh'],
+        language: ['en', 'zh', 'ru'],
         indexBlog: false,
         docsRouteBasePath: '/',
         // Disabled: appends ?_highlight=... to URLs (before the #anchor),

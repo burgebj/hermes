@@ -1,0 +1,90 @@
+---
+slug: /
+sidebar_position: 0
+title: "Hermes Agent Документація"
+description: "Самонавчальний AI агент, створений Nous Research. Вбудований цикл навчання, який створює навички з досвіду, покращує їх під час використання та пам'ятає їх між сесіями."
+hide_table_of_contents: true
+displayed_sidebar: docs
+---
+
+import Link from '@docusaurus/Link';
+
+# Hermes Agent
+
+Самонавчальний AI‑агент, створений [Nous Research](https://nousresearch.com). Єдиний агент із вбудованим **циклом навчання** — він створює навички з досвіду, покращує їх під час використання, підштовхує себе до збереження знань і формує глибшу модель того, хто ти, у різних сесіях.
+
+<div style={{display: 'flex', gap: '1rem', marginBottom: '2rem', flexWrap: 'wrap'}}>
+  <Link to="/getting-started/installation" style={{display: 'inline-block', padding: '0.6rem 1.2rem', backgroundColor: '#FFD700', color: '#07070d', borderRadius: '8px', fontWeight: 600, textDecoration: 'none'}}>Почати →</Link>
+  <a href="https://github.com/NousResearch/hermes-agent" style={{display: 'inline-block', padding: '0.6rem 1.2rem', border: '1px solid rgba(255,215,0,0.2)', borderRadius: '8px', textDecoration: 'none'}}>Переглянути на GitHub</a>
+</div>
+
+## Install
+
+**Linux / macOS / WSL2**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+```
+
+**Windows (native, PowerShell)** — *рання бета, [деталі →](/user-guide/windows-native)*
+
+```powershell
+iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
+```
+
+**Android (Termux)** — та ж однорядкова команда `curl`, що й для Linux; інсталятор автоматично визначає Termux.
+
+Дивись повний **[Посібник з інсталяції](/getting-started/installation)**, щоб дізнатися, що робить інсталятор, як виглядає розташування для користувача та root, а також примітки щодо Windows.
+
+:::tip Найшвидший шлях до працюючого агента
+Після встановлення запусти `hermes setup --portal` — один OAuth охоплює модель і всі чотири інструменти **шлюзу інструментів** (веб‑пошук, генерація зображень, TTS, браузер). Дивись [Nous Portal](/integrations/nous-portal).
+:::
+
+## What is Hermes Agent?
+
+Це не код‑копілот, прив’язаний до IDE, і не чат‑бот, що обгортає одну API. Це **автономний агент**, який стає спроможнішим чим довше працює. Він живе там, куди ти його розгорнеш — на $5 VPS, GPU‑кластері чи безсерверній інфраструктурі (Daytona, Modal), яка майже нічого не коштує в стані бездіяльності. Спілкуйся з ним у Telegram, поки він працює на хмарному ВМ, до якого ти ніколи не підключаєшся через SSH. Він не прив’язаний до твого ноутбука.
+
+## Quick Links
+
+| | |
+|---|---|
+| 🚀 **[Installation](/getting-started/installation)** | Встановити за 60 секунд на Linux, macOS, WSL2 або нативному Windows (рання бета) |
+| 📖 **[Quickstart Tutorial](/getting-started/quickstart)** | Перша розмова та ключові функції для випробування |
+| 🗺️ **[Learning Path](/getting-started/learning-path)** | Знайди потрібну документацію відповідно до рівня досвіду |
+| ⚙️ **[Configuration](/user-guide/configuration)** | Файл конфігурації, провайдери, моделі та параметри |
+| 💬 **[Messaging Gateway](/user-guide/messaging)** | Налаштуй Telegram, Discord, Slack, WhatsApp, Teams та інші |
+| 🔧 **[Tools & Toolsets](/user-guide/features/tools)** | 60+ вбудованих інструментів і їх налаштування |
+| 🧠 **[Memory System](/user-guide/features/memory)** | Постійна пам’ять, що зростає між сесіями |
+| 📚 **[Skills System](/user-guide/features/skills)** | Процедурна пам’ять, яку агент створює та повторно використовує |
+| 🔌 **[MCP Integration](/user-guide/features/mcp)** | Підключення до серверів MCP, фільтрація їх інструментів та безпечне розширення Hermes |
+| 🧭 **[Use MCP with Hermes](/guides/use-mcp-with-hermes)** | Практичні шаблони, приклади та посібники з налаштування MCP |
+| 🎙️ **[Voice Mode](/user-guide/features/voice-mode)** | Голосова взаємодія в реальному часі в CLI, Telegram, Discord та Discord VC |
+| 🗣️ **[Use Voice Mode with Hermes](/guides/use-voice-mode-with-hermes)** | Практичні налаштування та шаблони використання голосових робочих процесів Hermes |
+| 🎭 **[Personality & SOUL.md](/user-guide/features/personality)** | Визначте типову голосову особистість Hermes у глобальному SOUL.md |
+| 📄 **[Context Files](/user-guide/features/context-files)** | Файли контексту проєкту, що формують кожну розмову |
+| 🔒 **[Security](/user-guide/security)** | Підтвердження команд, авторизація, ізоляція контейнерів |
+| 💡 **[Tips & Best Practices](/guides/tips)** | Швидкі перемоги для отримання максимуму від Hermes |
+| 🏗️ **[Architecture](/developer-guide/architecture)** | Як це працює «під капотом» |
+| ❓ **[FAQ & Troubleshooting](/reference/faq)** | Поширені питання та рішення |
+
+## Key Features
+
+- **Закритий цикл навчання** — пам’ять, курована агентом, з періодичними підштовхуваннями, автономне створення навичок, їх самовдосконалення під час використання, крос‑сесійний пошук FTS5 з підсумовуванням LLM та діалектичне моделювання користувача за допомогою [Honcho](https://github.com/plastic-labs/honcho)
+- **Працює будь-де, а не лише на ноутбуці** — 6 бекендів терміналу: локальний, Docker, SSH, Daytona, Singularity, Modal. Daytona і Modal пропонують безсерверну постійність — твоє середовище спить, коли не використовується, майже без витрат
+- **Живе там, де ти** — CLI, Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Mattermost, Email, SMS, DingTalk, Feishu, WeCom, Weixin, QQ Bot, Yuanbao, BlueBubbles, Home Assistant, Microsoft Teams, Google Chat та інші — 20+ платформ через один шлюз
+- **Створений тренерами моделей** — розроблений [Nous Research](https://nousresearch.com), лабораторією за Hermes, Nomos та Psyche. Працює з [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai), OpenAI або будь‑яким кінцевим пунктом
+- **Заплановані автоматизації** — вбудований cron з доставкою на будь‑яку платформу
+- **Делегування та паралелізація** — створює ізольовані суб‑агенти для паралельних робочих потоків. Програмний виклик інструменту через `execute_code` стискає багатокрокові конвеєри в один запит
+- **Відкриті стандарти навичок** — сумісний з [agentskills.io](https://agentskills.io). Навички портативні, діляться та розвиваються спільнотою через Skills Hub
+- **Повний веб‑контроль** — пошук, витяг, перегляд, візія, генерація зображень, TTS — одна підписка через [Nous Portal](/integrations/nous-portal) охоплює все
+- **Підтримка MCP** — підключення до будь‑якого сервера MCP для розширених можливостей інструментів
+- **Готовий для досліджень** — пакетна обробка, експорт траєкторій, RL‑тренування з Atropos. Створений [Nous Research](https://nousresearch.com) — лабораторією за Hermes, Nomos та Psyche
+
+## For LLMs and coding agents
+
+Машинно‑читабельні точки входу в цю документацію:
+
+- **[`/llms.txt`](/llms.txt)** — індекс усіх сторінок документації з короткими описами. ~17 KB, безпечно завантажити в контекст LLM.
+- **[`/llms-full.txt`](/llms-full.txt)** — усі сторінки документації, об’єднані в один markdown‑файл для одноразового засвоєння. ~1.8 MB.
+
+Обидва файли також доступні за `/docs/llms.txt` і `/docs/llms-full.txt`. Генеруються заново при кожному розгортанні.
