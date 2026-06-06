@@ -8468,11 +8468,29 @@ async def pty_ws(ws: WebSocket) -> None:
     channel = _channel_or_close_code(ws)
     sidecar_url = _build_sidecar_url(channel) if channel else None
 
+    # _resolve_chat_argv → _make_tui_argv can do blocking work (subprocess
+    # calls for node/npm bootstrap, build staleness checks, optional builds).
+    # Wrap in run_in_executor so any slow path doesn't freeze the uvicorn
+    # event loop — otherwise `await ws.accept()`'s queued ASGI message can't
+    # flush, downstream proxy timeouts fire, and the browser sees 502 /
+    # "Empty reply" with no log entry. Broad Exception catch ensures any
+    # future regression surfaces as a visible error frame rather than a
+    # silent close.
+    loop = asyncio.get_running_loop()
     try:
-        argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
+        argv, cwd, env = await loop.run_in_executor(
+            None, lambda: _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
+        )
     except SystemExit as exc:
         # _make_tui_argv calls sys.exit(1) when node/npm is missing.
         await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+        await ws.close(code=1011)
+        return
+    except Exception as exc:
+        logging.getLogger("hermes.pty_ws").exception(
+            "Unexpected error resolving chat argv: %r", exc
+        )
+        await ws.send_text(f"\r\n\x1b[31mChat error: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
 
