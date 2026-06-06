@@ -624,6 +624,320 @@ class TestExtractMedia:
 
 
 # ---------------------------------------------------------------------------
+# File / audio / video — extension-bucket extraction (#16964)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractMediaFileMessages:
+    """File / audio / video messages must produce media_urls so the gateway
+    doesn't silently drop them.
+
+    The dingtalk-stream SDK only knows ``text`` / ``picture`` / ``richText``
+    explicitly — every other ``msgtype`` (``file``, ``audio``, ``video``)
+    lands the payload in ``ChatbotMessage.extensions["content"]``. Before
+    #16964 was fixed ``_extract_media`` only looked at ``image_content`` /
+    ``rich_text_content`` so a single PDF/DOCX yielded an empty
+    ``(text, media_urls)`` pair and the message was filtered out by the
+    early-return at the call site, leaving the user stuck on 🤔.
+    """
+
+    def _make_message(self, *, msg_type: str, content: dict | None) -> MagicMock:
+        msg = MagicMock()
+        msg.message_type = msg_type
+        msg.image_content = None
+        msg.rich_text_content = None
+        msg.rich_text = None
+        msg.extensions = {"content": content} if content is not None else {}
+        return msg
+
+    def test_file_message_extracts_download_code_into_media_urls(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        msg = self._make_message(
+            msg_type="file",
+            content={"downloadCode": "FILE-CODE-XYZ", "fileName": "doc.pdf"},
+        )
+
+        msg_type, media_urls, media_types = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+
+        assert media_urls == ["FILE-CODE-XYZ"]
+        assert media_types == ["application/octet-stream"]
+        assert msg_type == MessageType.DOCUMENT
+
+    def test_file_message_accepts_snake_case_download_code(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        msg = self._make_message(
+            msg_type="file",
+            content={"download_code": "snake-code"},
+        )
+
+        msg_type, media_urls, _ = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+
+        assert media_urls == ["snake-code"]
+        assert msg_type == MessageType.DOCUMENT
+
+    def test_audio_message_routes_to_audio_type(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        msg = self._make_message(
+            msg_type="audio",
+            content={"downloadCode": "AUDIO-CODE"},
+        )
+        _, media_urls, media_types = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+        assert media_urls == ["AUDIO-CODE"]
+        assert media_types == ["audio"]
+
+    def test_video_message_routes_to_video_type(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        msg = self._make_message(
+            msg_type="video",
+            content={"downloadCode": "VIDEO-CODE"},
+        )
+        _, media_urls, media_types = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+        assert media_urls == ["VIDEO-CODE"]
+        assert media_types == ["video"]
+
+    def test_file_message_with_missing_download_code_yields_no_media(self):
+        """If the SDK delivers a file callback without a download code we
+        keep the existing 'empty message, drop' behavior — no point
+        invoking the agent on something we can't fetch."""
+        from gateway.platforms.dingtalk import DingTalkAdapter
+
+        msg = self._make_message(
+            msg_type="file",
+            content={"fileName": "doc.pdf"},  # no downloadCode
+        )
+        _, media_urls, _ = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+        assert media_urls == []
+
+    def test_image_path_unaffected(self):
+        """Existing picture flow must keep working — the new branch only
+        runs when the existing branches yield no media."""
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        msg = MagicMock()
+        msg.message_type = "picture"
+        msg.image_content = MagicMock(download_code="IMG-CODE")
+        msg.rich_text_content = None
+        msg.rich_text = None
+        msg.extensions = {}
+        msg_type, media_urls, media_types = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+        assert media_urls == ["IMG-CODE"]
+        assert media_types == ["image"]
+        assert msg_type == MessageType.PHOTO
+
+
+# ---------------------------------------------------------------------------
+# File / audio / video — async download-code resolution (#16964)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestResolveMediaCodesFileMessages:
+    """``_resolve_media_codes`` runs before ``_extract_media`` and is
+    responsible for swapping each download code for a fetchable URL in
+    place. Without a corresponding extension-bucket branch, the new
+    ``_extract_media`` file/audio/video path would still emit raw
+    DingTalk codes — the silent drop is gone but document/audio/video
+    handlers downstream cannot fetch the attachment.
+
+    These tests pin two invariants:
+      1. ``_fetch_download_url`` is called with the raw code from
+         ``message.extensions["content"]``.
+      2. After resolution, ``_extract_media`` reads the URL — not the
+         code — so the emitted ``MessageEvent.media_urls`` carries
+         something downstream can ``GET``.
+    """
+
+    def _adapter(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        config = PlatformConfig(
+            enabled=True,
+            extra={"client_id": "cfg-id", "client_secret": "cfg-secret"},
+        )
+        adapter = DingTalkAdapter(config)
+        # ``_get_access_token`` is async — patch with an AsyncMock so
+        # ``await self._get_access_token()`` resolves to a token without
+        # hitting the real DingTalk auth endpoint.
+        adapter._get_access_token = AsyncMock(return_value="acs-token")
+        # ``_robot_sdk`` is checked for truthiness inside
+        # ``_fetch_download_url`` before the SDK call.  We replace
+        # ``_fetch_download_url`` itself with the per-test mock below
+        # (so this just has to be non-None for the early-exit guard).
+        adapter._robot_sdk = MagicMock()
+        return adapter
+
+    def _make_message(self, *, msg_type: str, content: dict, robot_code="rb-1"):
+        msg = MagicMock()
+        msg.message_type = msg_type
+        msg.image_content = None
+        msg.rich_text_content = None
+        msg.rich_text = None
+        msg.extensions = {"content": content}
+        msg.robot_code = robot_code
+        return msg
+
+    async def test_file_message_resolves_download_code_to_url(self):
+        adapter = self._adapter()
+        content = {"downloadCode": "FILE-CODE-XYZ", "fileName": "doc.pdf"}
+        msg = self._make_message(msg_type="file", content=content)
+
+        captured = {}
+
+        async def fake_fetch(code, robot_code, token, obj, key):
+            captured["code"] = code
+            captured["robot_code"] = robot_code
+            captured["token"] = token
+            captured["obj_is_content_payload"] = obj is content
+            captured["key"] = key
+            # Mutate in place exactly like the real implementation.
+            obj[key] = f"https://oapi.dingtalk.com/dl/{code}"
+
+        adapter._fetch_download_url = fake_fetch
+
+        await adapter._resolve_media_codes(msg)
+
+        assert captured.get("code") == "FILE-CODE-XYZ", (
+            "_fetch_download_url must be called with the raw download code"
+        )
+        assert captured.get("robot_code") == "rb-1"
+        assert captured.get("token") == "acs-token"
+        assert captured.get("obj_is_content_payload") is True
+        assert captured.get("key") == "downloadCode"
+        # The dict was mutated in place — _extract_media will see the URL.
+        assert content["downloadCode"] == "https://oapi.dingtalk.com/dl/FILE-CODE-XYZ"
+
+    async def test_extract_media_after_resolve_emits_resolved_url(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.base import MessageType
+
+        adapter = self._adapter()
+        content = {"downloadCode": "FILE-CODE-XYZ", "fileName": "doc.pdf"}
+        msg = self._make_message(msg_type="file", content=content)
+
+        async def fake_fetch(code, robot_code, token, obj, key):
+            obj[key] = f"https://oapi.dingtalk.com/dl/{code}"
+
+        adapter._fetch_download_url = fake_fetch
+
+        # Realistic gateway order: resolve first, then extract.
+        await adapter._resolve_media_codes(msg)
+        msg_type, media_urls, media_types = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+
+        assert media_urls == [
+            "https://oapi.dingtalk.com/dl/FILE-CODE-XYZ"
+        ], (
+            "media_urls must carry the resolved URL, not the raw "
+            "DingTalk code — downstream handlers fetch the attachment "
+            "by URL"
+        )
+        assert media_types == ["application/octet-stream"]
+        assert msg_type == MessageType.DOCUMENT
+
+    async def test_audio_message_resolved(self):
+        adapter = self._adapter()
+        content = {"downloadCode": "AUDIO-CODE"}
+        msg = self._make_message(msg_type="audio", content=content)
+
+        async def fake_fetch(code, robot_code, token, obj, key):
+            obj[key] = f"https://example.invalid/{code}"
+
+        adapter._fetch_download_url = fake_fetch
+        await adapter._resolve_media_codes(msg)
+        assert content["downloadCode"] == "https://example.invalid/AUDIO-CODE"
+
+    async def test_video_message_resolved(self):
+        adapter = self._adapter()
+        content = {"downloadCode": "VIDEO-CODE"}
+        msg = self._make_message(msg_type="video", content=content)
+
+        async def fake_fetch(code, robot_code, token, obj, key):
+            obj[key] = f"https://example.invalid/{code}"
+
+        adapter._fetch_download_url = fake_fetch
+        await adapter._resolve_media_codes(msg)
+        assert content["downloadCode"] == "https://example.invalid/VIDEO-CODE"
+
+    async def test_snake_case_download_code_resolved(self):
+        adapter = self._adapter()
+        content = {"download_code": "SNAKE-CODE"}
+        msg = self._make_message(msg_type="file", content=content)
+
+        async def fake_fetch(code, robot_code, token, obj, key):
+            obj[key] = f"https://example.invalid/{code}"
+
+        adapter._fetch_download_url = fake_fetch
+        await adapter._resolve_media_codes(msg)
+        assert content["download_code"] == "https://example.invalid/SNAKE-CODE"
+
+    async def test_image_message_unaffected(self):
+        """The image_content branch must keep working — adding the
+        extension-bucket branch must not double-resolve or change the
+        existing path."""
+        adapter = self._adapter()
+        img = MagicMock(download_code="IMG-CODE")
+        msg = MagicMock()
+        msg.message_type = "picture"
+        msg.image_content = img
+        msg.rich_text_content = None
+        msg.rich_text = None
+        msg.extensions = {}
+        msg.robot_code = "rb-1"
+
+        async def fake_fetch(code, robot_code, token, obj, key):
+            setattr(obj, key, f"https://example.invalid/{code}")
+
+        adapter._fetch_download_url = fake_fetch
+        await adapter._resolve_media_codes(msg)
+        assert img.download_code == "https://example.invalid/IMG-CODE"
+
+    async def test_text_message_skipped(self):
+        """Plain text messages shouldn't trigger the new branch."""
+        adapter = self._adapter()
+        msg = MagicMock()
+        msg.message_type = "text"
+        msg.image_content = None
+        msg.rich_text_content = None
+        msg.rich_text = None
+        msg.extensions = {}
+        msg.robot_code = "rb-1"
+
+        called = False
+
+        async def fake_fetch(*_args, **_kwargs):
+            nonlocal called
+            called = True
+
+        adapter._fetch_download_url = fake_fetch
+        await adapter._resolve_media_codes(msg)
+        assert called is False, (
+            "Text messages have no download code; _fetch_download_url "
+            "must not run"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Group gating — require_mention + allowed_users (parity with other platforms)
 # ---------------------------------------------------------------------------
 
