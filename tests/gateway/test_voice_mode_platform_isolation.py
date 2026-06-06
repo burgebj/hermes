@@ -64,15 +64,18 @@ class TestVoiceModePlatformIsolation:
 class TestLegacyKeyMigration:
     """Test migration of legacy unprefixed keys in _load_voice_modes."""
 
-    def test_load_voice_modes_skips_legacy_keys(self):
-        """_load_voice_modes skips keys without ':' prefix and logs a warning."""
+    def test_load_voice_modes_skips_legacy_nonoff_keys(self):
+        """Legacy unprefixed non-'off' keys are dropped with a warning.
+
+        Only 'off' legacy rows are preserved (see #14025); 'all' and
+        'voice_only' legacy rows would broadcast TTS to the wrong
+        platform if migrated without knowing the owner.
+        """
         runner = _make_runner()
 
-        # Simulate legacy persisted data with unprefixed keys
         legacy_data = {
             "123": "all",
             "456": "voice_only",
-            # Also includes a properly prefixed key (from after the fix)
             "telegram:789": "off",
         }
 
@@ -84,15 +87,36 @@ class TestLegacyKeyMigration:
                 with patch("gateway.run.logger") as mock_logger:
                     result = runner._load_voice_modes()
 
-            # Legacy keys without ':' should be skipped
             assert "123" not in result
             assert "456" not in result
-            # Prefixed key should be preserved
             assert result.get("telegram:789") == "off"
-            # Warning should be logged for each legacy key
             assert mock_logger.warning.called
             warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
             assert any("Skipping legacy unprefixed voice mode key" in str(c) for c in warning_calls)
+
+    def test_load_voice_modes_preserves_legacy_off_keys(self):
+        """Legacy unprefixed keys with mode='off' are preserved so the
+        auto-TTS suppression survives the #12542 migration (#14025)."""
+        runner = _make_runner()
+
+        legacy_data = {
+            "123": "off",
+            "456": "all",
+            "789": "voice_only",
+            "telegram:999": "off",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            voice_path = Path(tmpdir) / "gateway_voice_mode.json"
+            voice_path.write_text(json.dumps(legacy_data))
+
+            with patch.object(runner, "_VOICE_MODE_PATH", voice_path):
+                result = runner._load_voice_modes()
+
+        assert result.get("123") == "off"
+        assert "456" not in result
+        assert "789" not in result
+        assert result.get("telegram:999") == "off"
 
     def test_load_voice_modes_preserves_prefixed_keys(self):
         """_load_voice_modes correctly loads platform-prefixed keys."""
@@ -203,9 +227,69 @@ class TestSyncVoiceModeStateToAdapter:
         # Should not raise
         runner._sync_voice_mode_state_to_adapter(mock_adapter)
 
+    def test_sync_legacy_off_applies_to_all_adapters(self):
+        """Legacy unprefixed 'off' rows suppress auto-TTS on every adapter
+        that has no explicit prefixed entry for the same chat id (#14025)."""
+        runner = _make_runner()
+        runner._voice_mode = {
+            "123": "off",
+            "telegram:456": "off",
+            "slack:789": "off",
+        }
+
+        telegram_adapter = _make_adapter(Platform.TELEGRAM)
+        runner._sync_voice_mode_state_to_adapter(telegram_adapter)
+        assert telegram_adapter._auto_tts_disabled_chats == {"123", "456"}
+
+        slack_adapter = _make_adapter(Platform.SLACK)
+        runner._sync_voice_mode_state_to_adapter(slack_adapter)
+        assert slack_adapter._auto_tts_disabled_chats == {"123", "789"}
+
+    def test_explicit_prefixed_state_overrides_legacy_off_on_same_platform(self):
+        """An explicit <platform>:<chat_id> row wins over a legacy unprefixed
+        off row on the same chat id on that platform, regardless of the
+        explicit mode (#14025). Covers voice_only, all (the mode written by
+        the Discord /voice channel join path), and off."""
+        runner = _make_runner()
+        runner._voice_mode = {
+            "123": "off",
+            "456": "off",
+            "789": "off",
+            "telegram:123": "voice_only",
+            "telegram:456": "all",
+            "telegram:789": "off",
+            "slack:123": "off",
+        }
+
+        telegram_adapter = _make_adapter(Platform.TELEGRAM)
+        runner._sync_voice_mode_state_to_adapter(telegram_adapter)
+        assert telegram_adapter._auto_tts_disabled_chats == {"789"}
+
+        slack_adapter = _make_adapter(Platform.SLACK)
+        runner._sync_voice_mode_state_to_adapter(slack_adapter)
+        assert slack_adapter._auto_tts_disabled_chats == {"123", "456", "789"}
+
+    def test_legacy_off_survives_upgrade_restart_for_telegram(self):
+        """End-to-end: a pre-#12542 {<chat_id>: 'off'} entry still suppresses
+        auto-TTS on the Telegram adapter after an upgrade and restart without
+        requiring the user to re-run /voice off (#14025)."""
+        runner = _make_runner()
+        legacy_data = {"987654321": "off"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            voice_path = Path(tmpdir) / "gateway_voice_mode.json"
+            voice_path.write_text(json.dumps(legacy_data))
+            with patch.object(runner, "_VOICE_MODE_PATH", voice_path):
+                runner._voice_mode = runner._load_voice_modes()
+
+        telegram_adapter = _make_adapter(Platform.TELEGRAM)
+        runner._sync_voice_mode_state_to_adapter(telegram_adapter)
+
+        assert "987654321" in telegram_adapter._auto_tts_disabled_chats
+
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _make_runner() -> GatewayRunner:
@@ -215,3 +299,10 @@ def _make_runner() -> GatewayRunner:
         runner._voice_mode = {}
         runner.adapters = {}
     return runner
+
+
+def _make_adapter(platform: Platform) -> MagicMock:
+    adapter = MagicMock()
+    adapter.platform = platform
+    adapter._auto_tts_disabled_chats = set()
+    return adapter
