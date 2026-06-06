@@ -1437,6 +1437,57 @@ class TestDelegationProviderIntegration(unittest.TestCase):
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._resolve_task_provider_runtime")
+    def test_preset_provider_runtime_reaches_child_agent(self, mock_runtime, mock_creds, mock_cfg):
+        """Preset provider/model must resolve to its own runtime credentials, not parent creds."""
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "parent-model",
+            "provider": "parent-provider",
+            "presets": {
+                "coder": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["terminal", "file"],
+                }
+            },
+        }
+        mock_creds.return_value = {
+            "model": "parent-model",
+            "provider": "parent-provider",
+            "base_url": "https://parent.example/v1",
+            "api_key": "parent-key",
+            "api_mode": "chat_completions",
+        }
+        mock_runtime.return_value = {
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "deepseek-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_build.return_value = MagicMock()
+            mock_run.return_value = {
+                "task_index": 0, "status": "completed",
+                "summary": "Done", "api_calls": 1, "duration_seconds": 1.0
+            }
+
+            delegate_task(tasks=[{"goal": "Task A", "preset": "coder"}], parent_agent=parent)
+
+            _, kwargs = mock_build.call_args
+            self.assertEqual(kwargs.get("model"), "deepseek-v4-pro")
+            self.assertEqual(kwargs.get("override_provider"), "deepseek")
+            self.assertEqual(kwargs.get("override_base_url"), "https://api.deepseek.com/v1")
+            self.assertEqual(kwargs.get("override_api_key"), "deepseek-key")
+            self.assertEqual(kwargs.get("override_api_mode"), "chat_completions")
+            self.assertEqual(kwargs.get("toolsets"), ["terminal", "file"])
+            mock_runtime.assert_called_once_with("deepseek", "deepseek-v4-pro")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
     def test_model_only_no_provider_inherits_parent_credentials(self, mock_creds, mock_cfg):
         """Setting only model (no provider) changes model but keeps parent credentials."""
         mock_cfg.return_value = {

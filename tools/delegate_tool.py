@@ -600,6 +600,19 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+def _resolve_preset(name: str) -> Optional[dict]:
+    """Resolve a preset name from delegation.presets config.
+
+    Returns the preset dict or None if not found / config unavailable.
+    """
+    try:
+        cfg = _load_config()
+        presets = cfg.get("presets") or {}
+        return presets.get(name) if isinstance(presets, dict) else None
+    except Exception:
+        return None
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -608,6 +621,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    preset_system_prompt: Optional[str] = None,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -619,9 +633,10 @@ def _build_child_system_prompt(
     """
     parts = [
         "You are a focused subagent working on a specific delegated task.",
-        "",
-        f"YOUR TASK:\n{goal}",
     ]
+    if preset_system_prompt and preset_system_prompt.strip():
+        parts.append(f"\nROLE:\n{preset_system_prompt}")
+    parts.append(f"\nYOUR TASK:\n{goal}")
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
@@ -922,6 +937,8 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Role-specific system prompt from delegation.presets
+    preset_system_prompt: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1009,6 +1026,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        preset_system_prompt=preset_system_prompt,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
@@ -1974,6 +1992,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    preset: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2085,6 +2104,28 @@ def delegate_task(
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
 
+    # Resolve presets for each task and merge into task dict.
+    # Per-task values override preset values; preset overrides creds defaults.
+    for i, task in enumerate(task_list):
+        task_preset_name = task.get("preset") or preset
+        if not task_preset_name:
+            continue
+        preset_cfg = _resolve_preset(task_preset_name)
+        if not preset_cfg:
+            logger.warning("Preset '%s' not found in delegation.presets, ignoring", task_preset_name)
+            continue
+        # Merge preset values into task (task values take precedence)
+        if "provider" not in task and preset_cfg.get("provider"):
+            task["provider"] = preset_cfg["provider"]
+        if "model" not in task and preset_cfg.get("model"):
+            task["model"] = preset_cfg["model"]
+        if "base_url" not in task and preset_cfg.get("base_url"):
+            task["base_url"] = preset_cfg["base_url"]
+        if not task.get("toolsets") and preset_cfg.get("toolsets"):
+            task["toolsets"] = preset_cfg["toolsets"]
+        if not task.get("system_prompt") and preset_cfg.get("system_prompt"):
+            task["system_prompt"] = preset_cfg["system_prompt"]
+
     overall_start = time.monotonic()
     results = []
 
@@ -2109,28 +2150,58 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            task_preset_name = t.get("preset") or preset
+            task_preset_cfg = _resolve_preset(task_preset_name) if task_preset_name else None
+            # Per-task model/provider from preset or explicit override > creds
+            task_model = t.get("model") or (task_preset_cfg or {}).get("model") or creds["model"]
+            explicit_task_provider = t.get("provider") or (task_preset_cfg or {}).get("provider")
+            task_provider = explicit_task_provider or creds["provider"]
+            explicit_task_base_url = t.get("base_url") or (task_preset_cfg or {}).get("base_url")
+            task_base_url = explicit_task_base_url or creds["base_url"]
+            task_api_key = creds["api_key"]
+            task_api_mode = creds["api_mode"]
+            task_command = creds.get("command")
+            task_args = list(creds.get("args") or [])
+            if explicit_task_provider:
+                try:
+                    runtime = _resolve_task_provider_runtime(task_provider, task_model) or {}
+                except Exception as exc:
+                    return tool_error(
+                        f"Cannot resolve task provider '{task_provider}' "
+                        f"for task {i}: {exc}. Check provider config/API key."
+                    )
+                task_provider = runtime.get("provider") or task_provider
+                task_base_url = explicit_task_base_url or runtime.get("base_url") or creds["base_url"]
+                task_api_key = runtime.get("api_key") or task_api_key
+                task_api_mode = runtime.get("api_mode") or task_api_mode
+                task_model = task_model or runtime.get("model")
+                task_command = runtime.get("command") or task_command
+                task_args = list(runtime.get("args") or task_args or [])
+            child_system_prompt = t.get("system_prompt") or (task_preset_cfg or {}).get("system_prompt")
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=task_model,
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=task_provider,
+                override_base_url=task_base_url,
+                override_api_key=task_api_key,
+                override_api_mode=task_api_mode,
                 override_acp_command=t.get("acp_command")
                 or acp_command
-                or creds.get("command"),
+                or task_command,
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (acp_args if acp_args is not None else task_args)
                 ),
                 role=effective_role,
+                preset_system_prompt=child_system_prompt,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2399,6 +2470,28 @@ def _resolve_child_credential_pool(effective_provider: Optional[str], parent_age
             exc,
         )
     return None
+
+
+def _resolve_task_provider_runtime(
+    provider: Optional[str],
+    model: Optional[str],
+) -> Optional[dict]:
+    """Resolve a per-task/preset provider into concrete runtime credentials.
+
+    ``_resolve_delegation_credentials`` only handles the global
+    ``delegation.provider`` override. Presets can set ``provider`` per task, so
+    they need the same runtime-provider resolution path; otherwise a child gets
+    the preset's provider/model label but keeps the parent's base_url/api_key.
+    """
+    requested = str(provider or "").strip()
+    if not requested:
+        return None
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    return resolve_runtime_provider(
+        requested=requested,
+        target_model=(str(model).strip() if model else None),
+    )
 
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
@@ -2795,6 +2888,10 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "preset": {
+                            "type": "string",
+                            "description": "Per-task preset name override. Resolves from delegation.presets.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2807,6 +2904,16 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "preset": {
+                "type": "string",
+                "description": (
+                    "Preset name from delegation.presets config. When set, "
+                    "the preset's provider/model/toolsets/system_prompt are "
+                    "loaded automatically. Per-task 'preset' overrides this "
+                    "top-level value. Explicit params (model, provider) "
+                    "always override preset values."
+                ),
             },
             "acp_command": {
                 "type": "string",
@@ -2852,6 +2959,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        preset=args.get("preset"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
