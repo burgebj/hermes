@@ -8683,6 +8683,15 @@ def _invalidate_update_cache():
         for entry in profiles_root.iterdir():
             if entry.is_dir():
                 homes.append(entry)
+    hermes_home = (os.environ.get("HERMES_HOME") or "").strip()
+    if hermes_home:
+        try:
+            custom_home = Path(hermes_home).expanduser().resolve()
+            known_homes = {home.expanduser().resolve() for home in homes}
+            if custom_home not in known_homes:
+                homes.append(custom_home)
+        except Exception:
+            pass
     for home in homes:
         try:
             cache_file = home / ".update_check"
