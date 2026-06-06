@@ -2884,12 +2884,19 @@ class AIAgent:
         manager, and on_session_end() on the context engine.
         NOT called per-turn — only at CLI exit, /reset, gateway
         session expiry, etc.
+
+        When the agent has already been interrupted (SIGTERM, Ctrl+C,
+        /stop), skip memory-manager on_session_end() so cleanup does not
+        start local-LLM consolidation work while native inference threads
+        may still be unwinding. Resource shutdown still runs.
         """
+        was_interrupted = getattr(self, "_interrupt_requested", False)
         if self._memory_manager:
-            try:
-                self._memory_manager.on_session_end(messages or [])
-            except Exception:
-                pass
+            if not was_interrupted:
+                try:
+                    self._memory_manager.on_session_end(messages or [])
+                except Exception:
+                    pass
             try:
                 self._memory_manager.shutdown_all()
             except Exception:
