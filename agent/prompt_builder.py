@@ -90,8 +90,11 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     for directory in [current, *current.parents]:
         for name in _HERMES_MD_NAMES:
             candidate = directory / name
-            if candidate.is_file():
-                return candidate
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError as e:
+                logger.debug("Could not access %s: %s", candidate, e)
         # Stop walking at the git root (or filesystem root).
         if stop_at and directory == stop_at:
             break
@@ -1453,15 +1456,15 @@ def _load_agents_md(cwd_path: Path) -> str:
     """AGENTS.md — top-level only (no recursive walk)."""
     for name in ["AGENTS.md", "agents.md"]:
         candidate = cwd_path / name
-        if candidate.exists():
-            try:
+        try:
+            if candidate.exists():
                 content = candidate.read_text(encoding="utf-8").strip()
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
                     return _truncate_content(result, "AGENTS.md")
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
+        except Exception as e:
+            logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
@@ -1469,15 +1472,15 @@ def _load_claude_md(cwd_path: Path) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ["CLAUDE.md", "claude.md"]:
         candidate = cwd_path / name
-        if candidate.exists():
-            try:
+        try:
+            if candidate.exists():
                 content = candidate.read_text(encoding="utf-8").strip()
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
                     return _truncate_content(result, "CLAUDE.md")
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
+        except Exception as e:
+            logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
@@ -1485,26 +1488,29 @@ def _load_cursorrules(cwd_path: Path) -> str:
     """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
     cursorrules_file = cwd_path / ".cursorrules"
-    if cursorrules_file.exists():
-        try:
+    try:
+        if cursorrules_file.exists():
             content = cursorrules_file.read_text(encoding="utf-8").strip()
             if content:
                 content = _scan_context_content(content, ".cursorrules")
                 cursorrules_content += f"## .cursorrules\n\n{content}\n\n"
-        except Exception as e:
-            logger.debug("Could not read .cursorrules: %s", e)
+    except Exception as e:
+        logger.debug("Could not read .cursorrules: %s", e)
 
     cursor_rules_dir = cwd_path / ".cursor" / "rules"
-    if cursor_rules_dir.exists() and cursor_rules_dir.is_dir():
-        mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
-        for mdc_file in mdc_files:
-            try:
-                content = mdc_file.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, f".cursor/rules/{mdc_file.name}")
-                    cursorrules_content += f"## .cursor/rules/{mdc_file.name}\n\n{content}\n\n"
-            except Exception as e:
-                logger.debug("Could not read %s: %s", mdc_file, e)
+    try:
+        if cursor_rules_dir.exists() and cursor_rules_dir.is_dir():
+            mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
+            for mdc_file in mdc_files:
+                try:
+                    content = mdc_file.read_text(encoding="utf-8").strip()
+                    if content:
+                        content = _scan_context_content(content, f".cursor/rules/{mdc_file.name}")
+                        cursorrules_content += f"## .cursor/rules/{mdc_file.name}\n\n{content}\n\n"
+                except Exception as e:
+                    logger.debug("Could not read %s: %s", mdc_file, e)
+    except OSError as e:
+        logger.debug("Could not access .cursor/rules: %s", e)
 
     if not cursorrules_content:
         return ""
