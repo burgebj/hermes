@@ -383,6 +383,65 @@ class TestUpdateJob:
                 data = await resp.json()
                 assert "No valid fields" in data["error"]
 
+    @pytest.mark.asyncio
+    async def test_update_job_accepts_repeat_positive_integer(self, adapter):
+        """PATCH /api/jobs/{id} accepts repeat as a positive integer."""
+        app = _create_app(adapter)
+        updated_job = {**SAMPLE_JOB, "repeat": {"times": 3, "completed": 0}}
+        mock_update = MagicMock(return_value=updated_job)
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_update", mock_update
+            ):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"repeat": 3},
+                )
+                assert resp.status == 200
+                mock_update.assert_called_once_with(VALID_JOB_ID, {"repeat": 3})
+
+    @pytest.mark.asyncio
+    async def test_update_job_accepts_repeat_null_to_clear_limit(self, adapter):
+        """PATCH /api/jobs/{id} accepts repeat=null to clear the run limit."""
+        app = _create_app(adapter)
+        updated_job = {**SAMPLE_JOB, "repeat": {"times": None, "completed": 0}}
+        mock_update = MagicMock(return_value=updated_job)
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_update", mock_update
+            ):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"repeat": None},
+                )
+                assert resp.status == 200
+                mock_update.assert_called_once_with(VALID_JOB_ID, {"repeat": None})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_repeat", [0, -1, "3", 2.5, True])
+    async def test_update_job_rejects_invalid_repeat(self, adapter, bad_repeat):
+        """PATCH /api/jobs/{id} rejects repeat values that corrupt scheduler state."""
+        app = _create_app(adapter)
+        mock_update = MagicMock(return_value=SAMPLE_JOB)
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_update", mock_update
+            ):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"repeat": bad_repeat},
+                )
+                assert resp.status == 400
+                data = await resp.json()
+                assert "repeat" in data["error"].lower()
+                mock_update.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 13. test_delete_job

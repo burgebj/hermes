@@ -264,6 +264,19 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_list_normalizes_legacy_scalar_repeat(self):
+        from cron.jobs import create_job, load_jobs, save_jobs
+
+        create_job(prompt="Legacy repeat", schedule="every 1h", name="Legacy")
+        jobs = load_jobs()
+        jobs[0]["repeat"] = 3
+        save_jobs(jobs)
+
+        listing = json.loads(cronjob(action="list"))
+
+        assert listing["success"] is True
+        assert listing["jobs"][0]["repeat"] == "3 times"
+
     def test_list_handles_partial_legacy_job_records(self):
         from cron.jobs import save_jobs
 

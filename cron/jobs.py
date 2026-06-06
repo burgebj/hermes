@@ -86,11 +86,24 @@ def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = N
 
 
 def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a job dict with canonical `skills` and legacy `skill` fields aligned."""
+    """Return a job dict with canonical compatibility fields aligned."""
     normalized = dict(job)
     skills = _normalize_skill_list(normalized.get("skill"), normalized.get("skills"))
     normalized["skills"] = skills
     normalized["skill"] = skills[0] if skills else None
+    try:
+        normalized["repeat"] = _normalize_repeat_state(
+            normalized.get("repeat"), normalized.get("repeat")
+        )
+    except ValueError as exc:
+        logger.warning(
+            "Job '%s' (%s) had invalid repeat state %r; returning infinite repeat: %s",
+            normalized.get("name", normalized.get("id", "unknown")),
+            normalized.get("id", "unknown"),
+            normalized.get("repeat"),
+            exc,
+        )
+        normalized["repeat"] = {"times": None, "completed": 0}
     return normalized
 
 
@@ -523,6 +536,52 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
+def _is_plain_int(value: Any) -> bool:
+    """Return True for integers, excluding bool's int subclass."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _repeat_completed_count(repeat_state: Any) -> int:
+    """Extract a safe completed count from an existing repeat state."""
+    if isinstance(repeat_state, dict):
+        completed = repeat_state.get("completed", 0)
+        if _is_plain_int(completed) and completed >= 0:
+            return completed
+    return 0
+
+
+def _normalize_repeat_state(
+    repeat: Any,
+    existing_repeat: Optional[Any] = None,
+) -> Dict[str, Optional[int]]:
+    """Normalize repeat updates to the persisted scheduler shape.
+
+    Public edit surfaces send repeat as a scalar run limit (``int``) or
+    ``None`` to mean forever. Persisted jobs store a dict so the scheduler can
+    keep the completed-run counter. Preserve the existing completed count when
+    the run limit changes.
+    """
+    completed = _repeat_completed_count(existing_repeat)
+
+    if isinstance(repeat, dict):
+        times = repeat.get("times")
+        new_completed = repeat.get("completed", completed)
+        if not _is_plain_int(new_completed) or new_completed < 0:
+            raise ValueError("Repeat completed count must be a non-negative integer")
+        completed = new_completed
+    else:
+        times = repeat
+
+    if times is None:
+        normalized_times = None
+    elif _is_plain_int(times) and times > 0:
+        normalized_times = times
+    else:
+        raise ValueError("Repeat must be a positive integer or null")
+
+    return {"times": normalized_times, "completed": completed}
+
+
 def _normalize_profile(profile: Optional[str]) -> Optional[str]:
     """Normalize and validate an optional cron job profile name.
 
@@ -621,8 +680,11 @@ def create_job(
     parsed_schedule = parse_schedule(schedule)
 
     # Normalize repeat: treat 0 or negative values as None (infinite)
-    if repeat is not None and repeat <= 0:
-        repeat = None
+    if repeat is not None:
+        if not _is_plain_int(repeat):
+            raise ValueError("Repeat must be an integer or None")
+        if repeat <= 0:
+            repeat = None
 
     # Auto-set repeat=1 for one-shot schedules if not specified
     if parsed_schedule["kind"] == "once" and repeat is None:
@@ -792,7 +854,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             else:
                 updates["workdir"] = _normalize_workdir(_wd)
 
-        # Validate / normalize profile if present in updates.  Empty string or
+        if "repeat" in updates:
+            updates["repeat"] = _normalize_repeat_state(updates["repeat"], job.get("repeat"))
+
+        # Validate / normalize profile if present in updates. Empty string or
         # None both mean "clear the field" (restore old behaviour).
         if "profile" in updates:
             _profile = updates["profile"]
@@ -929,18 +994,32 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
                 
+                # Normalize repeat into the canonical dict shape before
+                # incrementing. This repairs legacy scalar/null values that may
+                # have been persisted by older edit surfaces.
+                try:
+                    job["repeat"] = _normalize_repeat_state(job.get("repeat"), job.get("repeat"))
+                except ValueError as exc:
+                    logger.warning(
+                        "Job '%s' (%s) had invalid repeat state %r; resetting to infinite: %s",
+                        job.get("name", job["id"]),
+                        job["id"],
+                        job.get("repeat"),
+                        exc,
+                    )
+                    job["repeat"] = {"times": None, "completed": 0}
+
                 # Increment completed count
-                if job.get("repeat"):
-                    job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                    
-                    # Check if we've hit the repeat limit
-                    times = job["repeat"].get("times")
-                    completed = job["repeat"]["completed"]
-                    if times is not None and times > 0 and completed >= times:
-                        # Remove the job (limit reached)
-                        jobs.pop(i)
-                        save_jobs(jobs)
-                        return
+                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
+
+                # Check if we've hit the repeat limit
+                times = job["repeat"].get("times")
+                completed = job["repeat"]["completed"]
+                if times is not None and times > 0 and completed >= times:
+                    # Remove the job (limit reached)
+                    jobs.pop(i)
+                    save_jobs(jobs)
+                    return
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)

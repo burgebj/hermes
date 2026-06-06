@@ -204,6 +204,15 @@ class TestJobCRUD:
         jobs = list_jobs()
         assert len(jobs) == 2
 
+    def test_get_and_list_normalize_legacy_scalar_repeat(self, tmp_cron_dir):
+        job = create_job(prompt="Legacy repeat", schedule="every 1h")
+        jobs = load_jobs()
+        jobs[0]["repeat"] = 3
+        save_jobs(jobs)
+
+        assert get_job(job["id"])["repeat"] == {"times": 3, "completed": 0}
+        assert list_jobs()[0]["repeat"] == {"times": 3, "completed": 0}
+
     def test_list_jobs_normalizes_partial_legacy_records(self, tmp_cron_dir):
         save_jobs([
             {
@@ -222,6 +231,7 @@ class TestJobCRUD:
         assert jobs[0]["name"] == "abc123deadbe"
         assert jobs[0]["prompt"] == ""
         assert jobs[0]["schedule_display"] == "every 60m"
+        assert jobs[0]["repeat"] == {"times": None, "completed": 0}
         assert jobs[0]["state"] == "scheduled"
 
     def test_remove_job(self, tmp_cron_dir):
@@ -313,6 +323,47 @@ class TestUpdateJob:
     def test_update_nonexistent_returns_none(self, tmp_cron_dir):
         result = update_job("nonexistent_id", {"name": "X"})
         assert result is None
+
+    def test_update_repeat_scalar_preserves_repeat_shape_and_completed_count(self, tmp_cron_dir):
+        job = create_job(prompt="Repeat me", schedule="every 1h")
+        mark_job_run(job["id"], success=True)
+        assert get_job(job["id"])["repeat"]["completed"] == 1
+
+        updated = update_job(job["id"], {"repeat": 3})
+
+        assert updated["repeat"] == {"times": 3, "completed": 1}
+        mark_job_run(job["id"], success=True)
+        assert get_job(job["id"])["repeat"] == {"times": 3, "completed": 2}
+
+    def test_update_repeat_none_preserves_repeat_shape_and_clears_limit(self, tmp_cron_dir):
+        job = create_job(prompt="Repeat me", schedule="every 1h", repeat=2)
+        mark_job_run(job["id"], success=True)
+        assert get_job(job["id"])["repeat"]["completed"] == 1
+
+        updated = update_job(job["id"], {"repeat": None})
+
+        assert updated["repeat"] == {"times": None, "completed": 1}
+        mark_job_run(job["id"], success=True)
+        assert get_job(job["id"]) is not None
+        assert get_job(job["id"])["repeat"] == {"times": None, "completed": 2}
+
+    def test_mark_job_run_normalizes_legacy_scalar_repeat(self, tmp_cron_dir):
+        job = create_job(prompt="Legacy repeat", schedule="every 1h")
+        jobs = load_jobs()
+        jobs[0]["repeat"] = 3
+        save_jobs(jobs)
+
+        mark_job_run(job["id"], success=True)
+
+        updated = get_job(job["id"])
+        assert updated["repeat"] == {"times": 3, "completed": 1}
+
+    @pytest.mark.parametrize("bad_repeat", [0, -1, "3", 2.5, True])
+    def test_update_repeat_rejects_invalid_values(self, tmp_cron_dir, bad_repeat):
+        job = create_job(prompt="Bad repeat", schedule="every 1h")
+
+        with pytest.raises(ValueError, match="Repeat"):
+            update_job(job["id"], {"repeat": bad_repeat})
 
     def test_update_rejects_id_change(self, tmp_cron_dir):
         """Job IDs are filesystem path components — must be immutable."""
