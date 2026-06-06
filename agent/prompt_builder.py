@@ -1262,48 +1262,42 @@ def build_skills_system_prompt(
         index_lines = []
         for category in sorted(skills_by_category.keys()):
             cat_desc = category_descriptions.get(category, "")
+            unique_skill_count = len({name for name, _desc in skills_by_category[category]})
+            count_suffix = f" ({unique_skill_count} skill{'s' if unique_skill_count != 1 else ''})"
             if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
+                index_lines.append(f"  {category}: {cat_desc}{count_suffix}")
             else:
-                index_lines.append(f"  {category}:")
-            # Deduplicate and sort skills within each category
-            seen = set()
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
-                if name in seen:
-                    continue
-                seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
+                index_lines.append(f"  {category}:{count_suffix}")
 
         result = (
             "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+            "Before replying, scan the skill categories below. If a category matches or is even partially relevant "
+            "to your task, you MUST call skills_list(category=...) to inspect the available skills, then load "
+            "matching skills with skill_view(name) and follow their instructions. "
             "Err on the side of loading — it is always better to have context you don't need "
             "than to miss critical steps, pitfalls, or established workflows. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
+            "and proven workflows that outperform general-purpose approaches. Load relevant skills "
             "even if you think you could handle the task with basic tools like web_search or terminal. "
             "Skills also encode the user's preferred approach, conventions, and quality standards "
             "for tasks like code review, planning, and testing — load them even for tasks you "
             "already know how to do, because the skill defines how it should be done here.\n"
             "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
             "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+            "skills, voice, gateway, plugins, or any feature — call skills_list(category='autonomous-ai-agents') "
+            "if needed, then load the `hermes-agent` skill first. It has the actual commands "
+            "(e.g. `hermes config set …`, `hermes tools`, `hermes setup`) so you don't have "
+            "to guess or invent workarounds.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
             "pitfalls you discovered, update it before finishing.\n"
             "\n"
-            "<available_skills>\n"
+            "<available_skill_categories>\n"
             + "\n".join(index_lines) + "\n"
-            "</available_skills>\n"
+            "</available_skill_categories>\n"
             "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
+            "Only proceed without loading a skill if genuinely no category is relevant to the task."
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────
