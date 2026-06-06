@@ -514,6 +514,57 @@ async def test_stop_clears_pending_messages():
 
 
 # ------------------------------------------------------------------
+# Test 6d: /stop must NOT suspend the session (regression for #9224)
+# ------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_stop_does_not_suspend_session():
+    """PR #9224 removed suspend_session() from /stop because it caused
+    users to lose their conversation history.  This test guards against
+    a revert: /stop must interrupt the agent and unlock the session
+    WITHOUT marking it suspended.
+
+    Covers all three code paths:
+      - sentinel set (agent still starting)
+      - real agent running
+      - no agent running (no-op path)
+    """
+    runner = _make_runner()
+    session_key = build_session_key(
+        SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="12345",
+            chat_type="dm",
+            user_id="u1",
+        )
+    )
+
+    stop_event = _make_event(text="/stop")
+
+    # Path 1: /stop while sentinel is set (agent starting)
+    runner._running_agents[session_key] = _AGENT_PENDING_SENTINEL
+    await runner._handle_message(stop_event)
+    runner.session_store.suspend_session.assert_not_called()
+    assert session_key not in runner._running_agents, (
+        "sentinel must be cleaned up after /stop"
+    )
+
+    # Path 2: /stop while real agent is running
+    runner.session_store.reset_mock()
+    fake_agent = MagicMock()
+    runner._running_agents[session_key] = fake_agent
+    await runner._handle_message(stop_event)
+    runner.session_store.suspend_session.assert_not_called()
+    assert session_key not in runner._running_agents, (
+        "agent must be removed after /stop"
+    )
+
+    # Path 3: /stop with no agent (no-op)
+    runner.session_store.reset_mock()
+    await runner._handle_message(stop_event)
+    runner.session_store.suspend_session.assert_not_called()
+
+
+# ------------------------------------------------------------------
 # Test 7: Shutdown skips sentinel entries
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
