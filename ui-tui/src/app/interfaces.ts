@@ -193,6 +193,7 @@ export interface ComposerState {
 }
 
 export interface UseComposerStateOptions {
+  catalog: null | SlashCatalog
   gw: GatewayClient
   onClipboardPaste: (quiet?: boolean) => Promise<void> | void
   onImageAttached?: (info: ImageAttachResponse) => void
