@@ -18425,6 +18425,66 @@ class GatewayRunner:
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
 
+            # Eager session-rotation persistence.
+            #
+            # If the agent rotated its session_id mid-run (via
+            # _compress_context), persist the rotation NOW — before the
+            # post-run block at the success path runs, and before any
+            # stale-result discard or early-return can swallow it.
+            #
+            # Without this, an interrupt (/stop) or a transient failure
+            # between here and the post-run "Session split detected" block
+            # discards the rotation entirely: the session_store entry keeps
+            # pointing at the pre-compression session_id, and the NEXT turn
+            # reloads the FULL uncompressed transcript from disk, then
+            # immediately re-compresses — burning another aux LLM call and
+            # creating a phantom orphaned session in SQLite.
+            #
+            # The success-path block at the "Session split detected" log
+            # below is now idempotent w.r.t. this eager write.
+            try:
+                _split_session_id = getattr(agent, "session_id", None)
+                if (
+                    _split_session_id
+                    and session_key
+                    and _split_session_id != session_id
+                ):
+                    _split_entry = self.session_store._entries.get(session_key)
+                    if _split_entry and _split_entry.session_id != _split_session_id:
+                        _split_entry.session_id = _split_session_id
+                        self.session_store._save()
+                        # Mirror the compressed transcript into the new
+                        # session's JSONL store so load_transcript() on the
+                        # next turn returns the compressed history, not the
+                        # stale JSONL from the pre-rotation session_id.
+                        # The agent has already written these to SQLite via
+                        # its own flush path; rewrite_transcript() replaces
+                        # both stores atomically and is idempotent.
+                        _split_msgs = result.get("messages") or []
+                        if _split_msgs:
+                            try:
+                                self.session_store.rewrite_transcript(
+                                    _split_session_id, _split_msgs,
+                                )
+                            except Exception as _rt_err:
+                                logger.debug(
+                                    "Eager rewrite_transcript after session "
+                                    "rotation failed (non-fatal, SQLite "
+                                    "still has the data): %s",
+                                    _rt_err,
+                                )
+                        logger.info(
+                            "Eagerly persisted session rotation %s → %s "
+                            "(survives /stop and early-return paths)",
+                            session_id, _split_session_id,
+                        )
+            except Exception as _eager_err:
+                # Never let persistence bookkeeping crash the agent run.
+                logger.debug(
+                    "Eager session-rotation persist failed: %s",
+                    _eager_err, exc_info=True,
+                )
+
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:
                 _stream_consumer.finish()
@@ -18509,6 +18569,14 @@ class GatewayRunner:
             # mid-run context compression (_compress_context splits sessions).
             # If so, update the session store entry so the NEXT message loads
             # the compressed transcript, not the stale pre-compression one.
+            #
+            # NOTE: as of the eager-rotation-persist fix, this update has
+            # already been performed inside `run_sync` immediately after
+            # `agent.run_conversation()` returned — so the assignment below
+            # is idempotent on the happy path.  We keep it for defence in
+            # depth: if a future refactor moves the eager block, or if the
+            # eager write failed silently, this block still recovers the
+            # rotation on successful (non-stale) turn completion.
             agent = agent_holder[0]
             _session_was_split = False
             if agent and session_key and hasattr(agent, 'session_id') and agent.session_id != session_id:
@@ -18518,7 +18586,7 @@ class GatewayRunner:
                     session_id, agent.session_id,
                 )
                 entry = self.session_store._entries.get(session_key)
-                if entry:
+                if entry and entry.session_id != agent.session_id:
                     entry.session_id = agent.session_id
                     self.session_store._save()
 
