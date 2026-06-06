@@ -1,0 +1,48 @@
+{
+  "events": [
+    {
+      "text": "Muhammad Ali refused induction into the United States Army in Houston, Texas.",
+      "year": 1967,
+      "pages": [
+        {"normalizedtitle": "Muhammad Ali"},
+        {"normalizedtitle": "Vietnam War draft resistance"}
+      ]
+    },
+    {
+      "text": "The mutiny on HMS Bounty took place in the South Pacific.",
+      "year": 1789,
+      "pages": [
+        {"normalizedtitle": "Mutiny on the Bounty"}
+      ]
+    },
+    {
+      "text": "Dennis Tito became the first space tourist on Soyuz TM-32 launching from Baikonur, Kazakhstan.",
+      "year": 2001,
+      "pages": [
+        {"normalizedtitle": "Dennis Tito"},
+        {"normalizedtitle": "Soyuz TM-32"}
+      ]
+    },
+    {
+      "text": "Thor Heyerdahl set sail on the Kon-Tiki raft from Callao, Peru.",
+      "year": 1947,
+      "pages": [
+        {"normalizedtitle": "Kon-Tiki expedition"}
+      ]
+    }
+  ],
+  "births": [
+    {
+      "text": "Jessica Alba, American actress.",
+      "year": 1981,
+      "pages": [{"normalizedtitle": "Jessica Alba"}]
+    }
+  ],
+  "deaths": [
+    {
+      "text": "Benito Mussolini, Italian dictator, was killed in northern Italy.",
+      "year": 1945,
+      "pages": [{"normalizedtitle": "Benito Mussolini"}]
+    }
+  ]
+}

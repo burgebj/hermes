@@ -1,0 +1,13 @@
+name: on_this_day_art_trivia
+version: 0.1.1
+description: |
+  Intercepts inbound Telegram messages for the on-this-day-art-trivia game.
+  In DMs with an active challenge, plain-text replies are scored as guesses.
+  In groups, only direct replies to the challenge image (or explicit
+  /on-this-day-art-trivia guess) are scored. Wrong/correct/close replies are
+  delivered through the gateway; the original message is consumed via
+  pre_gateway_dispatch's "skip" action so the agent does not also reply.
+hooks:
+  - pre_gateway_dispatch
+commands:
+  - on-this-day-art-trivia
