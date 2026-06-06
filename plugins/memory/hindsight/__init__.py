@@ -58,6 +58,11 @@ _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
 # overwrites prior turns server-side, so we keep the per-process
 # unique document_id fallback for older APIs.
 _MIN_VERSION_FOR_UPDATE_MODE_APPEND = "0.5.0"
+# Hindsight 0.6.x replaced the monolithic `hindsight.HindsightEmbedded` class
+# with a two-stage API: `DaemonEmbedManager` (daemon lifecycle) +
+# `hindsight_client.Hindsight` (HTTP client).  Older versions (< 0.6.0) still
+# use the legacy single-class approach.
+_MIN_VERSION_FOR_TWO_STAGE_API = "0.6.0"
 _VALID_BUDGETS = {"low", "mid", "high"}
 _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
@@ -91,12 +96,38 @@ def _check_local_runtime() -> tuple[bool, str | None]:
     so Hermes can degrade gracefully instead of repeatedly trying to start
     a broken local memory backend.
     """
+    # Try 0.6.x modules first, fall back to legacy 0.5.x module
+    try:
+        importlib.import_module("hindsight_client")
+        importlib.import_module("hindsight_embed.daemon_embed_manager")
+        return True, None
+    except Exception:
+        pass
     try:
         importlib.import_module("hindsight")
-        importlib.import_module("hindsight_embed.daemon_embed_manager")
         return True, None
     except Exception as exc:
         return False, str(exc)
+
+
+def _use_two_stage_api() -> bool:
+    """Return True if the installed hindsight-client supports the 0.6.x two-stage API.
+
+    Hindsight >= 0.6.0 split the monolithic ``HindsightEmbedded`` class into
+    ``DaemonEmbedManager`` (daemon lifecycle) + ``hindsight_client.Hindsight``
+    (HTTP client).  Older versions still use the legacy single-class approach.
+    """
+    try:
+        from packaging.version import Version
+        version_str = importlib.metadata.version("hindsight-client")
+        return Version(version_str) >= Version(_MIN_VERSION_FOR_TWO_STAGE_API)
+    except Exception:
+        # If we can't determine the version, check for the existence of the new modules
+        try:
+            importlib.import_module("hindsight_embed.daemon_embed_manager")
+            return True
+        except Exception:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +457,20 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     }
     if current_base_url:
         env_values["HINDSIGHT_API_LLM_BASE_URL"] = str(current_base_url)
+
+    # Embeddings provider — daemon needs this to avoid loading local sentence-transformers
+    embeddings_provider = config.get("embeddings_provider") or os.environ.get(
+        "HINDSIGHT_API_EMBEDDINGS_PROVIDER", ""
+    )
+    if embeddings_provider:
+        env_values["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] = str(embeddings_provider)
+
+    # Reranker provider — daemon needs this to avoid loading local cross-encoder
+    reranker_provider = config.get("reranker_provider") or os.environ.get(
+        "HINDSIGHT_API_RERANKER_PROVIDER", ""
+    )
+    if reranker_provider:
+        env_values["HINDSIGHT_API_RERANKER_PROVIDER"] = str(reranker_provider)
 
     idle_timeout = (
         config.get("idle_timeout")
@@ -876,6 +921,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "recall_prompt_preamble", "description": "Custom preamble for recalled memories in context"},
             {"key": "timeout", "description": "API request timeout in seconds", "default": _DEFAULT_TIMEOUT},
             {"key": "idle_timeout", "description": "Embedded daemon idle timeout in seconds (0 disables auto-shutdown)", "default": _DEFAULT_IDLE_TIMEOUT, "when": {"mode": "local_embedded"}},
+            {"key": "embeddings_provider", "description": "Embedding provider for local_embedded mode (google, openai, tei, cohere). Leave empty to use local sentence-transformers", "default": "", "when": {"mode": "local_embedded"}},
+            {"key": "reranker_provider", "description": "Reranker provider for local_embedded mode (rrf, tei, cohere, litellm). Use 'rrf' for passthrough without model download", "default": "", "when": {"mode": "local_embedded"}},
         ]
 
     def _get_client(self):
@@ -888,6 +935,8 @@ class HindsightMemoryProvider(MemoryProvider):
                         "Hindsight local runtime is unavailable"
                         + (f": {reason}" if reason else "")
                     )
+
+                # Lazy-load hindsight dependency (upstream addition)
                 try:
                     from tools.lazy_deps import ensure as _lazy_ensure
                     _lazy_ensure("memory.hindsight", prompt=False)
@@ -895,30 +944,13 @@ class HindsightMemoryProvider(MemoryProvider):
                     pass
                 except Exception as _e:
                     raise ImportError(str(_e))
-                from hindsight import HindsightEmbedded
-                HindsightEmbedded.__del__ = lambda self: None
-                llm_provider = self._config.get("llm_provider", "")
-                if llm_provider in {"openai_compatible", "openrouter"}:
-                    llm_provider = "openai"
-                logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
-                             self._config.get("profile", "hermes"), llm_provider)
-                kwargs = dict(
-                    profile=self._config.get("profile", "hermes"),
-                    llm_provider=llm_provider,
-                    llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or os.environ.get("HINDSIGHT_LLM_API_KEY", ""),
-                    llm_model=self._config.get("llm_model", ""),
-                )
-                if self._llm_base_url:
-                    kwargs["llm_base_url"] = self._llm_base_url
-                idle_timeout = _parse_int_setting(
-                    self._config.get("idle_timeout")
-                    if self._config.get("idle_timeout") is not None
-                    else os.environ.get("HINDSIGHT_IDLE_TIMEOUT", self._idle_timeout),
-                    _DEFAULT_IDLE_TIMEOUT,
-                )
-                self._idle_timeout = idle_timeout
-                kwargs["idle_timeout"] = idle_timeout
-                self._client = HindsightEmbedded(**kwargs)
+
+                if _use_two_stage_api():
+                    # --- 0.6.x two-stage API: DaemonEmbedManager + HTTP client ---
+                    self._client = self._create_two_stage_client()
+                else:
+                    # --- Legacy < 0.6.0: monolithic HindsightEmbedded class ---
+                    self._client = self._create_legacy_embedded_client()
             else:
                 from hindsight_client import Hindsight
                 timeout = self._timeout or _DEFAULT_TIMEOUT
@@ -929,6 +961,129 @@ class HindsightMemoryProvider(MemoryProvider):
                              self._api_url, bool(self._api_key), kwargs["timeout"])
                 self._client = Hindsight(**kwargs)
         return self._client
+
+    # -----------------------------------------------------------------------
+    # Two-stage API client (Hindsight >= 0.6.0)
+    # -----------------------------------------------------------------------
+
+    def _create_two_stage_client(self):
+        """Create embedded client using the 0.6.x two-stage API.
+
+        Hindsight 0.6.x split the monolithic ``HindsightEmbedded`` class into:
+          - ``DaemonEmbedManager`` — manages daemon lifecycle (start/stop/health)
+          - ``hindsight_client.Hindsight`` — async HTTP client talking to daemon
+        """
+        from hindsight_embed import DaemonEmbedManager
+        from hindsight_client import Hindsight
+
+        class _EmbeddedClientWrapper:
+            """Bridge wrapper — exposes the same interface as the old HindsightEmbedded."""
+
+            def __init__(self, manager, http_client, profile):
+                self._manager = manager
+                self._client = http_client  # inner async client for close() compat
+                self._profile = profile
+
+            def _ensure_started(self):
+                """Ensure daemon is running (called from initialize background thread)."""
+                if not self._manager.is_running(self._profile):
+                    env_values = _build_embedded_profile_env(
+                        self._config, llm_api_key=self._llm_api_key
+                    )
+                    self._manager.ensure_running(config=env_values, profile=self._profile)
+
+            def close(self):
+                try:
+                    inner = getattr(self._client, "_session", None)
+                    if inner is not None and hasattr(inner, "close"):
+                        inner.close()
+                except Exception:
+                    pass
+                try:
+                    self._manager.stop(self._profile)
+                except Exception:
+                    pass
+
+            def __getattr__(self, name):
+                """Forward all other attribute accesses to the inner HTTP client.
+
+                This ensures that calls like ``client.aretain_batch()``,
+                ``client.arecall()``, etc. are dispatched to the real
+                ``hindsight_client.Hindsight`` instance behind the wrapper.
+                """
+                return getattr(self._client, name)
+
+        profile = self._config.get("profile", "hermes")
+        llm_api_key = (
+            self._config.get("llmApiKey")
+            or self._config.get("llm_api_key")
+            or os.environ.get("HINDSIGHT_LLM_API_KEY", "")
+        )
+        logger.debug(
+            "Creating embedded client via DaemonEmbedManager (profile=%s)", profile
+        )
+
+        # Ensure .env file is up-to-date before starting daemon
+        _materialize_embedded_profile_env(self._config, llm_api_key=llm_api_key or None)
+
+        manager = DaemonEmbedManager()
+        # Start the daemon — it reads LLM config from ~/.hindsight/profiles/<profile>.env
+        env_values = _build_embedded_profile_env(
+            self._config, llm_api_key=llm_api_key
+        )
+        manager.ensure_running(config=env_values, profile=profile)
+
+        # Create HTTP client pointing at the running daemon
+        daemon_url = manager.get_url(profile)
+        timeout = self._timeout or _DEFAULT_TIMEOUT
+        http_client = Hindsight(base_url=daemon_url, timeout=float(timeout))
+
+        wrapper = _EmbeddedClientWrapper(manager, http_client, profile)
+        wrapper._config = self._config  # for _ensure_started env rebuild
+        wrapper._llm_api_key = llm_api_key
+        return wrapper
+
+    # -----------------------------------------------------------------------
+    # Legacy embedded client (Hindsight < 0.6.0)
+    # -----------------------------------------------------------------------
+
+    def _create_legacy_embedded_client(self):
+        """Create embedded client using the legacy monolithic HindsightEmbedded class.
+
+        Used when hindsight-client < 0.6.0 is installed.
+        """
+        from hindsight import HindsightEmbedded
+
+        HindsightEmbedded.__del__ = lambda self: None
+        llm_provider = self._config.get("llm_provider", "")
+        if llm_provider in ("openai_compatible", "openrouter"):
+            llm_provider = "openai"
+        logger.debug(
+            "Creating legacy HindsightEmbedded client (profile=%s, provider=%s)",
+            self._config.get("profile", "hermes"),
+            llm_provider,
+        )
+        kwargs = dict(
+            profile=self._config.get("profile", "hermes"),
+            llm_provider=llm_provider,
+            llm_api_key=(
+                self._config.get("llmApiKey")
+                or self._config.get("llm_api_key")
+                or os.environ.get("HINDSIGHT_LLM_API_KEY", "")
+            ),
+            llm_model=self._config.get("llm_model", ""),
+        )
+        if self._llm_base_url:
+            kwargs["llm_base_url"] = self._llm_base_url
+        idle_timeout = _parse_int_setting(
+            self._config.get("idle_timeout")
+            if self._config.get("idle_timeout") is not None
+            else os.environ.get("HINDSIGHT_IDLE_TIMEOUT", self._idle_timeout),
+            _DEFAULT_IDLE_TIMEOUT,
+        )
+        self._idle_timeout = idle_timeout
+        kwargs["idle_timeout"] = idle_timeout
+        return HindsightEmbedded(**kwargs)
 
     def _run_sync(self, coro):
         """Schedule *coro* on the shared loop using the configured timeout."""
@@ -1737,22 +1892,11 @@ class HindsightMemoryProvider(MemoryProvider):
         if self._client is not None:
             try:
                 if self._mode == "local_embedded":
-                    # HindsightEmbedded.close() delegates to its sync client.close().
-                    # When Hermes created/used that client on the shared async loop,
-                    # closing it from this thread can raise "attached to a different
-                    # loop" before aiohttp releases the session. Close the embedded
-                    # inner async client on the shared loop first, then let the
-                    # wrapper clean up daemon/UI bookkeeping.
-                    inner_client = getattr(self._client, "_client", None)
-                    if inner_client is not None and hasattr(inner_client, "aclose"):
-                        _run_sync(inner_client.aclose())
-                        try:
-                            self._client._client = None
-                        except Exception:
-                            pass
+                    # Both the 0.6.x _EmbeddedClientWrapper and legacy HindsightEmbedded
+                    # expose .close() for cleanup (HTTP session + daemon / embedded runtime).
                     try:
                         self._client.close()
-                    except RuntimeError:
+                    except Exception:
                         pass
                 else:
                     self._run_sync(self._client.aclose())
