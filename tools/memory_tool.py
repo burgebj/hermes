@@ -500,7 +500,11 @@ class MemoryStore:
         if not path.exists():
             return []
         try:
-            raw = path.read_text(encoding="utf-8")
+            # Use utf-8-sig to auto-strip BOM if present (common on Windows).
+            # Fall back to replacement characters for non-UTF-8 bytes rather
+            # than raising UnicodeDecodeError (which was previously swallowed
+            # by a bare except, silently emptying all memory).
+            raw = path.read_text(encoding="utf-8-sig", errors="replace")
         except (OSError, IOError):
             return []
 
