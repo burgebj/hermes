@@ -75,6 +75,18 @@ The app checks for updates in the background and offers a one-click update when 
 
 The [manual update process](https://hermes-agent.nousresearch.com/docs/getting-started/updating) also works with the GUI.
 
+:::caution Remote backends update separately
+The desktop's one-click update only updates the **app on this machine**. If you've [connected to a remote backend](#connecting-to-a-remote-backend), that backend is a separate Hermes install on the other machine — updating the desktop does **not** update it. After a desktop update, also update the remote so the two stay aligned:
+
+```bash
+# on the remote machine, in its Hermes checkout
+hermes update          # or: git pull origin main && uv pip install -e .
+# then restart the `hermes dashboard` process so the new code loads
+```
+
+A desktop that's newer than its backend can misbehave in ways that aren't obvious (e.g. sessions started under one profile landing in another, because newer session-routing the app relies on isn't present in the older backend). The app surfaces a **"Backend out of date"** warning when it detects this skew — if you see it, update the backend as above.
+:::
+
 ## CLI reference: `hermes desktop`
 
 To launch via the CLI, simply run `hermes desktop`. By default it installs workspace Node dependencies, builds the current OS's unpacked Electron app, then launches that packaged artifact.
@@ -160,6 +172,7 @@ You can also set the backend URL without the UI via the `HERMES_DESKTOP_REMOTE_U
 - **No "Sign in" button — it asks for a session token instead** — the backend's username/password provider isn't active. `/api/status` won't list `"basic"` in `auth_providers`. Make sure both the username and a password (or password hash) are set in `~/.hermes/.env` and that the dashboard process actually loaded them.
 - **Signed out on every restart** — set `HERMES_DASHBOARD_BASIC_AUTH_SECRET` to a stable value. Without it the token-signing key is regenerated per boot, invalidating all sessions.
 - **Connection refused / times out** — the backend bound to `127.0.0.1` (the default) or a firewall/VPN is blocking the port. Bind to `0.0.0.0` or the tailscale IP and open the port to your trusted network.
+- **New chats land in the wrong profile, or "session not found" after switching profiles** — the remote backend is on **older code** than the desktop. Per-profile session routing is a backend feature; if you updated the desktop but not the remote, the backend ignores the profile the app sends and falls back to its launch profile. Update the remote backend (`hermes update` on that machine, then restart its `hermes dashboard`) so it matches the desktop. See the [Remote backends update separately](#updating) note above; the app also shows a **"Backend out of date"** warning when it detects this.
 
 For the same setup from the web-dashboard angle, see [Web Dashboard → Connecting Hermes Desktop to a remote backend](./features/web-dashboard.md#connecting-hermes-desktop-to-a-remote-backend); the env vars are catalogued under [Environment Variables → Web Dashboard & Hermes Desktop](../reference/environment-variables.md#web-dashboard--hermes-desktop).
 
