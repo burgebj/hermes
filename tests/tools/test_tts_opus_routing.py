@@ -60,6 +60,11 @@ def test_edge_telegram_converts_to_opus_voice(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_tool, "_import_edge_tts", lambda: object())
     monkeypatch.setattr(tts_tool, "_generate_edge_tts", _write_edge_output)
     monkeypatch.setattr(tts_tool, "_convert_to_opus", convert)
+    monkeypatch.setattr(
+        tts_tool,
+        "_is_telegram_voice_artifact",
+        lambda path: Path(path) == opus,
+    )
 
     result = json.loads(tts_tool.text_to_speech_tool("hello", output_path=str(out)))
 

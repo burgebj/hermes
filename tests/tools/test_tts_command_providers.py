@@ -450,9 +450,8 @@ class TestTextToSpeechToolWithCommandProvider:
         assert data["voice_compatible"] is False
         assert Path(data["file_path"]).exists()
 
-    def test_voice_compatible_opt_in_toggles_flag(self, tmp_path):
-        """voice_compatible=true is reflected in the response when the
-        file is already .ogg (no ffmpeg needed)."""
+    def test_voice_compatible_opt_in_requires_valid_artifact(self, tmp_path):
+        """voice_compatible=true still requires validated OGG/Opus output."""
         cfg = {
             "provider": "py-copy-ogg",
             "providers": {
@@ -466,7 +465,32 @@ class TestTextToSpeechToolWithCommandProvider:
         }
         out = tmp_path / "clip.ogg"
 
-        with patch("tools.tts_tool._load_tts_config", return_value=cfg):
+        with patch("tools.tts_tool._load_tts_config", return_value=cfg), \
+             patch("tools.tts_tool._is_telegram_voice_artifact", return_value=False, create=True), \
+             patch("tools.tts_tool._convert_to_opus", return_value=None):
+            result = text_to_speech_tool(text="hi", output_path=str(out))
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["voice_compatible"] is False
+        assert not data["media_tag"].startswith("[[audio_as_voice]]")
+
+    def test_voice_compatible_opt_in_marks_valid_artifact(self, tmp_path):
+        """Validated command-provider OGG/Opus can be sent as voice."""
+        cfg = {
+            "provider": "py-copy-ogg",
+            "providers": {
+                "py-copy-ogg": {
+                    "type": "command",
+                    "command": _python_copy_command(),
+                    "output_format": "ogg",
+                    "voice_compatible": True,
+                },
+            },
+        }
+        out = tmp_path / "clip.ogg"
+
+        with patch("tools.tts_tool._load_tts_config", return_value=cfg), \
+             patch("tools.tts_tool._is_telegram_voice_artifact", return_value=True, create=True):
             result = text_to_speech_tool(text="hi", output_path=str(out))
         data = json.loads(result)
         assert data["success"] is True

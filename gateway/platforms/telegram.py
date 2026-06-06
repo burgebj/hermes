@@ -3718,13 +3718,22 @@ class TelegramAdapter(BasePlatformAdapter):
         """Send audio as a native Telegram voice message or audio file."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
+        ext = os.path.splitext(audio_path)[1].lower()
         
         try:
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Audio", audio_path))
+
+            if ext in {".ogg", ".opus"}:
+                from tools.tts_tool import _is_telegram_voice_artifact
+
+                if not _is_telegram_voice_artifact(audio_path):
+                    return SendResult(
+                        success=False,
+                        error=f"Not a valid Telegram voice artifact: {audio_path}",
+                    )
             
             with open(audio_path, "rb") as audio_file:
-                ext = os.path.splitext(audio_path)[1].lower()
                 # .ogg / .opus files -> send as voice (round playable bubble)
                 if ext in {".ogg", ".opus"}:
                     _voice_thread = self._metadata_thread_id(metadata)
@@ -3789,6 +3798,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
+            if ext in {".ogg", ".opus"}:
+                logger.error(
+                    "[%s] Failed to send Telegram voice/audio: %s",
+                    self.name,
+                    e,
+                    exc_info=True,
+                )
+                return SendResult(success=False, error=f"Telegram voice/audio upload failed: {e}")
             logger.error(
                 "[%s] Failed to send Telegram voice/audio, falling back to base adapter: %s",
                 self.name,

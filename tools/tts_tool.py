@@ -863,12 +863,78 @@ def _has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _convert_to_opus(mp3_path: str) -> Optional[str]:
+def _inspect_audio_file(path: str) -> Dict[str, Any]:
+    """Inspect an audio file's real container/codec metadata with ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=format_name:stream=codec_type,codec_name,duration",
+            "-of", "json",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffprobe failed")
+
+    data = json.loads(result.stdout or "{}")
+    streams = data.get("streams") or []
+    audio_stream = next(
+        (stream for stream in streams if stream.get("codec_type") == "audio"),
+        {},
+    )
+    duration = audio_stream.get("duration")
+    return {
+        "container": str((data.get("format") or {}).get("format_name") or ""),
+        "codec": str(audio_stream.get("codec_name") or ""),
+        "duration": float(duration) if duration not in (None, "N/A", "") else 0.0,
+        "size": os.path.getsize(path) if os.path.exists(path) else 0,
+    }
+
+
+def _is_telegram_voice_artifact(path: str) -> bool:
+    """Return True only for validated OGG/Opus Telegram voice artifacts."""
+    try:
+        info = _inspect_audio_file(path)
+    except Exception as exc:
+        logger.warning("Failed to inspect audio artifact %s: %s", path, exc)
+        return False
+    return (
+        Path(path).suffix.lower() in {".ogg", ".opus"}
+        and "ogg" in str(info.get("container", "")).lower()
+        and str(info.get("codec", "")).lower() == "opus"
+        and int(info.get("size") or 0) > 0
+    )
+
+
+_PROVIDER_SOURCE_EXTENSIONS: Dict[str, str] = {
+    "edge": ".mp3",
+    "minimax": ".mp3",
+    "xai": ".mp3",
+    "neutts": ".wav",
+    "kittentts": ".wav",
+    "piper": ".wav",
+}
+
+
+def _provider_source_path(output_path: str, provider: str) -> str:
+    """Return a provider-native source path for requested Telegram voice output."""
+    requested = Path(output_path)
+    source_ext = _PROVIDER_SOURCE_EXTENSIONS.get((provider or "").lower())
+    if requested.suffix.lower() in {".ogg", ".opus"} and source_ext:
+        return str(requested.with_suffix(source_ext))
+    return output_path
+
+
+def _convert_to_opus(source_path: str) -> Optional[str]:
     """
-    Convert an MP3 file to OGG Opus format for Telegram voice bubbles.
+    Convert an audio file to OGG Opus format for Telegram voice bubbles.
 
     Args:
-        mp3_path: Path to the input MP3 file.
+        source_path: Path to the input audio file.
 
     Returns:
         Path to the .ogg file, or None if conversion fails.
@@ -876,10 +942,11 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
     if not _has_ffmpeg():
         return None
 
-    ogg_path = mp3_path.rsplit(".", 1)[0] + ".ogg"
+    source = Path(source_path)
+    ogg_path = str(source.with_name(f"{source.stem}.voice.ogg"))
     try:
         result = subprocess.run(
-            ["ffmpeg", "-i", mp3_path, "-acodec", "libopus",
+            ["ffmpeg", "-i", source_path, "-acodec", "libopus",
              "-ac", "1", "-b:a", "64k", "-vbr", "off", ogg_path, "-y"],
             capture_output=True, timeout=30,
         )
@@ -888,6 +955,12 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
                           result.returncode, result.stderr.decode('utf-8', errors='ignore')[:200])
             return None
         if os.path.exists(ogg_path) and os.path.getsize(ogg_path) > 0:
+            if not _is_telegram_voice_artifact(ogg_path):
+                logger.warning(
+                    "ffmpeg produced non-telegram voice artifact: %s",
+                    ogg_path,
+                )
+                return None
             return ogg_path
     except subprocess.TimeoutExpired:
         logger.warning("ffmpeg OGG conversion timed out after 30s")
@@ -1928,9 +2001,14 @@ def text_to_speech_tool(
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
 
+    requested_voice_artifact = file_path.suffix.lower() in {".ogg", ".opus"}
+
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_str = str(file_path)
+    if command_provider_config is None:
+        file_str = _provider_source_path(file_str, provider)
+        Path(file_str).parent.mkdir(parents=True, exist_ok=True)
 
     try:
         # Generate audio with the configured provider
@@ -2085,11 +2163,11 @@ def text_to_speech_tool(
             # delivery only kicks in when the user explicitly opts in
             # via ``voice_compatible: true`` in their provider config.
             if _is_command_tts_voice_compatible(command_provider_config):
-                if not file_str.endswith(".ogg"):
+                if not _is_telegram_voice_artifact(file_str):
                     opus_path = _convert_to_opus(file_str)
                     if opus_path:
                         file_str = opus_path
-                voice_compatible = file_str.endswith(".ogg")
+                voice_compatible = _is_telegram_voice_artifact(file_str)
         elif provider not in BUILTIN_TTS_PROVIDERS:
             # Plugin-registered provider (issue #30398). Voice-bubble
             # delivery opts in via ``TTSProvider.voice_compatible``
@@ -2097,22 +2175,22 @@ def text_to_speech_tool(
             # already write Opus skip the ffmpeg conversion.
             plugin_voice_compatible = _plugin_provider_is_voice_compatible(provider)
             if plugin_voice_compatible:
-                if not file_str.endswith(".ogg"):
+                if not _is_telegram_voice_artifact(file_str):
                     opus_path = _convert_to_opus(file_str)
                     if opus_path:
                         file_str = opus_path
-                voice_compatible = file_str.endswith(".ogg")
+                voice_compatible = _is_telegram_voice_artifact(file_str)
         elif (
-            want_opus
-            and provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"}
-            and not file_str.endswith(".ogg")
+            provider in _PROVIDER_SOURCE_EXTENSIONS
+            and (want_opus or requested_voice_artifact)
+            and not _is_telegram_voice_artifact(file_str)
         ):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
-                voice_compatible = True
+            voice_compatible = _is_telegram_voice_artifact(file_str)
         elif provider in {"elevenlabs", "openai", "mistral", "gemini"}:
-            voice_compatible = want_opus and file_str.endswith(".ogg")
+            voice_compatible = want_opus and _is_telegram_voice_artifact(file_str)
 
         file_size = os.path.getsize(file_str)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
