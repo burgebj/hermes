@@ -60,10 +60,10 @@ _QQBOT_VIDEO_EXTS = {".mp4"}
 _QQBOT_VOICE_EXTS = {".silk", ".wav"}
 _QQBOT_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"}
 # QQ Bot API inline-base64 upload cap.  The API accepts a JSON body with
-# a base64-encoded file_data field; the practical raw-file limit is ~7.5 MB
-# (base64 expands to ~10 MB in the JSON body).  For larger files the adapter
-# uses chunked upload (up to ~100 MB).
-_MAX_QQBOT_INLINE_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB base64 body
+# a base64-encoded file_data field.  Base64 expands ~33 %, so a 7 MB raw
+# file becomes ~9.3 MB in the JSON body (under the 10 MB cap).  For larger
+# files the adapter uses chunked upload (up to ~100 MB).
+_MAX_QQBOT_INLINE_RAW_FILE_BYTES = 7 * 1024 * 1024  # 7 MB raw file (~9.3 MB base64 body, under 10 MB JSON cap)
 # Telegram's Bot API sendAudio only accepts MP3 / M4A. Other audio
 # formats either route through sendVoice (Opus/OGG) or fall back to
 # document delivery.
@@ -416,7 +416,7 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         # Only explicit prefixes are treated as direct IDs; everything else goes
         # through channel_directory name resolution (e.g. display names, labels).
         ref = target_ref.strip()
-        if ref.startswith(("c2c:", "user:", "group:")):
+        if ref.startswith(("c2c:", "user:", "group:", "guild:")):
             return ref, None, True
     if platform_name == "ntfy":
         topic = target_ref.strip()
@@ -1793,7 +1793,7 @@ async def _send_qqbot(pconfig, chat_id, message):
 
             # For guild channels or unknown targets, try channel endpoint first
             if target_type != "c2c" and target_type != "group":
-                url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
+                url = f"https://api.sgroup.qq.com/channels/{target_id}/messages"
                 resp = await client.post(url, json=payload, headers=headers)
                 if resp.status_code in {200, 201}:
                     data = resp.json()
@@ -1886,9 +1886,9 @@ async def _send_qqbot_with_media(pconfig, chat_id, message, media_files):
     # --- Reject oversized files before reading into memory ---
     for media_path, _, _ in media_items:
         file_size = os.path.getsize(media_path)
-        if file_size > _MAX_QQBOT_INLINE_UPLOAD_BYTES:
+        if file_size > _MAX_QQBOT_INLINE_RAW_FILE_BYTES:
             size_mb = file_size / (1024 * 1024)
-            limit_mb = _MAX_QQBOT_INLINE_UPLOAD_BYTES / (1024 * 1024)
+            limit_mb = _MAX_QQBOT_INLINE_RAW_FILE_BYTES / (1024 * 1024)
             return _error(
                 f"File too large for QQBot inline upload: {Path(media_path).name} "
                 f"({size_mb:.1f} MB > {limit_mb:.0f} MB limit)"

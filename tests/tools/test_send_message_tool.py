@@ -2911,6 +2911,12 @@ class TestParseTargetRefQqbot:
         assert chat_id == "user:ghi"
         assert is_explicit is True
 
+    def test_explicit_guild_prefix(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "guild:ch1")
+        assert chat_id == "guild:ch1"
+        assert thread_id is None
+        assert is_explicit is True
+
     def test_display_name_is_NOT_explicit(self):
         """Display names must NOT be treated as explicit targets."""
         chat_id, thread_id, is_explicit = _parse_target_ref("qqbot", "test_label")
@@ -3016,7 +3022,7 @@ class TestQqbotMediaSizeLimit:
         )
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b"x" * (11 * 1024 * 1024))  # 11 MB > 10 MB limit
+            f.write(b"x" * (8 * 1024 * 1024))  # 8 MB > 7 MB limit
             big_path = f.name
         try:
             result = await _send_qqbot_with_media(
@@ -3498,3 +3504,16 @@ class TestQqbotProtocolLevel:
             assert "429" in result["error"]
         finally:
             os.unlink(img_path)
+
+    @pytest.mark.asyncio
+    async def test_guild_text_uses_target_id_not_chat_id(self):
+        """B3 regression: guild:ch1 must use /channels/ch1/messages, not /channels/guild:ch1/messages."""
+        captured = []
+        mock_httpx = self._mock_httpx(captured)
+        with patch.dict("sys.modules", {"httpx": mock_httpx}):
+            result = await _send_qqbot(self._make_pconfig(), "guild:ch1", "hello guild")
+        assert result.get("success")
+        msg_reqs = [r for r in captured if "/channels/" in r["url"] and "/messages" in r["url"]]
+        assert len(msg_reqs) == 1
+        assert "/channels/ch1/messages" in msg_reqs[0]["url"]
+        assert "guild:" not in msg_reqs[0]["url"]
