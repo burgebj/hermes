@@ -1485,3 +1485,163 @@ class TestMediaDeliveryDiagnosability:
         assert any(r.endswith("cache/documents") for r in roots)
         # Legacy layout still present.
         assert any(r.endswith("image_cache") for r in roots)
+
+
+# ---------------------------------------------------------------------------
+# Fatal error enhancements — history, backoff, chaining
+# ---------------------------------------------------------------------------
+
+
+class _StubAdapter(BasePlatformAdapter):
+    """Concrete stub for testing base adapter properties."""
+    async def connect(self): pass
+    async def disconnect(self): pass
+    async def get_chat_info(self, chat_id): return {}
+    async def send(self, *a, **kw): pass
+
+
+class TestFatalErrorHistory:
+    """Tests for fatal error history ring buffer."""
+
+    def _make_adapter(self):
+        adapter = object.__new__(_StubAdapter)
+        adapter._fatal_error_history = []
+        adapter._fatal_error_code = None
+        adapter._fatal_error_message = None
+        adapter._fatal_error_retryable = True
+        adapter._consecutive_retryable_errors = 0
+        adapter._fatal_error_handler = None
+        adapter._fatal_error_extra_handlers = []
+        adapter._running = False
+        adapter._status_write_logged = set()
+        return adapter
+
+    def test_record_fatal_error_history(self):
+        adapter = self._make_adapter()
+        adapter._record_fatal_error_history("auth_fail", "Invalid token", False)
+        assert len(adapter.fatal_error_history) == 1
+        entry = adapter.fatal_error_history[0]
+        assert entry["code"] == "auth_fail"
+        assert entry["message"] == "Invalid token"
+        assert entry["retryable"] is False
+        assert "timestamp" in entry
+
+    def test_history_ring_buffer_limit(self):
+        adapter = self._make_adapter()
+        adapter._FATAL_ERROR_HISTORY_MAX = 5
+        for i in range(10):
+            adapter._record_fatal_error_history(f"err_{i}", f"msg_{i}", True)
+        assert len(adapter.fatal_error_history) == 5
+        # Should keep the last 5
+        assert adapter.fatal_error_history[0]["code"] == "err_5"
+        assert adapter.fatal_error_history[4]["code"] == "err_9"
+
+    def test_history_returns_copy(self):
+        adapter = self._make_adapter()
+        adapter._record_fatal_error_history("err", "msg", True)
+        history = adapter.fatal_error_history
+        history.clear()
+        assert len(adapter.fatal_error_history) == 1
+
+
+class TestRetryBackoff:
+    """Tests for retry_backoff_seconds property."""
+
+    def _make_adapter(self):
+        adapter = object.__new__(_StubAdapter)
+        adapter._consecutive_retryable_errors = 0
+        adapter._fatal_error_retryable = True
+        return adapter
+
+    def test_zero_when_no_errors(self):
+        adapter = self._make_adapter()
+        assert adapter.retry_backoff_seconds == 0.0
+
+    def test_exponential_backoff(self):
+        adapter = self._make_adapter()
+        adapter._consecutive_retryable_errors = 1
+        assert adapter.retry_backoff_seconds == 2.0
+        adapter._consecutive_retryable_errors = 2
+        assert adapter.retry_backoff_seconds == 4.0
+        adapter._consecutive_retryable_errors = 3
+        assert adapter.retry_backoff_seconds == 8.0
+
+    def test_capped_at_300(self):
+        adapter = self._make_adapter()
+        adapter._consecutive_retryable_errors = 10
+        assert adapter.retry_backoff_seconds == 300.0
+
+    def test_resets_on_connected(self):
+        from gateway.platforms.base import Platform
+        adapter = object.__new__(_StubAdapter)
+        adapter.platform = Platform.DISCORD
+        adapter._running = False
+        adapter._fatal_error_code = None
+        adapter._fatal_error_message = None
+        adapter._fatal_error_retryable = True
+        adapter._consecutive_retryable_errors = 5
+        adapter._status_write_logged = set()
+        adapter._mark_connected()
+        assert adapter._consecutive_retryable_errors == 0
+        assert adapter.retry_backoff_seconds == 0.0
+
+
+class TestFatalErrorChaining:
+    """Tests for multiple fatal error handlers."""
+
+    def _make_adapter(self):
+        adapter = object.__new__(_StubAdapter)
+        adapter._fatal_error_handler = None
+        adapter._fatal_error_extra_handlers = []
+        return adapter
+
+    def test_add_fatal_error_handler(self):
+        adapter = self._make_adapter()
+        handler1 = lambda a: None
+        handler2 = lambda a: None
+        adapter.set_fatal_error_handler(handler1)
+        adapter.add_fatal_error_handler(handler2)
+        assert adapter._fatal_error_handler is handler1
+        assert handler2 in adapter._fatal_error_extra_handlers
+
+    def test_extra_handlers_called(self):
+        import asyncio
+        from gateway.platforms.base import BasePlatformAdapter
+
+        call_log = []
+
+        def handler1(a):
+            call_log.append("h1")
+
+        def handler2(a):
+            call_log.append("h2")
+
+        adapter = self._make_adapter()
+        adapter.set_fatal_error_handler(handler1)
+        adapter.add_fatal_error_handler(handler2)
+
+        asyncio.run(adapter._notify_fatal_error())
+        assert call_log == ["h1", "h2"]
+
+    def test_extra_handler_failure_doesnt_stop_others(self):
+        import asyncio
+
+        call_log = []
+
+        def good_handler(a):
+            call_log.append("good")
+
+        def bad_handler(a):
+            raise RuntimeError("boom")
+
+        def another_handler(a):
+            call_log.append("after_bad")
+
+        from gateway.platforms.base import BasePlatformAdapter
+        adapter = self._make_adapter()
+        adapter.set_fatal_error_handler(good_handler)
+        adapter.add_fatal_error_handler(bad_handler)
+        adapter.add_fatal_error_handler(another_handler)
+
+        asyncio.run(adapter._notify_fatal_error())
+        assert call_log == ["good", "after_bad"]
