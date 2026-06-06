@@ -399,11 +399,12 @@ def _resolve_runtime_from_pool_entry(
             if detected:
                 api_mode = detected
 
-    # OpenCode base URLs end with /v1 for OpenAI-compatible models, but the
-    # Anthropic SDK prepends its own /v1/messages to the base_url.  Strip the
-    # trailing /v1 so the SDK constructs the correct path (e.g.
-    # https://opencode.ai/zen/go/v1/messages instead of .../v1/v1/messages).
-    if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go"}:
+    # OpenCode and Kimi Coding base URLs end with /v1 for OpenAI-compatible
+    # models, but the Anthropic SDK prepends its own /v1/messages to the
+    # base_url.  Strip the trailing /v1 so the SDK constructs the correct path
+    # (e.g. https://opencode.ai/zen/go/v1/messages instead of .../v1/v1/messages,
+    # or https://api.kimi.com/coding/v1/messages instead of .../coding/v1/v1/messages).
+    if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go", "kimi-coding", "kimi-coding-cn"}:
         base_url = re.sub(r"/v1/?$", "", base_url)
 
     # Optional opt-in: route OpenAI/Codex turns through `codex app-server`.
@@ -1213,6 +1214,11 @@ def _resolve_explicit_runtime(
                 if detected:
                     api_mode = detected
 
+        # Strip trailing /v1 for Anthropic-compatible providers (OpenCode,
+        # Kimi Coding, etc.) whose SDK appends /v1/messages to the base_url.
+        if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go", "kimi-coding", "kimi-coding-cn"}:
+            base_url = re.sub(r"/v1/?$", "", base_url)
+
         return {
             "provider": provider,
             "api_mode": api_mode,
@@ -1667,8 +1673,12 @@ def resolve_runtime_provider(
                 detected = _detect_api_mode_for_url(base_url)
                 if detected:
                     api_mode = detected
-        # Strip trailing /v1 for OpenCode Anthropic models (see comment above).
-        if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go"}:
+        # Strip trailing /v1 for Anthropic-compatible providers (OpenCode,
+        # Kimi Coding, etc.) whose SDK appends /v1/messages to the base_url.
+        # Without this, a base_url like https://api.kimi.com/coding/v1 becomes
+        # /coding/v1/v1/messages and hits a 404.
+        # Refs: https://www.kimi.com/code/docs/en/
+        if api_mode == "anthropic_messages" and provider in {"opencode-zen", "opencode-go", "kimi-coding", "kimi-coding-cn"}:
             base_url = re.sub(r"/v1/?$", "", base_url)
         return {
             "provider": provider,

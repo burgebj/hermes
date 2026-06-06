@@ -708,7 +708,14 @@ def build_anthropic_client(
             kwargs["base_url"] = normalized_base_url.rstrip("/")
             kwargs["default_query"] = {"api-version": "2025-04-15"}
         else:
-            kwargs["base_url"] = normalized_base_url
+            # Kimi Coding: strip trailing /v1 so the Anthropic SDK appends
+            # /v1/messages correctly (avoids /coding/v1/v1/messages 404).
+            # Refs: https://www.kimi.com/code/docs/en/
+            if _is_kimi_coding_endpoint(normalized_base_url):
+                import re as _re
+                kwargs["base_url"] = _re.sub(r"/v1/?$", "", normalized_base_url)
+            else:
+                kwargs["base_url"] = normalized_base_url
     common_betas = _common_betas_for_base_url(
         normalized_base_url,
         drop_context_1m_beta=drop_context_1m_beta,
