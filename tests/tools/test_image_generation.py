@@ -119,6 +119,19 @@ class TestAspectRatioFamily:
         p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hello", "portrait")
         assert p["aspect_ratio"] == "9:16"
 
+    def test_nano_banana_2_landscape_uses_aspect_ratio(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-2", "hello", "landscape")
+        assert p["aspect_ratio"] == "16:9"
+        assert "image_size" not in p
+
+    def test_nano_banana_2_square_uses_aspect_ratio(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-2", "hello", "square")
+        assert p["aspect_ratio"] == "1:1"
+
+    def test_nano_banana_2_portrait_uses_aspect_ratio(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-2", "hello", "portrait")
+        assert p["aspect_ratio"] == "9:16"
+
 
 class TestGptLiteralFamily:
     """GPT-Image 1.5 uses literal size strings."""
@@ -218,6 +231,11 @@ class TestSupportsFilter:
     def test_nano_banana_never_gets_image_size(self, image_tool):
         # Common bug: translator accidentally setting both image_size and aspect_ratio.
         p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hi", "landscape", seed=1)
+        assert "image_size" not in p
+        assert p["aspect_ratio"] == "16:9"
+
+    def test_nano_banana_2_never_gets_image_size(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-2", "hi", "landscape", seed=1)
         assert "image_size" not in p
         assert p["aspect_ratio"] == "16:9"
 
@@ -363,11 +381,12 @@ class TestAspectRatioNormalization:
 
 class TestRegistryIntegration:
 
-    def test_schema_exposes_only_prompt_and_aspect_ratio_to_agent(self, image_tool):
-        """The agent-facing schema must stay tight — model selection is a
-        user-level config choice, not an agent-level arg."""
+    def test_schema_exposes_prompt_aspect_ratio_and_reference_images_to_agent(self, image_tool):
+        """The agent-facing schema stays tight: the agent can provide the prompt,
+        output framing, and optional reference images, but not provider/model
+        selection knobs."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-        assert set(props.keys()) == {"prompt", "aspect_ratio"}
+        assert set(props.keys()) == {"prompt", "aspect_ratio", "reference_images"}
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
@@ -412,6 +431,105 @@ class TestExtractHttpStatus:
         exc = Exception("weird")
         exc.response = OddResponse()  # type: ignore[attr-defined]
         assert image_tool._extract_http_status(exc) is None
+
+
+class TestFalReferenceImages:
+    def test_normalize_fal_reference_images_accepts_urls_and_data_urls(self, image_tool):
+        image_urls, invalid = image_tool._normalize_fal_reference_images([
+            "https://example.com/a.png",
+            "data:image/png;base64,abc123",
+        ])
+        assert image_urls == [
+            "https://example.com/a.png",
+            "data:image/png;base64,abc123",
+        ]
+        assert invalid == []
+
+    def test_normalize_fal_reference_images_encodes_local_file(self, image_tool, tmp_path, monkeypatch):
+        img = tmp_path / "ref.png"
+        img.write_bytes(b"png-bytes")
+
+        monkeypatch.setattr(
+            "agent.image_routing._file_to_data_url",
+            lambda path: "data:image/png;base64,LOCALDATA",
+        )
+
+        image_urls, invalid = image_tool._normalize_fal_reference_images([str(img)])
+        assert image_urls == ["data:image/png;base64,LOCALDATA"]
+        assert invalid == []
+
+    def test_reference_images_use_edit_endpoint_for_nano_banana_pro(self, image_tool, monkeypatch):
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: object())
+        monkeypatch.setattr(
+            image_tool,
+            "_normalize_fal_reference_images",
+            lambda refs: (["https://example.com/base.png", "https://example.com/face.png"], []),
+        )
+
+        submitted = {}
+
+        class _Handler:
+            def get(self):
+                return {"images": [{"url": "https://example.com/out.png"}]}
+
+        def _fake_submit(model, arguments):
+            submitted["model"] = model
+            submitted["arguments"] = arguments
+            return _Handler()
+
+        monkeypatch.setattr(image_tool, "_submit_fal_request", _fake_submit)
+        monkeypatch.setattr(image_tool, "_resolve_fal_model", lambda: (
+            "fal-ai/nano-banana-pro",
+            image_tool.FAL_MODELS["fal-ai/nano-banana-pro"],
+        ))
+
+        result = image_tool.image_generate_tool(
+            prompt="swap face",
+            aspect_ratio="landscape",
+            reference_images=["a", "b"],
+        )
+        assert "https://example.com/out.png" in result
+        assert submitted["model"] == "fal-ai/nano-banana-pro/edit"
+        assert submitted["arguments"]["image_urls"] == [
+            "https://example.com/base.png",
+            "https://example.com/face.png",
+        ]
+        assert submitted["arguments"]["aspect_ratio"] == "16:9"
+
+    def test_reference_images_use_edit_endpoint_for_nano_banana_2(self, image_tool, monkeypatch):
+        monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway", lambda: object())
+        monkeypatch.setattr(
+            image_tool,
+            "_normalize_fal_reference_images",
+            lambda refs: (["https://example.com/base.png"], []),
+        )
+
+        submitted = {}
+
+        class _Handler:
+            def get(self):
+                return {"images": [{"url": "https://example.com/out2.png"}]}
+
+        def _fake_submit(model, arguments):
+            submitted["model"] = model
+            submitted["arguments"] = arguments
+            return _Handler()
+
+        monkeypatch.setattr(image_tool, "_submit_fal_request", _fake_submit)
+        monkeypatch.setattr(image_tool, "_resolve_fal_model", lambda: (
+            "fal-ai/nano-banana-2",
+            image_tool.FAL_MODELS["fal-ai/nano-banana-2"],
+        ))
+
+        result = image_tool.image_generate_tool(
+            prompt="edit image",
+            aspect_ratio="square",
+            reference_images=["a"],
+        )
+        assert "https://example.com/out2.png" in result
+        assert submitted["model"] == "fal-ai/nano-banana-2/edit"
+        assert submitted["arguments"]["image_urls"] == ["https://example.com/base.png"]
+        assert submitted["arguments"]["aspect_ratio"] == "1:1"
 
 
 class TestManagedGatewayErrorTranslation:

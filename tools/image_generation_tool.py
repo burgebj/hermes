@@ -26,7 +26,9 @@ import os
 import datetime
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+from urllib.parse import urlencode
 
 # fal_client is imported lazily — see _load_fal_client(). Pulling it
 # eagerly added ~64 ms to every CLI cold start because
@@ -191,8 +193,42 @@ FAL_MODELS: Dict[str, Dict[str, Any]] = {
         "supports": {
             "prompt", "aspect_ratio", "num_images", "output_format",
             "safety_tolerance", "seed", "sync_mode", "resolution",
-            "enable_web_search", "limit_generations",
+            "enable_web_search", "limit_generations", "image_urls",
         },
+        "edit_model": "fal-ai/nano-banana-pro/edit",
+        "supports_reference_images": True,
+        "edit_requires_image_urls": True,
+        "max_reference_images": 14,
+        "upscale": False,
+    },
+    "fal-ai/nano-banana-2": {
+        "display": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        "speed": "~5s",
+        "strengths": "Fast Gemini image editing, semantic reasoning, text rendering",
+        "price": "$0.039/image (1K)",
+        "size_style": "aspect_ratio",
+        "sizes": {
+            "landscape": "16:9",
+            "square": "1:1",
+            "portrait": "9:16",
+        },
+        "defaults": {
+            "num_images": 1,
+            "output_format": "png",
+            "safety_tolerance": "4",
+            "resolution": "1K",
+            "limit_generations": True,
+        },
+        "supports": {
+            "prompt", "aspect_ratio", "num_images", "output_format",
+            "safety_tolerance", "seed", "sync_mode", "resolution",
+            "enable_web_search", "limit_generations", "image_urls",
+            "thinking_level", "system_prompt",
+        },
+        "edit_model": "fal-ai/nano-banana-2/edit",
+        "supports_reference_images": True,
+        "edit_requires_image_urls": True,
+        "max_reference_images": 14,
         "upscale": False,
     },
     "fal-ai/gpt-image-1.5": {
@@ -554,6 +590,49 @@ def _build_fal_payload(
     return {k: v for k, v in payload.items() if k in supports}
 
 
+def _normalize_fal_reference_images(reference_images: Any) -> tuple[list[str], list[str]]:
+    """Convert image refs into FAL-compatible ``image_urls`` values.
+
+    Accepts hosted URLs, data URLs, or local file paths. Local files are
+    encoded as data URLs so the in-tree FAL backend can pass them directly to
+    edit endpoints like Nano Banana Pro / Nano Banana 2.
+    """
+    if reference_images in (None, "", []):
+        return [], []
+
+    refs = reference_images if isinstance(reference_images, list) else [reference_images]
+    image_urls: list[str] = []
+    invalid: list[str] = []
+
+    for raw_ref in refs:
+        if not isinstance(raw_ref, str):
+            invalid.append(str(raw_ref))
+            continue
+        ref = raw_ref.strip()
+        if not ref:
+            invalid.append(str(raw_ref))
+            continue
+        if ref.startswith(("http://", "https://", "data:image/")):
+            image_urls.append(ref)
+            continue
+
+        path = Path(ref).expanduser()
+        if path.exists() and path.is_file():
+            try:
+                from agent.image_routing import _file_to_data_url
+
+                data_url = _file_to_data_url(path)
+            except Exception as exc:
+                logger.debug("Could not encode FAL reference image %s: %s", path, exc)
+                data_url = None
+            if data_url:
+                image_urls.append(data_url)
+                continue
+        invalid.append(ref)
+
+    return image_urls, invalid
+
+
 # ---------------------------------------------------------------------------
 # Upscaler
 # ---------------------------------------------------------------------------
@@ -614,6 +693,7 @@ def image_generate_tool(
     num_images: Optional[int] = None,
     output_format: Optional[str] = None,
     seed: Optional[int] = None,
+    reference_images: Optional[list[str]] = None,
 ) -> str:
     """Generate an image from a text prompt using the configured FAL model.
 
@@ -637,6 +717,7 @@ def image_generate_tool(
             "num_images": num_images,
             "output_format": output_format,
             "seed": seed,
+            "reference_images": reference_images,
         },
         "error": None,
         "success": False,
@@ -675,12 +756,38 @@ def image_generate_tool(
             model_id, prompt, aspect_lc, seed=seed, overrides=overrides,
         )
 
+        request_model_id = model_id
+        if reference_images:
+            if not meta.get("supports_reference_images"):
+                raise ValueError(
+                    f"Configured FAL model '{model_id}' does not support reference_images"
+                )
+
+            image_urls, invalid_refs = _normalize_fal_reference_images(reference_images)
+            if invalid_refs:
+                raise ValueError(
+                    "Invalid reference_images entries: " + ", ".join(invalid_refs)
+                )
+            if meta.get("edit_requires_image_urls") and not image_urls:
+                raise ValueError(
+                    f"Configured FAL model '{model_id}' requires at least one reference image"
+                )
+
+            max_refs = meta.get("max_reference_images")
+            if isinstance(max_refs, int) and max_refs > 0 and len(image_urls) > max_refs:
+                raise ValueError(
+                    f"Configured FAL model '{model_id}' accepts at most {max_refs} reference images"
+                )
+
+            arguments["image_urls"] = image_urls
+            request_model_id = str(meta.get("edit_model") or model_id)
+
         logger.info(
             "Generating image with %s (%s) — prompt: %s",
-            meta.get("display", model_id), model_id, prompt[:80],
+            meta.get("display", model_id), request_model_id, prompt[:80],
         )
 
-        handler = _submit_fal_request(model_id, arguments=arguments)
+        handler = _submit_fal_request(request_model_id, arguments=arguments)
         result = handler.get()
 
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
@@ -720,7 +827,7 @@ def image_generate_tool(
         upscaled_count = sum(1 for img in formatted_images if img.get("upscaled"))
         logger.info(
             "Generated %s image(s) in %.1fs (%s upscaled) via %s",
-            len(formatted_images), generation_time, upscaled_count, model_id,
+            len(formatted_images), generation_time, upscaled_count, request_model_id,
         )
 
         response_data = {
@@ -906,6 +1013,14 @@ IMAGE_GENERATE_SCHEMA = {
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
             },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional reference image URLs, data URLs, or absolute/local file paths. "
+                    "Use this when the backend supports image-conditioned generation or editing."
+                ),
+            },
         },
         "required": ["prompt"],
     },
@@ -951,7 +1066,7 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str, reference_images=None):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -1006,6 +1121,8 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
 
     try:
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+        if reference_images is not None:
+            kwargs["reference_images"] = reference_images
         if configured_model:
             kwargs["model"] = configured_model
         result = provider.generate(**kwargs)
@@ -1035,16 +1152,18 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    reference_images = args.get("reference_images")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio, reference_images)
     if dispatched is not None:
         return dispatched
 
     return image_generate_tool(
         prompt=prompt,
         aspect_ratio=aspect_ratio,
+        reference_images=reference_images,
     )
 
 

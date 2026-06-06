@@ -129,7 +129,7 @@ class TestGenerate:
 
         captured = {}
 
-        def _collect(token, *, prompt, size, quality):
+        def _collect(token, *, prompt, size, quality, reference_images=None):
             captured.update(codex_plugin._build_responses_payload(
                 prompt=prompt,
                 size=size,
@@ -159,6 +159,30 @@ class TestGenerate:
         assert tool["output_format"] == "png"
         assert tool["background"] == "opaque"
         assert tool["partial_images"] == 1
+
+    def test_payload_includes_reference_image_url(self):
+        payload = codex_plugin._build_responses_payload(
+            prompt="swap only the face",
+            size="1024x1024",
+            quality="medium",
+            reference_images=["https://example.com/source.png"],
+        )
+        content = payload["input"][0]["content"]
+        assert content[0] == {"type": "input_text", "text": "swap only the face"}
+        assert content[1] == {"type": "input_image", "image_url": "https://example.com/source.png"}
+
+    def test_payload_includes_local_reference_image_as_data_url(self, tmp_path):
+        img_path = tmp_path / "ref.png"
+        img_path.write_bytes(bytes.fromhex(_PNG_HEX))
+        payload = codex_plugin._build_responses_payload(
+            prompt="swap only the face",
+            size="1024x1024",
+            quality="medium",
+            reference_images=[str(img_path)],
+        )
+        content = payload["input"][0]["content"]
+        assert content[1]["type"] == "input_image"
+        assert content[1]["image_url"].startswith("data:image/png;base64,")
 
     def test_partial_image_event_used_when_done_missing(self):
         """If output_item.done is missing, partial_image_b64 is accepted."""

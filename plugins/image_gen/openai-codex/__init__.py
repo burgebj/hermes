@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_gen_provider import (
@@ -143,8 +144,57 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
-def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[str, Any]:
+def _normalize_reference_images(reference_images: Any) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Convert user-supplied image refs into Responses ``input_image`` parts.
+
+    Accepts remote URLs, data URLs, or local file paths. Local files are encoded
+    as data URLs so the Codex Responses backend can consume them directly.
+    Returns ``(parts, invalid_refs)``.
+    """
+    if reference_images in (None, "", []):
+        return [], []
+
+    refs = reference_images if isinstance(reference_images, list) else [reference_images]
+    parts: List[Dict[str, str]] = []
+    invalid: List[str] = []
+
+    for raw_ref in refs:
+        if not isinstance(raw_ref, str):
+            invalid.append(str(raw_ref))
+            continue
+        ref = raw_ref.strip()
+        if not ref:
+            invalid.append(str(raw_ref))
+            continue
+        if ref.startswith(("http://", "https://", "data:image/")):
+            parts.append({"type": "input_image", "image_url": ref})
+            continue
+        path = Path(ref).expanduser()
+        if path.exists() and path.is_file():
+            try:
+                from agent.image_routing import _file_to_data_url
+
+                data_url = _file_to_data_url(path)
+            except Exception as exc:
+                logger.debug("Could not encode reference image %s: %s", path, exc)
+                data_url = None
+            if data_url:
+                parts.append({"type": "input_image", "image_url": data_url})
+                continue
+        invalid.append(ref)
+
+    return parts, invalid
+
+
+def _build_responses_payload(*, prompt: str, size: str, quality: str, reference_images: Any = None) -> Dict[str, Any]:
     """Build the Codex Responses request body for an image_generation call."""
+    image_parts, invalid_refs = _normalize_reference_images(reference_images)
+    if invalid_refs:
+        raise ValueError(
+            "Invalid reference_images entries: " + ", ".join(invalid_refs)
+        )
+    content_parts: List[Dict[str, str]] = [{"type": "input_text", "text": prompt}]
+    content_parts.extend(image_parts)
     return {
         "model": _CODEX_CHAT_MODEL,
         "store": False,
@@ -152,7 +202,7 @@ def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[st
         "input": [{
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": prompt}],
+            "content": content_parts,
         }],
         "tools": [{
             "type": "image_generation",
@@ -242,7 +292,7 @@ def _iter_sse_json(response: Any):
         yield payload
 
 
-def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> Optional[str]:
+def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str, reference_images: Any = None) -> Optional[str]:
     """Stream a Codex Responses image_generation call and return the b64 image."""
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
@@ -253,7 +303,7 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     })
-    payload = _build_responses_payload(prompt=prompt, size=size, quality=quality)
+    payload = _build_responses_payload(prompt=prompt, size=size, quality=quality, reference_images=reference_images)
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
 
     image_b64: Optional[str] = None
@@ -335,6 +385,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
+        reference_images = kwargs.get("reference_images")
 
         if not prompt:
             return error_response(
@@ -388,6 +439,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
                 prompt=prompt,
                 size=size,
                 quality=meta["quality"],
+                reference_images=reference_images,
             )
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
