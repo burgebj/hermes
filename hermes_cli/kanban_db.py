@@ -6744,9 +6744,10 @@ def _default_spawn(
     if task.model_override:
         cmd.extend(["-m", task.model_override])
     cmd.extend([
-        "chat",
-        "-q", prompt,
+        "-z", prompt,  # -z = one-shot mode at root level, skips TUI init
     ])
+    # -z is a root-level flag — the "chat" subcommand is not needed
+    # and would cause "unrecognized arguments" if placed after it.
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and
