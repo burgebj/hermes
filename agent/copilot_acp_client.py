@@ -26,6 +26,7 @@ from agent.redact import redact_sensitive_text
 
 ACP_MARKER_BASE_URL = "acp://copilot"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
+_ACP_ENV_PASSTHROUGH = "HERMES_COPILOT_ACP_ENV_PASSTHROUGH"
 
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 _TOOL_CALL_JSON_RE = re.compile(r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL)
@@ -103,8 +104,47 @@ def _resolve_home_dir() -> str:
     return "/tmp"
 
 
+def _iter_explicit_acp_env_passthrough() -> list[str]:
+    raw = os.getenv(_ACP_ENV_PASSTHROUGH, "").strip()
+    if not raw:
+        return []
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _build_explicit_acp_passthrough_env() -> dict[str, str]:
+    try:
+        from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
+    except Exception:
+        _HERMES_PROVIDER_ENV_BLOCKLIST = frozenset()
+
+    env: dict[str, str] = {}
+    for name in _iter_explicit_acp_env_passthrough():
+        if name == _ACP_ENV_PASSTHROUGH or name in _HERMES_PROVIDER_ENV_BLOCKLIST:
+            continue
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
+    return env
+
+
 def _build_subprocess_env() -> dict[str, str]:
-    env = os.environ.copy()
+    from tools.environments.local import _sanitize_subprocess_env
+
+    base_env = dict(os.environ)
+    base_env.pop(_ACP_ENV_PASSTHROUGH, None)
+    env = _sanitize_subprocess_env(
+        base_env,
+        extra_env=_build_explicit_acp_passthrough_env(),
+    )
     env["HOME"] = _resolve_home_dir()
     return env
 

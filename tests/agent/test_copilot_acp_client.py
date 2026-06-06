@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.copilot_acp_client import CopilotACPClient
+from agent.copilot_acp_client import CopilotACPClient, _build_subprocess_env
 
 
 class _FakeProcess:
@@ -205,3 +205,66 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+def test_build_subprocess_env_filters_provider_and_gateway_secrets(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/tester")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/home/tester/.config")
+    monkeypatch.setenv("LC_TIME", "en_US.UTF-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-abc123def456ghi789jkl012")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot123456789:secret")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "discord-secret")
+    monkeypatch.setenv("HERMES_API_TOKEN", "hermes-secret")
+
+    env = _build_subprocess_env()
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["HOME"] == "/home/tester"
+    assert env["LANG"] == "en_US.UTF-8"
+    assert env["XDG_CONFIG_HOME"] == "/home/tester/.config"
+    assert env["LC_TIME"] == "en_US.UTF-8"
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert "DISCORD_BOT_TOKEN" not in env
+
+
+def test_build_subprocess_env_allows_explicit_passthrough(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("CUSTOM_CA_PATH", "/tmp/ca.pem")
+    monkeypatch.setenv("HERMES_COPILOT_ACP_ENV_PASSTHROUGH", "CUSTOM_CA_PATH")
+
+    env = _build_subprocess_env()
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["CUSTOM_CA_PATH"] == "/tmp/ca.pem"
+
+
+def test_build_subprocess_env_deduplicates_passthrough_entries(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("CUSTOM_PROXY", "http://proxy.internal")
+    monkeypatch.setenv(
+        "HERMES_COPILOT_ACP_ENV_PASSTHROUGH",
+        " CUSTOM_PROXY , CUSTOM_PROXY ,, ",
+    )
+
+    env = _build_subprocess_env()
+
+    assert env["CUSTOM_PROXY"] == "http://proxy.internal"
+
+
+def test_build_subprocess_env_passthrough_cannot_restore_blocked_secret(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-abc123def456ghi789jkl012")
+    monkeypatch.setenv(
+        "HERMES_COPILOT_ACP_ENV_PASSTHROUGH",
+        "OPENAI_API_KEY",
+    )
+
+    env = _build_subprocess_env()
+
+    assert env["PATH"] == "/usr/bin"
+    assert "OPENAI_API_KEY" not in env
