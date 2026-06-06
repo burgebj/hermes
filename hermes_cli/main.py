@@ -1501,6 +1501,20 @@ def _find_bundled_tui(hermes_cli_dir: Path | None = None) -> Path | None:
     return bundled if bundled.is_file() else None
 
 
+
+def _node_ws_import_flag() -> list[str]:
+    """``--import`` flag that polyfills ``WebSocket`` for Node.js < 22.
+
+    Node.js 22 ships a stable global ``WebSocket``; older versions do not.
+    ``gatewayClient.ts`` calls ``new WebSocket(url)`` without any import and
+    bails out with *gateway websocket unavailable* when the global is absent.
+    The ``ws`` package is already present in the monorepo root
+    ``node_modules/``, so the polyfill promotes it into ``globalThis``.
+    """
+    polyfill = Path(__file__).parent / "ws-polyfill.mjs"
+    return ["--import", str(polyfill)] if polyfill.is_file() else []
+
+
 def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     """TUI: --dev → tsx src; else node dist (HERMES_TUI_DIR prebuilt or esbuild)."""
     _ensure_tui_node()
@@ -1540,13 +1554,13 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             p = Path(ext_dir)
             if (p / "dist" / "entry.js").is_file():
                 node = _node_bin("node")
-                return [node, "--expose-gc", str(p / "dist" / "entry.js")], p
+                return [node, "--expose-gc", *_node_ws_import_flag(), str(p / "dist" / "entry.js")], p
 
         # 1b. Bundled in wheel (pip install)
         bundled = _find_bundled_tui()
         if bundled is not None:
             node = _node_bin("node")
-            return [node, "--expose-gc", str(bundled)], bundled.parent
+            return [node, "--expose-gc", *_node_ws_import_flag(), str(bundled)], bundled.parent
 
     # 2. Normal flow: npm install if needed, always esbuild, then node dist/entry.js.
     #    --dev flow: npm install if needed, then tsx src/entry.tsx.
@@ -1652,7 +1666,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             sys.exit(1)
 
     node = _node_bin("node")
-    return [node, "--expose-gc", str(tui_dir / "dist" / "entry.js")], tui_dir
+    return [node, "--expose-gc", *_node_ws_import_flag(), str(tui_dir / "dist" / "entry.js")], tui_dir
 
 
 def _normalize_tui_toolsets(toolsets: object) -> list[str]:
