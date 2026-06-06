@@ -2999,8 +2999,37 @@ def get_launchd_label() -> str:
     return f"ai.hermes.gateway-{suffix}" if suffix else "ai.hermes.gateway"
 
 
+_launchd_domain_cache: str | None = None
+
 def _launchd_domain() -> str:
-    return f"gui/{os.getuid()}"  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
+    """Return the launchd domain (e.g. ``gui/<uid>``).
+
+    On some macOS setups (e.g. SSH-only sessions, screen-sharing without a
+    login window) ``gui/<uid>`` is unavailable — launchctl returns exit code
+    125 or 5.  When that happens we probe once and fall back to
+    ``user/<uid>`` for the rest of the process lifetime.
+    """
+    global _launchd_domain_cache
+    if _launchd_domain_cache is not None:
+        return _launchd_domain_cache
+    uid = os.getuid()
+    gui_domain = f"gui/{uid}"
+    try:
+        subprocess.run(
+            ["launchctl", "print", f"{gui_domain}/"],
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        _launchd_domain_cache = gui_domain
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode in {125, 5}:
+            _launchd_domain_cache = f"user/{uid}"
+        else:
+            _launchd_domain_cache = gui_domain
+    except Exception:
+        _launchd_domain_cache = gui_domain
+    return _launchd_domain_cache
 
 
 def generate_launchd_plist() -> str:
@@ -3216,7 +3245,7 @@ def launchd_start():
             timeout=30,
         )
     except subprocess.CalledProcessError as e:
-        if e.returncode not in {3, 113}:
+        if e.returncode not in {3, 113, 125, 5}:
             raise
         print("↻ launchd job was unloaded; reloading service definition")
         subprocess.run(
@@ -3250,7 +3279,7 @@ def launchd_stop():
     try:
         subprocess.run(["launchctl", "bootout", target], check=True, timeout=90)
     except subprocess.CalledProcessError as e:
-        if e.returncode in {3, 113}:
+        if e.returncode in {3, 113, 125, 5}:
             pass  # Already unloaded — nothing to stop.
         else:
             raise
@@ -3335,7 +3364,7 @@ def launchd_restart():
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
         print("✓ Service restarted")
     except subprocess.CalledProcessError as e:
-        if e.returncode not in {3, 113}:
+        if e.returncode not in {3, 113, 125, 5}:
             raise
         # Job not loaded — bootstrap and start fresh
         print("↻ launchd job was unloaded; reloading")
