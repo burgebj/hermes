@@ -248,6 +248,47 @@ class TestBackendGate:
 
         assert mgr._plugins["image_gen/fancy"].enabled is True
 
+    def test_forced_rediscovery_removes_deleted_image_gen_provider(self, tmp_path, monkeypatch):
+        from agent import image_gen_registry
+
+        image_gen_registry._reset_for_tests()
+        import os
+        hermes_home = Path(os.environ["HERMES_HOME"])  # set by hermetic conftest fixture
+        user_plugins = hermes_home / "plugins"
+        plugin_dir = _write_plugin(
+            user_plugins,
+            ["image_gen", "fancy"],
+            manifest_extra={"kind": "backend"},
+            register_body=(
+                "from agent.image_gen_provider import ImageGenProvider\n"
+                "    class P(ImageGenProvider):\n"
+                "        @property\n"
+                "        def name(self): return 'stale-test-provider'\n"
+                "        def generate(self, prompt, aspect_ratio='landscape', **kw):\n"
+                "            return {'success': True, 'image': 'x://y'}\n"
+                "    ctx.register_image_gen_provider(P())"
+            ),
+        )
+        _enable(hermes_home, "image_gen/fancy")
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert image_gen_registry.get_provider("stale-test-provider") is not None
+
+        import shutil
+
+        shutil.rmtree(plugin_dir)
+        if not any(plugin_dir.parent.iterdir()):
+            plugin_dir.parent.rmdir()
+
+        mgr.discover_and_load(force=True)
+
+        assert "image_gen/fancy" not in mgr._plugins
+        assert image_gen_registry.get_provider("stale-test-provider") is None
+
+        image_gen_registry._reset_for_tests()
+
     def test_exclusive_kind_skipped(self, tmp_path, monkeypatch):
         """``kind: exclusive`` plugins are recorded but not loaded — the
         category's own discovery system handles them (memory today)."""

@@ -57,6 +57,24 @@ def register_provider(provider: ImageGenProvider) -> None:
         logger.debug("Registered image gen provider '%s' (%s)", name, type(provider).__name__)
 
 
+def unregister_provider(name: str) -> bool:
+    """Remove the provider registered under *name*.
+
+    Returns True when a provider existed and was removed.
+    """
+    if not isinstance(name, str):
+        return False
+    clean = name.strip()
+    if not clean:
+        return False
+    with _lock:
+        removed = _providers.pop(clean, None)
+    if removed is not None:
+        logger.debug("Unregistered image gen provider '%s' (%s)", clean, type(removed).__name__)
+        return True
+    return False
+
+
 def list_providers() -> List[ImageGenProvider]:
     """Return all registered providers, sorted by name."""
     with _lock:

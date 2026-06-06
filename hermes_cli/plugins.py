@@ -551,6 +551,7 @@ class PluginContext:
             )
             return
         register_provider(provider)
+        self._manager._plugin_image_gen_provider_names.add(provider.name)
         logger.info(
             "Plugin '%s' registered image_gen provider: %s",
             self.manifest.name, provider.name,
@@ -1034,6 +1035,7 @@ class PluginManager:
         self._hooks: Dict[str, List[Callable]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
+        self._plugin_image_gen_provider_names: Set[str] = set()
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
         self._context_engine = None  # Set by a plugin via register_context_engine()
@@ -1060,10 +1062,12 @@ class PluginManager:
         if self._discovered and not force:
             return
         if force:
+            self._unregister_plugin_image_gen_providers()
             self._plugins.clear()
             self._hooks.clear()
             self._middleware.clear()
             self._plugin_tool_names.clear()
+            self._plugin_image_gen_provider_names.clear()
             self._cli_commands.clear()
             self._plugin_commands.clear()
             self._plugin_skills.clear()
@@ -1222,6 +1226,22 @@ class PluginManager:
     # -----------------------------------------------------------------------
     # Directory scanning
     # -----------------------------------------------------------------------
+
+    def _unregister_plugin_image_gen_providers(self) -> None:
+        """Drop plugin-provided image generation backends before a forced rescan."""
+        if not self._plugin_image_gen_provider_names:
+            return
+        from agent.image_gen_registry import unregister_provider
+
+        for name in tuple(self._plugin_image_gen_provider_names):
+            try:
+                unregister_provider(name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to unregister plugin image_gen provider '%s' during refresh: %s",
+                    name,
+                    exc,
+                )
 
     def _scan_directory(
         self,
