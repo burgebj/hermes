@@ -938,6 +938,22 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
+        elif function_name == "interactive_prompt":
+            from tools.interactive_prompt_tool import interactive_prompt_tool as _ip_tool
+            from tools.human_input_gateway import get_interactive_prompt_timeout
+            _raw_timeout = function_args.get("timeout_seconds")
+            _timeout = int(_raw_timeout) if _raw_timeout is not None else get_interactive_prompt_timeout()
+            function_result = _ip_tool(
+                question=function_args.get("question", ""),
+                options=function_args.get("options", []),
+                display_type=function_args.get("display_type", "buttons"),
+                timeout_seconds=_timeout,
+                auth_policy=function_args.get("auth_policy", "session_owner_only"),
+                callback=getattr(agent, "interactive_prompt_callback", None),
+            )
+            tool_duration = time.time() - tool_start_time
+            if agent._should_emit_quiet_tool_messages():
+                agent._vprint(f"  {_get_cute_tool_message_impl('interactive_prompt', function_args, tool_duration, result=function_result)}")
         elif function_name == "delegate_task":
             tasks_arg = function_args.get("tasks")
             if tasks_arg and isinstance(tasks_arg, list):

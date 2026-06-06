@@ -4436,6 +4436,64 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_clarify failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    async def send_human_input(
+        self,
+        chat_id: str,
+        question: str,
+        options: list,
+        prompt_id: str,
+        session_key: str,
+        display_type: str = "buttons",
+        auth_policy: str = "session_owner_only",
+        origin_user_id: Optional[str] = None,
+        timeout_seconds: float = 900,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Render an interactive prompt with per-option actions (buttons / modal).
+
+        For options with ``action: "return"``: button click resolves immediately
+        via ``human_input_gateway.resolve_choice()``.
+
+        For options with ``action: "modal"``: button click opens a Discord modal
+        popup; modal submit resolves via ``human_input_gateway.resolve_modal()``.
+        """
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            from tools.discord_interactive_views import (
+                InteractivePromptView,
+                build_prompt_embed,
+            )
+
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            embed = build_prompt_embed(question, status="pending")
+
+            view = InteractivePromptView(
+                prompt_id=prompt_id,
+                question=question,
+                options=options,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+                auth_policy=auth_policy,
+                origin_user_id=origin_user_id,
+                timeout_seconds=timeout_seconds,
+            )
+
+            msg = await channel.send(embed=embed, view=view)
+            view._message = msg
+            return SendResult(success=True, message_id=str(msg.id))
+        except Exception as e:
+            logger.warning("[%s] send_human_input failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
         session_key: str = "",
@@ -5181,69 +5239,11 @@ class DiscordAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 
-def _component_check_auth(
-    interaction,
-    allowed_user_ids: Optional[set],
-    allowed_role_ids: Optional[set],
-) -> bool:
-    """Shared user-or-role OR semantics for component view button clicks.
+# ---------------------------------------------------------------------------
+# Auth helper — delegates to shared utility to avoid duplication
+# ---------------------------------------------------------------------------
 
-    Mirrors ``DiscordAdapter._is_allowed_user`` / the slash and on_message
-    gates so every Discord interaction surface honors the same trust
-    boundary. Component views (ExecApprovalView, SlashConfirmView,
-    UpdatePromptView, ModelPickerView) used to receive only
-    ``allowed_user_ids``: in role-only deployments
-    (DISCORD_ALLOWED_ROLES set, DISCORD_ALLOWED_USERS empty) the user
-    set was empty and the legacy "no allowlist = allow everyone" branch
-    let any guild member click the buttons -- approving exec commands,
-    cancelling slash confirmations, switching the model.
-
-    Behavior:
-
-      - both allowlists empty -> allow (preserves existing no-allowlist
-        deployments, no regression)
-      - user is in user allowlist -> allow
-      - role allowlist set + user has a role in it -> allow
-      - role allowlist set + interaction.user has no resolvable
-        ``roles`` attribute (e.g. DM context with a role policy active)
-        -> reject (fail closed)
-      - otherwise -> reject
-    """
-    user_set = allowed_user_ids or set()
-    role_set = allowed_role_ids or set()
-    has_users = bool(user_set)
-    has_roles = bool(role_set)
-    if not has_users and not has_roles:
-        return True
-
-    user = getattr(interaction, "user", None)
-    if user is None:
-        return False
-
-    if has_users:
-        try:
-            uid = str(user.id)
-        except AttributeError:
-            uid = ""
-        if uid and uid in user_set:
-            return True
-
-    if has_roles:
-        roles_attr = getattr(user, "roles", None)
-        if roles_attr is None:
-            # Role policy is configured but the interaction doesn't
-            # carry role data (DM-context Member, raw User payload).
-            # Fail closed: a user without a resolvable role list cannot
-            # satisfy a role allowlist.
-            return False
-        try:
-            user_role_ids = {getattr(r, "id", None) for r in roles_attr}
-        except TypeError:
-            return False
-        if user_role_ids & role_set:
-            return True
-
-    return False
+from tools.discord_auth_helpers import component_check_auth as _component_check_auth  # noqa: E402
 
 
 def _define_discord_view_classes() -> None:
