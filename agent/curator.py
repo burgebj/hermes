@@ -355,6 +355,7 @@ CURATOR_DRY_RUN_BANNER = (
 
 
 CURATOR_REVIEW_PROMPT = (
+    "[Hermes automated prompt — NOT from the user] "
     "You are running as Hermes' background skill CURATOR. This is an "
     "UMBRELLA-BUILDING consolidation pass, not a passive audit and not a "
     "duplicate-finder.\n\n"
@@ -1779,7 +1780,15 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         with open(os.devnull, "w", encoding="utf-8") as _devnull, \
              contextlib.redirect_stdout(_devnull), \
              contextlib.redirect_stderr(_devnull):
-            conv_result = review_agent.run_conversation(user_message=prompt)
+            # Inject the curator review prompt as a system message
+            # so parallel agent instances don't mistake it for a real
+            # user command. The user_message is a benign placeholder.
+            conv_result = review_agent.run_conversation(
+                user_message="[automated curator review]",
+                conversation_history=[
+                    {"role": "system", "content": prompt},
+                ],
+            )
 
         final = ""
         if isinstance(conv_result, dict):
