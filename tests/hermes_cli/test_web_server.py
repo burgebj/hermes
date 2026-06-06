@@ -1204,6 +1204,20 @@ class TestWebServerEndpoints:
         resp = self.client.get("/api/dashboard/plugins/rescan")
         assert resp.status_code == 200
 
+    def test_unknown_api_route_returns_json_404_not_spa_html(self):
+        """Missing /api/* routes must not fall through to index.html.
+
+        Stale dashboard bundles can call routes that older backends do not
+        know about. Returning the SPA HTML makes the browser parse
+        ``<!doctype html>`` as JSON and hide the real version-mismatch cause.
+        """
+        resp = self.client.get("/api/model/definitely-missing")
+
+        assert resp.status_code == 404
+        assert resp.headers["content-type"].startswith("application/json")
+        assert "<!doctype" not in resp.text.lower()
+        assert resp.json()["detail"] == "API route not found"
+
     def test_path_traversal_blocked(self):
         """Verify URL-encoded path traversal is blocked."""
         # %2e%2e = ..
