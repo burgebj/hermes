@@ -324,6 +324,60 @@ async def test_command_hook_fires_for_plugin_registered_command(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_registered_plugin_command_not_reported_as_unknown_when_handler_raises(
+    monkeypatch,
+):
+    """Regression: when a plugin command is registered but its handler raises,
+    the outer ``except Exception`` in the plugin-dispatch block swallows the
+    error and control falls through to the unknown-command guard. That guard
+    must recognize the command as a registered plugin command (not built-in)
+    and refrain from telling the user "Unknown command /<plugin-cmd>"."""
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError(
+            "plugin command with raising handler leaked to the agent"
+        )
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    from hermes_cli import plugins as _plugins_mod
+
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_commands",
+        lambda: {"metricas": {"description": "Metrics", "args_hint": "dias:7"}},
+    )
+
+    def _raising_handler(_args):
+        raise RuntimeError("simulated plugin failure")
+
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: _raising_handler if name == "metricas" else None,
+    )
+
+    result = await runner._handle_message(_make_event("/metricas dias:7"))
+
+    # The plugin handler raised → outer except swallowed the error → control
+    # flow reaches the unknown-command guard. Before the fix, the guard used
+    # a direct ``GATEWAY_KNOWN_COMMANDS`` check that did not see plugin
+    # commands and would return the "Unknown command" guidance string. After
+    # the fix it uses ``is_gateway_known_command`` which queries the lazy
+    # plugin registry and correctly identifies /metricas.
+    if result is not None:
+        assert "Unknown command" not in result, (
+            "Registered plugin command should not be reported as unknown "
+            "even when its handler raises (control flow reaches the guard)."
+        )
+
+
+@pytest.mark.asyncio
 async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     """A rewrite decision should re-resolve the command and route to the new one."""
     import gateway.run as gateway_run

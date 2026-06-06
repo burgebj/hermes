@@ -8501,10 +8501,14 @@ class GatewayRunner:
                     # the user instead of silently forwarding it to the LLM
                     # as free text (which leads to silent-failure behavior
                     # like the model inventing a delegate_task call).
-                    # Normalize to hyphenated form before checking known
-                    # built-ins (command may be an alias target set by the
-                    # quick-command block above, so _cmd_def can be stale).
-                    if command.replace("_", "-") not in GATEWAY_KNOWN_COMMANDS:
+                    # Normalize to hyphenated form before checking, and use
+                    # is_gateway_known_command() so lazily-registered plugin
+                    # commands are recognized too — direct GATEWAY_KNOWN_COMMANDS
+                    # membership only covers built-ins (frozen at import time)
+                    # and would mis-report a real plugin command as unknown if
+                    # control reaches here (e.g. plugin handler raised and the
+                    # except above swallowed the error).
+                    if not is_gateway_known_command(command.replace("_", "-")):
                         logger.warning(
                             "Unrecognized slash command /%s from %s — "
                             "replying with unknown-command notice",
