@@ -47,6 +47,23 @@ async def _create_and_return_transport():
 class TestRunAsyncLoopLifecycle:
     """Verify _run_async() keeps the event loop alive after returning."""
 
+    def test_run_async_executes_coroutine_inside_task(self):
+        """Persistent-loop branches must wrap the coroutine in a real Task.
+
+        aiohttp timeout contexts call asyncio.current_task(); running the
+        coroutine bare via loop.run_until_complete(coro) leaves current_task()
+        as None and breaks outbound Weixin sends with:
+        "Timeout context manager should be used inside a task".
+        """
+        from model_tools import _run_async
+
+        async def _probe_current_task():
+            return asyncio.current_task()
+
+        current = _run_async(_probe_current_task())
+        assert current is not None
+        assert isinstance(current, asyncio.Task)
+
     def test_loop_not_closed_after_run_async(self):
         """The loop used by _run_async must still be open after the call."""
         from model_tools import _run_async
@@ -86,6 +103,23 @@ class TestRunAsyncLoopLifecycle:
 
 class TestRunAsyncWorkerThread:
     """Verify worker threads get persistent per-thread loops (delegate_task fix)."""
+
+    def test_worker_thread_executes_coroutine_inside_task(self):
+        """Worker-thread persistent loops must also create a Task wrapper."""
+        from concurrent.futures import ThreadPoolExecutor
+        from model_tools import _run_async
+
+        async def _probe_current_task():
+            return asyncio.current_task()
+
+        def _run_on_worker():
+            return _run_async(_probe_current_task())
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            current = pool.submit(_run_on_worker).result()
+
+        assert current is not None
+        assert isinstance(current, asyncio.Task)
 
     def test_worker_thread_loop_not_closed(self):
         """A worker thread's loop must stay open after _run_async returns,
@@ -254,8 +288,10 @@ class TestRunAsyncWithRunningLoop:
             FakeExecutor,
         )
 
+        coro = _never_finishes()
         with pytest.raises(concurrent.futures.TimeoutError):
-            _run_async(_never_finishes())
+            _run_async(coro)
+        coro.close()
 
         assert events["result_timeout"] == 300
         # The worker wrapper creates its own event loop so _run_async can
