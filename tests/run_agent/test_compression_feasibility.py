@@ -57,6 +57,7 @@ def _make_agent(
     compressor = MagicMock(spec=ContextCompressor)
     compressor.context_length = main_context
     compressor.threshold_tokens = int(main_context * threshold_percent)
+    compressor.threshold_percent = threshold_percent
     agent.context_compressor = compressor
 
     return agent
@@ -65,13 +66,16 @@ def _make_agent(
 # ── Core warning logic ──────────────────────────────────────────────
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_client, mock_ctx_len):
     """Auto-correction: aux >= 64K floor but < threshold → lower threshold
     to aux_context so compression still works this session."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
     # threshold = 100,000 — aux has 80,000 (above 64K floor, below threshold)
+    # First call = aux model context probe; second call = main model
+    # (re-deriving the threshold, see #12977).
+    mock_ctx_len.side_effect = [80_000, 200_000]
     mock_client = MagicMock()
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
@@ -187,7 +191,9 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
+    # Since #12977 the main model context is also probed.  Only the
+    # auxiliary-model call shape is governed by this test.
+    mock_ctx_len.assert_any_call(
         "custom/big-model",
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
@@ -211,7 +217,7 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
+    mock_ctx_len.assert_any_call(
         "custom/model",
         base_url="http://custom:8080/v1",
         api_key="sk-test",
@@ -222,14 +228,7 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
 
 
 def test_init_feasibility_check_uses_aux_context_override_from_config():
-    """Lazy feasibility check should cache and forward auxiliary.compression.context_length.
-
-    NB: feasibility check is deferred from AIAgent.__init__ to the first
-    actual compression attempt (saves ~400ms cold startup on short sessions
-    that never trigger compression). The test drives the check explicitly
-    via ``agent._check_compression_model_feasibility()`` to assert the
-    config-override threading.
-    """
+    """Real AIAgent init should cache and forward auxiliary.compression.context_length."""
 
     class _StubCompressor:
         def __init__(self, *args, **kwargs):
@@ -270,17 +269,14 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
             skip_context_files=True,
             skip_memory=True,
         )
-
-        # Config override is captured eagerly in __init__ (still needed
-        # because the threshold-derivation logic at construction time
-        # consults it).
-        assert agent._aux_compression_context_length_config == 1_000_000
-
-        # The expensive feasibility probe is deferred. Drive it manually
-        # to validate the call shape still forwards the override correctly.
+        agent._emit_status = lambda msg: None
         agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
+    assert agent._aux_compression_context_length_config == 1_000_000
+
+    # Since #12977 the main model context is also probed.  Only the
+    # auxiliary-model call shape is governed by this test.
+    mock_ctx_len.assert_any_call(
         "custom/big-model",
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
@@ -353,12 +349,14 @@ def test_exact_threshold_boundary_no_warning(mock_get_client, mock_ctx_len):
     assert len(messages) == 0
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=99_999)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_just_below_threshold_auto_corrects(mock_get_client, mock_ctx_len):
     """Auto-correct fires when aux context is one token below the threshold
     (and above the 64K hard floor)."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    # First call = aux model context probe; second call = main model.
+    mock_ctx_len.side_effect = [99_999, 200_000]
     mock_client = MagicMock()
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
@@ -378,11 +376,13 @@ def test_just_below_threshold_auto_corrects(mock_get_client, mock_ctx_len):
 # ── Two-phase: __init__ + run_conversation replay ───────────────────
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
     """__init__ stores the warning; _replay sends it through status_callback."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    # First call = aux model context probe; second call = main model.
+    mock_ctx_len.side_effect = [80_000, 200_000]
     mock_client = MagicMock()
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
@@ -439,12 +439,14 @@ def test_replay_without_callback_is_noop():
     agent._replay_compression_warning()
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_run_conversation_clears_warning_after_replay(mock_get_client, mock_ctx_len):
     """After replay in run_conversation, _compression_warning is cleared
     so the warning is not sent again on subsequent turns."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    # First call = aux model context probe; second call = main model.
+    mock_ctx_len.side_effect = [80_000, 200_000]
     mock_client = MagicMock()
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
