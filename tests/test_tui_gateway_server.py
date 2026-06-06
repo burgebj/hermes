@@ -851,6 +851,94 @@ def _session(agent=None, **extra):
     }
 
 
+def test_sessions_patch_routes_latest_user_message_to_prompt_submit(monkeypatch):
+    calls = []
+    server._sessions["sid"] = _session(session_key="desktop-session")
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *_args, **_kwargs: None)
+
+    def fake_run(rid, sid, session, text):
+        calls.append((rid, sid, text))
+        with session["history_lock"]:
+            session["running"] = False
+
+    monkeypatch.setattr(server, "_run_prompt_submit", fake_run)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "sessions.patch",
+                "params": {
+                    "sessionKey": "desktop-session",
+                    "messages": [
+                        {"role": "assistant", "content": "old"},
+                        {"role": "user", "content": [{"type": "text", "text": "hello via desktop"}]},
+                    ],
+                },
+            }
+        )
+
+        assert resp == {"jsonrpc": "2.0", "id": "1", "result": {"status": "streaming"}}
+        deadline = time.time() + 1
+        while not calls and time.time() < deadline:
+            time.sleep(0.01)
+        assert calls == [("1", "sid", "hello via desktop")]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_sessions_patch_accepts_json_patch_payload_with_single_live_session(monkeypatch):
+    calls = []
+    server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *_args, **_kwargs: None)
+
+    def fake_run(rid, sid, session, text):
+        calls.append((sid, text))
+        with session["history_lock"]:
+            session["running"] = False
+
+    monkeypatch.setattr(server, "_run_prompt_submit", fake_run)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.patch",
+                "params": {
+                    "sessionKey": "client-side-key",
+                    "patches": [
+                        {
+                            "op": "add",
+                            "path": "/messages/-",
+                            "value": {"role": "user", "content": "hello from patch"},
+                        }
+                    ],
+                },
+            }
+        )
+
+        assert resp["result"]["status"] == "streaming"
+        deadline = time.time() + 1
+        while not calls and time.time() < deadline:
+            time.sleep(0.01)
+        assert calls == [("sid", "hello from patch")]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_sessions_patch_rejects_payload_without_text():
+    server._sessions["sid"] = _session()
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "sessions.patch", "params": {"session_id": "sid"}}
+        )
+        assert resp["error"] == {"code": 4002, "message": "message text required"}
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 

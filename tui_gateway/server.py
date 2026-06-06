@@ -783,6 +783,100 @@ def _sess(params, rid):
     return (s, _wait_agent(s, rid))
 
 
+def _coerce_message_text(value: Any) -> str:
+    """Best-effort text extraction for Desktop/custom-runtime payloads."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "input", "prompt"):
+            text = _coerce_message_text(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = _coerce_message_text(item)
+            if text:
+                parts.append(text)
+        return "".join(parts).strip()
+    return str(value).strip()
+
+
+def _resolve_session_patch_id(params: dict) -> str:
+    """Resolve Desktop ``sessions.patch`` identifiers to local TUI session IDs."""
+    candidates: list[Any] = []
+    for key in ("session_id", "sessionId", "sessionKey", "key", "id"):
+        candidates.append(params.get(key))
+    session_obj = params.get("session")
+    if isinstance(session_obj, dict):
+        for key in ("session_id", "sessionId", "sessionKey", "key", "id"):
+            candidates.append(session_obj.get(key))
+    elif session_obj is not None:
+        candidates.append(session_obj)
+
+    for raw in candidates:
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip()
+        if not value:
+            continue
+        if value in _sessions:
+            return value
+        for sid, session in _sessions.items():
+            if session.get("session_key") == value:
+                return sid
+
+    # Some custom-runtime bridges keep only one remote Hermes TUI session and
+    # address it with their own client-side key.  In that common case, fall
+    # back to the sole live session instead of failing with "session not found".
+    if len(_sessions) == 1:
+        return next(iter(_sessions))
+    return ""
+
+
+def _extract_session_patch_text(params: dict) -> str:
+    """Extract the latest user prompt from common ``sessions.patch`` shapes."""
+    for key in ("text", "input", "prompt"):
+        text = _coerce_message_text(params.get(key))
+        if text:
+            return text
+
+    message_text = _coerce_message_text(params.get("message"))
+    if message_text:
+        return message_text
+
+    messages = params.get("messages")
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") == "user":
+                text = _coerce_message_text(message)
+                if text:
+                    return text
+        for message in reversed(messages):
+            text = _coerce_message_text(message)
+            if text:
+                return text
+
+    for key in ("patch", "patches", "ops", "operations"):
+        patch_items = params.get(key)
+        if isinstance(patch_items, dict):
+            patch_items = [patch_items]
+        if not isinstance(patch_items, list):
+            continue
+        for item in reversed(patch_items):
+            if isinstance(item, dict):
+                value = item.get("value", item.get("message", item.get("content")))
+            else:
+                value = item
+            text = _coerce_message_text(value)
+            if text:
+                return text
+    return ""
+
+
 def _normalize_completion_path(path_part: str) -> str:
     expanded = os.path.expanduser(path_part)
     if os.name != "nt":
@@ -4266,6 +4360,26 @@ def _(rid, params: dict) -> dict:
 
 
 # ── Methods: prompt ──────────────────────────────────────────────────
+
+
+@method("sessions.patch")
+@method("session.patch")
+def _(rid, params: dict) -> dict:
+    """Desktop/custom-runtime compatibility shim for sending a chat turn.
+
+    Hermes Desktop v0.4.x may call the plural ``sessions.patch`` RPC while
+    the in-repo TUI has historically exposed only ``prompt.submit``.  Accept
+    common patch/message payload shapes and route them through the existing
+    prompt submission path so SSH-tunnel clients do not fail with "unknown
+    method" or "Custom runtime does not implement sessions.patch".
+    """
+    sid = _resolve_session_patch_id(params)
+    if not sid:
+        return _err(rid, 4001, "session not found")
+    text = _extract_session_patch_text(params)
+    if not text:
+        return _err(rid, 4002, "message text required")
+    return _methods["prompt.submit"](rid, {**params, "session_id": sid, "text": text})
 
 
 @method("prompt.submit")
