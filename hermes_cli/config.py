@@ -5529,7 +5529,6 @@ def save_env_value(key: str, value: str):
         if line.strip().startswith(f"{key}="):
             lines[i] = f"{key}={value}\n"
             found = True
-            break
 
     if not found:
         # Ensure there's a newline at the end of the file before appending
