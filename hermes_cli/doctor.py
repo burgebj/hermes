@@ -10,7 +10,7 @@ import subprocess
 import shutil
 from pathlib import Path
 
-from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
+from hermes_cli.config import get_project_root, get_hermes_home, get_env_path, get_env_value
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_constants import display_hermes_home
 
@@ -1522,7 +1522,7 @@ def run_doctor(args):
     _probes: list = []  # list of (label, callable) submitted in display order
 
     def _probe_openrouter() -> _ConnectivityResult:
-        key = os.getenv("OPENROUTER_API_KEY")
+        key = get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
         if not key:
             return _ConnectivityResult(
                 "OpenRouter API",
@@ -1655,7 +1655,7 @@ def run_doctor(args):
                                supports_health_check) -> _ConnectivityResult:
         key = ""
         for ev in env_vars:
-            key = os.getenv(ev, "")
+            key = get_env_value(ev) or os.getenv(ev, "")
             if key:
                 break
         if not key:
@@ -1670,7 +1670,7 @@ def run_doctor(args):
             )
         try:
             import httpx
-            base = os.getenv(base_env, "") if base_env else ""
+            base = (get_env_value(base_env) or os.getenv(base_env, "")) if base_env else ""
             # Auto-detect Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1
             # (OpenAI-compat surface, which exposes /models for health check).
             if not base and key.startswith("sk-kimi-"):
