@@ -89,7 +89,16 @@ class OAuthNonInteractiveError(RuntimeError):
 # Module-level state
 # ---------------------------------------------------------------------------
 
-# Port used by the most recent build_oauth_auth() call.  Exposed so that
+# Per-thread OAuth callback port. Concurrent OAuth flows (e.g. two gateway sessions
+# starting MCP servers simultaneously) previously stomped on each other because
+# _oauth_port was a module-level scalar. Replacing it with threading.local isolates
+# each thread's port selection.
+# Kept as a module-level alias for backward-compatible test reads.
+import threading as _oauth_threading
+_oauth_tls = _oauth_threading.local()
+_oauth_tls.port = None
+
+# Legacy alias — reads/writes the current thread's TLS port.
 # tests can verify the callback server and the redirect_uri share a port.
 _oauth_port: int | None = None
 
@@ -468,7 +477,12 @@ async def _wait_for_callback() -> tuple[str, str | None]:
             that ``build_oauth_auth`` was skipped — the asserting form below
             was a silent bug when running Python with ``-O``/``-OO``.
     """
-    if _oauth_port is None:
+    # Prefer per-thread TLS port (set by _configure_callback_port) so
+    # concurrent OAuth flows each use their own port and don't stomp on each
+    # other. Fall back to the module-level scalar for backward compat with
+    # callers that set _oauth_port directly.
+    _port = getattr(_oauth_tls, "port", None) or _oauth_port
+    if _port is None:
         raise RuntimeError(
             "OAuth callback port not set — build_oauth_auth must be called "
             "before _wait_for_oauth_callback"
@@ -480,7 +494,7 @@ async def _wait_for_callback() -> tuple[str, str | None]:
 
     # Start a temporary server on the known port
     try:
-        server = HTTPServer(("127.0.0.1", _oauth_port), handler_cls)
+        server = HTTPServer(("127.0.0.1", _port), handler_cls)
     except OSError:
         # Port already in use — the server from build_oauth_auth is running.
         # Fall back to polling the server started by build_oauth_auth.
@@ -657,7 +671,8 @@ def _configure_callback_port(cfg: dict) -> int:
     requested = int(cfg.get("redirect_port", 0))
     port = _find_free_port() if requested == 0 else requested
     cfg["_resolved_port"] = port
-    _oauth_port = port  # legacy consumer: _wait_for_callback reads this
+    _oauth_tls.port = port  # per-thread TLS — primary read path for _wait_for_callback
+    _oauth_port = port  # module-level legacy alias kept for backward-compat test reads
     return port
 
 
