@@ -139,3 +139,21 @@ def test_manager_builds_hermes_provider_subclass(tmp_path, monkeypatch):
     assert isinstance(provider, _HERMES_PROVIDER_CLS)
     assert provider._hermes_server_name == "srv"
 
+
+def test_oauth_flow_lock_is_shared_across_providers(tmp_path, monkeypatch):
+    """All provider instances must share one OAuth handshake lock.
+
+    This prevents Supabase/Vercel from starting interactive browser auth in
+    parallel and trampling each other's loopback callback state.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from tools.mcp_oauth_manager import MCPOAuthManager, reset_manager_for_tests
+    reset_manager_for_tests()
+
+    mgr = MCPOAuthManager()
+    p1 = mgr.get_or_build_provider("supabase", "https://example.com/mcp", None)
+    p2 = mgr.get_or_build_provider("vercel", "https://example.com/mcp", None)
+
+    assert p1 is not None and p2 is not None
+    assert p1._get_auth_flow_lock() is p2._get_auth_flow_lock()
+

@@ -1258,6 +1258,36 @@ class TestShutdown:
 
         assert len(_servers) == 0
 
+    def test_shutdown_cancels_pending_loop_tasks_before_closing_loop(self):
+        """Shutdown drains pending loop tasks so stdio subprocess startup is not destroyed."""
+        import tools.mcp_tool as mcp_mod
+        from tools.mcp_tool import shutdown_mcp_servers, _servers
+
+        _servers.clear()
+        mcp_mod._ensure_mcp_loop()
+        loop = mcp_mod._mcp_loop
+        assert loop is not None
+
+        async def wait_forever():
+            await asyncio.Event().wait()
+
+        async def create_pending_task():
+            task = asyncio.create_task(wait_forever())
+            await asyncio.sleep(0)
+            return task
+
+        pending_task = asyncio.run_coroutine_threadsafe(create_pending_task(), loop).result(timeout=5)
+        assert not pending_task.done()
+
+        try:
+            shutdown_mcp_servers()
+        finally:
+            mcp_mod._mcp_loop = None
+            mcp_mod._mcp_thread = None
+
+        assert pending_task.done()
+        assert pending_task.cancelled()
+
     def test_shutdown_is_parallel(self):
         """Multiple servers are shut down in parallel via asyncio.gather."""
         import tools.mcp_tool as mcp_mod

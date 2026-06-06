@@ -2442,17 +2442,28 @@ def _mcp_loop_exception_handler(loop, context):
 def _ensure_mcp_loop():
     """Start the background event loop thread if not already running."""
     global _mcp_loop, _mcp_thread
+    started = threading.Event()
     with _lock:
         if _mcp_loop is not None and _mcp_loop.is_running():
             return
-        _mcp_loop = asyncio.new_event_loop()
-        _mcp_loop.set_exception_handler(_mcp_loop_exception_handler)
+        def _run_loop():
+            global _mcp_loop
+            loop = asyncio.new_event_loop()
+            loop.set_exception_handler(_mcp_loop_exception_handler)
+            asyncio.set_event_loop(loop)
+            with _lock:
+                _mcp_loop = loop
+            started.set()
+            loop.run_forever()
+
+        _mcp_loop = None
         _mcp_thread = threading.Thread(
-            target=_mcp_loop.run_forever,
+            target=_run_loop,
             name="mcp-event-loop",
             daemon=True,
         )
         _mcp_thread.start()
+    started.wait(timeout=1)
 
 
 def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
@@ -3902,7 +3913,28 @@ def _stop_mcp_loop():
         _mcp_loop = None
         _mcp_thread = None
     if loop is not None:
-        loop.call_soon_threadsafe(loop.stop)
+        if loop.is_running():
+            async def _cancel_pending_tasks():
+                current = asyncio.current_task()
+                pending = [
+                    task for task in asyncio.all_tasks()
+                    if task is not current and not task.done()
+                ]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(_cancel_pending_tasks(), loop)
+                future.result(timeout=5)
+            except Exception as exc:
+                logger.debug("Error draining pending MCP loop tasks during shutdown: %s", exc)
+
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            pass
         if thread is not None:
             thread.join(timeout=5)
         try:

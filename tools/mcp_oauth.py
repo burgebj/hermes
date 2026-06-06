@@ -304,6 +304,13 @@ class HermesTokenStorage:
         data = _read_json(self._client_info_path())
         if data is None:
             return None
+        # Some hosted OAuth MCP providers (notably Supabase) dynamically
+        # register a confidential client and return ``client_secret`` without
+        # echoing ``token_endpoint_auth_method``. The MCP SDK only sends the
+        # secret when that method is explicit, so normalize cached client info
+        # before validation to avoid 422 "Required parameter: client_secret".
+        if data.get("client_secret") and not data.get("token_endpoint_auth_method"):
+            data["token_endpoint_auth_method"] = "client_secret_post"
         try:
             return OAuthClientInformationFull.model_validate(data)
         except (ValueError, TypeError, KeyError) as exc:
@@ -311,7 +318,10 @@ class HermesTokenStorage:
             return None
 
     async def set_client_info(self, client_info: "OAuthClientInformationFull") -> None:
-        _write_json(self._client_info_path(), client_info.model_dump(mode="json", exclude_none=True))
+        payload = client_info.model_dump(mode="json", exclude_none=True)
+        if payload.get("client_secret") and not payload.get("token_endpoint_auth_method"):
+            payload["token_endpoint_auth_method"] = "client_secret_post"
+        _write_json(self._client_info_path(), payload)
         logger.debug("OAuth client info saved for %s", self._server_name)
 
     # -- oauth server metadata --------------------------------------------

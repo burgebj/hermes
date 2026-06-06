@@ -95,17 +95,22 @@ def _make_hermes_provider_class() -> Optional[type]:
     class HermesMCPOAuthProvider(OAuthClientProvider):
         """OAuthClientProvider with pre-flow disk-mtime reload.
 
-        Before every ``async_auth_flow`` invocation, asks the manager to
-        check whether the tokens file on disk has been modified externally.
-        If so, the manager resets ``_initialized`` so the next flow
-        re-reads from storage.
-
-        This makes external-process refreshes (cron, another CLI instance)
-        visible to the running MCP session without requiring a restart.
-
-        Reference: Claude Code's ``invalidateOAuthCacheIfDiskChanged``
-        (``src/utils/auth.ts:1320``, CC-1096 / GH#24317).
+        OAuth flows are serialized across all MCP servers to avoid cross-talk
+        between concurrent loopback callback listeners. Supabase and Vercel
+        both use browser-based OAuth, and starting them in parallel can race
+        the shared callback state / port bookkeeping in the MCP SDK.
         """
+
+        _auth_flow_lock: asyncio.Lock | None = None
+
+        @classmethod
+        def _get_auth_flow_lock(cls) -> asyncio.Lock:
+            """Return the shared lock guarding interactive OAuth flows."""
+            lock = cls._auth_flow_lock
+            if lock is None:
+                lock = asyncio.Lock()
+                cls._auth_flow_lock = lock
+            return lock
 
         def __init__(self, *args: Any, server_name: str = "", **kwargs: Any):
             super().__init__(*args, **kwargs)
@@ -298,31 +303,36 @@ def _make_hermes_provider_class() -> Optional[type]:
                     self._hermes_server_name, exc,
                 )
 
-            # Manually bridge the bidirectional generator protocol. httpx's
-            # auth_flow driver (httpx._client._send_handling_auth) calls
-            # ``auth_flow.asend(response)`` to feed HTTP responses back into
-            # the generator. A naive wrapper using ``async for item in inner:
-            # yield item`` DISCARDS those .asend(response) values and resumes
-            # the inner generator with None, so the SDK's
-            # ``response = yield request`` branch in
-            # mcp/client/auth/oauth2.py sees response=None and crashes at
-            # ``if response.status_code == 401`` with AttributeError.
-            #
-            # The bridge below forwards each .asend() value into the inner
-            # generator via inner.asend(incoming), preserving the bidirectional
-            # contract. Regression from PR #11383 caught by
-            # tests/tools/test_mcp_oauth_bidirectional.py.
-            inner = super().async_auth_flow(request)
-            try:
-                outgoing = await inner.__anext__()
-                while True:
-                    incoming = yield outgoing
-                    outgoing = await inner.asend(incoming)
-            except StopAsyncIteration:
-                # Persist any metadata the SDK discovered lazily during the
-                # 401 branch so a subsequent cold-load skips discovery.
-                self._persist_oauth_metadata_if_changed()
-                return
+            # Serialize interactive OAuth handshakes across all MCP servers.
+            # Supabase/Vercel both use loopback redirect listeners and can
+            # race each other if two providers start browser auth at once.
+            async with self._get_auth_flow_lock():
+                # Manually bridge the bidirectional generator protocol.
+                # httpx's auth_flow driver (httpx._client._send_handling_auth)
+                # calls ``auth_flow.asend(response)`` to feed HTTP responses
+                # back into the generator. A naive wrapper using ``async for
+                # item in inner: yield item`` DISCARDS those
+                # .asend(response) values and resumes the inner generator with
+                # None, so the SDK's ``response = yield request`` branch in
+                # mcp/client/auth/oauth2.py sees response=None and crashes at
+                # ``if response.status_code == 401`` with AttributeError.
+                #
+                # The bridge below forwards each .asend() value into the inner
+                # generator via inner.asend(incoming), preserving the
+                # bidirectional contract. Regression from PR #11383 caught by
+                # tests/tools/test_mcp_oauth_bidirectional.py.
+                inner = super().async_auth_flow(request)
+                try:
+                    outgoing = await inner.__anext__()
+                    while True:
+                        incoming = yield outgoing
+                        outgoing = await inner.asend(incoming)
+                except StopAsyncIteration:
+                    # Persist any metadata the SDK discovered lazily during
+                    # the 401 branch so a subsequent cold-load skips
+                    # discovery.
+                    self._persist_oauth_metadata_if_changed()
+                    return
 
     return HermesMCPOAuthProvider
 
