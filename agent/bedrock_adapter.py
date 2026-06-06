@@ -61,7 +61,11 @@ _bedrock_control_client_cache: Dict[str, Any] = {}
 def _require_boto3():
     """Import boto3, raising a clear error if not installed."""
     try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+
+        _lazy_ensure("provider.bedrock")
         import boto3
+
         return boto3
     except ImportError:
         raise ImportError(
