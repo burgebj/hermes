@@ -384,6 +384,22 @@ def _migrate_legacy_store(base: Path) -> Optional[Path]:
     return legacy_root
 
 
+def _ensure_store_scaffolding(store: Path) -> None:
+    """Ensure required bare-repo subdirectories exist.
+
+    Git treats a bare repository with a missing ``refs/`` directory as not a
+    repository at all.  Older/pruned checkpoint stores can keep HEAD, config,
+    and objects while losing refs/, which makes every later ``git add`` fail
+    with ``fatal: not a git repository``.  Recreating the empty scaffolding is
+    safe and preserves packed refs and objects.
+    """
+    (store / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    (store / "refs" / "tags").mkdir(parents=True, exist_ok=True)
+    (store / _REFS_PREFIX).mkdir(parents=True, exist_ok=True)
+    (store / _INDEXES_DIRNAME).mkdir(parents=True, exist_ok=True)
+    (store / _PROJECTS_DIRNAME).mkdir(parents=True, exist_ok=True)
+
+
 def _init_store(store: Path, working_dir: str) -> Optional[str]:
     """Initialise the shared shadow store if needed.  Returns error or None.
 
@@ -402,11 +418,11 @@ def _init_store(store: Path, working_dir: str) -> Optional[str]:
         _migrate_legacy_store(base)
 
     if (store / "HEAD").exists():
+        _ensure_store_scaffolding(store)
         return None
 
     store.mkdir(parents=True, exist_ok=True)
-    (store / _INDEXES_DIRNAME).mkdir(exist_ok=True)
-    (store / _PROJECTS_DIRNAME).mkdir(exist_ok=True)
+    _ensure_store_scaffolding(store)
 
     # ``git init --bare`` rejects GIT_WORK_TREE, so we can't use _run_git
     # here (which always sets GIT_DIR + GIT_WORK_TREE).  Use a raw

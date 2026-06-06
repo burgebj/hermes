@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 import pytest
@@ -129,6 +130,23 @@ class TestStoreInit:
         assert _init_store(store, str(work_dir)) is None
         assert _init_store(store, str(work_dir)) is None
 
+    def test_init_repairs_missing_refs_scaffolding(self, work_dir, checkpoint_base, monkeypatch):
+        """A store with HEAD/config/objects but no refs/ must self-heal."""
+        monkeypatch.setattr("tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base)
+        store = _store_path(checkpoint_base)
+        assert _init_store(store, str(work_dir)) is None
+        shutil.rmtree(store / "refs")
+
+        assert _init_store(store, str(work_dir)) is None
+
+        assert (store / "refs" / "heads").is_dir()
+        assert (store / "refs" / "tags").is_dir()
+        assert (store / "refs" / "hermes").is_dir()
+        dir_hash = _project_hash(str(work_dir))
+        index_file = store / "indexes" / dir_hash
+        ok, _, err = _run_git(["status", "--short"], store, str(work_dir), index_file=index_file)
+        assert ok, err
+
     def test_bc_init_shadow_repo_shim(self, work_dir, checkpoint_base, monkeypatch):
         """Backward-compatible helper still works for old callers/tests."""
         monkeypatch.setattr("tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base)
@@ -200,6 +218,21 @@ class TestTakeCheckpoint:
         mgr.ensure_checkpoint(str(work_dir), "initial")
         mgr.new_turn()
         assert mgr.ensure_checkpoint(str(work_dir), "no changes") is False
+
+    def test_checkpoint_write_after_refs_scaffolding_repair(self, mgr, work_dir, checkpoint_base):
+        """Repair path must support the original write operation, not just status."""
+        assert mgr.ensure_checkpoint(str(work_dir), "initial") is True
+        store = _store_path(checkpoint_base)
+        ok, _, err = _run_git(["pack-refs", "--all"], store, str(work_dir))
+        assert ok, err
+        shutil.rmtree(store / "refs")
+
+        mgr.new_turn()
+        (work_dir / "main.py").write_text("print('after repair')\n")
+
+        assert mgr.ensure_checkpoint(str(work_dir), "after repair") is True
+        listed = mgr.list_checkpoints(str(work_dir))
+        assert [item["reason"] for item in listed] == ["after repair", "initial"]
 
     def test_skip_root_dir(self, mgr):
         assert mgr.ensure_checkpoint("/", "root") is False
