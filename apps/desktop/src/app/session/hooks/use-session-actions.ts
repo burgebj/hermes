@@ -686,9 +686,25 @@ export function useSessionActions({
 
         const cwd = $currentCwd.get().trim()
 
+        // A branch is a fresh session.create spun off an existing thread, so it
+        // must inherit the SOURCE thread's profile — not the new-chat picker's.
+        // `/profile` and the switcher only retarget NEW chats; an open thread
+        // keeps its own profile, so the live gateway may be on a different one
+        // right now. Swap onto the source profile and carry it on create so the
+        // branch builds its agent + persists against the right home/state.db,
+        // mirroring resumeSession. Omitting it births the branch under the wrong
+        // SOUL/identity + state.db and 404s on later resume in app-global remote
+        // mode (the session.create profile invariant from #39993).
+        const sourceProfile = $sessions
+          .get()
+          .find(session => session.id === selectedStoredSessionIdRef.current)?.profile
+
+        await ensureGatewayProfile(sourceProfile)
+
         const branched = await requestGateway<SessionCreateResponse>('session.create', {
           cols: 96,
           ...(cwd && { cwd }),
+          ...(sourceProfile ? { profile: sourceProfile } : {}),
           messages: branchMessages.map(({ content, role }) => ({ content, role })),
           title: copy.branchTitle
         })
