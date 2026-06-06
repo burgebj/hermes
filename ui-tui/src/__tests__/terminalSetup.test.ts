@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   configureDetectedTerminalKeybindings,
@@ -62,6 +62,13 @@ describe('terminalSetup helpers', () => {
 })
 
 describe('configureTerminalKeybindings', () => {
+  beforeEach(() => {
+    // Most configureTerminalKeybindings tests expect a local (non-SSH)
+    // environment; stub SSH vars so they don't short-circuit.
+    vi.stubEnv('SSH_CONNECTION', '')
+    vi.stubEnv('SSH_TTY', '')
+    vi.stubEnv('SSH_CLIENT', '')
+  })
   it('writes missing bindings into a VS Code style keybindings file', async () => {
     const mkdir = vi.fn().mockResolvedValue(undefined)
     const readFile = vi.fn().mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }))
