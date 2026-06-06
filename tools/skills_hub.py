@@ -3033,8 +3033,25 @@ class HubLockFile:
             return {"version": 1, "installed": {}}
 
     def save(self, data: dict) -> None:
+        import tempfile
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.path.parent),
+            prefix=f".{self.path.stem}_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def record_install(
         self,
@@ -3106,8 +3123,25 @@ class TapsManager:
             return []
 
     def save(self, taps: List[dict]) -> None:
+        import tempfile
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"taps": taps}, indent=2) + "\n")
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.path.parent),
+            prefix=f".{self.path.stem}_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"taps": taps}, indent=2) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def add(self, repo: str, path: str = "skills/") -> bool:
         """Add a tap. Returns False if already exists."""
