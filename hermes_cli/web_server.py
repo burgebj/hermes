@@ -269,6 +269,13 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     if bound_host in {"0.0.0.0", "::"}:
         return True
 
+    # Extra hosts from environment (reverse proxy domains)
+    _extra_hosts = os.environ.get("HERMES_DASHBOARD_EXTRA_HOSTS", "")
+    if _extra_hosts:
+        extra = {h.strip().lower() for h in _extra_hosts.split(",") if h.strip()}
+        if host_only in extra:
+            return True
+
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
