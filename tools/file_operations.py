@@ -1956,23 +1956,43 @@ class ShellFileOperations(FileOperations):
         hidden_exclude = "-not -path '*/.*'" if not has_hidden_path_ancestor else ""
         hidden_filter_expr = f" {hidden_exclude}" if hidden_exclude else ""
 
-        # Use shell pagination for standard roots. For hidden roots, gather full
-        # output so we can re-apply hidden-descendant filtering while allowing
-        # explicit hidden-root searches.
+        # Use shell pagination only when the shell command itself is producing
+        # mtime-sorted output. Hidden roots need post-filtering in Python, and
+        # the final plain-find fallback does not have sortable timestamps.
         pagination_expr = ""
         if not has_hidden_path_ancestor:
             pagination_expr = f" | tail -n +{offset + 1} | head -n {limit}"
+        paginated_in_shell = False
 
         cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
               f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
         result = self._exec(cmd, timeout=60)
+        if result.stdout.strip():
+            paginated_in_shell = not has_hidden_path_ancestor
 
         if not result.stdout.strip():
-            # Try without -printf (BSD find compatibility -- macOS)
-            cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
-                        f"2>/dev/null | sort -rn{pagination_expr}"
+            # BSD/macOS find lacks -printf. Recover mtime ordering with BSD
+            # stat so we keep recent-first semantics and correct pagination.
+            cmd_bsd = (
+                f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f "
+                f"-name {self._escape_shell_arg(search_pattern)} -exec stat -f '%m %N' {{}} \\; "
+                f"2>/dev/null | sort -rn{pagination_expr}"
+            )
+            result = self._exec(cmd_bsd, timeout=60)
+            if result.stdout.strip():
+                paginated_in_shell = not has_hidden_path_ancestor
+
+        if not result.stdout.strip():
+            # Last-ditch fallback when neither GNU -printf nor BSD stat is
+            # available. Do not apply numeric sort/pagination in-shell: plain
+            # file paths sort incorrectly under `sort -rn` and break offset/limit.
+            cmd_simple = (
+                f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f "
+                f"-name {self._escape_shell_arg(search_pattern)} 2>/dev/null"
+            )
             result = self._exec(cmd_simple, timeout=60)
+            paginated_in_shell = False
 
         files = []
         for line in result.stdout.strip().split('\n'):
@@ -1998,8 +2018,15 @@ class ShellFileOperations(FileOperations):
                 if any(part not in {".", ".."} and part.startswith(".") for part in rel_parts):
                     continue
                 filtered_files.append(file_path)
-            files = filtered_files[offset:offset + limit]
-        # pagination for standard roots is already applied in shell
+            files = filtered_files
+
+        if not paginated_in_shell:
+            files = files[offset:offset + limit]
+        else:
+            # Shell pagination already handled offset; still cap the final
+            # result length here so mocked/odd shells that skip `head -n`
+            # cannot leak extra rows past the requested limit.
+            files = files[:limit]
 
         return SearchResult(
             files=files,

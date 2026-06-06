@@ -2,7 +2,6 @@
 
 import os
 import pytest
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -497,25 +496,6 @@ class TestSearchPathValidation:
 
 
 class TestSearchFilesFallbackHiddenPaths:
-    def _make_env(self):
-        env = MagicMock()
-        env.cwd = "/"
-
-        def execute(command, **kwargs):
-            completed = subprocess.run(
-                command,
-                shell=True,
-                text=True,
-                capture_output=True,
-            )
-            return {
-                "output": completed.stdout,
-                "returncode": completed.returncode,
-            }
-
-        env.execute = execute
-        return env
-
     def test_hidden_root_with_hidden_ancestor_includes_files(self, tmp_path, monkeypatch):
         """Fallback find should include visible files when path is inside hidden root."""
         root = tmp_path / ".hermes" / "logs"
@@ -529,12 +509,36 @@ class TestSearchFilesFallbackHiddenPaths:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x")
 
-        ops = ShellFileOperations(self._make_env())
+        env = MagicMock()
+        env.cwd = "/"
+        commands = []
+
+        def execute(command, **kwargs):
+            commands.append(command)
+            if "-printf '%T@ %p\\n'" in command:
+                return {"output": "", "returncode": 1}
+            if "stat -f '%m %N'" in command:
+                return {
+                    "output": (
+                        f"400 {visible_nested_file}\n"
+                        f"300 {nested_hidden_file}\n"
+                        f"200 {visible_file}\n"
+                        f"100 {hidden_dir_file}\n"
+                    ),
+                    "returncode": 0,
+                }
+            return {"output": "", "returncode": 0}
+
+        env.execute = execute
+        ops = ShellFileOperations(env)
         monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
         result = ops._search_files("*.log", str(root), limit=50, offset=0)
 
         assert result.error is None
         assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+        stat_commands = [cmd for cmd in commands if "stat -f '%m %N'" in cmd]
+        assert stat_commands
+        assert "-not -path '*/.*'" not in stat_commands[0]
 
     def test_normal_root_still_excludes_hidden_descendants(self, tmp_path, monkeypatch):
         """Fallback find should still exclude hidden descendant paths for normal roots."""
@@ -548,12 +552,98 @@ class TestSearchFilesFallbackHiddenPaths:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x")
 
-        ops = ShellFileOperations(self._make_env())
+        env = MagicMock()
+        env.cwd = "/"
+        commands = []
+
+        def execute(command, **kwargs):
+            commands.append(command)
+            if "-printf '%T@ %p\\n'" in command:
+                return {
+                    "output": (
+                        f"300 {visible_nested_file}\n"
+                        f"200 {visible_file}\n"
+                    ),
+                    "returncode": 0,
+                }
+            return {"output": "", "returncode": 0}
+
+        env.execute = execute
+        ops = ShellFileOperations(env)
         monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
         result = ops._search_files("*.log", str(root), limit=50, offset=0)
 
         assert result.error is None
         assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+        printf_commands = [cmd for cmd in commands if "-printf '%T@ %p\\n'" in cmd]
+        assert printf_commands
+        assert "-not -path '*/.*'" in printf_commands[0]
+
+    def test_bsd_stat_fallback_preserves_recent_first_order(self, monkeypatch):
+        """BSD/macOS fallback should recover mtime sorting via `stat -f`."""
+        env = MagicMock()
+        env.cwd = "/"
+        commands = []
+
+        def execute(command, **kwargs):
+            commands.append(command)
+            if "-printf '%T@ %p\\n'" in command:
+                return {"output": "", "returncode": 1}
+            if "stat -f '%m %N'" in command:
+                return {
+                    "output": "200 /repo/new.log\n100 /repo/old.log\n",
+                    "returncode": 0,
+                }
+            return {"output": "", "returncode": 0}
+
+        env.execute = execute
+        ops = ShellFileOperations(env)
+        monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
+
+        result = ops._search_files("*.log", "/repo", limit=1, offset=0)
+
+        assert result.error is None
+        assert result.files == ["/repo/new.log"]
+        stat_commands = [cmd for cmd in commands if "stat -f '%m %N'" in cmd]
+        assert stat_commands
+        assert "| tail -n +1 | head -n 1" in stat_commands[0]
+
+    def test_plain_find_last_resort_avoids_numeric_sort_and_paginates_in_python(self, monkeypatch):
+        """Final plain-find fallback must not build the broken `sort -rn` pipeline."""
+        env = MagicMock()
+        env.cwd = "/"
+        commands = []
+
+        def execute(command, **kwargs):
+            commands.append(command)
+            if "-printf '%T@ %p\\n'" in command:
+                return {"output": "", "returncode": 1}
+            if "stat -f '%m %N'" in command:
+                return {"output": "", "returncode": 1}
+            return {
+                "output": "/repo/old.log\n/repo/new.log\n",
+                "returncode": 0,
+            }
+
+        env.execute = execute
+        ops = ShellFileOperations(env)
+        monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
+
+        result = ops._search_files("*.log", "/repo", limit=1, offset=1)
+
+        assert result.error is None
+        assert result.files == ["/repo/new.log"]
+        plain_find_commands = [
+            cmd
+            for cmd in commands
+            if cmd.startswith("find ")
+            and "-printf '%T@ %p\\n'" not in cmd
+            and "stat -f '%m %N'" not in cmd
+        ]
+        assert plain_find_commands
+        assert "sort -rn" not in plain_find_commands[0]
+        assert "| tail -n +" not in plain_find_commands[0]
+        assert "| head -n " not in plain_find_commands[0]
 
 
 class TestShellFileOpsWriteDenied:
