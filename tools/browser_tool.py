@@ -69,6 +69,14 @@ from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
 
+# Reload .env so newly added env vars (e.g. AGENT_BROWSER_CHROME_FLAGS added
+# after gateway startup) are visible to browser tool subprocesses without requiring
+# a full gateway restart.
+try:
+    from hermes_cli.env_loader import load_hermes_dotenv as _load_dotenv
+except ImportError:
+    _load_dotenv = lambda: None  # noqa: E731 -- fail-open in standalone tool contexts
+
 try:
     from tools.website_policy import check_website_access
 except Exception:
@@ -1895,6 +1903,9 @@ def _run_browser_command(
     Returns:
         Parsed JSON response from agent-browser
     """
+    # Reload .env so newly added env vars are visible to this subprocess request.
+    _load_dotenv()
+
     if timeout is None:
         timeout = _get_command_timeout()
     args = args or []
