@@ -752,6 +752,16 @@ class TestMCPToolParameterCoercion:
         result = _run_tool(server, "conversations_list", {"limit": "2"})
         assert result["count"] == 2
 
+    def test_conversations_list_coerces_numeric_platform(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "conversations_list", {"platform": 123})
+        assert result["count"] == 0
+
+    def test_conversations_list_ignores_invalid_search_type(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "conversations_list", {"search": ["Alice"]})
+        assert result["count"] == 3
+
     def test_messages_read_coerces_string_limit(self, fake_mcp_server, _event_loop):
         server, _ = fake_mcp_server
         result = _run_tool(
@@ -760,6 +770,25 @@ class TestMCPToolParameterCoercion:
             {"session_key": "agent:main:telegram:dm:123456", "limit": "2"},
         )
         assert result["count"] == 2
+
+    def test_conversation_get_rejects_unhashable_session_key(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "conversation_get", {"session_key": []})
+        assert result == {"error": "session_key must be a string"}
+
+    def test_messages_read_rejects_unhashable_session_key(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "messages_read", {"session_key": {}})
+        assert result == {"error": "session_key must be a string"}
+
+    def test_attachments_fetch_rejects_invalid_message_id(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(
+            server,
+            "attachments_fetch",
+            {"session_key": "agent:main:telegram:dm:123456", "message_id": []},
+        )
+        assert result == {"error": "message_id must be a string"}
 
     def test_events_poll_coerces_string_cursor_and_limit(self, fake_mcp_server, _event_loop):
         from mcp_serve import QueueEvent
@@ -771,6 +800,14 @@ class TestMCPToolParameterCoercion:
         result = _run_tool(server, "events_poll", {"after_cursor": "0", "limit": "1"})
         assert len(result["events"]) == 1
         assert result["next_cursor"] == 1
+
+    def test_events_poll_ignores_invalid_session_key_type(self, fake_mcp_server, _event_loop):
+        from mcp_serve import QueueEvent
+
+        server, bridge = fake_mcp_server
+        bridge._enqueue(QueueEvent(cursor=0, type="message", session_key="a"))
+        result = _run_tool(server, "events_poll", {"session_key": []})
+        assert len(result["events"]) == 1
 
     def test_events_wait_coerces_invalid_timeout(self, fake_mcp_server, _event_loop):
         from mcp_serve import QueueEvent
@@ -788,6 +825,29 @@ class TestMCPToolParameterCoercion:
         result = _run_tool(server, "events_wait", {"after_cursor": "0", "timeout_ms": "bad"})
         assert result["event"] is not None
         assert result["event"]["content"] == "waiting for this"
+
+    def test_events_wait_ignores_invalid_session_key_type(self, fake_mcp_server, _event_loop):
+        from mcp_serve import QueueEvent
+
+        server, bridge = fake_mcp_server
+        bridge._enqueue(QueueEvent(cursor=0, type="message", session_key="test"))
+        result = _run_tool(server, "events_wait", {"session_key": {}})
+        assert result["event"] is not None
+
+    def test_messages_send_rejects_invalid_target_type(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "messages_send", {"target": [], "message": "hi"})
+        assert result == {"error": "target must be a string"}
+
+    def test_channels_list_ignores_invalid_platform_type(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "channels_list", {"platform": ["slack"]})
+        assert result["count"] == 3
+
+    def test_permissions_respond_rejects_invalid_id_type(self, fake_mcp_server, _event_loop):
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "permissions_respond", {"id": [], "decision": "deny"})
+        assert result == {"error": "id must be a string"}
 
 
 class TestE2EMessagesSend:
