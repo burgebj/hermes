@@ -284,12 +284,21 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
                         sub_spec.loader.exec_module(sub_mod)
                     except Exception as e:
                         logger.debug("Failed to load submodule %s: %s", full_sub_name, e)
+                        # Remove partially loaded submodule from sys.modules so it
+                        # doesn't poison future import attempts.
+                        sys.modules.pop(full_sub_name, None)
 
         try:
             spec.loader.exec_module(mod)
         except Exception as e:
             logger.debug("Failed to exec_module %s: %s", module_name, e)
+            # Clean up the main module AND any pre-loaded submodules from
+            # sys.modules so that a future load attempt starts fresh.
             sys.modules.pop(module_name, None)
+            for _sub in provider_dir.glob("*.py"):
+                if _sub.name == "__init__.py":
+                    continue
+                sys.modules.pop(f"{module_name}.{_sub.stem}", None)
             return None
 
     # Try register(ctx) pattern first (how our plugins are written)
