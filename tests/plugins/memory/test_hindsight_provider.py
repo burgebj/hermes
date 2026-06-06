@@ -278,6 +278,38 @@ class TestConfig:
         assert cfg["banks"]["hermes"]["bankId"] == "env-bank"
         assert cfg["banks"]["hermes"]["budget"] == "high"
 
+    def test_load_config_logs_warning_on_malformed_profile_json(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """A malformed profile config.json must surface as a warning, not be
+        swallowed silently. Previously a syntax error here returned the
+        env-var fallback with no diagnostic, making misconfiguration
+        invisible to operators (issue ag08)."""
+        hermes_home = tmp_path / "hermes-home"
+        (hermes_home / "hindsight").mkdir(parents=True)
+        (hermes_home / "hindsight" / "config.json").write_text(
+            '{"mode": "cloud", "apiKey": "should-not-shadow"',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home",
+            lambda: hermes_home,
+        )
+        monkeypatch.setattr(
+            "pathlib.Path.home",
+            staticmethod(lambda: tmp_path / "nohome"),
+        )
+
+        with caplog.at_level("WARNING", logger="plugins.memory.hindsight"):
+            cfg = _load_config()
+
+        assert "apiKey" in cfg
+        assert any(
+            "failed to load profile config" in rec.message
+            and "JSONDecodeError" in rec.message
+            for rec in caplog.records
+        ), [r.message for r in caplog.records]
+
     def test_embedded_profile_env_includes_idle_timeout_from_config(self):
         env = _build_embedded_profile_env({
             "llm_provider": "openai",

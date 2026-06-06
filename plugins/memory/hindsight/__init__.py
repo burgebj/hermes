@@ -309,16 +309,28 @@ def _load_config() -> dict:
     if profile_path.exists():
         try:
             return json.loads(profile_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Surface the failure so a malformed/unreadable config.json
+            # doesn't silently shadow into the env-var fallback below —
+            # users were observing default behaviour despite a config
+            # file being present and unable to diagnose why.
+            logger.warning(
+                "Hindsight: failed to load profile config %s (%s: %s); "
+                "falling back to legacy/env config.",
+                profile_path, type(exc).__name__, exc,
+            )
 
     # Legacy shared path (backward compat)
     legacy_path = Path.home() / ".hindsight" / "config.json"
     if legacy_path.exists():
         try:
             return json.loads(legacy_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "Hindsight: failed to load legacy config %s (%s: %s); "
+                "falling back to env config.",
+                legacy_path, type(exc).__name__, exc,
+            )
 
     return {
         "mode": os.environ.get("HINDSIGHT_MODE", "cloud"),
@@ -630,8 +642,16 @@ class HindsightMemoryProvider(MemoryProvider):
         if config_path.exists():
             try:
                 existing = json.loads(config_path.read_text())
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # Existing config.json is unreadable or malformed.
+                # Log the failure so a save_config() call doesn't silently
+                # overwrite a partially-broken file with only the new
+                # values, masking that the previous content was lost.
+                logger.warning(
+                    "Hindsight: failed to read existing config %s before "
+                    "save (%s: %s); previous values will not be preserved.",
+                    config_path, type(exc).__name__, exc,
+                )
         existing.update(values)
         from utils import atomic_json_write
         atomic_json_write(config_path, existing, mode=0o600)
@@ -816,8 +836,16 @@ class HindsightMemoryProvider(MemoryProvider):
             config_path = Path(hermes_home) / "hindsight" / "config.json"
             try:
                 materialized_config = json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # Fall back to the in-memory provider_config (already
+                # assigned above) but tell the operator why — running
+                # post_setup with a stale/malformed on-disk config used
+                # to silently materialize the wrong embedded profile.
+                logger.warning(
+                    "Hindsight: failed to load %s during local_embedded "
+                    "post_setup (%s: %s); using in-memory provider_config.",
+                    config_path, type(exc).__name__, exc,
+                )
 
             llm_api_key = env_writes.get("HINDSIGHT_LLM_API_KEY", "")
             if not llm_api_key:
