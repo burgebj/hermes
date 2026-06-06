@@ -16541,6 +16541,10 @@ class GatewayRunner:
             agent._last_activity_ts = time.time()
             agent._last_activity_desc = "starting new turn (cached)"
         agent._api_call_count = 0
+        # Reset iteration budget so goal continuation turns get a fresh budget
+        if hasattr(agent, 'iteration_budget') and agent.iteration_budget is not None:
+            with agent.iteration_budget._lock:
+                agent.iteration_budget._used = 0
 
     def _release_evicted_agent_soft(self, agent: Any) -> None:
         """Soft cleanup for cache-evicted agents — preserves session tool state.
@@ -18511,6 +18515,20 @@ class GatewayRunner:
                 if entry:
                     entry.session_id = agent.session_id
                     self.session_store._save()
+
+                # Migrate goal state from the old session to the new one
+                # so /goal continuation survives context compression.
+                try:
+                    from hermes_cli.goals import load_goal, save_goal
+                    old_goal = load_goal(session_id)
+                    if old_goal and old_goal.status == "active":
+                        save_goal(agent.session_id, old_goal)
+                        logger.info(
+                            "Goal state migrated: %s → %s",
+                            session_id, agent.session_id,
+                        )
+                except Exception as _goal_migrate_exc:
+                    logger.debug("Goal migration failed during session split: %s", _goal_migrate_exc)
 
                 # If this is a Telegram DM and source.thread_id was lost during
                 # the session split (synthetic / recovered event), restore it
