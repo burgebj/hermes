@@ -511,6 +511,56 @@ def _render_code_block_element(element: Dict[str, Any]) -> str:
     return f"```{language}\n{code}{trailing_newline}```"
 
 
+def _convert_md_tables_to_lists(content: str) -> str:
+    """Convert markdown tables to readable bullet-list format.
+
+    Feishu's 'md' post elements don't render tables.  Instead of sending
+    raw pipe characters, convert each row to a compact bullet list so the
+    content is still readable.
+
+    Example::
+
+        | Name  | Score |
+        |-------|-------|
+        | Alice | 95    |
+        | Bob   | 87    |
+
+    becomes::
+
+        - **Name**: Alice | **Score**: 95
+        - **Name**: Bob | **Score**: 87
+    """
+    lines = content.split("\n")
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Detect start of a table: line with pipes + next line is separator
+        if (
+            line.strip().startswith("|")
+            and i + 1 < len(lines)
+            and re.match(r"^\|[\s\-:|]+\|$", lines[i + 1].strip())
+        ):
+            # Parse header row
+            headers = [c.strip() for c in line.strip().strip("|").split("|")]
+            # Skip separator line
+            i += 2
+            # Parse data rows
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                parts = []
+                for h, c in zip(headers, cells):
+                    if c:
+                        parts.append(f"**{h}**: {c}" if h else c)
+                if parts:
+                    result.append("- " + " | ".join(parts))
+                i += 1
+        else:
+            result.append(line)
+            i += 1
+    return "\n".join(result)
+
+
 def _strip_markdown_to_plain_text(text: str) -> str:
     """Strip markdown formatting to plain text for Feishu text fallbacks.
 
@@ -4326,10 +4376,9 @@ class FeishuAdapter(BasePlatformAdapter):
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
         # Feishu post-type 'md' elements do not render markdown tables; sending
         # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
+        # Convert markdown tables to a readable bullet-list format before sending.
         if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
+            content = _convert_md_tables_to_lists(content)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
