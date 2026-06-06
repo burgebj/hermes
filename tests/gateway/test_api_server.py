@@ -32,6 +32,7 @@ from gateway.platforms.api_server import (
     _derive_chat_session_id,
     check_api_server_requirements,
     cors_middleware,
+    rate_limit_middleware,
     security_headers_middleware,
 )
 
@@ -404,9 +405,14 @@ def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
 
 def _create_app(adapter: APIServerAdapter) -> web.Application:
     """Create the aiohttp app from the adapter (without starting the full server)."""
-    mws = [mw for mw in (cors_middleware, security_headers_middleware) if mw is not None]
+    mws = [
+        mw
+        for mw in (cors_middleware, rate_limit_middleware, security_headers_middleware)
+        if mw is not None
+    ]
     app = web.Application(middlewares=mws)
     app["api_server_adapter"] = adapter
+    app["_api_rate_limit_hits"] = {}
     app.router.add_get("/health", adapter._handle_health)
     app.router.add_get("/health/detailed", adapter._handle_health_detailed)
     app.router.add_get("/v1/health", adapter._handle_health)
@@ -496,6 +502,44 @@ class TestHealthEndpoint:
             data = await resp.json()
             assert data["status"] == "ok"
             assert data["platform"] == "hermes-agent"
+
+
+class TestRateLimitMiddleware:
+    @pytest.mark.asyncio
+    async def test_returns_429_after_default_endpoint_limit(self, adapter, monkeypatch):
+        import gateway.platforms.api_server as api_server
+
+        monkeypatch.setattr(api_server, "RATE_LIMIT_DEFAULT_MAX", 2)
+        monkeypatch.setattr(api_server, "RATE_LIMIT_WINDOW_SECONDS", 60)
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            assert (await cli.get("/health")).status == 200
+            assert (await cli.get("/health")).status == 200
+            resp = await cli.get("/health")
+
+            assert resp.status == 429
+            assert resp.headers.get("Retry-After")
+            data = await resp.json()
+            assert data["error"]["code"] == "rate_limit_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_sensitive_response_lookup_uses_stricter_bucket(self, adapter, monkeypatch):
+        import gateway.platforms.api_server as api_server
+
+        monkeypatch.setattr(api_server, "RATE_LIMIT_DEFAULT_MAX", 100)
+        monkeypatch.setattr(api_server, "RATE_LIMIT_SENSITIVE_MAX", 1)
+        monkeypatch.setattr(api_server, "RATE_LIMIT_WINDOW_SECONDS", 60)
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.get("/v1/responses/resp_missing")
+            second = await cli.get("/v1/responses/another_missing")
+
+            assert first.status == 404
+            assert second.status == 429
+            data = await second.json()
+            assert data["error"]["code"] == "rate_limit_exceeded"
 
     @pytest.mark.asyncio
     async def test_v1_health_alias_returns_ok(self, adapter):

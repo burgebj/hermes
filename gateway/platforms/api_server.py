@@ -69,6 +69,10 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_DEFAULT_MAX = 120
+RATE_LIMIT_SENSITIVE_MAX = 30
+RATE_LIMIT_SENSITIVE_PREFIXES = ("/v1/responses/", "/api/jobs")
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -569,6 +573,56 @@ if AIOHTTP_AVAILABLE:
         return await handler(request)
 else:
     body_limit_middleware = None  # type: ignore[assignment]
+
+
+def _rate_limit_client_id(request: "web.Request") -> str:
+    if request.remote:
+        return request.remote
+    peername = request.transport.get_extra_info("peername") if request.transport else None
+    if isinstance(peername, tuple) and peername:
+        return str(peername[0])
+    return "unknown"
+
+
+def _rate_limit_bucket(path: str) -> str:
+    if any(path.startswith(prefix) for prefix in RATE_LIMIT_SENSITIVE_PREFIXES):
+        return "sensitive"
+    return path
+
+
+def _rate_limit_max(path: str) -> int:
+    if any(path.startswith(prefix) for prefix in RATE_LIMIT_SENSITIVE_PREFIXES):
+        return RATE_LIMIT_SENSITIVE_MAX
+    return RATE_LIMIT_DEFAULT_MAX
+
+
+if AIOHTTP_AVAILABLE:
+    @web.middleware
+    async def rate_limit_middleware(request, handler):
+        """Apply an in-memory sliding-window limit per client and endpoint bucket."""
+        if request.method == "OPTIONS":
+            return await handler(request)
+
+        now = time.time()
+        path = request.path
+        key = (_rate_limit_client_id(request), _rate_limit_bucket(path))
+        hits = request.app.setdefault("_api_rate_limit_hits", {})
+        window = hits.setdefault(key, [])
+        window[:] = [ts for ts in window if now - ts < RATE_LIMIT_WINDOW_SECONDS]
+
+        limit = _rate_limit_max(path)
+        if len(window) >= limit:
+            retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - window[0])))
+            return web.json_response(
+                _openai_error("Rate limit exceeded.", code="rate_limit_exceeded"),
+                status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        window.append(now)
+        return await handler(request)
+else:
+    rate_limit_middleware = None  # type: ignore[assignment]
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
@@ -4098,9 +4152,19 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         try:
-            mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
+            mws = [
+                mw
+                for mw in (
+                    cors_middleware,
+                    body_limit_middleware,
+                    rate_limit_middleware,
+                    security_headers_middleware,
+                )
+                if mw is not None
+            ]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             assert self._app is not None
+            self._app["_api_rate_limit_hits"] = {}
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/health", self._handle_health)
