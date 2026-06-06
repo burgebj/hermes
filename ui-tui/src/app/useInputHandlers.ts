@@ -273,7 +273,13 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
       if (promptOverlay && !fallThroughForScroll) {
         if (isCtrl(key, ch, 'c')) {
-          cancelOverlayFromCtrlC()
+          // Selection-aware: copy beats deny when the user has text selected,
+          // matching the unblocked-path precedent (isCopyShortcut + clearSelection).
+          if (terminal.hasSelection) {
+            copySelection()
+          } else {
+            cancelOverlayFromCtrlC()
+          }
         }
 
         return
