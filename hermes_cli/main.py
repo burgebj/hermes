@@ -10498,10 +10498,29 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     text=True,
                     check=False,
                 )
-            print("✓ Already up to date!")
-            return
+
+            # Resume marker present — a previous run pulled the code but
+            # crashed before post-pull steps completed (issue #39549).
+            from hermes_constants import get_hermes_home
+            update_marker = get_hermes_home() / ".update_in_progress"
+            if update_marker.exists():
+                print("→ Resuming incomplete update (previous run crashed)...")
+                auto_stash_ref = None  # already restored above, skip re-apply
+            else:
+                print("✓ Already up to date!")
+                return
 
         print(f"→ Found {commit_count} new commit(s)")
+
+        # Write the in-progress marker so a crash between pull and
+        # post-pull steps doesn't trap the user with "Already up to
+        # date!" on re-run (issue #39549).
+        from hermes_constants import get_hermes_home
+        _update_marker = get_hermes_home() / ".update_in_progress"
+        try:
+            _update_marker.write_text("")
+        except Exception:
+            pass
 
         # Snapshot critical state (state.db, config, pairing JSONs, etc.)
         # before pulling so a user can recover if something goes wrong.
@@ -10950,6 +10969,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         except Exception as exc:
             # Never let the cron safety net break an otherwise-good update.
             logger.debug("Cron jobs auto-restore check failed: %s", exc)
+
+        # Remove the in-progress marker — everything completed successfully.
+        try:
+            (get_hermes_home() / ".update_in_progress").unlink()
+        except Exception:
+            pass
 
         print()
         print("✓ Update complete!")
