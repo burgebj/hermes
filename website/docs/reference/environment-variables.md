@@ -522,7 +522,8 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS` | Grace window before flushing a queued Telegram text chunk (default: `0.6`). |
 | `HERMES_TELEGRAM_TEXT_BATCH_SPLIT_DELAY_SECONDS` | Delay between split chunks when a single Telegram message exceeds the length limit (default: `2.0`). |
 | `HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS` | Grace window before flushing queued Telegram media (default: `0.6`). |
-| `HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS` | Delay before sending a follow-up after the agent finishes, to avoid racing the last stream chunk. |
+| `HERMES_GATEWAY_FOLLOWUP_GRACE_SECONDS` | Within this many seconds of an agent turn starting, an inbound user follow-up is merged into the active session instead of triggering the default interrupt — covers Telegram, WeChat (Weixin), and WeCom (default: `5.0`, set to `0` to disable). Mitigates mid-Q&A breaks caused by mobile keyboards / IMEs / voice-to-text emitting bursts of short messages. See #28417. |
+| `HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS` | Legacy Telegram-only alias for `HERMES_GATEWAY_FOLLOWUP_GRACE_SECONDS`; honoured only as a fallback when the generalised variable is unset. New deployments should use the generalised name. |
 | `HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT` / `_READ_TIMEOUT` / `_WRITE_TIMEOUT` / `_POOL_TIMEOUT` | Override the underlying `python-telegram-bot` HTTP timeouts (seconds). |
 | `HERMES_TELEGRAM_HTTP_POOL_SIZE` | Max concurrent HTTP connections to the Telegram API. |
 | `HERMES_TELEGRAM_DISABLE_FALLBACK_IPS` | Disable the hard-coded Cloudflare fallback IPs used when DNS fails (`true`/`false`). |

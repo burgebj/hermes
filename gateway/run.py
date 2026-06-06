@@ -3219,6 +3219,67 @@ class GatewayRunner:
             default=False,
         )
 
+    # ---- Messaging follow-up grace (#28417) ---------------------------
+    #
+    # Platforms whose users commonly send rapid burst follow-ups (IME
+    # autocorrect on Chinese keyboards, mobile typo fixups, voice-to-text
+    # cleanups, telegram client-side splits).  Within the grace window
+    # below, the second message is merged into the active session's
+    # pending buffer instead of interrupting the running agent — which
+    # is what made one Q&A "break in the middle" on Telegram and WeChat
+    # before this fix.
+
+    _FOLLOWUP_GRACE_PLATFORMS: frozenset = frozenset({
+        Platform.TELEGRAM,
+        Platform.WEIXIN,
+        Platform.WECOM,
+        Platform.WECOM_CALLBACK,
+    })
+
+    @classmethod
+    def _platform_has_followup_grace(cls, platform: "Platform") -> bool:
+        """Return whether *platform* participates in the follow-up grace
+        window.  Centralised so the set is easy to extend (e.g. Feishu,
+        Slack) without scattering platform tuples through ``_handle_message``.
+        """
+        return platform in cls._FOLLOWUP_GRACE_PLATFORMS
+
+    @staticmethod
+    def _messaging_followup_grace_seconds() -> float:
+        """Read the follow-up grace window from env, in seconds.
+
+        Resolution order (first non-empty wins):
+
+        1. ``HERMES_GATEWAY_FOLLOWUP_GRACE_SECONDS`` — the generalised
+           knob covering every platform in ``_FOLLOWUP_GRACE_PLATFORMS``.
+        2. ``HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS`` — legacy
+           Telegram-only override; kept honoured so existing deployments
+           that tuned it don't see a value reset.
+        3. Default ``5.0`` seconds — slightly wider than the previous
+           Telegram-only ``3.0`` because the symptom in #28417 was that
+           3s did not cover normal mobile bursts; still tight enough
+           that genuine user-initiated interrupts work within ~5s.
+
+        Returns ``0.0`` (which disables the window) if a non-numeric
+        value is set, so a misconfigured deployment fails open to the
+        previous default-interrupt behaviour rather than crashing.
+        """
+        for env_var in (
+            "HERMES_GATEWAY_FOLLOWUP_GRACE_SECONDS",
+            "HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS",
+        ):
+            raw = os.getenv(env_var, "").strip()
+            if raw:
+                try:
+                    return max(0.0, float(raw))
+                except ValueError:
+                    logger.warning(
+                        "Invalid %s=%r — ignoring; using default 5.0s",
+                        env_var, raw,
+                    )
+                    return 5.0
+        return 5.0
+
     @staticmethod
     def _load_busy_input_mode() -> str:
         """Load gateway drain-time busy-input behavior from config/env."""
@@ -7978,19 +8039,26 @@ class GatewayRunner:
                     merge_pending_message_event(adapter._pending_messages, _quick_key, event)
                 return None
 
-            _telegram_followup_grace = float(
-                os.getenv("HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", "3.0")
-            )
+            # Messaging follow-up grace window (#28417): mobile chat clients
+            # commonly split one logical message into rapid bursts (typo
+            # correction, IME segmentation, voice-to-text fixups).  Without
+            # a grace window the burst's second chunk hits the running
+            # session and triggers default ``interrupt`` mode, which aborts
+            # the in-flight answer mid-stream — the exact symptom users
+            # report on Telegram *and* WeChat.  Apply the grace to all
+            # platforms that exhibit this burst pattern.
+            _followup_grace = self._messaging_followup_grace_seconds()
             _started_at = self._running_agents_ts.get(_quick_key, 0)
             if (
-                source.platform == Platform.TELEGRAM
+                self._platform_has_followup_grace(source.platform)
                 and event.message_type == MessageType.TEXT
-                and _telegram_followup_grace > 0
+                and _followup_grace > 0
                 and _started_at
-                and (time.time() - _started_at) <= _telegram_followup_grace
+                and (time.time() - _started_at) <= _followup_grace
             ):
                 logger.debug(
-                    "Telegram follow-up arrived %.2fs after run start for %s — queueing without interrupt",
+                    "[%s] follow-up arrived %.2fs after run start for %s — queueing without interrupt",
+                    source.platform.value,
                     time.time() - _started_at,
                     _quick_key,
                 )
