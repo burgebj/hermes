@@ -168,7 +168,10 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
         suffix = normalized.split(":", 1)[1].strip()
         if not suffix:
             return "custom"
-        normalized = suffix
+        # Preserve the "custom:" prefix so downstream _get_named_custom_provider
+        # lookups (which check startswith("custom:")) can still match named custom
+        # providers. The suffix is already lowercased by .strip().lower() above.
+        return f"custom:{suffix}"
     if normalized == "codex":
         return "openai-codex"
     if normalized == "main":
