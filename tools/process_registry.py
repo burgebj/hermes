@@ -892,11 +892,14 @@ class ProcessRegistry:
         """Check if a completion notification was already consumed via wait/poll/log."""
         return session_id in self._completion_consumed
 
-    def drain_notifications(self) -> "list[tuple[dict, str]]":
+    def drain_notifications(self, notification_mode: str = "all") -> "list[tuple[dict, str]]":
         """Pop all pending notification events and return formatted pairs.
 
         Returns a list of (raw_event, formatted_text) tuples.
         Skips completion events that were already consumed via wait/poll/log.
+        ``notification_mode='off'`` still consumes queued events but returns no
+        formatted notifications, preventing stale completions from waking a
+        later turn.
         """
         results = []
         while not self.completion_queue.empty():
@@ -906,6 +909,8 @@ class ProcessRegistry:
                 break
             _evt_sid = evt.get("session_id", "")
             if evt.get("type") == "completion" and self.is_completion_consumed(_evt_sid):
+                continue
+            if not should_queue_process_notification(evt, notification_mode):
                 continue
             text = format_process_notification(evt)
             if text:
@@ -1490,28 +1495,59 @@ class ProcessRegistry:
 process_registry = ProcessRegistry()
 
 
+def normalize_background_notification_mode(raw: object) -> str:
+    """Normalize background notification mode names shared by CLI/gateway."""
+    if raw is False:
+        mode = "off"
+    else:
+        mode = str(raw or "").strip().lower()
+    if not mode:
+        return "all"
+    if mode not in {"all", "result", "error", "off"}:
+        return "all"
+    return mode
+
+
+def should_queue_process_notification(evt: dict, notification_mode: object = "all") -> bool:
+    """Return whether a queued process event should produce an agent wakeup."""
+    mode = normalize_background_notification_mode(notification_mode)
+    if mode == "off":
+        return False
+    evt_type = evt.get("type", "completion")
+    if evt_type == "completion":
+        exit_code = evt.get("exit_code")
+        return mode in {"all", "result"} or (mode == "error" and exit_code not in {0, None})
+    if evt_type in {"watch_match", "watch_disabled", "watch_overflow_released", "watch_overflow_tripped"}:
+        return mode == "all"
+    return False
+
+
 def format_process_notification(evt: dict) -> "str | None":
-    """Format a process notification event into a [IMPORTANT: ...] message.
+    """Format a process notification event as a non-authoritative observation.
 
     Handles completion events (notify_on_complete), watch pattern matches,
-    and watch disabled events from the unified completion_queue.
+    and watch summary events from the unified completion_queue.  Process output
+    is attacker-controlled; keep the model-facing wrapper observational and
+    label embedded output as untrusted.
     """
+    from tools.ansi_strip import strip_ansi
+
     evt_type = evt.get("type", "completion")
     _sid = evt.get("session_id", "unknown")
-    _cmd = evt.get("command", "unknown")
+    _cmd = strip_ansi(str(evt.get("command", "unknown")))
 
-    if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
+    if evt_type in {"watch_disabled", "watch_overflow_released", "watch_overflow_tripped"}:
+        return f"[Background process observation: {strip_ansi(str(evt.get('message', '')))}]"
 
     if evt_type == "watch_match":
-        _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _pat = strip_ansi(str(evt.get("pattern", "?")))
+        _out = strip_ansi(str(evt.get("output", "")))
         _sup = evt.get("suppressed", 0)
         text = (
-            f"[IMPORTANT: Background process {_sid} matched "
+            f"[Background process observation: process {_sid} matched "
             f"watch pattern \"{_pat}\".\n"
             f"Command: {_cmd}\n"
-            f"Matched output:\n{_out}"
+            f"Untrusted matched output:\n{_out}"
         )
         if _sup:
             text += f"\n({_sup} earlier matches were suppressed by rate limit)"
@@ -1519,12 +1555,12 @@ def format_process_notification(evt: dict) -> "str | None":
         return text
 
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = strip_ansi(str(evt.get("output", "")))
     return (
-        f"[IMPORTANT: Background process {_sid} completed "
+        f"[Background process observation: process {_sid} completed "
         f"(exit code {_exit}).\n"
         f"Command: {_cmd}\n"
-        f"Output:\n{_out}]"
+        f"Untrusted process output:\n{_out}]"
     )
 
 

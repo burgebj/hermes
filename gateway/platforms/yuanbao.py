@@ -50,6 +50,7 @@ except ImportError:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
+    InternalEventKind,
     MessageEvent,
     MessageType,
     SendResult,
@@ -1344,6 +1345,8 @@ class RecallGuardMiddleware(InboundMiddleware):
             message_type=MessageType.TEXT,
             source=cls._build_source(adapter, group_code, from_account),
             internal=True,
+            internal_event_kind=InternalEventKind.MESSAGE_RECALL.value,
+            internal_event_source="platform_adapter",
         )
         # Set pending + signal directly (bypass handle_message to avoid busy-ack).
         # May overwrite a user message pending in the same ~200ms window — acceptable.

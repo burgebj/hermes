@@ -22,6 +22,7 @@ except ImportError:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
+    InternalEventKind,
     MessageEvent,
     MessageType,
     SendResult,
@@ -370,6 +371,8 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             raw_message=notification,
             message_id=message_id,
             internal=True,
+            internal_event_kind=InternalEventKind.WEBHOOK_NOTIFICATION.value,
+            internal_event_source="platform_adapter",
         )
 
     def _render_prompt(self, notification: Dict[str, Any]) -> str:

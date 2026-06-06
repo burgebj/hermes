@@ -2403,7 +2403,106 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     return resolved
 
 
+def _normalize_background_notifications_mode(raw: object) -> str:
+    if raw is False:
+        mode = "off"
+    else:
+        mode = str(raw or "").strip().lower()
+    if not mode:
+        return "all"
+    valid = {"all", "result", "error", "off"}
+    if mode not in valid:
+        logger.warning(
+            "Unknown background_process_notifications '%s', defaulting to 'all'",
+            mode,
+        )
+        return "all"
+    return mode
 
+
+def _load_background_notifications_mode(config: "dict | None" = None) -> str:
+    """Load CLI background process notification mode from env/config."""
+    mode = os.getenv("HERMES_BACKGROUND_NOTIFICATIONS", "")
+    if not mode:
+        cfg = config if isinstance(config, dict) else CLI_CONFIG
+        display = cfg.get("display", {}) if isinstance(cfg, dict) else {}
+        if isinstance(display, dict):
+            raw = display.get("background_process_notifications")
+            if raw not in (None, ""):
+                mode = raw
+    return _normalize_background_notifications_mode(mode)
+
+
+def _should_queue_process_notification(evt: dict, notification_mode: str) -> bool:
+    """Return whether a drained process event should wake the CLI agent."""
+    mode = _normalize_background_notifications_mode(notification_mode)
+    if mode == "off":
+        return False
+    evt_type = evt.get("type", "completion")
+    if evt_type == "completion":
+        exit_code = evt.get("exit_code")
+        return mode in ("all", "result") or (mode == "error" and exit_code not in (0, None))
+    if evt_type in {"watch_match", "watch_disabled", "watch_overflow_released", "watch_overflow_tripped"}:
+        return mode == "all"
+    return False
+
+
+def _drain_process_notifications_to_pending_input(
+    process_registry,
+    pending_input,
+    notification_mode: "str | None" = None,
+) -> int:
+    """Drain background process notifications and enqueue allowed observations.
+
+    Formatting lives in ``tools.process_registry`` so CLI/TUI paths share the
+    same non-authoritative, ANSI-stripped text. Mode ``off`` still drains but
+    queues nothing, preventing stale completions from waking a future turn.
+    """
+    mode = _load_background_notifications_mode() if notification_mode is None else notification_mode
+    mode = _normalize_background_notifications_mode(mode)
+
+    if mode == "off" and hasattr(process_registry, "completion_queue"):
+        drained = 0
+        completion_queue = process_registry.completion_queue
+        while not completion_queue.empty():
+            try:
+                completion_queue.get_nowait()
+            except queue.Empty:
+                break
+            drained += 1
+        return drained
+
+    drain_notifications = getattr(process_registry, "drain_notifications", None)
+    if callable(drain_notifications):
+        drained = 0
+        for _evt, _synth in drain_notifications(notification_mode=mode):
+            drained += 1
+            if _synth:
+                pending_input.put(_synth)
+        return drained
+
+    # Compatibility path for lightweight test doubles that expose only the
+    # queue/consumption API.
+    from tools.process_registry import format_process_notification
+
+    drained = 0
+    completion_queue = process_registry.completion_queue
+    while not completion_queue.empty():
+        try:
+            evt = completion_queue.get_nowait()
+        except queue.Empty:
+            break
+        drained += 1
+        _evt_sid = evt.get("session_id", "")
+        is_consumed = getattr(process_registry, "is_completion_consumed", lambda _sid: False)
+        if evt.get("type", "completion") == "completion" and is_consumed(_evt_sid):
+            continue
+        if not _should_queue_process_notification(evt, mode):
+            continue
+        _synth = format_process_notification(evt)
+        if _synth:
+            pending_input.put(_synth)
+    return drained
 
 
 def _detect_file_drop(user_input: str) -> "dict | None":
@@ -15175,8 +15274,10 @@ class HermesCLI:
                             # and watch pattern matches) while agent is idle.
                             try:
                                 from tools.process_registry import process_registry
-                                for _evt, _synth in process_registry.drain_notifications():
-                                    self._pending_input.put(_synth)
+                                _drain_process_notifications_to_pending_input(
+                                    process_registry,
+                                    self._pending_input,
+                                )
                             except Exception:
                                 pass
                         continue
@@ -15303,8 +15404,10 @@ class HermesCLI:
                         # that arrived while the agent was running.
                         try:
                             from tools.process_registry import process_registry
-                            for _evt, _synth in process_registry.drain_notifications():
-                                self._pending_input.put(_synth)
+                            _drain_process_notifications_to_pending_input(
+                                process_registry,
+                                self._pending_input,
+                            )
                         except Exception:
                             pass  # Non-fatal — don't break the main loop
 
