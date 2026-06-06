@@ -438,6 +438,42 @@ def _allowed_for_source(
     return False
 
 
+def _group_message_triggers_reply(
+    *,
+    message: Dict[str, Any],
+    bot_user_id: Optional[str],
+    trigger_prefixes: Tuple[str, ...],
+) -> bool:
+    """Decide whether a group/room message should be replied to in
+    mention-only mode.
+
+    Returns ``True`` when the message is text and either:
+
+    - the bot is ``@mentioned`` (``message.mention.mentionees`` contains
+      an entry whose ``userId`` matches ``bot_user_id``), or
+    - the stripped text starts with one of ``trigger_prefixes``
+      (case-insensitive).
+
+    Non-text events (image, sticker, file, location) cannot address the
+    bot so they always return ``False`` here. DM (source type ``user``)
+    should never be passed in — the caller is responsible for
+    short-circuiting on DM before invoking this helper.
+
+    Both gates are useful together because LINE rarely surfaces bots in
+    the in-app ``@`` suggestion list, so a text prefix is often the
+    only reliable trigger in practice.
+    """
+    if (message or {}).get("type") != "text":
+        return False
+    text = ((message or {}).get("text") or "").strip()
+    mentionees = ((message or {}).get("mention") or {}).get("mentionees") or []
+    if bot_user_id and any(m.get("userId") == bot_user_id for m in mentionees):
+        return True
+    if trigger_prefixes and text.lower().startswith(trigger_prefixes):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # LINE Reply / Push HTTP client
 # ---------------------------------------------------------------------------
@@ -689,6 +725,22 @@ class LineAdapter(BasePlatformAdapter):
             os.getenv("LINE_ALLOWED_ROOMS", "")
         ) | set(extra.get("allowed_rooms", []))
 
+        # Group/room mention-only mode: only reply in group/room chats when
+        # the bot is @mentioned in the text. DMs are unaffected.
+        self.group_mention_only = _truthy_env(
+            "LINE_GROUP_MENTION_ONLY",
+            bool(extra.get("group_mention_only", False)),
+        )
+        # Group/room trigger prefixes (CSV, case-insensitive). When set,
+        # a message whose text starts with any of these prefixes also
+        # triggers a reply in mention-only mode — useful because LINE
+        # rarely surfaces bots in the @ suggestion list.
+        self.group_trigger_prefixes = tuple(
+            p.lower() for p in _csv_set(
+                os.getenv("LINE_GROUP_TRIGGER_PREFIXES", "")
+            )
+        )
+
         # Slow-LLM postback button threshold
         try:
             self.slow_response_threshold = float(
@@ -919,6 +971,26 @@ class LineAdapter(BasePlatformAdapter):
         ):
             logger.info("LINE: rejecting unauthorized source %s", source)
             return
+
+        # Mention-only gate for groups/rooms.
+        if (
+            self.group_mention_only
+            and event_type == "message"
+            and source.get("type") in {"group", "room"}
+        ):
+            msg = event.get("message") or {}
+            if not _group_message_triggers_reply(
+                message=msg,
+                bot_user_id=self._bot_user_id,
+                trigger_prefixes=self.group_trigger_prefixes,
+            ):
+                logger.info(
+                    "LINE: group/room message dropped in mention-only mode "
+                    "(msg_type=%s, source=%s)",
+                    msg.get("type"),
+                    source,
+                )
+                return
 
         if event_type == "message":
             await self._handle_message_event(event)

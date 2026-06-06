@@ -35,6 +35,7 @@ split_for_line = _line.split_for_line
 build_postback_button_message = _line.build_postback_button_message
 _resolve_chat = _line._resolve_chat
 _allowed_for_source = _line._allowed_for_source
+_group_message_triggers_reply = _line._group_message_triggers_reply
 _is_system_bypass = _line._is_system_bypass
 RequestCache = _line.RequestCache
 State = _line.State
@@ -149,6 +150,125 @@ class TestAllowlist:
     def test_unknown_type_rejected(self):
         src = {"type": "weird"}
         assert not _allowed_for_source(src, allow_all=False, user_ids=set(), group_ids=set(), room_ids=set())
+
+
+# ---------------------------------------------------------------------------
+# 3b. Mention-only gate for group/room chats
+# ---------------------------------------------------------------------------
+
+class TestGroupMentionGate:
+    """Pure-function tests for ``_group_message_triggers_reply``.
+
+    The helper is only invoked for source types ``group`` and ``room``
+    when ``LINE_GROUP_MENTION_ONLY=true``. DM messages bypass the gate
+    in the dispatcher, so we don't test DM behavior here.
+    """
+
+    BOT = "Ubot1234567890abcdef1234567890abcd"
+
+    def _text(self, text, mentionees=None):
+        msg = {"type": "text", "text": text}
+        if mentionees is not None:
+            msg["mention"] = {"mentionees": mentionees}
+        return msg
+
+    # --- mention path --------------------------------------------------
+
+    def test_mention_matches(self):
+        msg = self._text("hi", mentionees=[{"index": 0, "length": 3, "userId": self.BOT}])
+        assert _group_message_triggers_reply(
+            message=msg, bot_user_id=self.BOT, trigger_prefixes=()
+        )
+
+    def test_mention_other_user_does_not_match(self):
+        msg = self._text("hi", mentionees=[{"userId": "Uother"}])
+        assert not _group_message_triggers_reply(
+            message=msg, bot_user_id=self.BOT, trigger_prefixes=()
+        )
+
+    def test_mention_without_bot_user_id_known(self):
+        # If we never learned the bot's own user id, mention path can't fire.
+        msg = self._text("hi", mentionees=[{"userId": self.BOT}])
+        assert not _group_message_triggers_reply(
+            message=msg, bot_user_id=None, trigger_prefixes=()
+        )
+
+    # --- prefix path ---------------------------------------------------
+
+    def test_prefix_at_start_matches(self):
+        msg = self._text("emma what's up")
+        assert _group_message_triggers_reply(
+            message=msg, bot_user_id=None, trigger_prefixes=("emma",)
+        )
+
+    def test_prefix_case_insensitive(self):
+        for text in ("Emma hi", "EMMA hi", "eMmA hi"):
+            msg = self._text(text)
+            assert _group_message_triggers_reply(
+                message=msg, bot_user_id=None, trigger_prefixes=("emma",)
+            ), text
+
+    def test_prefix_must_be_at_start(self):
+        msg = self._text("hey emma")
+        assert not _group_message_triggers_reply(
+            message=msg, bot_user_id=None, trigger_prefixes=("emma",)
+        )
+
+    def test_prefix_strips_leading_whitespace(self):
+        msg = self._text("   emma hi")
+        assert _group_message_triggers_reply(
+            message=msg, bot_user_id=None, trigger_prefixes=("emma",)
+        )
+
+    def test_any_of_multiple_prefixes_matches(self):
+        prefixes = ("emma", "/h", "!bot")
+        for text in ("emma hi", "/h hi", "!bot do something"):
+            assert _group_message_triggers_reply(
+                message=self._text(text), bot_user_id=None, trigger_prefixes=prefixes
+            ), text
+
+    def test_empty_prefixes_tuple_means_no_prefix_gate(self):
+        msg = self._text("emma hi")
+        assert not _group_message_triggers_reply(
+            message=msg, bot_user_id=None, trigger_prefixes=()
+        )
+
+    # --- combined / fallthrough ----------------------------------------
+
+    def test_mention_or_prefix_either_passes(self):
+        msg = self._text("emma hi", mentionees=[{"userId": "Uother"}])
+        assert _group_message_triggers_reply(
+            message=msg, bot_user_id=self.BOT, trigger_prefixes=("emma",)
+        )
+
+    def test_neither_mention_nor_prefix_rejected(self):
+        msg = self._text("hi", mentionees=[{"userId": "Uother"}])
+        assert not _group_message_triggers_reply(
+            message=msg, bot_user_id=self.BOT, trigger_prefixes=("emma",)
+        )
+
+    # --- non-text -----------------------------------------------------
+
+    def test_non_text_message_rejected(self):
+        for msg_type in ("image", "sticker", "video", "audio", "file", "location"):
+            msg = {"type": msg_type}
+            assert not _group_message_triggers_reply(
+                message=msg, bot_user_id=self.BOT, trigger_prefixes=("emma",)
+            ), msg_type
+
+    def test_missing_text_treated_as_empty(self):
+        # message of type text but no "text" field — defensive handling
+        msg = {"type": "text"}
+        assert not _group_message_triggers_reply(
+            message=msg, bot_user_id=None, trigger_prefixes=("emma",)
+        )
+
+    def test_none_message_rejected(self):
+        # The dispatcher uses ``event.get("message") or {}`` but make
+        # sure the helper is also robust to falsy inputs.
+        assert not _group_message_triggers_reply(
+            message={}, bot_user_id=None, trigger_prefixes=("emma",)
+        )
 
 
 # ---------------------------------------------------------------------------

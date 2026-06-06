@@ -17,8 +17,8 @@ LINE is the dominant messaging app in Japan, Taiwan, and Thailand. If your users
 | Context | Behavior |
 |---------|----------|
 | **1:1 chat** (`U` IDs) | Responds to every message |
-| **Group chat** (`C` IDs) | Responds when the group is on the allowlist |
-| **Multi-user room** (`R` IDs) | Responds when the room is on the allowlist |
+| **Group chat** (`C` IDs) | Responds when the group is on the allowlist. Optionally [restrict to @mention / trigger prefix](#quieting-groups-mention-only-mode). |
+| **Multi-user room** (`R` IDs) | Responds when the room is on the allowlist. Same optional gate as groups. |
 
 Inbound text, images, audio, video, files, stickers, and locations are all handled. Outbound text uses the **free reply token first** (single-use, ~60s window) and falls back to the metered Push API when the token has expired.
 
@@ -156,6 +156,38 @@ Cron jobs with `deliver: line` route to `LINE_HOME_CHANNEL`. The adapter ships a
 
 ---
 
+## Quieting groups: mention-only mode
+
+By default the bot replies to every message in any allowlisted group or room — which is the right behavior for a bot dedicated to one chat, but quickly becomes noise in a busy team channel. Set `LINE_GROUP_MENTION_ONLY=true` and the bot only replies in groups/rooms when:
+
+- the bot is **@mentioned** (`message.mention.mentionees` contains the bot's own user ID), **or**
+- the message text **starts with one of `LINE_GROUP_TRIGGER_PREFIXES`** (CSV, case-insensitive, matched after stripping leading whitespace).
+
+1:1 DMs are unaffected — the gate is only consulted when `source.type` is `group` or `room`.
+
+```env
+LINE_GROUP_MENTION_ONLY=true
+LINE_GROUP_TRIGGER_PREFIXES=emma,/h,!bot
+```
+
+With the example above:
+
+| In group, message | Result |
+|---|---|
+| `emma what's the weather?` | replies (prefix `emma`) |
+| `Emma 你好` | replies (case-insensitive) |
+| `/h help` | replies (prefix `/h`) |
+| `@Emma hi` (if LINE produced a real mention event) | replies (mention path) |
+| `hey emma` | dropped (prefix only matches at message start) |
+| `hello team` | dropped |
+| anything in DM | replies (DM bypasses the gate) |
+
+**Why prefixes matter even when LINE supports `@`.** LINE's in-app `@` typing suggestion list rarely surfaces bots — many users will not find your bot in the dropdown even when it is a group member. A text prefix (`emma`, `/h`, etc.) is the only reliable trigger in practice. The mention path is kept for clients that do produce mention events.
+
+Non-text events (image, sticker, file, location) in mention-only mode are always dropped in groups/rooms — there is no place to address the bot. Send them to the bot in DM instead.
+
+---
+
 ## Environment variable reference
 
 | Variable | Required | Default | Description |
@@ -169,6 +201,8 @@ Cron jobs with `deliver: line` route to `LINE_HOME_CHANNEL`. The adapter ships a
 | `LINE_ALLOWED_GROUPS` | one of | — | Comma-separated group IDs (C-prefixed) |
 | `LINE_ALLOWED_ROOMS` | one of | — | Comma-separated room IDs (R-prefixed) |
 | `LINE_ALLOW_ALL_USERS` | dev only | `false` | Skip allowlist entirely |
+| `LINE_GROUP_MENTION_ONLY` | no | `false` | In groups/rooms, only reply when @mentioned or a trigger prefix matches. DMs unaffected. See [Quieting groups](#quieting-groups-mention-only-mode). |
+| `LINE_GROUP_TRIGGER_PREFIXES` | no | — | CSV of case-insensitive prefixes; a group/room message whose stripped text starts with any of them triggers a reply in mention-only mode |
 | `LINE_HOME_CHANNEL` | no | — | Default cron / notification delivery target |
 | `LINE_SLOW_RESPONSE_THRESHOLD` | no | `45` | Seconds before the postback button fires (`0` = disabled) |
 | `LINE_PENDING_TEXT` | no | "🤔 Still thinking…" | Bubble text shown alongside the postback button |
@@ -183,6 +217,8 @@ Cron jobs with `deliver: line` route to `LINE_HOME_CHANNEL`. The adapter ships a
 **"invalid signature" on webhook verify.** The `Channel secret` was copied wrong, or your tunnel rewrote the request body. Verify with `curl -i https://<tunnel>/line/webhook/health` first — that should return `{"status":"ok","platform":"line"}`.
 
 **Bot receives nothing in groups.** Check `LINE_ALLOWED_GROUPS` includes the `C...` group ID. To find a group ID, send a test message and grep `~/.hermes/logs/gateway.log` for `LINE: rejecting unauthorized source` — the rejected source dict has the IDs.
+
+**Bot is in the group but never replies to anything.** If `LINE_GROUP_MENTION_ONLY=true` is set, the bot intentionally drops group messages that aren't addressed to it. Grep `gateway.log` for `dropped in mention-only mode` — if you see those, configure `LINE_GROUP_TRIGGER_PREFIXES` so users have a way to invoke the bot (e.g. `LINE_GROUP_TRIGGER_PREFIXES=emma`). LINE's `@` suggestion list rarely shows bots, so a prefix is usually the only reliable trigger.
 
 **`send_image` fails with "LINE_PUBLIC_URL must be set".** LINE's Messaging API does not accept binary uploads — images, audio, and video must be reachable HTTPS URLs. Set `LINE_PUBLIC_URL` to the tunnel's public hostname and the adapter will serve files from `/line/media/<token>/<filename>` automatically.
 
