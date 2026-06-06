@@ -352,6 +352,28 @@ class TestTrackForgetQuick:
         for d in ("logs", "memories", "sessions", "cron", "cache"):
             assert (_isolate_env / d).exists(), f"{d}/ should be preserved"
 
+    def test_quick_preserves_git_internal_dirs_and_removes_normal_empty_dirs(self, _isolate_env):
+        dg = _load_lib()
+        checkpoint_heads = _isolate_env / "checkpoints" / "demo" / "refs" / "heads"
+        checkpoint_info = _isolate_env / "checkpoints" / "demo" / "objects" / "info"
+        repo_heads = _isolate_env / "scratch" / "repo" / ".git" / "refs" / "heads"
+        repo_info = _isolate_env / "scratch" / "repo" / ".git" / "objects" / "info"
+        plain_empty = _isolate_env / "scratch" / "empty-dir"
+
+        for p in (checkpoint_heads, checkpoint_info, repo_heads, repo_info):
+            p.mkdir(parents=True, exist_ok=True)
+        (_isolate_env / "checkpoints" / "demo" / "HERMES_WORKDIR").write_text("/tmp/demo\n")
+        plain_empty.mkdir(parents=True)
+
+        summary = dg.quick()
+
+        assert checkpoint_heads.exists()
+        assert checkpoint_info.exists()
+        assert repo_heads.exists()
+        assert repo_info.exists()
+        assert not plain_empty.exists()
+        assert summary["empty_dirs"] == 1
+
 
 class TestStatus:
     def test_empty_status(self, _isolate_env):
