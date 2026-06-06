@@ -1279,13 +1279,7 @@ def build_tool_complete(
 # ---------------------------------------------------------------------------
 
 
-def extract_locations(
-    arguments: Dict[str, Any],
-) -> List[ToolCallLocation]:
-    """Extract file-system locations from tool arguments."""
-    locations: List[ToolCallLocation] = []
-    path = arguments.get("path")
-    if path:
-        line = arguments.get("offset") or arguments.get("line")
-        locations.append(ToolCallLocation(path=path, line=line))
-    return locations
+def extract_locations(arguments: Dict[str, Any]) -> List[ToolCallLocation]:
+    return ([ToolCallLocation(path=arguments["path"],
+                              line=arguments.get("offset") or arguments.get("line"))]
+            if arguments.get("path") else [])
