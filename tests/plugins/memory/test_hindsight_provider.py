@@ -25,6 +25,7 @@ from plugins.memory.hindsight import (
     _normalize_retain_tags,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
+    _sanitize_retain_text,
 )
 
 
@@ -151,6 +152,217 @@ def test_normalize_retain_tags_accepts_csv_and_dedupes():
 def test_normalize_retain_tags_accepts_json_array_string():
     value = json.dumps(["agent:fakeassistantname", "source_system:hermes-agent"])
     assert _normalize_retain_tags(value) == ["agent:fakeassistantname", "source_system:hermes-agent"]
+
+
+def test_sanitize_retain_text_redacts_base64_data_urls():
+    payload = "look " + "data:image/png;base64," + ("A" * 1200) + " done"
+
+    sanitized = _sanitize_retain_text(payload)
+
+    assert "data:image/png;base64" not in sanitized
+    assert "A" * 1200 not in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+    assert "data_url_chars=" in sanitized
+    assert sanitized.startswith("look ")
+    assert sanitized.endswith(" done")
+
+
+def test_sanitize_retain_text_handles_data_url_variants():
+    parameterized = "data:image/png;charset=utf-8;base64," + ("B" * 1200)
+    unknown_mime = "data:;base64," + ("C" * 1200)
+    mixed_case = "DATA:IMAGE/JPEG;BASE64," + ("D" * 1200)
+
+    sanitized = _sanitize_retain_text(f"variants {parameterized} {unknown_mime} {mixed_case}")
+
+    assert parameterized not in sanitized
+    assert unknown_mime not in sanitized
+    assert mixed_case not in sanitized
+    assert "B" * 1000 not in sanitized
+    assert "C" * 1000 not in sanitized
+    assert "D" * 1000 not in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+    assert "omitted base64 unknown data URL" in sanitized
+    assert "omitted base64 image/jpeg data URL" in sanitized
+
+
+def test_sanitize_retain_text_preserves_data_scheme_inside_larger_tokens():
+    semantic = "metadata:image/png;base64," + ("A" * 1200)
+
+    sanitized = _sanitize_retain_text(f"keep {semantic}")
+
+    assert semantic in sanitized
+    assert "omitted base64" not in sanitized
+
+
+def test_sanitize_retain_text_handles_many_invalid_data_markers():
+    text = ("data:not-base64 " * 1000) + "data:image/png;base64," + ("A" * 1200)
+
+    sanitized = _sanitize_retain_text(text)
+
+    assert "data:not-base64" in sanitized
+    assert "A" * 1000 not in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_handles_unicode_before_data_url():
+    payload = "İ before data:image/png;base64," + ("A" * 1200)
+
+    sanitized = _sanitize_retain_text(payload)
+
+    assert "İ before" in sanitized
+    assert "A" * 1000 not in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_preserves_text_after_data_url_line():
+    data_url = "data:image/png;base64," + ("E" * 1000)
+
+    sanitized = _sanitize_retain_text(f"before {data_url}\nKeep this follow-up text")
+
+    assert data_url not in sanitized
+    assert "E" * 1000 not in sanitized
+    assert "before" in sanitized
+    assert "Keep this follow-up text" in sanitized
+
+
+def test_sanitize_retain_text_redacts_wrapped_data_urls():
+    wrapped_payload = "data:image/png;base64," + "\n".join(
+        ["H" * 80, "I" * 80, "Q" * 80, "S" * 80, "T" * 80]
+    )
+    escaped_wrapped_payload = "data:image/jpeg;base64," + "\\n".join(["J" * 80, "K" * 80, "R" * 80])
+
+    sanitized = _sanitize_retain_text(
+        f"before {wrapped_payload}\nafter actual newline {escaped_wrapped_payload} after escaped newline"
+    )
+
+    assert "H" * 80 not in sanitized
+    assert "I" * 80 not in sanitized
+    assert "Q" * 80 not in sanitized
+    assert "S" * 80 not in sanitized
+    assert "T" * 80 not in sanitized
+    assert "J" * 80 not in sanitized
+    assert "K" * 80 not in sanitized
+    assert "R" * 80 not in sanitized
+    assert "after actual newline" in sanitized
+    assert "after escaped newline" in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+    assert "omitted base64 image/jpeg data URL" in sanitized
+
+
+def test_sanitize_retain_text_redacts_large_two_line_wrapped_data_url():
+    payload = "data:image/png;base64," + ("H" * 80) + "\n" + ("I" * 600)
+
+    sanitized = _sanitize_retain_text(f"before {payload} after")
+
+    assert "H" * 80 not in sanitized
+    assert "I" * 512 not in sanitized
+    assert "before" in sanitized
+    assert "after" in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_redacts_nonstandard_wrapped_data_url_with_large_tail():
+    payload = "data:image/png;base64," + ("W" * 200) + "\n" + ("X" * 600)
+
+    sanitized = _sanitize_retain_text(f"before {payload} after")
+
+    assert "W" * 200 not in sanitized
+    assert "X" * 512 not in sanitized
+    assert "before" in sanitized
+    assert "after" in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_redacts_payload_starting_after_header_line():
+    payload = "data:image/png;base64,\n" + ("P" * 600)
+
+    sanitized = _sanitize_retain_text(f"before {payload} after")
+
+    assert "P" * 512 not in sanitized
+    assert "before" in sanitized
+    assert "after" in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_redacts_many_wrapped_lines_after_short_first_line():
+    payload = "data:image/png;base64," + ("Y" * 52) + "\n" + "\n".join(
+        ["Z" * 80, "U" * 80, "O" * 80, "R" * 80]
+    )
+
+    sanitized = _sanitize_retain_text(f"before {payload} after")
+
+    assert "Y" * 52 not in sanitized
+    assert "Z" * 80 not in sanitized
+    assert "U" * 80 not in sanitized
+    assert "O" * 80 not in sanitized
+    assert "R" * 80 not in sanitized
+    assert "before" in sanitized
+    assert "after" in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_preserves_header_line_followed_by_single_semantic_line():
+    semantic_line = "SemanticBase64AlphabetIdentifierShouldRemainVisible1234567890" + ("c" * 80)
+
+    sanitized = _sanitize_retain_text(f"before data:image/png;base64,\n{semantic_line} after")
+
+    assert semantic_line in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
+
+
+def test_sanitize_retain_text_preserves_long_text_after_data_url():
+    data_url = "data:image/png;base64," + ("M" * 1000)
+    long_followup = "thisLongFollowupIdentifierShouldRemainVisible1234567890"
+
+    sanitized = _sanitize_retain_text(f"before {data_url} {long_followup}")
+
+    assert data_url not in sanitized
+    assert "M" * 1000 not in sanitized
+    assert long_followup in sanitized
+
+
+def test_sanitize_retain_text_preserves_long_newline_text_after_data_url():
+    data_url = "data:image/png;base64," + ("N" * 1000)
+    followup_1 = "thisLongFollowupIdentifierShouldRemainVisible1234567890" * 2
+    followup_2 = "anotherLongFollowupIdentifierShouldRemainVisible1234567890" * 2
+
+    sanitized = _sanitize_retain_text(f"before {data_url}\n{followup_1}\n{followup_2}")
+
+    assert data_url not in sanitized
+    assert "N" * 1000 not in sanitized
+    assert followup_1 in sanitized
+    assert followup_2 in sanitized
+
+
+def test_sanitize_retain_text_preserves_short_data_url_followed_by_semantic_base64ish_lines():
+    data_url = "data:image/png;base64," + ("V" * 80)
+    followup_1 = "SemanticBase64AlphabetIdentifierShouldRemainVisible1234567890" + ("a" * 80)
+    followup_2 = "AnotherSemanticBase64AlphabetIdentifierShouldRemainVisible1234567890" + ("b" * 80)
+
+    sanitized = _sanitize_retain_text(f"before {data_url}\n{followup_1}\n{followup_2}")
+
+    assert "V" * 80 not in sanitized
+    assert followup_1 in sanitized
+    assert followup_2 in sanitized
+
+
+def test_sanitize_retain_text_handles_multimodal_payloads():
+    payload = [
+        {"type": "text", "text": "describe this"},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64," + ("F" * 2048),
+            },
+        },
+    ]
+
+    sanitized = _sanitize_retain_text(payload)
+
+    assert "describe this" in sanitized
+    assert "data:image/png;base64" not in sanitized
+    assert "F" * 1000 not in sanitized
+    assert "omitted base64 image/png data URL" in sanitized
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +685,59 @@ class TestToolHandlers:
         assert call_kwargs["bank_id"] == "test-bank"
         assert call_kwargs["content"] == "user likes dark mode"
 
+    def test_retain_redacts_inline_base64_data_url(self, provider):
+        data_url = "data:image/png;base64," + ("A" * 4096)
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain", {"content": f"keep text {data_url}"}
+        ))
+
+        assert result["result"] == "Memory stored successfully."
+        call_kwargs = provider._client.aretain.call_args.kwargs
+        assert "keep text" in call_kwargs["content"]
+        assert "data:image/png;base64" not in call_kwargs["content"]
+        assert "A" * 1000 not in call_kwargs["content"]
+        assert "omitted base64 image/png data URL" in call_kwargs["content"]
+
+    def test_retain_redacts_inline_base64_data_url_context(self, provider):
+        data_url = "data:image/png;base64," + ("G" * 4096)
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain",
+            {"content": "keep text", "context": f"screenshot context {data_url}"},
+        ))
+
+        assert result["result"] == "Memory stored successfully."
+        call_kwargs = provider._client.aretain.call_args.kwargs
+        assert "screenshot context" in call_kwargs["context"]
+        assert "data:image/png;base64" not in call_kwargs["context"]
+        assert "G" * 1000 not in call_kwargs["context"]
+        assert "omitted base64 image/png data URL" in call_kwargs["context"]
+
+    def test_retain_does_not_log_raw_base64_context(self, provider, caplog):
+        import logging
+
+        data_url = "data:image/png;base64," + ("L" * 4096)
+
+        with caplog.at_level(logging.DEBUG, logger="plugins.memory.hindsight"):
+            result = json.loads(provider.handle_tool_call(
+                "hindsight_retain",
+                {"content": "keep text", "context": f"screenshot context {data_url}"},
+            ))
+
+        assert result["result"] == "Memory stored successfully."
+        assert "data:image/png;base64" not in caplog.text
+        assert "L" * 1000 not in caplog.text
+        assert "context_len=" in caplog.text
+
+    def test_retain_rejects_non_string_content(self, provider):
+        for content in (None, [], {}, 0, False):
+            result = json.loads(provider.handle_tool_call(
+                "hindsight_retain", {"content": content}
+            ))
+            assert "error" in result
+        provider._client.aretain.assert_not_called()
+
     def test_retain_with_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
         p.handle_tool_call("hindsight_retain", {"content": "likes dark mode"})
@@ -739,6 +1004,44 @@ class TestSyncTurn:
         assert "conv" in item["tags"]
         assert "session1" in item["tags"]
         assert "session:test-session" in item["tags"]
+
+    def test_sync_turn_redacts_inline_image_data_urls(self, provider):
+        data_url = "data:image/png;base64," + ("B" * 200_000)
+        user_content = [
+            {"type": "text", "text": "please inspect this image"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                },
+            },
+        ]
+
+        provider.sync_turn(user_content, "done")
+        provider._retain_queue.join()
+
+        item = provider._client.aretain_batch.call_args.kwargs["items"][0]
+        content = item["content"]
+        assert "please inspect this image" in content
+        assert data_url not in content
+        assert "data:image/png;base64" not in content
+        assert "B" * 1000 not in content
+        assert "omitted base64 image/png data URL" in content
+        assert len(content) < 3_000
+
+    def test_sync_turn_redacts_assistant_data_urls(self, provider):
+        data_url = "data:image/jpeg;base64," + ("C" * 200_000)
+
+        provider.sync_turn("hello", f"assistant payload {data_url}")
+        provider._retain_queue.join()
+
+        item = provider._client.aretain_batch.call_args.kwargs["items"][0]
+        content = item["content"]
+        assert "assistant payload" in content
+        assert data_url not in content
+        assert "C" * 1000 not in content
+        assert "omitted base64 image/jpeg data URL" in content
+        assert len(content) < 3_000
 
     def test_sync_turn_uses_aretain_batch(self, provider):
         """sync_turn should use aretain_batch with retain_async."""

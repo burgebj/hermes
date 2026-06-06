@@ -72,6 +72,181 @@ _PROVIDER_DEFAULT_MODELS = {
 }
 
 
+_DATA_URL_CONTINUATION_MIN_CHARS = 64
+_DATA_URL_WRAP_MAX_CHARS = 128
+_DATA_URL_LARGE_CONTINUATION_CHARS = 512
+_DATA_URL_WRAPPED_LINE_MIN_COUNT = 4
+_DATA_URL_BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+_DATA_URL_SCHEME = "data:"
+_DATA_URL_HEADER_MAX_CHARS = 512
+
+
+def _data_url_has_boundary(text: str, pos: int) -> bool:
+    """Return whether ``data:`` at ``pos`` is not embedded in another token."""
+    return pos == 0 or not (text[pos - 1].isalnum() or text[pos - 1] in "+-.")
+
+
+def _parse_data_url_prefix(text: str, pos: int) -> tuple[int, str] | None:
+    """Parse a base64 data URL prefix at ``pos`` using a bounded linear scan."""
+    if not _data_url_has_boundary(text, pos):
+        return None
+
+    header_start = pos + len(_DATA_URL_SCHEME)
+    header_limit = min(len(text), header_start + _DATA_URL_HEADER_MAX_CHARS)
+    header_end = header_start
+    while header_end < header_limit and text[header_end] not in ",\r\n\t ":
+        header_end += 1
+    if header_end >= len(text) or text[header_end] != ",":
+        return None
+
+    header = text[header_start:header_end]
+    if not any(part.lower() == "base64" for part in header.split(";")[1:]):
+        return None
+    return header_end + 1, header
+
+
+def _find_data_url_scheme(text: str, start: int) -> int:
+    """Find the next ASCII-case-insensitive ``data:`` using original offsets."""
+    max_start = len(text) - len(_DATA_URL_SCHEME)
+    for pos in range(start, max_start + 1):
+        if (
+            text[pos] in "dD"
+            and text[pos + 1] in "aA"
+            and text[pos + 2] in "tT"
+            and text[pos + 3] in "aA"
+            and text[pos + 4] == ":"
+        ):
+            return pos
+    return -1
+
+
+def _data_url_mime(header: str) -> str:
+    """Return a normalized MIME type from a data URL header."""
+    return (header.split(";", 1)[0] or "unknown").lower()
+
+
+def _base64_chunk_end(text: str, pos: int) -> tuple[int, int]:
+    """Return ``(end, length)`` for a base64-ish chunk starting at ``pos``."""
+    start = pos
+    while pos < len(text) and text[pos] in _DATA_URL_BASE64_CHARS:
+        pos += 1
+    return pos, pos - start
+
+
+def _data_url_line_break_end(text: str, pos: int) -> tuple[int, str] | None:
+    """Return ``(end, kind)`` for a real or escaped line break at ``pos``."""
+    if text.startswith("\r\n", pos):
+        return pos + 2, "actual"
+    if pos < len(text) and text[pos] in "\r\n":
+        return pos + 1, "actual"
+    if text.startswith("\\r\\n", pos):
+        return pos + 4, "escaped"
+    if text.startswith("\\n", pos) or text.startswith("\\r", pos):
+        return pos + 2, "escaped"
+    return None
+
+
+def _data_url_continuations(text: str, pos: int) -> List[tuple[str, int, int]]:
+    """Collect plausible wrapped base64 continuation chunks after ``pos``.
+
+    Each returned tuple is ``(break_kind, chunk_len, chunk_end)``. The line
+    break before each chunk is included when a caller advances to ``chunk_end``.
+    """
+    continuations: List[tuple[str, int, int]] = []
+    scan = pos
+    while True:
+        line_break = _data_url_line_break_end(text, scan)
+        if line_break is None:
+            break
+        chunk_start, break_kind = line_break
+        while chunk_start < len(text) and text[chunk_start] in " \t":
+            chunk_start += 1
+        chunk_end, chunk_len = _base64_chunk_end(text, chunk_start)
+        if chunk_len < _DATA_URL_CONTINUATION_MIN_CHARS:
+            break
+        continuations.append((break_kind, chunk_len, chunk_end))
+        scan = chunk_end
+    return continuations
+
+
+def _wrapish_base64_line(length: int) -> bool:
+    return _DATA_URL_CONTINUATION_MIN_CHARS <= length <= _DATA_URL_WRAP_MAX_CHARS and length % 4 == 0
+
+
+def _should_consume_data_url_continuations(
+    _initial_len: int,
+    continuations: List[tuple[str, int, int]],
+) -> bool:
+    """Return whether continuation-like lines are likely part of the data URL.
+
+    Crossing real newlines is intentionally conservative: it prevents huge
+    wrapped payloads while avoiding deletion of ordinary follow-up text that
+    merely happens to use base64-alphabet characters.
+    """
+    if not continuations:
+        return False
+
+    chunk_lengths = [chunk_len for _, chunk_len, _ in continuations]
+    if any(break_kind == "escaped" for break_kind, _, _ in continuations):
+        return True
+    if any(chunk_len >= _DATA_URL_LARGE_CONTINUATION_CHARS for chunk_len in chunk_lengths):
+        return True
+    return (
+        len(continuations) >= _DATA_URL_WRAPPED_LINE_MIN_COUNT
+        and all(_wrapish_base64_line(chunk_len) for chunk_len in chunk_lengths)
+    )
+
+
+def _sanitize_retain_text(value: Any) -> str:
+    """Return retain-safe text with inline base64 data URLs redacted.
+
+    Multimodal gateway payloads can include ``data:image/...;base64,...``
+    URLs. Those are useful to the live model call, but disastrous for long-term
+    memory extraction: one image can serialize into millions of meaningless
+    characters and trigger many expensive Hindsight extraction calls. Preserve
+    surrounding semantic text and replace the binary payload with compact
+    metadata before it reaches Hindsight retain.
+    """
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+
+    parts: List[str] = []
+    cursor = 0
+    search_pos = 0
+    while True:
+        match_start = _find_data_url_scheme(text, search_pos)
+        if match_start == -1:
+            parts.append(text[cursor:])
+            break
+
+        parsed_prefix = _parse_data_url_prefix(text, match_start)
+        if parsed_prefix is None:
+            search_pos = match_start + len(_DATA_URL_SCHEME)
+            continue
+
+        payload_start, header = parsed_prefix
+        payload_end, initial_len = _base64_chunk_end(text, payload_start)
+        continuations = _data_url_continuations(text, payload_end)
+        if _should_consume_data_url_continuations(initial_len, continuations):
+            payload_end = continuations[-1][2]
+
+        mime_type = _data_url_mime(header)
+        parts.append(text[cursor:match_start])
+        parts.append(
+            f"[omitted base64 {mime_type} data URL from Hindsight retain, "
+            f"data_url_chars={payload_end - match_start}]"
+        )
+        cursor = payload_end
+        search_pos = payload_end
+
+    return "".join(parts)
+
+
 def _parse_int_setting(value: Any, default: int) -> int:
     """Parse an integer config/env value, falling back on invalid input."""
     if value is None or value == "":
@@ -1361,17 +1536,19 @@ class HindsightMemoryProvider(MemoryProvider):
         self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="hindsight-prefetch")
         self._prefetch_thread.start()
 
-    def _build_turn_messages(self, user_content: str, assistant_content: str) -> List[Dict[str, str]]:
+    def _build_turn_messages(self, user_content: Any, assistant_content: Any) -> List[Dict[str, str]]:
         now = datetime.now(timezone.utc).isoformat()
+        safe_user_content = _sanitize_retain_text(user_content)
+        safe_assistant_content = _sanitize_retain_text(assistant_content)
         return [
             {
                 "role": "user",
-                "content": f"{self._retain_user_prefix}: {user_content}",
+                "content": f"{self._retain_user_prefix}: {safe_user_content}",
                 "timestamp": now,
             },
             {
                 "role": "assistant",
-                "content": f"{self._retain_assistant_prefix}: {assistant_content}",
+                "content": f"{self._retain_assistant_prefix}: {safe_assistant_content}",
                 "timestamp": now,
             },
         ]
@@ -1414,13 +1591,14 @@ class HindsightMemoryProvider(MemoryProvider):
         tags: List[str] | None = None,
         retain_async: bool | None = None,
     ) -> Dict[str, Any]:
+        safe_content = _sanitize_retain_text(content)
         kwargs: Dict[str, Any] = {
             "bank_id": self._bank_id,
-            "content": content,
+            "content": safe_content,
             "metadata": metadata or self._build_metadata(message_count=1, turn_index=self._turn_index),
         }
         if context is not None:
-            kwargs["context"] = context
+            kwargs["context"] = _sanitize_retain_text(context)
         if document_id:
             kwargs["document_id"] = document_id
         if retain_async is not None:
@@ -1433,7 +1611,7 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs["tags"] = merged_tags
         return kwargs
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: Any, assistant_content: Any, *, session_id: str = "") -> None:
         """Enqueue a retain for the current turn. Non-blocking.
 
         The actual aretain_batch runs on a single long-lived writer thread
@@ -1517,9 +1695,10 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if tool_name == "hindsight_retain":
-            content = args.get("content", "")
-            if not content:
+            raw_content = args.get("content", "")
+            if not isinstance(raw_content, str) or not raw_content:
                 return tool_error("Missing required parameter: content")
+            content = _sanitize_retain_text(raw_content)
             context = args.get("context")
             try:
                 retain_kwargs = self._build_retain_kwargs(
@@ -1527,8 +1706,10 @@ class HindsightMemoryProvider(MemoryProvider):
                     context=context,
                     tags=args.get("tags"),
                 )
-                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                             self._bank_id, len(content), context)
+                safe_context = retain_kwargs.get("context")
+                safe_context_len = len(safe_context) if isinstance(safe_context, str) else 0
+                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context_len=%d",
+                             self._bank_id, len(content), safe_context_len)
                 self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
