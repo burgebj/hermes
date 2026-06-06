@@ -9064,6 +9064,11 @@ class GatewayRunner:
             session_entry.was_auto_reset = False
             session_entry.auto_reset_reason = None
 
+            # Evict cached agent to prevent stale context_compressor._previous_summary
+            # from leaking into the new session after auto-reset (daily/idle/suspended).
+            # Follow-up to #9893 which only handled compression_exhausted case.
+            self._evict_cached_agent(session_key)
+
         # Auto-load skill(s) for topic/channel bindings (Telegram DM Topics,
         # Discord channel_skill_bindings).  Supports a single name or ordered list.
         # Only inject on NEW sessions — ongoing conversations already have the
