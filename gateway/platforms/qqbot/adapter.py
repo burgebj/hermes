@@ -675,6 +675,16 @@ class QQAdapter(BasePlatformAdapter):
             return True
         except Exception as exc:
             logger.warning("[%s] Reconnect failed: %s", self._log_tag, exc)
+            # Clean up stale WebSocket so _read_events() raises on next call,
+            # preventing a silent busy-loop where _read_events() returns
+            # immediately (ws.closed=True) without triggering backoff retries.
+            if self._ws:
+                try:
+                    if not self._ws.closed:
+                        await self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
             return False
 
     async def _read_events(self) -> None:
