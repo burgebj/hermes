@@ -1699,6 +1699,7 @@ def _normalize_empty_agent_response(
     response: str,
     *,
     history_len: int = 0,
+    allow_user_visible_diagnostics: bool = True,
 ) -> str:
     """Normalize empty/None agent responses into user-facing messages.
 
@@ -1707,6 +1708,9 @@ def _normalize_empty_agent_response(
     Fix for #18765.
     """
     if response:
+        return response
+
+    if not allow_user_visible_diagnostics:
         return response
 
     if agent_result.get("failed"):
@@ -9537,17 +9541,11 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
 
-            # Convert the agent's internal "(empty)" sentinel into a
-            # user-friendly message.  "(empty)" means the model failed to
-            # produce visible content after exhausting all retries (nudge,
-            # prefill, empty-retry, fallback).  Sending the raw sentinel
-            # looks like a bug; a short explanation is more helpful.
+            # Chat gateways treat silent outcomes as a valid no-op. Keep the
+            # agent's internal empty sentinel out of user-visible channels and
+            # let the adapter no-op on the empty final response.
             if response == "(empty)":
-                response = (
-                    "⚠️ The model returned no response after processing tool "
-                    "results. This can happen with some models — try again or "
-                    "rephrase your question."
-                )
+                response = ""
             agent_messages = agent_result.get("messages", [])
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
@@ -9579,7 +9577,10 @@ class GatewayRunner:
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
             response = _normalize_empty_agent_response(
-                agent_result, response, history_len=len(history),
+                agent_result,
+                response,
+                history_len=len(history),
+                allow_user_visible_diagnostics=False,
             )
             response = _sanitize_gateway_final_response(source.platform, response)
 

@@ -403,6 +403,49 @@ class TestGatewaySurfacesNullResponse:
         assert "500 Internal Server Error" in response
         assert "/reset" in response
 
+    def test_gateway_mode_keeps_failed_empty_response_silent(self):
+        """Gateway turns should not leak backend failures into chat channels."""
+        from gateway.run import _normalize_empty_agent_response
+
+        agent_result = {
+            "final_response": None,
+            "api_calls": 0,
+            "failed": True,
+            "error": "500 Internal Server Error",
+        }
+
+        response = agent_result.get("final_response") or ""
+        response = _normalize_empty_agent_response(
+            agent_result,
+            response,
+            history_len=5,
+            allow_user_visible_diagnostics=False,
+        )
+
+        assert response == ""
+
+    def test_gateway_mode_keeps_partial_empty_response_silent(self):
+        """Gateway turns should stay silent for empty partial/tool failures."""
+        from gateway.run import _normalize_empty_agent_response
+
+        agent_result = {
+            "final_response": None,
+            "api_calls": 5,
+            "partial": True,
+            "interrupted": False,
+            "error": "Model generated invalid tool call: nonexistent_tool",
+        }
+
+        response = agent_result.get("final_response") or ""
+        response = _normalize_empty_agent_response(
+            agent_result,
+            response,
+            history_len=10,
+            allow_user_visible_diagnostics=False,
+        )
+
+        assert response == ""
+
     def test_nonempty_response_passes_through(self):
         """Non-empty response is returned unchanged."""
         from gateway.run import _normalize_empty_agent_response
