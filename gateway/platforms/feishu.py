@@ -60,7 +60,7 @@ import re
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -560,52 +560,280 @@ def _build_markdown_post_payload(content: str) -> str:
     )
 
 
-def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
-    """Build Feishu post rows while isolating fenced code blocks.
 
-    Feishu's `md` renderer can swallow trailing content when a fenced code block
-    appears inside one large markdown element. Split the reply at real fence
-    lines so prose before/after the code block remains visible while code stays
-    in a dedicated row.
+# ---------------------------------------------------------------------------
+# Markdown → Feishu Post rendering (ported from lark-cli's optimizeMarkdownStyle
+# + buildPostElementNodes + buildSegmentedPost)
+# ---------------------------------------------------------------------------
+
+# Heading downgrade regexes (lark-cli compatible)
+_RE_H1 = re.compile(r"(?m)^# (.+)$")
+_RE_H2_TO_H6 = re.compile(r"(?m)^#{2,6} (.+)$")
+_RE_HAS_H1_TO_H3 = re.compile(r"(?m)^#{1,3} ")
+
+# Spacing normalization regexes
+_RE_CONSEC_H = re.compile(r"(?m)^(#{4,5} .+)\n{1,2}(#{4,5} )")
+_RE_TABLE_NO_GAP = re.compile(r"(?m)^([^|\n].*)\n(\|.+\|)")
+_RE_TABLE_AFTER = re.compile(r"(?m)((?:^\|.+\|[^\S\n]*\n?)+)")
+_RE_EXCESS_NL = re.compile(r"\n{3,}")
+
+# Invalid image reference (non-img_xxx keys)
+_RE_INVALID_IMG = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+
+# Code fence block (non-greedy, like lark-cli)
+_RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```")
+
+# Blank line separator: one or more blank lines between content
+_RE_BLANK_LINE_SEP = re.compile(r"\n(?:[ \t]*\n)+")
+
+_CODE_BLOCK_PLACEHOLDER = "___CB_"
+_BLANK_LINE_PLACEHOLDER = "\u200b"
+
+
+def _protect_code_blocks(text: str) -> Tuple[str, List[str]]:
+    """Extract fenced code blocks into placeholders (lark-cli compatible)."""
+    code_blocks: List[str] = []
+
+    def _replace(m: re.Match) -> str:
+        idx = len(code_blocks)
+        code_blocks.append(m.group(0))
+        return f"{_CODE_BLOCK_PLACEHOLDER}{idx}___"
+
+    protected = _RE_CODE_BLOCK.sub(_replace, text)
+    return protected, code_blocks
+
+
+def _restore_code_blocks(text: str, code_blocks: List[str]) -> str:
+    """Restore code blocks from placeholders."""
+    restored = text
+    for i, block in enumerate(code_blocks):
+        restored = restored.replace(f"{_CODE_BLOCK_PLACEHOLDER}{i}___", block, 1)
+    return restored
+
+
+def _optimize_markdown_style(text: str) -> str:
+    """Optimize markdown text for Feishu post rendering. Ported from lark-cli."""
+    if not text:
+        return text
+
+    r, code_blocks = _protect_code_blocks(text)
+
+    # Only downgrade when original text has H1~H3
+    if _RE_HAS_H1_TO_H3.search(text):
+        # Order matters: H2~H6 first so H1 isn't matched twice
+        r = _RE_H2_TO_H6.sub("##### \\1", r)
+        r = _RE_H1.sub("#### \\1", r)
+
+    # Normalize spacing
+    r = _RE_CONSEC_H.sub("\\1\n\n\\2", r)
+
+    # Add blank line before tables when missing spacing
+    r = _RE_TABLE_NO_GAP.sub("\\1\n\n\\2", r)
+    r = _RE_TABLE_AFTER.sub("\\1\n", r)
+
+    # Restore code blocks
+    r = _restore_code_blocks(r, code_blocks)
+
+    # Compress excess blank lines
+    r = _RE_EXCESS_NL.sub("\n\n", r)
+
+    # Strip invalid image references (keep only img_xxx keys)
+    if "![" in r:
+        r = _RE_INVALID_IMG.sub("", r)
+
+    return r
+
+
+def _has_blank_line_separator(markdown: str) -> bool:
+    """Check if markdown has blank lines between content blocks."""
+    protected, _ = _protect_code_blocks(markdown)
+    return bool(_RE_BLANK_LINE_SEP.search(protected))
+
+
+def _split_by_blank_lines(markdown: str) -> List[Tuple[str, int, bool]]:
+    """Split markdown into parts at blank-line boundaries (lark-cli compatible).
+    Returns list of (text, newline_count, is_separator)."""
+    protected, code_blocks = _protect_code_blocks(markdown)
+    locs = list(_RE_BLANK_LINE_SEP.finditer(protected))
+    if not locs:
+        return [(markdown, 0, False)]
+
+    parts: List[Tuple[str, int, bool]] = []
+    last = 0
+    for m in locs:
+        if m.start() > last:
+            content = _restore_code_blocks(protected[last:m.start()], code_blocks)
+            if content:
+                parts.append((content, 0, False))
+        sep_text = protected[m.start():m.end()]
+        nl_count = sep_text.count("\n")
+        parts.append(("", nl_count, True))
+        last = m.end()
+
+    if last < len(protected):
+        content = _restore_code_blocks(protected[last:], code_blocks)
+        if content:
+            parts.append((content, 0, False))
+
+    return parts or [(markdown, 0, False)]
+
+
+def _scan_balanced_paren(text: str, open_paren: int) -> Optional[int]:
+    """Scan forward finding a balanced closing parenthesis.
+    Returns the position after ')' (exclusive) or None."""
+    if open_paren >= len(text) or text[open_paren] != "(":
+        return None
+    depth = 0
+    for i in range(open_paren, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def _scan_md_link_token(text: str, start: int) -> Optional[int]:
+    """Scan a markdown link [text](url) or ![alt](url).
+    Returns end position (exclusive) or None."""
+    if start >= len(text):
+        return None
+    open_bracket = start
+    if text[start] == "!":
+        if start + 1 >= len(text) or text[start + 1] != "[":
+            return None
+        open_bracket = start + 1
+    elif text[start] != "[":
+        return None
+    close_bracket = text.find("]", open_bracket + 1)
+    if close_bracket < 0:
+        return None
+    if close_bracket + 1 >= len(text) or text[close_bracket + 1] != "(":
+        return None
+    return _scan_balanced_paren(text, close_bracket + 1)
+
+
+def _scan_bare_url_token(text: str, start: int) -> Optional[int]:
+    """Scan a bare http(s) URL. Returns end position (exclusive) or None."""
+    is_url = text.startswith("http://", start) or text.startswith("https://", start)
+    if not is_url:
+        return None
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch in (" ", "\t", "\n", "\r", "<", ">", "\"", "[", "]"):
+            return i if i > start else None
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return i if i > start else None
+            depth -= 1
+        i += 1
+    return len(text) if i > start else None
+
+
+def _trim_bare_url_token(token: str) -> str:
+    """Trim trailing punctuation from a bare URL (lark-cli compatible)."""
+    trimmed = token.rstrip(".,;:!?")
+    while trimmed.endswith(")") and trimmed.count("(") < trimmed.count(")"):
+        trimmed = trimmed[:-1]
+    return trimmed
+
+
+def _build_post_element_nodes(text: str) -> List[Dict[str, str]]:
+    """Tokenize markdown text into Feishu Post inline elements.
+
+    - Markdown links [text](url) stay as {"tag": "md"} segments
+    - Bare http(s) URLs become {"tag": "a"} native links
+    - Everything else is {"tag": "md"}
+    - Code blocks are protected during tokenization
+    """
+    protected, code_blocks = _protect_code_blocks(text)
+    if not protected:
+        return [{"tag": "md", "text": text}]
+
+    elements: List[Dict[str, str]] = []
+    prev = 0
+    i = 0
+
+    while i < len(protected):
+        md_end = _scan_md_link_token(protected, i)
+        url_end = _scan_bare_url_token(protected, i) if md_end is None else None
+
+        if md_end is None and url_end is None:
+            i += 1
+            continue
+
+        end = md_end if md_end is not None else url_end
+        is_url = url_end is not None and md_end is None
+
+        if i > prev:
+            segment = _restore_code_blocks(protected[prev:i], code_blocks)
+            if segment:
+                elements.append({"tag": "md", "text": segment})
+
+        token = protected[i:end]
+
+        if is_url:
+            url = _trim_bare_url_token(token)
+            if url:
+                elements.append({"tag": "a", "text": url, "href": url})
+            rest = token[len(url):]
+            if rest:
+                elements.append({"tag": "md", "text": rest})
+        else:
+            md_token = _restore_code_blocks(token, code_blocks)
+            if md_token:
+                elements.append({"tag": "md", "text": md_token})
+
+        prev = end
+        i = end
+
+    if prev < len(protected):
+        segment = _restore_code_blocks(protected[prev:], code_blocks)
+        if segment:
+            elements.append({"tag": "md", "text": segment})
+
+    return elements or [{"tag": "md", "text": text}]
+
+
+def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
+    """Build Feishu post rows matching lark-cli's --markdown rendering.
+
+    Ported from lark-cli's flow:
+      1. optimizeMarkdownStyle \u2014 heading downgrade, spacing normalization, etc.
+      2. Decide single vs. segmented (has blank lines?)
+      3. If segmented: split by blank lines, build rows with \u200b separators
+      4. For each segment: buildPostElementNodes (bare URLs \u2192 a tags)
+
+    Known gap vs lark-cli: image URL auto-resolution (![alt](https://...)
+    downloading and uploading is not implemented.
     """
     if not content:
         return [[{"tag": "md", "text": ""}]]
-    if "```" not in content:
-        return [[{"tag": "md", "text": content}]]
+
+    optimized = _optimize_markdown_style(content)
+
+    if not _has_blank_line_separator(optimized):
+        return [_build_post_element_nodes(optimized)]
+
+    parts = _split_by_blank_lines(optimized)
 
     rows: List[List[Dict[str, str]]] = []
-    current: List[str] = []
-    in_code_block = False
-
-    def _flush_current() -> None:
-        nonlocal current
-        if not current:
-            return
-        segment = "\n".join(current)
-        if segment.strip():
-            rows.append([{"tag": "md", "text": segment}])
-        current = []
-
-    for raw_line in content.splitlines():
-        stripped_line = raw_line.strip()
-        is_fence = bool(
-            _MARKDOWN_FENCE_CLOSE_RE.match(stripped_line)
-            if in_code_block
-            else _MARKDOWN_FENCE_OPEN_RE.match(stripped_line)
-        )
-
-        if is_fence:
-            if not in_code_block:
-                _flush_current()
-            current.append(raw_line)
-            in_code_block = not in_code_block
-            if not in_code_block:
-                _flush_current()
+    for text_val, nl_count, is_sep in parts:
+        if is_sep:
+            for _ in range(1, nl_count):
+                rows.append([{"tag": "text", "text": _BLANK_LINE_PLACEHOLDER}])
             continue
+        trimmed = text_val.strip("\n")
+        if not trimmed:
+            continue
+        rows.append(_build_post_element_nodes(trimmed))
 
-        current.append(raw_line)
-
-    _flush_current()
     return rows or [[{"tag": "md", "text": content}]]
 
 
@@ -4324,13 +4552,11 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
+        # Markdown tables render fine in Feishu post "md" elements (tested 2026-05).
+        # No longer force plain text for tables — let them go through the normal
+        # markdown path. If the API rejects the post payload, the caller handles
+        # fallback to plain text automatically.
+        if _MARKDOWN_HINT_RE.search(content) or _MARKDOWN_TABLE_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
