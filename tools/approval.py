@@ -1292,7 +1292,16 @@ def check_all_command_guards(command: str, env_type: str,
         from tools.tirith_security import check_command_security
         tirith_result = check_command_security(command)
     except ImportError:
-        pass  # tirith module not installed — allow
+        try:
+            from tools.tirith_security import _load_security_config
+            _sec_cfg = _load_security_config()
+            _enabled = _sec_cfg.get("tirith_enabled", True)
+            _fail_open = _sec_cfg.get("tirith_fail_open", True)
+        except Exception:
+            _enabled = False
+            _fail_open = True
+        if _enabled and not _fail_open:
+            tirith_result = {"action": "warn", "findings": [], "summary": "tirith module unavailable (fail-closed)"}
 
     # Dangerous command check (detection only, no approval)
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
