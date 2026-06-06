@@ -21,6 +21,7 @@ def _isolate_feishu_env(monkeypatch):
         "FEISHU_ALLOW_BOTS",
         "FEISHU_ALLOWED_USERS",
         "FEISHU_ALLOW_ALL_USERS",
+        "FEISHU_GROUP_ALLOWED_CHATS",
         "GATEWAY_ALLOW_ALL_USERS",
         "GATEWAY_ALLOWED_USERS",
     ):
@@ -46,10 +47,10 @@ def _make_feishu_bot_source(open_id: str = "ou_peer"):
     )
 
 
-def _make_feishu_human_source(open_id: str = "ou_human"):
+def _make_feishu_human_source(open_id: str = "ou_human", chat_id: str = "oc_1"):
     return SessionSource(
         platform=Platform.FEISHU,
-        chat_id="oc_1",
+        chat_id=chat_id,
         chat_type="group",
         user_id=open_id,
         user_name="Human",
@@ -96,6 +97,43 @@ def test_feishu_human_still_checked_against_allowlist_when_bot_policy_set(monkey
 
     assert runner._is_user_authorized(_make_feishu_human_source("ou_stranger")) is False
     assert runner._is_user_authorized(_make_feishu_human_source("ou_human")) is True
+
+
+def test_feishu_group_allowed_chats_authorizes_group_without_opening_dm(monkeypatch):
+    runner = _make_bare_runner()
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_1")
+
+    group_source = _make_feishu_human_source("ou_stranger")
+    assert runner._is_user_authorized(group_source) is True
+
+    dm_source = SessionSource(
+        platform=Platform.FEISHU,
+        chat_id="oc_dm",
+        chat_type="dm",
+        user_id="ou_stranger",
+        user_name="Human",
+        is_bot=False,
+    )
+    assert runner._is_user_authorized(dm_source) is False
+
+
+def test_feishu_group_allowed_chats_rejects_other_groups_even_for_allowed_user(monkeypatch):
+    runner = _make_bare_runner()
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_allowed")
+    monkeypatch.setenv("FEISHU_ALLOWED_USERS", "ou_human")
+
+    allowed_group_source = _make_feishu_human_source("ou_human", chat_id="oc_allowed")
+    other_group_source = _make_feishu_human_source("ou_human", chat_id="oc_random")
+
+    assert runner._is_user_authorized(allowed_group_source) is True
+    assert runner._is_user_authorized(other_group_source) is False
+
+
+def test_feishu_group_allowed_chats_makes_unauthorized_dms_silent(monkeypatch):
+    runner = _make_bare_runner()
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_allowed")
+
+    assert runner._get_unauthorized_dm_behavior(Platform.FEISHU) == "ignore"
 
 
 def test_feishu_bot_bypass_does_not_leak_to_other_platforms(monkeypatch):

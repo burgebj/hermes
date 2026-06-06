@@ -155,6 +155,14 @@ FEISHU_ALLOWED_USERS=ou_xxx,ou_yyy
 
 如果白名单为空，任何能访问机器人的人都可能使用它。在群聊中，消息处理前会根据发送者的 open_id 检查白名单。
 
+如需允许特定群聊，但不开放陌生用户私信，可设置群聊 ID 白名单：
+
+```bash
+FEISHU_GROUP_ALLOWED_CHATS=oc_xxx,oc_yyy
+```
+
+这会允许来自所列群聊的消息；私信访问仍由 `FEISHU_ALLOWED_USERS`、配对机制或 `FEISHU_ALLOW_ALL_USERS` 控制。
+
 ### Webhook 加密密钥
 
 在 webhook 模式下运行时，设置加密密钥以启用入站 webhook payload 的签名验证：
@@ -488,6 +496,7 @@ platforms:
 | `FEISHU_DOMAIN` | — | `feishu` | `feishu`（中国）或 `lark`（国际版） |
 | `FEISHU_CONNECTION_MODE` | — | `websocket` | `websocket` 或 `webhook` |
 | `FEISHU_ALLOWED_USERS` | — | _（空）_ | 用户白名单的逗号分隔 open_id 列表 |
+| `FEISHU_GROUP_ALLOWED_CHATS` | — | _（空）_ | 飞书群聊 ID 白名单，逗号分隔 |
 | `FEISHU_ALLOW_BOTS` | — | `none` | 接受其他机器人消息：`none`、`mentions` 或 `all` |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | 群消息是否必须 @提及 机器人 |
 | `FEISHU_HOME_CHANNEL` | — | — | cron/通知输出的聊天 ID |
