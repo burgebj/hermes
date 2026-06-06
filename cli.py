@@ -11067,11 +11067,16 @@ class HermesCLI:
             else:
                 print(f"  🔧 {len(new_tools)} tool(s) available from {len(connected_servers)} server(s)")
 
-            # Refresh the agent's tool list so the model can call new tools
+            # Refresh the agent's tool list so the model can call new tools.
+            # Re-read enabled_toolsets from the live config so MCP servers
+            # added via /mcp-add (or by editing config.yaml) mid-session are
+            # picked up — otherwise the session-start snapshot would hide them.
             if self.agent is not None:
+                from hermes_cli.tools_config import _get_platform_tools
+                from hermes_cli.config import load_config
+                self.agent.enabled_toolsets = _get_platform_tools(load_config(), "cli")
                 self.agent.tools = get_tool_definitions(
-                    enabled_toolsets=self.agent.enabled_toolsets
-                    if hasattr(self.agent, "enabled_toolsets") else None,
+                    enabled_toolsets=self.agent.enabled_toolsets,
                     quiet_mode=True,
                 )
                 self.agent.valid_tool_names = {
