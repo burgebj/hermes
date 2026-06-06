@@ -81,13 +81,36 @@ def _save_subscriptions(subs: Dict[str, dict]) -> None:
 
 
 def _get_webhook_config() -> dict:
-    """Load webhook platform config. Returns {} if not configured."""
+    """Load webhook platform config, merged with WEBHOOK_* env overrides.
+
+    Mirrors gateway/config.py:_apply_env_overrides so `hermes webhook list`
+    agrees with the live gateway when webhook config is supplied via env vars
+    rather than config.yaml (#13240).
+    """
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
-        return cfg_get(cfg, "platforms", "webhook", default={})
+        wh = dict(cfg_get(cfg, "platforms", "webhook", default={}) or {})
     except Exception:
-        return {}
+        wh = {}
+
+    # Must stay in sync with gateway/config.py:_apply_env_overrides webhook block.
+    if os.getenv("WEBHOOK_ENABLED", "").lower() in ("true", "1", "yes"):
+        wh["enabled"] = True
+        extra = dict(wh.get("extra", {}))
+        webhook_port = os.getenv("WEBHOOK_PORT")
+        if webhook_port:
+            try:
+                extra["port"] = int(webhook_port)
+            except ValueError:
+                pass
+        webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+        if webhook_secret:
+            extra["secret"] = webhook_secret
+        if extra:
+            wh["extra"] = extra
+
+    return wh
 
 
 def _is_webhook_enabled() -> bool:
