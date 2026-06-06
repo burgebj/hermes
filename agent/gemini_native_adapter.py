@@ -40,6 +40,21 @@ DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 # an omitted limit means full budget).
 GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 65535
 
+_RATE_LIMIT_STATE: Dict[str, Dict[str, Any]] = {}
+
+def _check_rate_limit(endpoint: str) -> None:
+    entry = _RATE_LIMIT_STATE.get(endpoint)
+    if entry:
+        wait = entry["next_allowed_at"] - time.time()
+        if wait > 0:
+            time.sleep(wait)
+
+def _record_rate_limit(endpoint: str, retry_after: float, source: str) -> None:
+    _RATE_LIMIT_STATE[endpoint] = {
+        "next_allowed_at": time.time() + retry_after,
+        "source": source,
+    }
+
 
 def is_native_gemini_base_url(base_url: str) -> bool:
     """Return True when the endpoint speaks Gemini's native REST API."""
@@ -917,10 +932,14 @@ class GeminiNativeClient:
         if stream:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
+        _check_rate_limit("generateContent")
         url = f"{self.base_url}/models/{model}:generateContent"
         response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
         if response.status_code != 200:
-            raise gemini_http_error(response)
+            exc = gemini_http_error(response)
+            if exc.retry_after is not None:
+                _record_rate_limit("generateContent", exc.retry_after, "generateContent_429")
+            raise exc
         try:
             payload = response.json()
         except ValueError as exc:
@@ -937,12 +956,17 @@ class GeminiNativeClient:
         stream_headers = dict(self._headers())
         stream_headers["Accept"] = "text/event-stream"
 
+        _check_rate_limit("streamGenerateContent")
+
         def _generator() -> Iterator[_GeminiStreamChunk]:
             try:
                 with self._http.stream("POST", url, json=request, headers=stream_headers, timeout=timeout) as response:
                     if response.status_code != 200:
                         response.read()
-                        raise gemini_http_error(response)
+                        exc = gemini_http_error(response)
+                        if exc.retry_after is not None:
+                            _record_rate_limit("streamGenerateContent", exc.retry_after, "streamGenerateContent_429")
+                        raise exc
                     tool_call_indices: Dict[str, Dict[str, Any]] = {}
                     for event in _iter_sse_events(response):
                         for chunk in translate_stream_event(event, model, tool_call_indices):
