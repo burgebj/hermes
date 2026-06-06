@@ -1182,12 +1182,8 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
         from gateway.platforms.matrix import check_matrix_requirements
-        try:
-            import mautrix  # noqa: F401
+        with patch("tools.lazy_deps.feature_missing", return_value=()):
             assert check_matrix_requirements() is True
-        except ImportError:
-            with patch("tools.lazy_deps.ensure", side_effect=ImportError("mautrix unavailable")):
-                assert check_matrix_requirements() is False
 
     def test_check_requirements_without_creds(self, monkeypatch):
         monkeypatch.delenv("MATRIX_ACCESS_TOKEN", raising=False)
@@ -1210,7 +1206,7 @@ class TestMatrixRequirements:
 
         from gateway.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False), \
-             patch("tools.lazy_deps.ensure", side_effect=ImportError("mautrix unavailable")):
+             patch("tools.lazy_deps.feature_missing", return_value=()):
             assert matrix_mod.check_matrix_requirements() is False
 
     def test_check_requirements_e2ee_optional_no_deps_ok(self, monkeypatch):
@@ -1233,14 +1229,9 @@ class TestMatrixRequirements:
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
         from gateway.platforms import matrix as matrix_mod
-        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False):
-            # Still needs mautrix itself to be importable
-            try:
-                import mautrix  # noqa: F401
-                assert matrix_mod.check_matrix_requirements() is True
-            except ImportError:
-                with patch("tools.lazy_deps.ensure", side_effect=ImportError("mautrix unavailable")):
-                    assert matrix_mod.check_matrix_requirements() is False
+        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False), \
+             patch("tools.lazy_deps.feature_missing", return_value=()):
+            assert matrix_mod.check_matrix_requirements() is True
 
     def test_check_requirements_encryption_true_with_e2ee_deps(self, monkeypatch):
         """MATRIX_ENCRYPTION=true should pass if E2EE deps are available."""
@@ -1249,13 +1240,9 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
         from gateway.platforms import matrix as matrix_mod
-        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
-            try:
-                import mautrix  # noqa: F401
-                assert matrix_mod.check_matrix_requirements() is True
-            except ImportError:
-                with patch("tools.lazy_deps.ensure", side_effect=ImportError("mautrix unavailable")):
-                    assert matrix_mod.check_matrix_requirements() is False
+        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True), \
+             patch("tools.lazy_deps.feature_missing", return_value=()):
+            assert matrix_mod.check_matrix_requirements() is True
 
     def test_check_e2ee_deps_requires_asyncpg(self, monkeypatch):
         """E2EE deps check must reject when asyncpg is missing — even if olm is present.
