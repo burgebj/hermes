@@ -2210,16 +2210,40 @@ def check_tts_requirements() -> bool:
 def _resolve_openai_audio_client_config() -> tuple[str, str]:
     """Return direct OpenAI audio config or a managed gateway fallback.
 
+    Resolution order (when ``tts.use_gateway`` is not set):
+      1. ``tts.openai.api_key`` + ``tts.openai.base_url`` from config.yaml
+         — lets users point TTS at a local / self-hosted OpenAI-compatible
+         endpoint (e.g. llama.cpp, qwen3-tts) without any env vars.
+      2. ``VOICE_TOOLS_OPENAI_KEY`` / ``OPENAI_API_KEY`` env vars, combined
+         with ``tts.openai.base_url`` from config if present.
+      3. Managed Nous tool gateway (``openai-audio``).
+
+    Mirrors the STT resolver in ``tools.transcription_tools`` so both
+    halves of the audio pipeline treat config the same way.
+
     When ``tts.use_gateway`` is set in config, the Tool Gateway is preferred
     even if direct OpenAI credentials are present.
     """
-    direct_api_key = resolve_openai_audio_api_key()
-    if direct_api_key and not prefers_gateway("tts"):
-        return direct_api_key, DEFAULT_OPENAI_BASE_URL
+    gateway_preferred = prefers_gateway("tts")
+
+    tts_config = _load_tts_config()
+    openai_cfg = tts_config.get("openai", {}) if isinstance(tts_config, dict) else {}
+    cfg_api_key = (openai_cfg.get("api_key") or "").strip() if isinstance(openai_cfg, dict) else ""
+    cfg_base_url = (openai_cfg.get("base_url") or "").strip() if isinstance(openai_cfg, dict) else ""
+
+    if not gateway_preferred:
+        if cfg_api_key:
+            return cfg_api_key, (cfg_base_url or DEFAULT_OPENAI_BASE_URL)
+        direct_api_key = resolve_openai_audio_api_key()
+        if direct_api_key:
+            return direct_api_key, (cfg_base_url or DEFAULT_OPENAI_BASE_URL)
 
     managed_gateway = resolve_managed_tool_gateway("openai-audio")
     if managed_gateway is None:
-        message = "Neither VOICE_TOOLS_OPENAI_KEY nor OPENAI_API_KEY is set"
+        message = (
+            "Neither tts.openai.api_key in config nor "
+            "VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"
+        )
         if managed_nous_tools_enabled() or prefers_gateway("tts"):
             message += (
                 ". "
