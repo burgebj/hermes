@@ -472,11 +472,46 @@ def _get_orchestrator_enabled() -> bool:
     """
     cfg = _load_config()
     val = cfg.get("orchestrator_enabled", True)
+    parsed = _parse_bool(val)
+    return parsed if parsed is not None else True
+
+
+def _parse_bool(val) -> bool | None:
+    """Parse a bool/string/number config value to bool.
+
+    Returns None for unparseable types so callers can apply their own default.
+    """
     if isinstance(val, bool):
         return val
-    # Accept "true"/"false" strings from YAML that doesn't auto-coerce.
     if isinstance(val, str):
         return val.strip().lower() in {"true", "1", "yes", "on"}
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return None  # unparseable — let caller decide
+
+
+def _get_delegation_enabled() -> bool:
+    """Master switch for delegation (``delegation.enabled``).
+
+    When False, ``delegate_task`` is excluded from the toolset entirely
+    (via ``dynamic_schema_overrides``) and any direct call returns an
+    error immediately.  This gives operators a hard off-switch rather
+    than relying on ``max_iterations: 0`` or manual toolset filtering.
+
+    Config key: ``delegation.enabled`` (bool, default True).
+    Priority: config.yaml > env ``DELEGATION_ENABLED`` > default True.
+    """
+    cfg = _load_config()
+    val = cfg.get("enabled")
+    if val is not None:
+        parsed = _parse_bool(val)
+        if parsed is not None:
+            return parsed
+        logger.warning("delegation.enabled has invalid type %s, defaulting to True",
+                       type(val).__name__)
+    env_val = os.getenv("DELEGATION_ENABLED")
+    if env_val is not None:
+        return env_val.strip().lower() in {"true", "1", "yes", "on"}
     return True
 
 
@@ -2700,7 +2735,19 @@ def _build_dynamic_schema_overrides() -> dict:
     Plugged into ToolEntry.dynamic_schema_overrides so every
     get_definitions() pass rewrites the description fields to the user's
     actual limits.
+
+    When ``delegation.enabled`` is False, returns an empty dict so the
+    tool is excluded from the schema entirely — the model never sees the
+    tool and cannot attempt to call it.
     """
+    if not _get_delegation_enabled():
+        # Return a schema that makes the tool invisible to the model.
+        # We can't use check_fn here (it's set at registration time),
+        # so instead return a schema with an empty parameter list and
+        # a description indicating the tool is disabled.
+        return {"description": "[DISABLED] Delegation is disabled via delegation.enabled config.",
+                "parameters": {"type": "object", "properties": {}}}
+
     overrides_params = {
         **DELEGATE_TASK_SCHEMA["parameters"],
     }
