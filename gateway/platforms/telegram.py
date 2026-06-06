@@ -1714,9 +1714,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Store reference for retry use in _handle_polling_conflict
                 self._polling_error_callback_ref = _polling_error_callback
 
+                # drop_pending_updates=False: preserve messages queued while the
+                # gateway was offline (SIGTERM on every Fly deploy / rolling
+                # restart, cold-start, etc.).  Discarding the backlog silently
+                # drops user messages sent during any downtime window.  The two
+                # reconnect retry paths (_handle_polling_network_error and
+                # _handle_polling_conflict, lines 800 / 903) already use False
+                # correctly — this aligns the initial startup with that policy.
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    drop_pending_updates=False,
                     error_callback=_polling_error_callback,
                 )
             
