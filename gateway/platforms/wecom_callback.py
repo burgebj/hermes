@@ -29,6 +29,40 @@ except ImportError:
     ET = None  # type: ignore[assignment]
     DEFUSEDXML_AVAILABLE = False
 
+
+# WeCom callbacks POST XML payloads from outside the trust boundary, which
+# means the parser must defend against XML bombs (billion-laughs / quadratic
+# blow-up) and DOCTYPE-based attacks. Adding `defusedxml` is rejected by the
+# `dependencies` scope rule in pyproject.toml ("smallest possible blast
+# radius"), so we do a stdlib-only pre-check before handing the bytes to ET.
+#
+# Python 3.7.1+ already disables external entity resolution by default, but
+# DOCTYPE / inline ENTITY declarations are still parsed and counted toward
+# expansion, so we reject them outright. WeCom callbacks are well-formed
+# simple XML — no legitimate payload uses a DOCTYPE.
+_MAX_CALLBACK_XML_BYTES = 256 * 1024  # 256 KiB; WeCom callback payloads are < 8 KiB in practice
+_XML_FORBIDDEN_CONSTRUCTS = (b"<!DOCTYPE", b"<!ENTITY", b"<?xml-stylesheet")
+
+
+def _safe_parse_wecom_xml(payload: str | bytes) -> ET.Element:
+    """Parse WeCom callback XML with stdlib-only defenses against XML bombs.
+
+    Rejects payloads that exceed a hard size cap or that contain DOCTYPE /
+    ENTITY / external-stylesheet declarations. Returns the parsed root
+    element on success. Caller can treat any raised exception as a
+    malformed/hostile callback and respond with a 400.
+    """
+    raw = payload.encode("utf-8") if isinstance(payload, str) else payload
+    if len(raw) > _MAX_CALLBACK_XML_BYTES:
+        raise ET.ParseError(
+            f"callback XML payload too large ({len(raw)} > {_MAX_CALLBACK_XML_BYTES} bytes)"
+        )
+    head = raw[:2048].lstrip()  # forbidden constructs always appear in the prologue
+    for needle in _XML_FORBIDDEN_CONSTRUCTS:
+        if needle in head:
+            raise ET.ParseError(f"callback XML rejected: contains {needle!r}")
+    return ET.fromstring(raw)  # nosec B314  -- guarded by _safe_parse_wecom_xml above
+
 try:
     from aiohttp import web
 
@@ -332,13 +366,13 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self, app: Dict[str, Any], body: str,
         msg_signature: str, timestamp: str, nonce: str,
     ) -> str:
-        root = ET.fromstring(body)
+        root = _safe_parse_wecom_xml(body)
         encrypt = root.findtext("Encrypt", default="")
         crypt = self._crypt_for_app(app)
         return crypt.decrypt(msg_signature, timestamp, nonce, encrypt).decode("utf-8")
 
     def _build_event(self, app: Dict[str, Any], xml_text: str) -> Optional[MessageEvent]:
-        root = ET.fromstring(xml_text)
+        root = _safe_parse_wecom_xml(xml_text)
         msg_type = (root.findtext("MsgType") or "").lower()
         # Silently acknowledge lifecycle events.
         if msg_type == "event":
