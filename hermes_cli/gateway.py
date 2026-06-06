@@ -5,6 +5,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
+import html
 import logging
 import os
 import shutil
@@ -2431,6 +2432,30 @@ def _normalize_service_definition(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
+def _service_proxy_env() -> dict[str, str]:
+    """Return proxy env vars that should be preserved in service definitions."""
+    keys = (
+        "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+        "https_proxy", "http_proxy", "all_proxy",
+        "NO_PROXY", "no_proxy",
+    )
+    return {
+        key: value
+        for key in keys
+        if (value := os.environ.get(key))
+    }
+
+
+def _launchd_env_entries_xml(env: dict[str, str]) -> str:
+    if not env:
+        return ""
+    return "\n" + "\n".join(
+        f"        <key>{html.escape(key)}</key>\n"
+        f"        <string>{html.escape(value)}</string>"
+        for key, value in env.items()
+    )
+
+
 def _normalize_launchd_plist_for_comparison(text: str) -> str:
     """Normalize launchd plist text for staleness checks.
 
@@ -3157,6 +3182,7 @@ def generate_launchd_plist() -> str:
         ]
     )
     prog_args_xml = "\n        ".join(prog_args)
+    proxy_env_xml = _launchd_env_entries_xml(_service_proxy_env())
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3180,7 +3206,7 @@ def generate_launchd_plist() -> str:
         <key>VIRTUAL_ENV</key>
         <string>{venv_dir}</string>
         <key>HERMES_HOME</key>
-        <string>{hermes_home}</string>
+        <string>{hermes_home}</string>{proxy_env_xml}
     </dict>
 
     <key>LimitLoadToSessionType</key>
