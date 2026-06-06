@@ -9,6 +9,7 @@ This module is the single source of truth for the dangerous command system:
 """
 
 import contextvars
+import fnmatch
 import logging
 import os
 import re
@@ -1019,6 +1020,12 @@ def check_dangerous_command(command: str, env_type: str,
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if not is_dangerous:
         return {"approved": True, "message": None}
+
+    # Check glob-based allowlist BEFORE pattern-key lookup.
+    # command_allowlist entries like "python3 << *" are glob patterns, not pattern keys.
+    with _lock:
+        if any(fnmatch.fnmatch(command, p) for p in _permanent_approved):
+            return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
     if is_approved(session_key, pattern_key):
