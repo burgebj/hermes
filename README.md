@@ -214,3 +214,93 @@ scripts/run_tests.sh
 MIT — see [LICENSE](LICENSE).
 
 Built by [Nous Research](https://nousresearch.com).
+
+---
+
+## 中文快速入门 / Chinese Quick Start
+
+> 本节由社区贡献，帮助中文用户快速上手 Hermes Agent。
+
+### 环境要求
+
+- Python 3.11+
+- 推荐的 Linux VPS（Ubuntu 20.04+）或树莓派
+- 至少 1GB RAM（推荐 2GB+）
+- OpenAI API Key 或其他支持的模型供应商
+
+### 一键安装
+
+```bash
+# 克隆仓库
+git clone https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent
+
+# 运行安装脚本
+bash scripts/install.sh
+
+# 激活环境
+source venv/bin/activate
+
+# 配置 API Key
+export OPENAI_API_KEY=your_key_here
+
+# 启动 CLI（交互模式）
+hermes
+```
+
+### 与 OpenClaw 协同使用
+
+Hermes Agent 可以与 OpenClaw 配合使用，组成双机 AI 工作站：
+
+| 机器 | 运行 | 职责 |
+|------|------|------|
+| 本地/OpenClaw VPS | OpenClaw | 消息通道（QQ/飞书/Telegram）、UI 控制台、任务分发 |
+| 远程/Hermes VPS | Hermes Agent | AI 推理、代码执行、外部工具调用 |
+
+**架构示意：**
+```
+Telegram/QQ/飞书
+        ↓
+  OpenClaw Gateway
+        ↓ (Hermes Bridge / MCP)
+  Hermes Agent (远程 VPS)
+        ↓
+  OpenAI / Nous Portal / 其他模型
+```
+
+**配置 Hermes Bridge（远程机器）：**
+```bash
+# 在 Hermes 机器上配置反向隧道
+autossh -M 0 -N -R 2525:127.0.0.1:2525 -i ~/.ssh/id_ed25519 root@your-openclaw-host
+```
+
+**OpenClaw 端配置（~/.openclaw/config.yaml）：**
+```yaml
+channels:
+  hermes:
+    url: http://localhost:2525  # 通过隧道连接远程 Hermes
+    model: openai/gpt-4o
+```
+
+### 常见问题
+
+**Q: 启动报错 `ModuleNotFoundError`**
+```bash
+source venv/bin/activate
+pip install -e .
+```
+
+**Q: 模型连接失败**
+检查 `OPENAI_API_KEY` 是否正确设置，或切换到其他供应商：
+```bash
+hermes model set openrouter --api-key=your_key
+```
+
+**Q: 消息收不到**
+确认 gateway 已启动：`hermes gateway`
+检查防火墙：`ufw status`
+确认端口未被拦截：`ss -ltnp | grep 2525`
+
+### 贡献者
+
+本中文文档由 @ULing19 贡献。
