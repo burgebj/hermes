@@ -548,6 +548,27 @@ def _is_internal_file_status_text(content: str) -> bool:
     return False
 
 
+def _is_line_number_polluted(content: str) -> bool:
+    """Return True when content appears to be line-numbered read_file output.
+
+    When the model echoes read_file output directly into write_file,
+    the ``LINE_NUM|CONTENT`` prefixes get written to disk.  Detect this
+    by looking for the characteristic ``{n:6d}|`` prefix on most lines.
+
+    Threshold: >50% of non-empty lines must match the pattern.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return False
+    lines = content.split('\n')
+    non_empty = [l for l in lines if l.strip()]
+    if len(non_empty) < 2:
+        return False
+    import re
+    pattern = re.compile(r'^\s*\d{1,6}\|')
+    polluted = sum(1 for l in non_empty if pattern.match(l))
+    return polluted > 0 and polluted / len(non_empty) > 0.5
+
+
 def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     """Get or create ShellFileOperations for a terminal environment.
 
@@ -1061,6 +1082,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         return tool_error(
             "Refusing to write internal read_file status text as file content. "
             "Re-read the file or reconstruct the intended file contents before writing."
+        )
+    if _is_line_number_polluted(content):
+        return tool_error(
+            "Refusing to write line-numbered read_file output as file content. "
+            "Strip the LINE_NUM| prefixes or reconstruct the file before writing."
         )
     try:
         # Resolve once for the registry lock + stale check.  Failures here

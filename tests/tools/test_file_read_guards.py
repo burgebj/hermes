@@ -24,6 +24,7 @@ from tools.file_tools import (
     _DEFAULT_MAX_READ_CHARS,
     _read_tracker,
     notify_other_tool_call,
+    _is_line_number_polluted,
 )
 
 
@@ -286,6 +287,83 @@ class TestFileDedup(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("internal read_file status text", result["error"])
         fake.write_file.assert_not_called()
+
+    # -------------------------------------------------------------------------
+    # Line-number pollution guards
+    # -------------------------------------------------------------------------
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_write_rejects_line_number_polluted_content(self, mock_ops):
+        """write_file must reject content that is clearly read_file output."""
+        fake = MagicMock()
+        fake.write_file = MagicMock()
+        mock_ops.return_value = fake
+
+        polluted = "     1|setting: value\n     2|other: thing\n     3|third: item\n"
+        result = json.loads(write_file_tool(
+            self._tmpfile,
+            polluted,
+            task_id="guard",
+        ))
+
+        self.assertIn("error", result)
+        self.assertIn("line-numbered read_file output", result["error"])
+        fake.write_file.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_write_rejects_partial_line_number_pollution(self, mock_ops):
+        """Mixed content with majority line-number prefixes is rejected."""
+        fake = MagicMock()
+        fake.write_file = MagicMock()
+        mock_ops.return_value = fake
+
+        # 3 polluted lines, 1 legitimate — 75% > 50% threshold
+        polluted = "     1|alpha\n     2|beta\n     3|gamma\nreal line without number\n"
+        result = json.loads(write_file_tool(
+            self._tmpfile,
+            polluted,
+            task_id="guard",
+        ))
+
+        self.assertIn("error", result)
+        fake.write_file.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_write_allows_genuine_number_prefixed_content(self, mock_ops):
+        """Legitimate content with sparse number prefixes is allowed (>50% threshold)."""
+        fake = MagicMock()
+        write_mock = MagicMock(
+            to_dict=lambda: {"success": True, "path": self._tmpfile}
+        )
+        fake.write_file = lambda path, content: write_mock
+        mock_ops.return_value = fake
+
+        # Only 1 in 4 lines has number prefix — 25% < 50% threshold
+        genuine = "1|first item\n2|second item\nregular line\nfourth line\n"
+        result = json.loads(write_file_tool(
+            self._tmpfile,
+            genuine,
+            task_id="guard",
+        ))
+
+        self.assertNotIn("error", result)
+
+    # Unit tests for the helper directly
+    def test_is_line_number_polluted_true_on_typical_read_file_output(self):
+        content = "     1|foo\n     2|bar\n     3|baz\n"
+        self.assertTrue(_is_line_number_polluted(content))
+
+    def test_is_line_number_polluted_false_on_empty(self):
+        self.assertFalse(_is_line_number_polluted(""))
+        self.assertFalse(_is_line_number_polluted("   \n  \n"))
+
+    def test_is_line_number_polluted_false_on_single_line(self):
+        self.assertFalse(_is_line_number_polluted("no numbers here"))
+
+    def test_is_line_number_polluted_respects_threshold(self):
+        # Exactly 50% — not > 50%, so False
+        content = "     1|a\n     2|b\nthird\nfourth\n"
+        self.assertFalse(_is_line_number_polluted(content))
 
     @patch("tools.file_tools._get_file_ops")
     def test_write_allows_large_file_that_quotes_status_text(self, mock_ops):
