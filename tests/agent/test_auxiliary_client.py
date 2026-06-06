@@ -2809,6 +2809,96 @@ class TestVisionAutoSkipsKimiCoding:
         })
 
 
+class TestVisionFallbackChain:
+    def test_configured_fallback_chain_passes_explicit_endpoint_fields(
+        self, monkeypatch
+    ):
+        import agent.auxiliary_client as aux
+
+        fake_client = MagicMock(name="fallback_client")
+        monkeypatch.setattr(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            lambda task: {
+                "fallback_chain": [
+                    {
+                        "provider": "custom",
+                        "model": "vision-model",
+                        "base_url": "http://127.0.0.1:8090/v1",
+                        "api_key": "no-key-required",
+                    }
+                ]
+            },
+        )
+
+        def fake_resolve_provider_client(
+            provider,
+            model=None,
+            *,
+            explicit_base_url=None,
+            explicit_api_key=None,
+        ):
+            assert provider == "custom"
+            assert model == "vision-model"
+            assert explicit_base_url == "http://127.0.0.1:8090/v1"
+            assert explicit_api_key == "no-key-required"
+            return fake_client, model
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client.resolve_provider_client",
+            fake_resolve_provider_client,
+        )
+
+        client, model, label = aux._try_configured_fallback_chain(
+            "vision", "ollama-cloud", "unavailable")
+
+        assert client is fake_client
+        assert model == "vision-model"
+        assert label == "fallback_chain[0](custom)"
+
+    def test_unavailable_explicit_vision_provider_uses_configured_fallback_chain(
+        self, monkeypatch
+    ):
+        """A missing explicit vision provider credential should use the
+        configured vision fallback_chain before the generic auto route.
+        """
+        fake_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="fallback vision response")
+                )
+            ]
+        )
+        fake_client = MagicMock(name="fallback_client")
+        fake_client.chat.completions.create.return_value = fake_response
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            lambda task, provider=None, model=None, base_url=None, api_key=None:
+                ("ollama-cloud", "kimi-k2.6:cloud", None, None, None),
+        )
+        monkeypatch.setattr(
+            "agent.auxiliary_client.resolve_vision_provider_client",
+            MagicMock(return_value=("ollama-cloud", None, None)),
+        )
+        monkeypatch.setattr(
+            "agent.auxiliary_client._try_configured_fallback_chain",
+            MagicMock(return_value=(
+                fake_client,
+                "nvidia/nemotron-nano-12b-v2-vl",
+                "fallback_chain[0](nvidia)",
+            )),
+        )
+
+        response = call_llm(
+            task="vision",
+            messages=[{"role": "user", "content": "describe image"}],
+            max_tokens=20,
+        )
+
+        assert response.choices[0].message.content == "fallback vision response"
+        fake_client.chat.completions.create.assert_called_once()
+
+
 class TestCodexAuxiliaryAdapterTimeout:
     def test_forwards_timeout_to_responses_create(self):
         message_item = SimpleNamespace(

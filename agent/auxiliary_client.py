@@ -3052,8 +3052,8 @@ def _resolve_single_provider(
     client, resolved_model = resolve_provider_client(
         provider=provider,
         model=model,
-        base_url=base_url,
-        api_key=api_key,
+        explicit_base_url=base_url,
+        explicit_api_key=api_key,
     )
     return client
 
@@ -5009,15 +5009,25 @@ def call_llm(
             async_mode=False,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning(
-                "Vision provider %s unavailable, falling back to auto vision backends",
-                resolved_provider,
-            )
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=False,
-            )
+            fb_client, fb_model, fb_label = _try_configured_fallback_chain(
+                "vision", resolved_provider or "auto", reason="unavailable")
+            if fb_client is not None:
+                logger.warning(
+                    "Vision provider %s unavailable, using configured fallback %s",
+                    resolved_provider, fb_label,
+                )
+                effective_provider = fb_label
+                client, final_model = fb_client, fb_model
+            else:
+                logger.warning(
+                    "Vision provider %s unavailable, falling back to auto vision backends",
+                    resolved_provider,
+                )
+                effective_provider, client, final_model = resolve_vision_provider_client(
+                    provider="auto",
+                    model=resolved_model,
+                    async_mode=False,
+                )
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
@@ -5493,15 +5503,26 @@ async def async_call_llm(
             async_mode=True,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning(
-                "Vision provider %s unavailable, falling back to auto vision backends",
-                resolved_provider,
-            )
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=True,
-            )
+            fb_client, fb_model, fb_label = _try_configured_fallback_chain(
+                "vision", resolved_provider or "auto", reason="unavailable")
+            if fb_client is not None:
+                logger.warning(
+                    "Vision provider %s unavailable, using configured fallback %s",
+                    resolved_provider, fb_label,
+                )
+                effective_provider = fb_label
+                client, final_model = _to_async_client(
+                    fb_client, fb_model, is_vision=True)
+            else:
+                logger.warning(
+                    "Vision provider %s unavailable, falling back to auto vision backends",
+                    resolved_provider,
+                )
+                effective_provider, client, final_model = resolve_vision_provider_client(
+                    provider="auto",
+                    model=resolved_model,
+                    async_mode=True,
+                )
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
