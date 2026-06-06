@@ -1015,6 +1015,7 @@ DEFAULT_CONFIG = {
         # website/docs/developer-guide/browser-supervisor.md.
         "dialog_policy": "must_respond",  # must_respond | auto_dismiss | auto_accept
         "dialog_timeout_s": 300,  # Safety auto-dismiss after N seconds under must_respond
+        "backend": "",  # "cloakbrowser" | "camofox" | "" (auto-detect from env vars)
         "camofox": {
             # When true, Hermes sends a stable profile-scoped userId to Camofox
             # so the server maps it to a persistent Firefox profile automatically.
@@ -1031,6 +1032,17 @@ DEFAULT_CONFIG = {
             # host alias while leaving CAMOFOX_URL itself unchanged.
             "rewrite_loopback_urls": False,
             "loopback_host_alias": "host.docker.internal",
+        },
+        "cloakbrowser": {
+            # CloakBrowser — stealth Chromium with 49+ C++ fingerprint patches.
+            # Passes reCAPTCHA v3 (0.9), Cloudflare Turnstile, FingerprintJS, etc.
+            # Activate by setting CLOAKBROWSER_MODE=local or browser.backend=cloakbrowser.
+            "headless": True,
+            "humanize": False,  # Human-like mouse/keyboard behavior
+            "human_preset": "default",  # "default" | "careful"
+            "fingerprint_seed": "",  # Empty=random, int=deterministic identity
+            "proxy": "",  # HTTP or SOCKS5 proxy URL
+            "geoip": False,  # Auto-detect timezone/locale from proxy IP
         },
     },
 
@@ -2976,6 +2988,78 @@ OPTIONAL_ENV_VARS = {
         "description": "Camofox browser server URL for local anti-detection browsing (e.g. http://localhost:9377)",
         "prompt": "Camofox server URL",
         "url": "https://github.com/jo-inc/camofox-browser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_MODE": {
+        "description": "Set to 'local' to use CloakBrowser as the stealth browser backend (anti-detection Chromium)",
+        "prompt": "CloakBrowser mode (local to activate)",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_BINARY_PATH": {
+        "description": "Path to custom CloakBrowser binary (if not on PATH)",
+        "prompt": "CloakBrowser binary path",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_HEADLESS": {
+        "description": "Run CloakBrowser in headless mode (true/false, default: true)",
+        "prompt": "CloakBrowser headless mode",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_HUMANIZE": {
+        "description": "Enable human-like mouse/keyboard behavior in CloakBrowser (true/false)",
+        "prompt": "CloakBrowser humanize",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_FINGERPRINT_SEED": {
+        "description": "Deterministic fingerprint seed for CloakBrowser (empty=random, int=deterministic identity)",
+        "prompt": "CloakBrowser fingerprint seed",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_GEOIP": {
+        "description": "Auto-detect timezone/locale from proxy IP in CloakBrowser (true/false)",
+        "prompt": "CloakBrowser GeoIP locale detection",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_PROXY": {
+        "description": "HTTP or SOCKS5 proxy URL for CloakBrowser (e.g. socks5://user:pass@proxy:1080)",
+        "prompt": "CloakBrowser proxy URL",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": True,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_TIMEZONE": {
+        "description": "Timezone override for CloakBrowser (e.g. Asia/Ho_Chi_Minh, America/New_York)",
+        "prompt": "CloakBrowser timezone",
+        "url": "https://github.com/CloakHQ/CloakBrowser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": False,
+        "category": "tool",
+    },
+    "CLOAKBROWSER_LOCALE": {
+        "description": "Locale override for CloakBrowser (e.g. en-US, vi-VN)",
+        "prompt": "CloakBrowser locale",
+        "url": "https:///CloakHQ/CloakBrowser",
         "tools": ["browser_navigate", "browser_click"],
         "password": False,
         "category": "tool",
