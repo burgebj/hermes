@@ -44,6 +44,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List, Union
 
+from gateway.platforms.helpers import get_adapter_attribute, safe_call_adapter_checker, validate_positive_int
+
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
 # patches (tests/gateway/test_usage_command.py) target
@@ -17346,8 +17348,18 @@ class GatewayRunner:
             progress_lines = []      # Accumulated tool lines for the CURRENT editable bubble
             progress_msg_id = None   # ID of the current progress message to edit
             can_edit = True          # False once an edit fails (platform doesn't support it)
+            progress_edit_count = 0  # Successful edits against the current progress_msg_id
+            progress_last_sent_text = ""
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
+
+            def _progress_rotate_threshold() -> int | None:
+                threshold = get_adapter_attribute(adapter, "STREAM_EDIT_ROTATE_BEFORE_LIMIT")
+                return validate_positive_int(threshold)
+
+            def _should_rotate_progress_failure(result) -> bool:
+                checker = get_adapter_attribute(adapter, "should_rotate_stream_edit_failure")
+                return safe_call_adapter_checker(checker, result, logger_msg="Progress edit rotation failure check raised")
 
             _progress_len_fn = (
                 adapter.message_len_fn
@@ -17426,6 +17438,45 @@ class GatewayRunner:
                 )
                 _track_progress_result(result)
                 return result
+
+            async def _rotate_progress_message(full_text: str, *, reason: str) -> bool:
+                nonlocal progress_lines, progress_msg_id, progress_edit_count, progress_last_sent_text, can_edit
+
+                if not progress_msg_id:
+                    return False
+
+                visible_prefix = progress_last_sent_text or ""
+                if visible_prefix and full_text.startswith(visible_prefix):
+                    display_tail = full_text[len(visible_prefix):].lstrip()
+                else:
+                    display_tail = full_text
+                if not display_tail.strip():
+                    return False
+
+                result = await adapter.send(
+                    chat_id=source.chat_id,
+                    content=display_tail,
+                    metadata=_progress_metadata,
+                )
+                if not result.success or not result.message_id:
+                    return False
+
+                logger.info(
+                    "[%s] Rotated tool-progress edit target old=%s new=%s edits=%d reason=%s",
+                    adapter.name,
+                    progress_msg_id,
+                    result.message_id,
+                    progress_edit_count,
+                    reason,
+                )
+                progress_lines = display_tail.split("\n")
+                progress_msg_id = result.message_id
+                progress_edit_count = 0
+                progress_last_sent_text = display_tail
+                if _cleanup_progress:
+                    _cleanup_msg_ids.append(str(result.message_id))
+                can_edit = True
+                return True
 
             async def _roll_progress_overflow_if_needed() -> bool:
                 """Start fresh editable progress bubbles before a bubble exceeds limit.
@@ -17541,8 +17592,26 @@ class GatewayRunner:
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
+                        threshold = _progress_rotate_threshold()
+                        if (
+                            threshold is not None
+                            and progress_edit_count >= threshold
+                            and await _rotate_progress_message(full_text, reason="proactive")
+                        ):
+                            _last_edit_ts = time.monotonic()
+                            await asyncio.sleep(0.3)
+                            if _run_still_current():
+                                await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                            continue
                         result = await _edit_progress_message(progress_msg_id, full_text)
                         if not result.success:
+                            if _should_rotate_progress_failure(result):
+                                if await _rotate_progress_message(full_text, reason="reactive"):
+                                    _last_edit_ts = time.monotonic()
+                                    await asyncio.sleep(0.3)
+                                    if _run_still_current():
+                                        await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                                    continue
                             _err = (getattr(result, "error", "") or "").lower()
                             # Transient network errors (ConnectError, timeouts)
                             # must not permanently disable progress-message
@@ -17577,6 +17646,9 @@ class GatewayRunner:
                                 and getattr(_flood_result, "message_id", None)
                             ):
                                 _cleanup_msg_ids.append(str(_flood_result.message_id))
+                        else:
+                            progress_last_sent_text = full_text
+                            progress_edit_count += 1
                     else:
                         if can_edit:
                             # First tool: send all accumulated text as new message
@@ -17597,6 +17669,8 @@ class GatewayRunner:
                             )
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
+                            progress_edit_count = 0
+                            progress_last_sent_text = full_text if can_edit else msg
                             if _cleanup_progress:
                                 _cleanup_msg_ids.append(str(result.message_id))
 

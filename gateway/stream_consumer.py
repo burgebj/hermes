@@ -145,6 +145,7 @@ class GatewayStreamConsumer:
         self._message_created_ts: Optional[float] = None
         self._already_sent = False
         self._edit_supported = True  # Disabled when progressive edits are no longer usable
+        self._message_edit_count = 0
         self._last_edit_time = 0.0
         self._last_sent_text = ""   # Track last-sent text to skip redundant edits
         self._fallback_final_send = False
@@ -257,6 +258,7 @@ class GatewayStreamConsumer:
             return
         self._message_id = None
         self._message_created_ts = None
+        self._message_edit_count = 0
         self._accumulated = ""
         self._last_sent_text = ""
         self._fallback_final_send = False
@@ -552,6 +554,7 @@ class GatewayStreamConsumer:
                             break
                         self._accumulated = self._accumulated[split_at:].lstrip("\n")
                         self._message_id = None
+                        self._message_edit_count = 0
                         self._last_sent_text = ""
 
                     display_text = self._accumulated
@@ -713,6 +716,7 @@ class GatewayStreamConsumer:
             )
             if result.success and result.message_id:
                 self._message_id = str(result.message_id)
+                self._message_edit_count = 0
                 self._already_sent = True
                 self._last_sent_text = text
                 # Fresh content bubble — close off any stale tool bubble
@@ -739,6 +743,16 @@ class GatewayStreamConsumer:
         if prefix and final_text.startswith(prefix):
             return final_text[len(prefix):].lstrip()
         return final_text
+
+    def _stream_edit_rotate_threshold(self) -> int | None:
+        from gateway.platforms.helpers import get_adapter_attribute, validate_positive_int
+        threshold = get_adapter_attribute(self.adapter, "STREAM_EDIT_ROTATE_BEFORE_LIMIT")
+        return validate_positive_int(threshold)
+
+    def _should_rotate_after_edit_failure(self, result: Any) -> bool:
+        from gateway.platforms.helpers import get_adapter_attribute, safe_call_adapter_checker
+        checker = get_adapter_attribute(self.adapter, "should_rotate_stream_edit_failure")
+        return safe_call_adapter_checker(checker, result, logger_msg="Stream edit rotation failure check raised")
 
     @staticmethod
     def _split_text_chunks(
@@ -883,6 +897,7 @@ class GatewayStreamConsumer:
                     )
 
         self._message_id = last_message_id
+        self._message_edit_count = 0
         self._already_sent = True
         self._final_response_sent = True
         self._final_content_delivered = True
@@ -1031,6 +1046,69 @@ class GatewayStreamConsumer:
         except Exception:
             pass  # best-effort — don't let this block the fallback path
 
+    async def _rotate_edit_target(self, text: str, *, reason: str) -> bool:
+        """Rotate progressive editing to a fresh message for adapter-specific limits."""
+        old_message_id = self._message_id
+        if not old_message_id or old_message_id == "__no_edit__":
+            return False
+
+        visible_prefix = self._visible_prefix()
+        if visible_prefix and text.startswith(visible_prefix):
+            display_tail = text[len(visible_prefix):].lstrip("\n")
+        else:
+            display_tail = text
+        if not display_tail.strip():
+            return False
+
+        accumulated_tail = display_tail
+        if self.cfg.cursor and accumulated_tail.endswith(self.cfg.cursor):
+            accumulated_tail = accumulated_tail[:-len(self.cfg.cursor)].rstrip()
+
+        if visible_prefix.strip():
+            try:
+                await self.adapter.edit_message(
+                    chat_id=self.chat_id,
+                    message_id=old_message_id,
+                    content=visible_prefix,
+                )
+            except Exception:
+                pass
+
+        try:
+            result = await self.adapter.send(
+                chat_id=self.chat_id,
+                content=display_tail,
+                metadata=self.metadata,
+            )
+        except Exception as e:
+            logger.debug("Stream edit rotation send failed: %s", e)
+            return False
+        if not getattr(result, "success", False) or not getattr(result, "message_id", None):
+            return False
+
+        new_message_id = str(result.message_id)
+        logger.info(
+            "Rotated streaming edit target",
+            extra={
+                "adapter_name": self.adapter.__class__.__name__,
+                "old_message_id": old_message_id,
+                "new_message_id": new_message_id,
+                "edit_count": self._message_edit_count,
+                "reason": reason,
+            },
+        )
+        self._accumulated = accumulated_tail
+        self._message_id = new_message_id
+        self._message_created_ts = time.monotonic()
+        self._message_edit_count = 0
+        self._edit_supported = True
+        self._fallback_final_send = False
+        self._fallback_prefix = ""
+        self._flood_strikes = 0
+        self._last_sent_text = display_tail
+        self._already_sent = True
+        return True
+
     async def _send_commentary(self, text: str) -> bool:
         """Send a completed interim assistant commentary message."""
         text = self._clean_for_display(text)
@@ -1126,12 +1204,14 @@ class GatewayStreamConsumer:
         if new_message_id:
             self._message_id = new_message_id
             self._message_created_ts = time.monotonic()
+            self._message_edit_count = 0
         else:
             # Send succeeded but platform didn't return an id — treat the
             # delivery as final-only and fall back to "__no_edit__" so we
             # don't try to edit something we can't address.
             self._message_id = "__no_edit__"
             self._message_created_ts = None
+            self._message_edit_count = 0
         self._already_sent = True
         self._last_sent_text = text
         if is_turn_final:
@@ -1239,6 +1319,13 @@ class GatewayStreamConsumer:
                         )
                     ):
                         return True
+                    threshold = self._stream_edit_rotate_threshold()
+                    if (
+                        threshold is not None
+                        and self._message_edit_count >= threshold
+                        and await self._rotate_edit_target(text, reason="proactive")
+                    ):
+                        return True
                     # Edit existing message
                     result = await self._edit_message(
                         message_id=self._message_id,
@@ -1270,6 +1357,7 @@ class GatewayStreamConsumer:
                             self._notify_new_message()
                         else:
                             self._last_sent_text = text
+                        self._message_edit_count += 1
                         # Successful edit — reset flood strike counter
                         self._flood_strikes = 0
                         return True
@@ -1296,6 +1384,9 @@ class GatewayStreamConsumer:
                                 # respects the new interval.
                                 self._last_edit_time = time.monotonic()
                                 return False
+                        if self._should_rotate_after_edit_failure(result):
+                            if await self._rotate_edit_target(text, reason="reactive"):
+                                return True
 
                         # Non-flood error OR flood strikes exhausted: enter
                         # fallback mode — send only the missing tail once the
@@ -1332,8 +1423,10 @@ class GatewayStreamConsumer:
                         # the user so fresh-final logic can detect stale
                         # preview timestamps on long-running responses.
                         self._message_created_ts = time.monotonic()
+                        self._message_edit_count = 0
                     else:
                         self._edit_supported = False
+                        self._message_edit_count = 0
                     self._already_sent = True
                     self._last_sent_text = text
                     if not result.message_id:

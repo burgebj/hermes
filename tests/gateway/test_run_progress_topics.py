@@ -179,6 +179,27 @@ class DelayedProgressAgent:
         }
 
 
+class ReactiveRotationProgressAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.tool_progress_callback("tool.started", "terminal", 'echo "call 1"', {})
+        time.sleep(1.6)
+        self.tool_progress_callback("tool.started", "terminal", 'echo "call 2"', {})
+        time.sleep(1.6)
+        self.tool_progress_callback("tool.started", "terminal", 'echo "call 3"', {})
+        time.sleep(1.6)
+        self.tool_progress_callback("tool.started", "terminal", 'echo "call 4"', {})
+        time.sleep(0.2)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class ManyProgressLinesAgent:
     """Emits enough tool-progress lines to exceed a single platform bubble."""
 
@@ -583,6 +604,51 @@ class CommentaryAgent:
             "messages": [],
             "api_calls": 1,
         }
+
+
+class FeishuProgressRotationAdapter(ProgressCaptureAdapter):
+    SUPPORTS_MESSAGE_EDITING = True
+
+    @staticmethod
+    def should_rotate_stream_edit_failure(result) -> bool:
+        raw_response = getattr(result, "raw_response", None)
+        if getattr(raw_response, "code", None) == 230072:
+            return True
+
+        error_text = str(getattr(raw_response, "msg", "") or "")
+        return "number of times it can be edited" in error_text.lower()
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "content": content,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        message_id = f"progress-{len(self.sent)}"
+        return SendResult(success=True, message_id=message_id)
+
+    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+            }
+        )
+        if len(self.edits) == 2:
+            class MockResponse:
+                code = 230072
+                msg = "The message has reached the number of times it can be edited."
+
+            return SendResult(
+                success=False,
+                error="[230072] The message has reached the number of times it can be edited.",
+                raw_response=MockResponse(),
+            )
+        return SendResult(success=True, message_id=message_id)
 
 
 class PreviewedResponseAgent:
@@ -1136,6 +1202,54 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
     assert result["final_response"] == "done"
     assert 'first command' in all_progress_text
     assert 'second command' not in all_progress_text
+
+
+@pytest.mark.asyncio
+async def test_feishu_tool_progress_reactive_rotation_sends_tail(monkeypatch, tmp_path):
+    import yaml
+
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"display": {"tool_progress": "all"}}),
+        encoding="utf-8",
+    )
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = ReactiveRotationProgressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    import tools.terminal_tool  # noqa: F401
+
+    adapter = FeishuProgressRotationAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        chat_id="oc_test",
+        chat_type="group",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-progress-rotate",
+        session_key="agent:main:feishu:group:oc_test",
+    )
+
+    assert result["final_response"] == "done"
+    assert len(adapter.sent) == 2
+    assert 'call 1' in adapter.sent[0]["content"]
+    assert 'call 3' in adapter.sent[1]["content"]
+    assert 'call 1' not in adapter.sent[1]["content"]
+    assert [call["message_id"] for call in adapter.edits[:2]] == ["progress-1", "progress-1"]
 
 
 @pytest.mark.asyncio
