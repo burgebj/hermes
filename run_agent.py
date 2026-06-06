@@ -4950,6 +4950,7 @@ class AIAgent:
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
+            model=function_args.get("model"),
             parent_agent=self,
         )
 
