@@ -1425,20 +1425,21 @@ async def _send_matrix(token, extra, chat_id, message):
 
 
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
-    """Send via the Matrix adapter so native Matrix media uploads are preserved."""
+    """Send via the Matrix adapter so native Matrix media uploads are preserved.
+
+    Prefers the gateway's existing persistent MatrixAdapter to avoid
+    creating a new Matrix connection (login + E2EE + sync) per send.
+    Falls back to a fresh adapter when the gateway is not running.
+    """
     try:
         from gateway.platforms.matrix import MatrixAdapter
     except ImportError:
         return {"error": "Matrix dependencies not installed. Run: pip install 'mautrix[encryption]'"}
 
     media_files = media_files or []
+    _owned = False
 
-    try:
-        adapter = MatrixAdapter(pconfig)
-        connected = await adapter.connect()
-        if not connected:
-            return _error("Matrix connect failed")
-
+    async def _send_via(adapter):
         metadata = {"thread_id": thread_id} if thread_id else None
         last_result = None
 
@@ -1475,13 +1476,49 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
             "chat_id": chat_id,
             "message_id": last_result.message_id,
         }
+
+    try:
+        from gateway.run import _gateway_runner_ref
+        from gateway.config import Platform
+        runner = _gateway_runner_ref()
+        if runner:
+            gw_adapter = runner.adapters.get(Platform.MATRIX)
+            if gw_adapter:
+                # Get the gateway's main event loop so we can schedule the
+                # adapter call on the CORRECT loop.  The send_message tool
+                # runs in a worker thread (via _run_async), and calling
+                # the gateway adapter's aiohttp-bound methods from a
+                # different event loop triggers aiohttp's cross-loop guard.
+                gateway_loop = getattr(runner, "_gateway_loop", None)
+                if gateway_loop and not gateway_loop.is_closed():
+                    import asyncio as _asyncio
+                    _future = _asyncio.run_coroutine_threadsafe(
+                        _send_via(gw_adapter),
+                        gateway_loop,
+                    )
+                    _reuse_result = await _asyncio.wrap_future(_future)
+                else:
+                    _reuse_result = await _send_via(gw_adapter)
+                if isinstance(_reuse_result, dict) and _reuse_result.get("success"):
+                    return _reuse_result
+    except Exception:
+        pass
+
+    try:
+        adapter = MatrixAdapter(pconfig)
+        _owned = True
+        connected = await adapter.connect()
+        if not connected:
+            return _error("Matrix connect failed")
+        return await _send_via(adapter)
     except Exception as e:
         return _error(f"Matrix send failed: {e}")
     finally:
-        try:
-            await adapter.disconnect()
-        except Exception:
-            pass
+        if _owned:
+            try:
+                await adapter.disconnect()
+            except Exception:
+                pass
 
 
 async def _send_dingtalk(extra, chat_id, message):
