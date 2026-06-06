@@ -520,6 +520,67 @@ class TestSanitizeEnvLines:
             assert fixes == 0
 
 
+class TestSaveEnvValueDeduplication:
+    """Regression coverage for #8270 — duplicate KEY= lines must not survive a write.
+
+    python-dotenv resolves duplicate keys with last-occurrence-wins. Several
+    users reported that adding an OpenRouter key via the model picker (which
+    appends to .env) didn't take effect because a stale entry from a prior
+    setup attempt lingered later in the file. save_env_value must replace the
+    first match and strip the rest so the freshly written value is the one
+    that loads at startup.
+    """
+
+    def test_dedupe_collapses_existing_duplicates(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENROUTER_API_KEY=old-broken\n"
+            "FAL_KEY=keepme\n"
+            "OPENROUTER_API_KEY=stale-bottom\n"
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_env_value("OPENROUTER_API_KEY", "fresh-good")
+
+            content = env_file.read_text()
+            lines = [ln for ln in content.splitlines() if ln.strip()]
+
+            assert lines.count("OPENROUTER_API_KEY=fresh-good") == 1
+            assert "OPENROUTER_API_KEY=old-broken" not in content
+            assert "OPENROUTER_API_KEY=stale-bottom" not in content
+            assert "FAL_KEY=keepme" in content
+
+            assert load_env()["OPENROUTER_API_KEY"] == "fresh-good"
+
+    def test_first_position_preserved_when_deduping(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "FOO=top\n"
+            "OPENROUTER_API_KEY=first\n"
+            "BAR=middle\n"
+            "OPENROUTER_API_KEY=second\n"
+            "BAZ=bottom\n"
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_env_value("OPENROUTER_API_KEY", "winner")
+
+            lines = [ln for ln in env_file.read_text().splitlines() if ln.strip()]
+            assert lines == [
+                "FOO=top",
+                "OPENROUTER_API_KEY=winner",
+                "BAR=middle",
+                "BAZ=bottom",
+            ]
+
+    def test_dedupe_no_op_when_no_duplicates(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("FOO=a\nOPENROUTER_API_KEY=existing\nBAR=b\n")
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_env_value("OPENROUTER_API_KEY", "updated")
+
+            lines = [ln for ln in env_file.read_text().splitlines() if ln.strip()]
+            assert lines == ["FOO=a", "OPENROUTER_API_KEY=updated", "BAR=b"]
+
+
 class TestOptionalEnvVarsRegistry:
     """Verify that key env vars are registered in OPTIONAL_ENV_VARS."""
 

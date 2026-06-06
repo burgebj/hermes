@@ -5523,13 +5523,24 @@ def save_env_value(key: str, value: str):
         # Sanitize on every read: split concatenated keys, drop stale placeholders
         lines = _sanitize_env_lines(lines)
 
-    # Find and update or append
+    # Find and update or append. python-dotenv resolves duplicate keys
+    # last-wins, so updating only the first occurrence and leaving stale
+    # duplicates further down the file means the wrong value still loads
+    # at startup (#8270 — users hand-editing a fresh key at the top of
+    # .env while a stale key from a prior `hermes model` add lingered at
+    # the bottom). Replace the first hit, drop the rest.
+    needle = f"{key}="
     found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
+    deduped: list = []
+    for line in lines:
+        if line.strip().startswith(needle):
+            if not found:
+                deduped.append(f"{key}={value}\n")
+                found = True
+            # Subsequent matches are dropped to ensure the saved value wins.
+            continue
+        deduped.append(line)
+    lines = deduped
 
     if not found:
         # Ensure there's a newline at the end of the file before appending
