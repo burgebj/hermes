@@ -472,6 +472,20 @@ def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
     return "/anthropic" in normalized.rstrip("/").lower()
 
 
+def _is_minimax_anthropic_endpoint(base_url: str | None) -> bool:
+    """Return True for MiniMax's Anthropic-compatible endpoints.
+
+    MiniMax's global (api.minimax.io) and China (api.minimaxi.com) Anthropic-
+    compatible endpoints synthesise thinking blocks from ``reasoning_content``
+    rather than emitting signed ``reasoning_details``. Per MiniMax's own
+    interleaved-thinking docs, callers MUST round-trip those thinking blocks
+    on subsequent turns to preserve the +35-40% gain on agentic benchmarks
+    (Tau², BrowseComp). Without preservation, the generic third-party
+    stripper removes the synthesised blocks and reasoning quality collapses.
+    """
+    return _requires_bearer_auth(base_url)
+
+
 def _requires_bearer_auth(base_url: str | None) -> bool:
     """Return True for Anthropic-compatible providers that require Bearer auth.
 
@@ -1903,6 +1917,7 @@ def _manage_thinking_signatures(
     _preserve_unsigned_thinking = (
         _is_kimi_family_endpoint(base_url, model)
         or _is_deepseek_anthropic_endpoint(base_url)
+        or _is_minimax_anthropic_endpoint(base_url)
     )
 
     last_assistant_idx = None
