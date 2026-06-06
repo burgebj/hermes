@@ -3453,8 +3453,8 @@ class HermesCLI:
 
         # Voice mode state (also reinitialized inside run() for interactive TUI).
         self._voice_lock = threading.Lock()
-        self._voice_mode = False
-        self._voice_tts = False
+        self._voice_mode = CLI_CONFIG.get("voice", {}).get("enabled", False)
+        self._voice_tts = CLI_CONFIG.get("voice", {}).get("auto_tts", False)
         self._voice_recorder = None
         self._voice_recording = False
         self._voice_processing = False
@@ -13353,8 +13353,8 @@ class HermesCLI:
 
         # Voice mode state (protected by _voice_lock for cross-thread access)
         self._voice_lock = threading.Lock()
-        self._voice_mode = False        # Whether voice mode is enabled
-        self._voice_tts = False         # Whether TTS output is enabled
+        self._voice_mode = CLI_CONFIG.get("voice", {}).get("enabled", False)  # Whether voice mode is enabled
+        self._voice_tts = CLI_CONFIG.get("voice", {}).get("auto_tts", False)  # Whether TTS output is enabled
         self._voice_recorder = None     # AudioRecorder instance (lazy init)
         self._voice_recording = False   # Whether currently recording
         self._voice_processing = False  # Whether STT is in progress
