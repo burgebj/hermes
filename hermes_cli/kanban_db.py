@@ -6043,6 +6043,17 @@ def dispatch_once(
             ).fetchone()[0]
         )
 
+    # Clear stale claim locks on ready tasks. A task that is ready cannot
+    # have a live worker by definition (the worker would have claimed it
+    # and moved it to 'running'). Stale locks leak when a worker crashes
+    # and the task is manually reset from 'blocked' to 'ready' without
+    # clearing claim_lock — the reclaim path only inspects 'running' tasks
+    # so the lock is never released.
+    conn.execute(
+        "UPDATE tasks SET claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+        "WHERE status = 'ready' AND claim_lock IS NOT NULL"
+    )
+
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
