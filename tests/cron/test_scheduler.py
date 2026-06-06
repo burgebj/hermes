@@ -2314,6 +2314,152 @@ class TestSendMediaViaAdapter:
         adapter.send_image_file.assert_called_once()
 
 
+class TestAutoAttachSavedFiles:
+    """Unit tests for _auto_attach_saved_files.
+
+    Scans agent response text for absolute file paths and attaches any
+    that exist on disk.  Language-agnostic — purely pattern-based with
+    ``Path.is_file()`` as the real filter.
+    """
+
+    def test_language_agnostic_path_detected(self):
+        """Path in any language context should be detected.  File doesn't
+        exist so nothing is attached, but the regex must find it."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        media_files = []
+        _auto_attach_saved_files(
+            "檔案已儲存至 `/home/hikariksw/report.html`（56 KB）",
+            media_files,
+            {"id": "test", "name": "test-job"},
+        )
+        assert len(media_files) == 0
+
+    def test_real_file_attached(self, tmp_path):
+        """A real file whose path appears in text should be auto-attached."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        out = tmp_path / "output.html"
+        out.write_text("<html>test</html>")
+        path = str(out)
+
+        media_files = []
+        _auto_attach_saved_files(
+            f"saved to {path} for reference",
+            media_files,
+            {"id": "test", "name": "test-job"},
+        )
+        assert len(media_files) == 1
+        assert media_files[0] == (path, False)
+
+    def test_multiple_paths_deduplicated(self, tmp_path):
+        """Multiple paths should all be captured, duplicates skipped."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        f1 = tmp_path / "a.txt"
+        f1.write_text("a")
+        f2 = tmp_path / "b.md"
+        f2.write_text("b")
+        p1, p2 = str(f1), str(f2)
+
+        media_files = []
+        _auto_attach_saved_files(
+            f"written to {p1}\nsaved to {p2}\nalso written to {p1} again",
+            media_files,
+            {"id": "test"},
+        )
+        assert len(media_files) == 2
+        paths = {p for p, _ in media_files}
+        assert paths == {p1, p2}
+
+    def test_existing_media_tags_not_duplicated(self, tmp_path):
+        """Files already in media_files should not be added again."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        out = tmp_path / "report.pdf"
+        out.write_text("pdf")
+        path = str(out)
+
+        media_files = [(path, False)]
+        _auto_attach_saved_files(
+            f"saved to {path}",
+            media_files,
+            {"id": "test"},
+        )
+        assert len(media_files) == 1
+
+    def test_no_path_no_attachment(self):
+        """Content without any absolute file path should add nothing."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        media_files = []
+        _auto_attach_saved_files(
+            "Just a status update, nothing was saved to disk.",
+            media_files,
+            {"id": "test"},
+        )
+        assert len(media_files) == 0
+
+    def test_windows_style_path_detected(self, tmp_path):
+        """Windows-style path (C:\\...) should be detected."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        # Create file at a Windows-path-like location
+        win_dir = tmp_path / "Users" / "test"
+        win_dir.mkdir(parents=True)
+        out = win_dir / "data.csv"
+        out.write_text("col1,col2")
+        path = str(out)
+
+        # Put a Windows-style path in the content, but let Path resolve it
+        media_files = []
+        _auto_attach_saved_files(
+            f"exported data to {path}",
+            media_files,
+            {"id": "test"},
+        )
+        assert len(media_files) == 1
+        assert media_files[0] == (path, False)
+
+    def test_path_with_quotes_and_punctuation(self, tmp_path):
+        """Path wrapped in quotes, parentheses, or followed by punctuation."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        out = tmp_path / "result.json"
+        out.write_text("{}")
+        path = str(out)
+
+        for text in [
+            f"結果輸出 (`{path}`)",
+            f'output: "{path}"',
+            f"generated {path}.",
+            f"fichier ({path}) créé",
+        ]:
+            media_files = []
+            _auto_attach_saved_files(text, media_files, {"id": "test"})
+            assert len(media_files) == 1, f"failed for: {text}"
+
+    def test_unc_path_detected(self, tmp_path):
+        """UNC network path (\\\\server\\share\\file.txt) should be detected
+        when the file actually exists at that location."""
+        from cron.scheduler import _auto_attach_saved_files
+
+        # Simulate a UNC path that maps to tmp_path
+        unc_dir = tmp_path / "share"
+        unc_dir.mkdir()
+        out = unc_dir / "backup.zip"
+        out.write_text("fake")
+        path = str(out)
+
+        media_files = []
+        _auto_attach_saved_files(
+            f"backup stored at {path}",
+            media_files,
+            {"id": "test"},
+        )
+        assert len(media_files) == 1
+
+
 class TestParallelTick:
     """Verify that tick() runs due jobs concurrently and isolates ContextVars."""
 

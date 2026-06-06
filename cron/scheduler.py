@@ -15,6 +15,8 @@ import contextvars
 import json
 import logging
 import os
+from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -721,6 +723,55 @@ def _send_media_via_adapter(
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
 
 
+# Regex that matches absolute file paths in free-form text.
+# Language-agnostic: no save/write keywords needed — any path-like token
+# ending with a file extension is a candidate.  ``Path.is_file()`` is the
+# actual filter, so false positives are harmless (no file = no attach).
+#
+# Covers three platform formats:
+#   /home/user/report.html          (Unix / Linux / macOS / Docker)
+#   C:\Users\name\file.html         (Windows drive letter)
+#   \\server\share\file.txt         (Windows UNC network path)
+_PATH_PATTERN = re.compile(
+    r"("
+    r"/[^\s`\"'「」『』()\[\]{}<>]+\.\w{1,10}"
+    r"|"
+    r"[A-Za-z]:[\\/][^\s`\"'「」『』()\[\]{}<>]+\.\w{1,10}"
+    r"|"
+    r"\\\\[^\s`\"'「」『』()\[\]{}<>]+\.\w{1,10}"
+    r")"
+)
+
+
+def _auto_attach_saved_files(content: str, media_files: list, job: dict) -> None:
+    """Scan cron delivery content for file paths and auto-attach as media.
+
+    Extracts every absolute file path (Unix, Windows, UNC) from the agent's
+    delivery text and attaches any that exist on disk.  Language-agnostic and
+    cross-platform — uses ``Path.is_file()`` as the real filter so regex false
+    positives (matching tokens that look like paths but aren't files) cause no
+    harm.
+
+    Skips paths already in *media_files* (e.g. from MEDIA: tags) to prevent
+    duplicates.
+    """
+    existing = {p for p, _ in media_files}
+    seen = set()
+
+    for match in _PATH_PATTERN.finditer(content):
+        path = str(Path(match.group(0)).expanduser())
+        if path in seen or path in existing:
+            continue
+        seen.add(path)
+        if Path(path).is_file():
+            logger.info(
+                "Job '%s': auto-attaching file from agent response: %s",
+                job.get("name", job.get("id", "?")), path,
+            )
+            media_files.append((path, False))
+            existing.add(path)
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -770,6 +821,9 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from gateway.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+
+    # Auto-attach files mentioned in agent response without explicit MEDIA: tags
+    _auto_attach_saved_files(delivery_content, media_files, job)
 
     try:
         config = load_gateway_config()
