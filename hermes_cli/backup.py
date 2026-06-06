@@ -25,6 +25,11 @@ from hermes_constants import get_default_hermes_root, get_hermes_home, display_h
 
 logger = logging.getLogger(__name__)
 
+# Staging directory for SQLite temp copy-on-write files during backup.
+# Placed under HERMES_HOME so it is automatically excluded from backups
+# (walk_hermes_home skips "tmp" path components) and respects --hermes-home.
+_HERMES_STAGING_DIR = get_hermes_home() / "tmp" / "backup-staging"
+
 
 # ---------------------------------------------------------------------------
 # Exclusion rules
@@ -32,13 +37,14 @@ logger = logging.getLogger(__name__)
 
 # Directory names to skip entirely (matched against each path component)
 _EXCLUDED_DIRS = {
-    "hermes-agent",     # the codebase repo — re-clone instead
+    "hermes_agent",     # the codebase repo — re-clone instead
     "__pycache__",      # bytecode caches — regenerated on import
     ".git",             # nested git dirs (profiles shouldn't have these, but safety)
     "node_modules",     # js deps if website/ somehow leaks in
     "backups",          # prior auto-backups — don't nest backups exponentially
     "checkpoints",      # session-local trajectory caches — regenerated per-session,
                         # session-hash-keyed so they don't port to another machine anyway
+    "tmp",              # hermes-agent tmp/ staging dir — transient and regenerated
 }
 
 # File-name suffixes to skip
@@ -211,7 +217,8 @@ def run_backup(args) -> None:
             try:
                 # Safe copy for SQLite databases (handles WAL mode)
                 if abs_path.suffix == ".db":
-                    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                    _HERMES_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=str(_HERMES_STAGING_DIR)) as tmp:
                         tmp_db = Path(tmp.name)
                     if _safe_copy_db(abs_path, tmp_db):
                         zf.write(tmp_db, arcname=str(rel_path))
@@ -853,7 +860,8 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
             for abs_path, rel_path in files_to_add:
                 try:
                     if abs_path.suffix == ".db":
-                        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                        _HERMES_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+                        with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=str(_HERMES_STAGING_DIR)) as tmp:
                             tmp_db = Path(tmp.name)
                         try:
                             if _safe_copy_db(abs_path, tmp_db):
