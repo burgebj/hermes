@@ -425,11 +425,31 @@ class TestAllowPrivateUrlsIntegration:
         ]):
             assert is_safe_url("http://169.254.42.99/anything") is False
 
-    def test_dns_failure_still_blocked_with_toggle(self, monkeypatch):
-        """DNS failures are still blocked even with toggle on."""
+    def test_dns_failure_allowed_when_toggle_on(self, monkeypatch):
+        """DNS failures pass when toggle is on (#32217).
+
+        Sandboxed environments such as NVIDIA OpenShell intentionally block
+        direct DNS (``socket.getaddrinfo``) while routing every HTTP request
+        through a proxy that does its own resolution. When the user has
+        explicitly opted out of SSRF protection, fail-closed on
+        ``gaierror`` would block every web tool call even though the proxy
+        could legitimately reach the host.
+        """
         monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "true")
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("fail")):
-            assert is_safe_url("https://nonexistent.example.com") is False
+            assert is_safe_url("https://news.ycombinator.com") is True
+
+    def test_dns_failure_metadata_hostname_blocked_even_with_toggle(self, monkeypatch):
+        """metadata.google.internal stays blocked under DNS failure + toggle.
+
+        The always-blocked hostname check fires before DNS resolution, so
+        opening the gaierror exit when the toggle is on cannot be turned
+        into a metadata-endpoint bypass.
+        """
+        monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "true")
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("fail")):
+            assert is_safe_url("http://metadata.google.internal/") is False
+            assert is_safe_url("http://metadata.goog/") is False
 
     def test_empty_url_still_blocked_with_toggle(self, monkeypatch):
         """Empty URLs are still blocked."""

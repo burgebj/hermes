@@ -305,8 +305,24 @@ def is_safe_url(url: str) -> bool:
         try:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except socket.gaierror:
-            # DNS resolution failed — fail closed. If DNS can't resolve it,
-            # the HTTP client will also fail, so blocking loses nothing.
+            # DNS resolution failed. Default is fail-closed: if DNS can't
+            # resolve, the HTTP client typically can't reach the host either.
+            #
+            # Exception: when the user has explicitly opted out of SSRF
+            # protection (``security.allow_private_urls: true``), allow the
+            # request through. This unblocks sandboxed environments
+            # (NVIDIA OpenShell, corporate proxies, some VPNs) where direct
+            # DNS is intentionally disabled by network policy but ALL HTTP
+            # egress flows through a proxy that resolves names itself.
+            # Always-blocked hostnames (``metadata.google.internal``, etc.)
+            # were already caught above and still block here.
+            if allow_all_private:
+                logger.debug(
+                    "Allowing DNS-unresolvable hostname "
+                    "(security.allow_private_urls=true): %s",
+                    hostname,
+                )
+                return True
             logger.warning("Blocked request — DNS resolution failed for: %s", hostname)
             return False
 
