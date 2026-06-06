@@ -2356,6 +2356,59 @@ class TestMigrateLegacyCommand:
         assert called == {"interactive": False, "dry_run": False}
 
 
+class TestVaultRuntimeSmokeHook:
+    def test_schedule_vault_runtime_smoke_noops_when_script_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: tmp_path)
+        popen_calls = []
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "Popen",
+            lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+        )
+
+        gateway_cli._schedule_vault_runtime_smoke()
+
+        assert popen_calls == []
+
+    def test_schedule_vault_runtime_smoke_launches_optional_script(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: tmp_path)
+        script = tmp_path / "scripts" / "hermes_vault_runtime_smoke.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        popen_calls = []
+
+        class DummyLog:
+            def write(self, data):
+                return len(data)
+
+            def flush(self):
+                return None
+
+        def fake_open(path, mode):
+            assert path == tmp_path / "logs" / "vault_runtime_smoke.log"
+            assert mode == "ab"
+            return DummyLog()
+
+        def fake_popen(cmd, **kwargs):
+            popen_calls.append((cmd, kwargs))
+            return SimpleNamespace(pid=123)
+
+        monkeypatch.setattr(gateway_cli, "open", fake_open, raising=False)
+        monkeypatch.setattr(gateway_cli.subprocess, "Popen", fake_popen)
+
+        gateway_cli._schedule_vault_runtime_smoke(delay_seconds=3.5)
+
+        assert popen_calls
+        cmd, kwargs = popen_calls[0]
+        assert cmd == [gateway_cli.sys.executable, str(script), "--delay", "3.5"]
+        assert kwargs["stdout"].__class__ is DummyLog
+        assert kwargs["stderr"] is gateway_cli.subprocess.STDOUT
+        assert kwargs["start_new_session"] is True
+        assert "Scheduled post-restart vault smoke test" in capsys.readouterr().out
+
+
 class TestGatewayStatusParser:
     def test_gateway_status_subparser_accepts_full_flag(self):
         import subprocess
