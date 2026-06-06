@@ -168,6 +168,7 @@ class GatewayStreamConsumer:
         # Think-block filter state (mirrors CLI's _stream_delta tag suppression)
         self._in_think_block = False
         self._think_buffer = ""
+        self._reasoning_buffer = ""  # Accumulated reasoning/thinking content
 
         # Native draft-streaming state.  Resolved at the start of run() based
         # on cfg.transport, cfg.chat_type, and the adapter's
@@ -278,13 +279,18 @@ class GatewayStreamConsumer:
             type(self)._draft_id_counter += 1
             self._draft_id = type(self)._draft_id_counter
 
-    def on_delta(self, text: str) -> None:
+    def on_delta(self, text: str, *, reasoning_content: str | None = None) -> None:
         """Thread-safe callback — called from the agent's worker thread.
 
         When *text* is ``None``, signals a tool boundary: the current message
         is finalized and subsequent text will be sent as a new message so it
         appears below any tool-progress messages the gateway sent in between.
+
+        *reasoning_content* is an optional separate stream of reasoning/thinking
+        text (used by DeepSeek's reasoning_content field).
         """
+        if reasoning_content:
+            self._reasoning_buffer += reasoning_content
         if text:
             self._queue.put(text)
         elif text is None:
@@ -292,6 +298,7 @@ class GatewayStreamConsumer:
 
     def finish(self) -> None:
         """Signal that the stream is complete."""
+        self._reasoning_buffer = ""  # Clear reasoning buffer on finish
         self._queue.put(_DONE)
 
     # ── Think-block filtering ────────────────────────────────────────
@@ -312,6 +319,7 @@ class GatewayStreamConsumer:
         """
         buf = self._think_buffer + text
         self._think_buffer = ""
+        self._reasoning_buffer = ""  # Accumulated reasoning/thinking content
 
         while buf:
             if self._in_think_block:
@@ -325,7 +333,8 @@ class GatewayStreamConsumer:
                         best_len = len(tag)
 
                 if best_len:
-                    # Found closing tag — discard block, process remainder
+                    # Accumulate think block content (don't discard)
+                    self._reasoning_buffer += buf[:best_idx]
                     self._in_think_block = False
                     buf = buf[best_idx + best_len:]
                 else:
@@ -399,6 +408,7 @@ class GatewayStreamConsumer:
         if self._think_buffer and not self._in_think_block:
             self._accumulated += self._think_buffer
             self._think_buffer = ""
+        self._reasoning_buffer = ""  # Accumulated reasoning/thinking content
 
     async def run(self) -> None:
         """Async task that drains the queue and edits the platform message."""
