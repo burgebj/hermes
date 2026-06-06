@@ -160,8 +160,8 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
         timeout: int | None = None,
         stdin_data: str | None = None,
     ) -> PreparedModalExec:
-        effective_cwd = cwd or self.cwd
-        effective_timeout = timeout or self.timeout
+        effective_cwd = self._normalize_cwd(cwd)
+        effective_timeout = self._normalize_timeout(timeout)
 
         exec_command = command
         exec_stdin = stdin_data if self._stdin_mode == "payload" else None
@@ -178,6 +178,24 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
             timeout=effective_timeout,
             stdin_data=exec_stdin,
         )
+
+    def _normalize_cwd(self, cwd: str) -> str:
+        candidate = (cwd or "").strip()
+        if candidate:
+            return candidate
+        fallback = (self.cwd or "").strip()
+        return fallback or "/root"
+
+    def _normalize_timeout(self, timeout: int | None) -> int:
+        candidate = self.timeout if timeout is None else timeout
+        try:
+            parsed = int(candidate)
+        except (TypeError, ValueError):
+            parsed = int(self.timeout) if isinstance(self.timeout, int) else 0
+        if parsed <= 0:
+            fallback = int(self.timeout) if isinstance(self.timeout, int) else 0
+            parsed = fallback if fallback > 0 else 60
+        return parsed
 
     def _result(self, output: str, returncode: int) -> dict:
         return {
