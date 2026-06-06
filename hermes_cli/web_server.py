@@ -5515,27 +5515,46 @@ def _annotate_cron_job(job: Dict[str, Any], profile: str, home: Path) -> Dict[st
 def _call_cron_for_profile(profile: Optional[str], func_name: str, *args, **kwargs):
     """Run cron.jobs helpers against the selected profile's cron directory.
 
-    cron.jobs keeps CRON_DIR/JOBS_FILE/OUTPUT_DIR as module globals resolved
-    from the process HERMES_HOME at import time. The dashboard is a single
-    process that can inspect many profiles, so temporarily retarget those
-    globals while holding a lock and restore them immediately after the call.
+    cron.jobs internal code now uses ``_resolve_cron_dir()`` /
+    ``_resolve_jobs_file()`` / ``_resolve_output_dir()`` helpers that
+    call ``get_hermes_home()`` dynamically.  The dashboard is a single
+    process that can inspect many profiles, so temporarily redirect
+    those resolve helpers (and the legacy module-level constants for
+    any code that still reads them directly) while holding a lock.
     """
     profile_name, home = _cron_profile_home(profile)
+    target_cron = home.resolve() / "cron"
+    target_jobs = target_cron / "jobs.json"
+    target_output = target_cron / "output"
     with _CRON_PROFILE_LOCK:
         from cron import jobs as cron_jobs
 
-        old_cron_dir = cron_jobs.CRON_DIR
-        old_jobs_file = cron_jobs.JOBS_FILE
-        old_output_dir = cron_jobs.OUTPUT_DIR
-        cron_jobs.CRON_DIR = home / "cron"
-        cron_jobs.JOBS_FILE = cron_jobs.CRON_DIR / "jobs.json"
-        cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
+        # Snapshot the originals so we can restore unconditionally.
+        orig_resolve_cron_dir = cron_jobs._resolve_cron_dir
+        orig_resolve_jobs_file = cron_jobs._resolve_jobs_file
+        orig_resolve_output_dir = cron_jobs._resolve_output_dir
+        orig_cron_dir = cron_jobs.CRON_DIR
+        orig_jobs_file = cron_jobs.JOBS_FILE
+        orig_output_dir = cron_jobs.OUTPUT_DIR
+
+        # Patch both the dynamic resolvers (used by internal code) and
+        # the module-level constants (kept for backward compat / direct
+        # attribute access by external callers).
+        cron_jobs._resolve_cron_dir = lambda: target_cron
+        cron_jobs._resolve_jobs_file = lambda: target_jobs
+        cron_jobs._resolve_output_dir = lambda: target_output
+        cron_jobs.CRON_DIR = target_cron
+        cron_jobs.JOBS_FILE = target_jobs
+        cron_jobs.OUTPUT_DIR = target_output
         try:
             result = getattr(cron_jobs, func_name)(*args, **kwargs)
         finally:
-            cron_jobs.CRON_DIR = old_cron_dir
-            cron_jobs.JOBS_FILE = old_jobs_file
-            cron_jobs.OUTPUT_DIR = old_output_dir
+            cron_jobs._resolve_cron_dir = orig_resolve_cron_dir
+            cron_jobs._resolve_jobs_file = orig_resolve_jobs_file
+            cron_jobs._resolve_output_dir = orig_resolve_output_dir
+            cron_jobs.CRON_DIR = orig_cron_dir
+            cron_jobs.JOBS_FILE = orig_jobs_file
+            cron_jobs.OUTPUT_DIR = orig_output_dir
 
     if isinstance(result, list):
         return [_annotate_cron_job(j, profile_name, home) for j in result]
