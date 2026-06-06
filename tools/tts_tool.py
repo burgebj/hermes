@@ -996,6 +996,7 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     voice = oai_config.get("voice", DEFAULT_OPENAI_VOICE)
     base_url = oai_config.get("base_url", base_url)
     speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
+    instructions = oai_config.get("instructions", "").strip() or None
 
     # Determine response format from extension
     if output_path.endswith(".ogg"):
@@ -1015,6 +1016,8 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         }
         if speed != 1.0:
             create_kwargs["speed"] = max(0.25, min(4.0, speed))
+        if instructions:
+            create_kwargs["instructions"] = instructions
         response = client.audio.speech.create(**create_kwargs)
 
         response.stream_to_file(output_path)
