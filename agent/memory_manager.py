@@ -49,6 +49,10 @@ _INTERNAL_NOTE_RE = re.compile(
     r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
     re.IGNORECASE,
 )
+_PROMPT_STRUCTURING_TAG_RE = re.compile(
+    r'</?\s*(?:system|instructions|tool_use|tool_result|human|assistant|function_call|mandatory_tool_use)\b[^>]*>',
+    re.IGNORECASE,
+)
 
 
 def sanitize_context(text: str) -> str:
@@ -56,6 +60,7 @@ def sanitize_context(text: str) -> str:
     text = _INTERNAL_CONTEXT_RE.sub('', text)
     text = _INTERNAL_NOTE_RE.sub('', text)
     text = _FENCE_TAG_RE.sub('', text)
+    text = _PROMPT_STRUCTURING_TAG_RE.sub('', text)
     return text
 
 
