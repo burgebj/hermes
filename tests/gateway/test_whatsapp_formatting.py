@@ -325,6 +325,78 @@ class TestBridgeEventMetadata:
         assert event.raw_message["quotedRemoteJid"] == "15551234567@s.whatsapp.net"
         assert event.raw_message["hasQuotedMessage"] is True
 
+    @pytest.mark.asyncio
+    async def test_quoted_message_id_forwarded_to_agent_context(self):
+        """Reply context reaches the agent via reply_to_message_id."""
+        adapter = _make_adapter()
+        data = {
+            "messageId": "incoming-msg",
+            "chatId": "15551234567@s.whatsapp.net",
+            "senderId": "15551234567@s.whatsapp.net",
+            "senderName": "Tester",
+            "chatName": "Tester",
+            "isGroup": False,
+            "body": "Actually, change it to BL-99",
+            "hasMedia": False,
+            "mediaUrls": [],
+            "quotedMessageId": "ABC123",
+            "quotedParticipant": "99999999999@s.whatsapp.net",
+            "hasQuotedMessage": True,
+        }
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.reply_to_message_id == "ABC123"
+        assert event.reply_to_text is None  # bridge doesn't emit quoted text yet
+
+    @pytest.mark.asyncio
+    async def test_non_reply_message_unchanged(self):
+        """Normal messages leave reply_to_message_id unset."""
+        adapter = _make_adapter()
+        data = {
+            "messageId": "plain-msg",
+            "chatId": "15551234567@s.whatsapp.net",
+            "senderId": "15551234567@s.whatsapp.net",
+            "senderName": "Tester",
+            "chatName": "Tester",
+            "isGroup": False,
+            "body": "Please prioritize KL-42",
+            "hasMedia": False,
+            "mediaUrls": [],
+        }
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.reply_to_message_id is None
+        assert event.text == "Please prioritize KL-42"
+
+    def test_reply_to_bot_admission_control_still_works(self):
+        """_message_is_reply_to_bot continues to function after adapter change."""
+        adapter = _make_adapter()
+        # bot IDs are normalised inside the adapter; set via the bridge data field
+        data_reply_to_bot = {
+            "body": "approved",
+            "botIds": ["99999999999@s.whatsapp.net"],
+            "quotedParticipant": "99999999999@s.whatsapp.net",
+            "hasQuotedMessage": True,
+        }
+        data_reply_to_other = {
+            "body": "approved",
+            "botIds": ["99999999999@s.whatsapp.net"],
+            "quotedParticipant": "11111111111@s.whatsapp.net",
+            "hasQuotedMessage": True,
+        }
+        data_no_quote = {
+            "body": "hello",
+            "botIds": ["99999999999@s.whatsapp.net"],
+        }
+
+        assert adapter._message_is_reply_to_bot(data_reply_to_bot) is True
+        assert adapter._message_is_reply_to_bot(data_reply_to_other) is False
+        assert adapter._message_is_reply_to_bot(data_no_quote) is False
+
 
 # ---------------------------------------------------------------------------
 # display_config tier classification

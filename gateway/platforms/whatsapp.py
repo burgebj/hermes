@@ -1373,6 +1373,16 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         except Exception as e:
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)
 
+            # Forward quoted-message context so reply-based corrections keep
+            # their reference. The bridge (PR #25489) already extracts
+            # quotedMessageId / hasQuotedMessage from Baileys' contextInfo;
+            # we just need to map it to the structured field the agent prompt
+            # builder consumes.  No local text cache for the quoted body yet,
+            # so reply_to_text stays None — matching the Matrix adapter.
+            reply_to_message_id = None
+            if data.get("hasQuotedMessage"):
+                reply_to_message_id = data.get("quotedMessageId") or None
+
             return MessageEvent(
                 text=body,
                 message_type=msg_type,
@@ -1381,6 +1391,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                reply_to_message_id=reply_to_message_id,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
