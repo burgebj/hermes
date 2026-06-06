@@ -322,6 +322,14 @@ TOOLSETS = {
         "includes": []
     },
 
+    "jira": {
+        "description": "Native Jira Cloud integration — create, read, update, search, and transition issues; manage projects and comments",
+        "tools": [
+            "jira_issue", "jira_search", "jira_project", "jira_comment",
+        ],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     

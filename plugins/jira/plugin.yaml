@@ -1,0 +1,10 @@
+name: jira
+version: 1.0.0
+description: "Native Jira Cloud integration — 4 tools (issues, search, projects, comments) using Jira REST API v3 with API token auth. Auth via `hermes auth jira`."
+author: NousResearch
+kind: backend
+provides_tools:
+  - jira_issue
+  - jira_search
+  - jira_project
+  - jira_comment
