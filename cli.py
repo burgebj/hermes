@@ -7563,7 +7563,12 @@ class HermesCLI:
             self._status_bar_visible = False
             self._app.invalidate()
             try:
-                run_in_terminal(_pick)
+                _future = run_in_terminal(_pick)
+                # run_in_terminal returns an Awaitable/Future in prompt_toolkit 3.0+.
+                # Block until it completes so the coroutine isn't orphaned.
+                _done = threading.Event()
+                _future.add_done_callback(lambda f: _done.set())
+                _done.wait(timeout=60)
             finally:
                 self._status_bar_visible = was_visible
                 self._app.invalidate()
@@ -7600,7 +7605,12 @@ class HermesCLI:
             self._status_bar_visible = False
             self._app.invalidate()
             try:
-                run_in_terminal(_ask)
+                _future = run_in_terminal(_ask)
+                # run_in_terminal returns an Awaitable/Future in prompt_toolkit 3.0+.
+                # Block until it completes so the coroutine isn't orphaned.
+                _done = threading.Event()
+                _future.add_done_callback(lambda f: _done.set())
+                _done.wait(timeout=60)
             except Exception:
                 # WSL / Warp / certain terminal emulators silently drop the
                 # scheduled coroutine.  Fall back to a direct input() so the
