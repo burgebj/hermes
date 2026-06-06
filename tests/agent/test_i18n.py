@@ -74,6 +74,18 @@ def test_catalog_placeholders_match_english(lang: str):
         )
 
 
+def test_russian_catalog_uses_curated_terminology():
+    """Guard the highest-signal Russian phrasing against regression to calques."""
+    ru = _flatten(_load_raw("ru"))
+
+    assert ru["approval.allowed_always"].strip() == "✓ Разрешено всегда"
+    assert "кеш" not in ru["gateway.model.prompt_caching_enabled"].lower()
+    assert "кеш" not in ru["gateway.reload_mcp.confirm_prompt"].lower()
+    assert "кеш" not in ru["gateway.usage.label_cache_read"].lower()
+    assert "кеш" not in ru["gateway.usage.label_cache_write"].lower()
+    assert "историч." not in ru["gateway.compress.summary_failed"].lower()
+
+
 # ---------------------------------------------------------------------------
 # Language resolution
 # ---------------------------------------------------------------------------
