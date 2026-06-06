@@ -114,6 +114,51 @@ class TestEnvAssignments:
         assert "mypassword" not in result
 
 
+class TestEnvLookupPreserved:
+    """Programmatic env var lookups must not be corrupted (issue #2852)."""
+
+    def test_os_getenv_single_quote(self):
+        text = "ha_token=os.getenv('HOMEASSISTANT_TOKEN')"
+        result = redact_sensitive_text(text)
+        assert result == text
+
+    def test_os_getenv_double_quote(self):
+        text = 'api_token=os.getenv("MY_API_TOKEN")'
+        result = redact_sensitive_text(text)
+        assert result == text
+
+    def test_os_environ_get(self):
+        text = "self.token=os.environ.get('HOMEASSISTANT_TOKEN')"
+        result = redact_sensitive_text(text)
+        assert result == text
+
+    def test_os_environ_bracket(self):
+        text = "secret=os.environ['MY_SECRET']"
+        result = redact_sensitive_text(text)
+        assert result == text
+
+    def test_spaced_assignment(self):
+        text = "ha_token = os.getenv('HOMEASSISTANT_TOKEN')"
+        result = redact_sensitive_text(text)
+        assert result == text
+
+    def test_real_env_value_still_redacted(self):
+        text = "HOMEASSISTANT_TOKEN=eyJhbGciOiJIUzI1NiJ9.abc123.xyz"
+        result = redact_sensitive_text(text)
+        assert "eyJhbGciOiJIUzI1NiJ9" not in result
+
+    def test_multiline_skill_file(self):
+        text = """def _get_credentials():
+    ha_url = os.getenv('HOMEASSISTANT_URL')
+    ha_token=os.getenv('HOMEASSISTANT_TOKEN')
+    if not ha_url or not ha_token:
+        raise ValueError('Missing credentials')
+    return ha_url, ha_token"""
+        result = redact_sensitive_text(text)
+        assert "os.getenv('HOMEASSISTANT_TOKEN')" in result
+        assert "os.getenv('HOMEASSISTANT_URL')" in result
+
+
 class TestJsonFields:
     def test_json_api_key(self):
         text = '{"apiKey": "sk-proj-abc123def456ghi789jkl012"}'

@@ -358,6 +358,15 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     if _has_known_prefix_substring(text):
         text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
 
+    # ENV assignments: OPENAI_API_KEY=sk-abc...
+    def _redact_env(m):
+        name, quote, value = m.group(1), m.group(2), m.group(3)
+        # Skip programmatic env lookups — these reference variable *names*,
+        # not actual secret values (fixes #2852).
+        if re.match(r"os\.(?:getenv|environ)", value):
+            return m.group(0)
+        return f"{name}={quote}{_mask_token(value)}{quote}"
+    text = _ENV_ASSIGN_RE.sub(_redact_env, text)
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
     if not code_file:
         if "=" in text:
