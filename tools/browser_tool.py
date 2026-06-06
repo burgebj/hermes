@@ -1608,7 +1608,7 @@ BROWSER_TOOL_SCHEMAS = [
                 },
                 "expression": {
                     "type": "string",
-                    "description": "JavaScript expression to evaluate in the page context. Runs in the browser like DevTools console — full access to DOM, window, document. Return values are serialized to JSON. Example: 'document.title' or 'document.querySelectorAll(\"a\").length'"
+                    "description": "Simple read-only JavaScript expression to evaluate in the page context. Network, storage, cookie, credential, and code-execution APIs are blocked. Return values are serialized to JSON. Example: 'document.title' or 'document.querySelectorAll(\"a\").length'"
                 }
             },
             "required": []
@@ -2810,8 +2810,78 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     return json.dumps(response, ensure_ascii=False)
 
 
+_BROWSER_CONSOLE_MAX_EXPRESSION_LENGTH = 500
+
+_BROWSER_CONSOLE_BLOCK_PATTERNS = (
+    (re.compile(r"\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(", re.IGNORECASE), "network request APIs are not allowed"),
+    (re.compile(r"\bnavigator\s*\.\s*sendBeacon\s*\(", re.IGNORECASE), "network request APIs are not allowed"),
+    (re.compile(r"\[\s*['\"](?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)['\"]\s*\]", re.IGNORECASE), "network request APIs are not allowed"),
+    (re.compile(r"\bdocument\s*\.\s*cookie\b", re.IGNORECASE), "cookie access is not allowed"),
+    (re.compile(r"\[\s*['\"]cookie['\"]\s*\]", re.IGNORECASE), "cookie access is not allowed"),
+    (re.compile(r"\b(?:localStorage|sessionStorage|indexedDB)\b", re.IGNORECASE), "browser storage access is not allowed"),
+    (re.compile(r"\b(?:eval|Function|importScripts)\s*\(", re.IGNORECASE), "dynamic code execution is not allowed"),
+    (re.compile(r"\bimport\s*\(", re.IGNORECASE), "dynamic code execution is not allowed"),
+    (re.compile(r"\bset(?:Timeout|Interval)\s*\(\s*['\"`]", re.IGNORECASE), "string timer code execution is not allowed"),
+    (re.compile(r"\b(?:document|window)\s*\.\s*(?:write|open)\s*\(", re.IGNORECASE), "DOM mutation APIs are not allowed"),
+    (re.compile(r"\b(?:169\.254\.169\.254|169\.254\.170\.2|169\.254\.169\.253|127(?:\.\d{1,3}){3}|0\.0\.0\.0|localhost|metadata\.google\.internal|metadata\.goog|100\.100\.100\.200)\b", re.IGNORECASE), "private or metadata hosts are not allowed"),
+    (re.compile(r"\b(?:password|passwd|pwd|credential|secret|token|api[_-]?key|authorization)\b", re.IGNORECASE), "credential fields are not allowed"),
+)
+
+_BROWSER_CONSOLE_ALLOWED_PATTERNS = (
+    re.compile(r"\A\s*document\.(?:title|readyState|URL|referrer|characterSet)\s*;?\s*\Z"),
+    re.compile(r"\A\s*document\.body\.(?:innerText|textContent)\s*;?\s*\Z"),
+    re.compile(r"\A\s*document\.documentElement\.(?:lang|dir)\s*;?\s*\Z"),
+    re.compile(r"\A\s*(?:window\.)?location\.(?:href|hostname|host|origin|pathname|search|hash|protocol)\s*;?\s*\Z"),
+    re.compile(
+        r"\A\s*document\.querySelector(?:All)?\(\s*(?P<quote>['\"])[^'\"]{1,160}(?P=quote)\s*\)"
+        r"(?:(?:\?\.|\.)(?:length|textContent|innerText|id|className|tagName|href|src|alt|content|name))?\s*;?\s*\Z"
+    ),
+)
+
+
+def _browser_console_reject(expression: str) -> Optional[str]:
+    if not isinstance(expression, str) or not expression.strip():
+        return "expression must be a non-empty string"
+
+    if len(expression) > _BROWSER_CONSOLE_MAX_EXPRESSION_LENGTH:
+        return f"expression exceeds {_BROWSER_CONSOLE_MAX_EXPRESSION_LENGTH} characters"
+
+    try:
+        from agent.redact import _PREFIX_RE
+        if _PREFIX_RE.search(expression):
+            return "secret token literals are not allowed"
+    except Exception:
+        pass
+
+    without_comments = re.sub(r"/\*.*?\*/|//[^\r\n]*", "", expression, flags=re.DOTALL)
+    scan_targets = (without_comments, re.sub(r"\s+", "", without_comments))
+
+    for pattern, reason in _BROWSER_CONSOLE_BLOCK_PATTERNS:
+        if any(pattern.search(target) for target in scan_targets):
+            return reason
+
+    if not any(pattern.match(expression) for pattern in _BROWSER_CONSOLE_ALLOWED_PATTERNS):
+        return "only simple read-only DOM and location expressions are allowed"
+
+    return None
+
+
+def _browser_console_rejection_response(reason: str) -> str:
+    return json.dumps({
+        "success": False,
+        "error": (
+            f"Blocked unsafe browser_console expression: {reason}. "
+            "Use browser_snapshot, browser_vision, or a simple read-only DOM expression instead."
+        ),
+    }, ensure_ascii=False)
+
+
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
+    reject_reason = _browser_console_reject(expression)
+    if reject_reason:
+        return _browser_console_rejection_response(reject_reason)
+
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
@@ -2918,6 +2988,10 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
 
 def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate JS via Camofox's /tabs/{tab_id}/eval endpoint (if available)."""
+    reject_reason = _browser_console_reject(expression)
+    if reject_reason:
+        return _browser_console_rejection_response(reject_reason)
+
     from tools.browser_camofox import _ensure_tab, _post
     try:
         tab_info = _ensure_tab(task_id or "default")
