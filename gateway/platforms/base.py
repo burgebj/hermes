@@ -4475,15 +4475,16 @@ class BasePlatformAdapter(ABC):
                 )
             else:
                 _post_cb = getattr(self, "_post_delivery_callbacks", {}).pop(session_key, None)
+            # Stop typing indicator first — must not be delayed by a
+            # stuck post-delivery callback (see #24971).
+            await _stop_typing_task()
             if callable(_post_cb):
                 try:
                     _post_result = _post_cb()
                     if inspect.isawaitable(_post_result):
-                        await _post_result
-                except Exception:
+                        await asyncio.wait_for(_post_result, timeout=30.0)
+                except (asyncio.TimeoutError, Exception):
                     pass
-            # Stop typing indicator
-            await _stop_typing_task()
             # Also cancel any platform-level persistent typing tasks (e.g. Discord)
             # that may have been recreated by _keep_typing after the last stop_typing()
             try:

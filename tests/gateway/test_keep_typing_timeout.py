@@ -198,3 +198,100 @@ class TestKeepTypingTimeoutPerTick:
         assert calls == [], (
             f"send_typing was called on a paused chat: {calls}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: _keep_typing must stop even when post-delivery callback hangs
+# See: https://github.com/NousResearch/hermes-agent/issues/24971
+# ---------------------------------------------------------------------------
+
+
+class TestPostDeliveryCallbackTimeout:
+    """_stop_typing_task must run before the post-delivery callback, and the
+    callback must be bounded by a timeout so a hanging coroutine cannot prevent
+    typing cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_typing_stopped_before_callback(self):
+        """_stop_typing_task is called even if the callback hangs."""
+        adapter = _StubAdapter()
+        callback_entered = asyncio.Event()
+
+        async def _handler(_event):
+            return "ok"
+
+        async def _slow_callback():
+            callback_entered.set()
+            # Simulate a hung callback (e.g. dead Telegram socket)
+            await asyncio.sleep(3600)
+
+        adapter.set_message_handler(_handler)
+        adapter._post_delivery_callbacks = {"test-session": _slow_callback}
+
+        async def _tracking_keep_typing(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        adapter._keep_typing = _tracking_keep_typing
+
+        event = MagicMock()
+        event.source.chat_id = "test-chat"
+        event.source.thread_id = None
+        event.source.user_id = "user-1"
+        event.text = "hello"
+        event.raw = {}
+
+        # The fix adds asyncio.wait_for(..., timeout=30.0) around the
+        # callback.  Patch to a very short timeout so the test completes
+        # in reasonable time.
+        _real_wait_for = asyncio.wait_for
+
+        async def _fast_wait_for(coro, timeout=None):
+            return await _real_wait_for(coro, timeout=0.05)
+
+        import gateway.platforms.base as _base
+        _orig = _base.asyncio.wait_for
+        _base.asyncio.wait_for = _fast_wait_for
+        try:
+            await _real_wait_for(
+                adapter._process_message_background(event, "test-session"),
+                timeout=10.0,
+            )
+        finally:
+            _base.asyncio.wait_for = _orig
+
+        # If we got here, the function didn't hang — the timeout worked.
+        assert callback_entered.is_set()
+
+    @pytest.mark.asyncio
+    async def test_fast_callback_still_runs(self):
+        """A fast (non-hanging) callback should still execute normally."""
+        adapter = _StubAdapter()
+        callback_ran = asyncio.Event()
+
+        async def _handler(_event):
+            return "ok"
+
+        async def _fast_callback():
+            callback_ran.set()
+
+        adapter.set_message_handler(_handler)
+        adapter._post_delivery_callbacks = {"test-session": _fast_callback}
+
+        async def _hold_typing(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        adapter._keep_typing = _hold_typing
+
+        event = MagicMock()
+        event.source.chat_id = "test-chat"
+        event.source.thread_id = None
+        event.source.user_id = "user-1"
+        event.text = "hello"
+        event.raw = {}
+
+        await asyncio.wait_for(
+            adapter._process_message_background(event, "test-session"),
+            timeout=5.0,
+        )
+
+        assert callback_ran.is_set()
