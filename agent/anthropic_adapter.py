@@ -707,6 +707,12 @@ def build_anthropic_client(
         if _is_azure_anthropic_endpoint(normalized_base_url) and "api-version" not in normalized_base_url:
             kwargs["base_url"] = normalized_base_url.rstrip("/")
             kwargs["default_query"] = {"api-version": "2025-04-15"}
+        # Third-party Anthropic-compatible endpoints that already include /v1
+        # in their base URL (e.g. opencode.ai/zen/go/v1) would produce a
+        # double /v1/messages path when the SDK appends /v1/messages.
+        # Strip the trailing /v1 so the SDK's own path construction is correct.
+        elif normalized_base_url.rstrip("/").endswith("/v1"):
+            kwargs["base_url"] = normalized_base_url.rstrip("/")
         else:
             kwargs["base_url"] = normalized_base_url
     common_betas = _common_betas_for_base_url(
