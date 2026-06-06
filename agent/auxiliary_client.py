@@ -168,7 +168,11 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
         suffix = normalized.split(":", 1)[1].strip()
         if not suffix:
             return "custom"
-        normalized = suffix
+        # Preserve named custom providers (``custom:<name>``) through routing.
+        # Dropping the prefix makes auxiliary/vision routes look for a bare
+        # provider name and can fall back to the default custom endpoint instead
+        # of the explicitly selected custom provider.
+        normalized = f"custom:{suffix}"
     if normalized == "codex":
         return "openai-codex"
     if normalized == "main":

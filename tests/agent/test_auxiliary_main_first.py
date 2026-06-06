@@ -395,6 +395,36 @@ class TestResolveVisionMainFirst:
         assert provider == "nous"
         mock_strict.assert_called_once_with("nous", None)
 
+    def test_named_custom_provider_override_preserves_custom_prefix(self):
+        """Explicit custom:<name> vision overrides route to that named provider."""
+        with patch(
+            "agent.auxiliary_client._read_main_provider", return_value="openrouter",
+        ), patch(
+            "agent.auxiliary_client._read_main_model",
+            return_value="anthropic/claude-opus-4.6",
+        ), patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("custom:morecode-openai", "vision-model", None, None, None),
+        ), patch(
+            "agent.auxiliary_client.resolve_provider_client"
+        ) as mock_resolve, patch(
+            "agent.auxiliary_client._resolve_strict_vision_backend"
+        ) as mock_strict:
+            mock_client = MagicMock()
+            mock_resolve.return_value = (mock_client, "vision-model")
+
+            from agent.auxiliary_client import resolve_vision_provider_client
+
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "custom:morecode-openai"
+        assert client is mock_client
+        assert model == "vision-model"
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.args[0] == "custom:morecode-openai"
+        assert mock_resolve.call_args.kwargs.get("is_vision") is True
+        mock_strict.assert_not_called()
+
 
 # ── Constant cleanup ────────────────────────────────────────────────────────
 
