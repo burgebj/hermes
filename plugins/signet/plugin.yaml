@@ -1,0 +1,7 @@
+name: signet
+version: 0.1.0
+description: "Cryptographic audit trail — tamper-evident hash-chained receipts for every tool call. Addresses #487 (SHA-256 hash-chain audit log) with optional Ed25519 signatures via the Signet library."
+author: "willamhou (community contribution)"
+hooks:
+  - post_tool_call
+  - on_session_end
