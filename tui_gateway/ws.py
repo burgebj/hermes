@@ -288,28 +288,29 @@ async def handle_ws(ws: Any) -> None:
         if transport is not None:
             transport.close()
 
-            # Detach the transport from any sessions it owned so later emits
-            # fall back to stdio instead of crashing into a closed socket.
+            # Detach this transport from any sessions it owned so later emits
+            # do not crash into a closed socket. A session may still have other
+            # live clients attached through its fanout transport.
             #
             # In the dashboard's in-process gateway that stdio fallback has no
             # real reader, so a detached session would otherwise sit forever
             # holding its _SlashWorker subprocess open (one leaked python proc
             # per browser refresh — #38591 fallout). Schedule a grace-delayed
-            # reap; a quick reconnect / session.resume re-binds a live
-            # transport and cancels it (see _ws_session_is_orphaned).
-            for _sid, sess in list(server._sessions.items()):
-                if sess.get("transport") is transport:
-                    sess["transport"] = server._stdio_transport
-                    detached_sessions += 1
-                    try:
-                        server._schedule_ws_orphan_reap(_sid)
-                        reaped_scheduled += 1
-                    except Exception:
-                        _log.exception(
-                            "ws orphan-reap schedule failed peer=%s sid=%s",
-                            peer,
-                            _sid,
-                        )
+            # reap only when no other live transport remains.
+            for _sid in server._detach_transport_from_sessions(transport):
+                detached_sessions += 1
+                sess = server._sessions.get(_sid)
+                if not server._ws_session_is_orphaned(sess):
+                    continue
+                try:
+                    server._schedule_ws_orphan_reap(_sid)
+                    reaped_scheduled += 1
+                except Exception:
+                    _log.exception(
+                        "ws orphan-reap schedule failed peer=%s sid=%s",
+                        peer,
+                        _sid,
+                    )
         try:
             await ws.close()
         except Exception as exc:
