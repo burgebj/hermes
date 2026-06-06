@@ -1198,11 +1198,14 @@ class HonchoMemoryProvider(MemoryProvider):
             ),
         }
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: str | list, assistant_content: str | list, *, session_id: str = "") -> None:
         """Record the conversation turn in Honcho (non-blocking).
 
         Messages exceeding the Honcho API limit (default 25k chars) are
         split into multiple messages with continuation markers.
+
+        Handles multimodal content (list from image-bearing messages) by
+        extracting only text parts, discarding image references.
         """
         if self._cron_skipped:
             return
@@ -1212,9 +1215,24 @@ class HonchoMemoryProvider(MemoryProvider):
             self._start_session_init_background()
             return
 
+        # Normalize list content (e.g. RikkaHub image emotes) to plain text.
+        # Only extract text parts; discard image_url and other non-text parts.
+        def _extract_text(content: str | list) -> str:
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "text":
+                            parts.append(part.get("text", ""))
+                        # image_url and other types are intentionally skipped
+                    elif isinstance(part, str):
+                        parts.append(part)
+                return " ".join(parts)
+            return str(content) if content else ""
+
         msg_limit = self._config.message_max_chars if self._config else 25000
-        clean_user_content = sanitize_context(user_content or "").strip()
-        clean_assistant_content = sanitize_context(assistant_content or "").strip()
+        clean_user_content = sanitize_context(_extract_text(user_content)).strip()
+        clean_assistant_content = sanitize_context(_extract_text(assistant_content)).strip()
 
         def _sync():
             try:
