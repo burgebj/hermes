@@ -149,7 +149,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, update_job
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -2086,6 +2086,31 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 output_file = save_job_output(job["id"], output)
                 if verbose:
                     logger.info("Output saved to: %s", output_file)
+
+                # --- 429 retry queue ---
+                # If the LLM returned a 429 rate-limit error, pull next_run_at
+                # forward with exponential backoff instead of waiting for the
+                # normal schedule.  Retry indefinitely until success.
+                if not success and error and ("429" in str(error) or "rate limit" in str(error).lower()):
+                    retry_count = job.get("_retry_count", 0)
+                    backoff_minutes = min(5 * (2 ** retry_count), 60)  # 5, 10, 20, 40, 60, 60...
+                    retry_at = _hermes_now() + __import__("datetime").timedelta(minutes=backoff_minutes)
+                    retry_count += 1
+                    logger.info(
+                        "Job '%s': 429 rate limit (retry %d), requeuing in %d min at %s",
+                        job["id"], retry_count, backoff_minutes,
+                        retry_at.strftime("%H:%M:%S"),
+                    )
+                    mark_job_run(job["id"], False, error)
+                    update_job(job["id"], {
+                        "next_run_at": retry_at.isoformat(),
+                        "_retry_count": retry_count,
+                    })
+                    return False  # silent — no error delivery, just retry
+
+                # Reset retry counter on success or non-429 errors.
+                if job.get("_retry_count", 0) > 0:
+                    update_job(job["id"], {"_retry_count": 0})
 
                 # Deliver the final response to the origin/target chat.
                 # If the agent responded with [SILENT], skip delivery (but
