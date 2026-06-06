@@ -99,6 +99,20 @@ def _check_local_runtime() -> tuple[bool, str | None]:
         return False, str(exc)
 
 
+def _check_cloud_client() -> tuple[bool, str | None]:
+    """Return whether the hindsight-client package is importable.
+
+    Used by cloud and local_external modes to verify the client library is
+    installed before attempting to use it.  Without this check the gateway
+    crashes with an unhandled ImportError when the package is missing.
+    """
+    try:
+        importlib.import_module("hindsight_client")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Hindsight API capability probe — mirrors hindsight-integrations/openclaw.
 # ---------------------------------------------------------------------------
@@ -608,7 +622,12 @@ class HindsightMemoryProvider(MemoryProvider):
                 available, _ = _check_local_runtime()
                 return available
             if mode == "local_external":
-                return True
+                available, _ = _check_cloud_client()
+                return available
+            # Cloud mode: need both hindsight-client package AND an API key
+            pkg_ok, _ = _check_cloud_client()
+            if not pkg_ok:
+                return False
             has_key = bool(
                 cfg.get("apiKey")
                 or cfg.get("api_key")
@@ -920,7 +939,13 @@ class HindsightMemoryProvider(MemoryProvider):
                 kwargs["idle_timeout"] = idle_timeout
                 self._client = HindsightEmbedded(**kwargs)
             else:
-                from hindsight_client import Hindsight
+                try:
+                    from hindsight_client import Hindsight
+                except ImportError:
+                    raise RuntimeError(
+                        "hindsight-client is not installed. "
+                        "Install with: uv pip install 'hindsight-client>=0.4.22'"
+                    ) from None
                 timeout = self._timeout or _DEFAULT_TIMEOUT
                 kwargs = {"base_url": self._api_url, "timeout": float(timeout)}
                 if self._api_key:
@@ -1138,6 +1163,15 @@ class HindsightMemoryProvider(MemoryProvider):
                 logger.warning(
                     "Hindsight local mode disabled because its runtime could not be imported: %s",
                     reason,
+                )
+                self._mode = "disabled"
+                return
+        elif self._mode in ("cloud", "local_external"):
+            available, reason = _check_cloud_client()
+            if not available:
+                logger.warning(
+                    "Hindsight %s mode disabled because hindsight-client could not be imported: %s",
+                    self._mode, reason,
                 )
                 self._mode = "disabled"
                 return

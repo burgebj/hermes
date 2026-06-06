@@ -46,6 +46,15 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _mock_cloud_client(monkeypatch):
+    """#18875: Mock _check_cloud_client so cloud-mode tests pass without hindsight-client installed."""
+    monkeypatch.setattr(
+        "plugins.memory.hindsight._check_cloud_client",
+        lambda: (True, None),
+    )
+
+
 def _make_mock_client():
     """Create a mock Hindsight client with async methods."""
     async def _aretain(
@@ -93,7 +102,7 @@ def provider(tmp_path, monkeypatch):
     """Create an initialized HindsightMemoryProvider with a mock client."""
     config = {
         "mode": "cloud",
-        "apiKey": "test-key",
+        "apiKey": "***",
         "api_url": "http://localhost:9999",
         "bank_id": "test-bank",
         "budget": "mid",
@@ -105,6 +114,11 @@ def provider(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
+    )
+    # Mock cloud client check so initialize() doesn't disable cloud mode
+    monkeypatch.setattr(
+        "plugins.memory.hindsight._check_cloud_client",
+        lambda: (True, None),
     )
 
     p = HindsightMemoryProvider()
@@ -119,7 +133,7 @@ def provider_with_config(tmp_path, monkeypatch):
     def _make(**overrides):
         config = {
             "mode": "cloud",
-            "apiKey": "test-key",
+            "apiKey": "***",
             "api_url": "http://localhost:9999",
             "bank_id": "test-bank",
             "budget": "mid",
@@ -132,6 +146,11 @@ def provider_with_config(tmp_path, monkeypatch):
 
         monkeypatch.setattr(
             "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
+        )
+        # Mock cloud client check so initialize() doesn't disable cloud mode
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (True, None),
         )
 
         p = HindsightMemoryProvider()
@@ -1404,6 +1423,10 @@ class TestAvailability:
             lambda: tmp_path / "nonexistent",
         )
         monkeypatch.setenv("HINDSIGHT_API_KEY", "test-key")
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (True, None),
+        )
         p = HindsightMemoryProvider()
         assert p.is_available()
 
@@ -1438,6 +1461,10 @@ class TestAvailability:
         monkeypatch.setattr(
             "plugins.memory.hindsight.get_hermes_home",
             lambda: tmp_path,
+        )
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (True, None),
         )
 
         p = HindsightMemoryProvider()
@@ -1478,6 +1505,70 @@ class TestAvailability:
         monkeypatch.setattr(
             "plugins.memory.hindsight.importlib.import_module",
             _raise,
+        )
+
+        p = HindsightMemoryProvider()
+        p.initialize(session_id="test-session", hermes_home=str(tmp_path), platform="cli")
+        assert p._mode == "disabled"
+
+    def test_cloud_mode_unavailable_when_client_not_installed(self, tmp_path, monkeypatch):
+        """#18875: cloud mode must check hindsight_client is importable."""
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home",
+            lambda: tmp_path / "nonexistent",
+        )
+        monkeypatch.setenv("HINDSIGHT_API_KEY", "test-key")
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (False, "No module named 'hindsight_client'"),
+        )
+        p = HindsightMemoryProvider()
+        assert not p.is_available()
+
+    def test_local_external_mode_unavailable_when_client_not_installed(self, tmp_path, monkeypatch):
+        """#18875: local_external mode also needs hindsight_client."""
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home",
+            lambda: tmp_path / "nonexistent",
+        )
+        monkeypatch.setenv("HINDSIGHT_MODE", "local_external")
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (False, "No module named 'hindsight_client'"),
+        )
+        p = HindsightMemoryProvider()
+        assert not p.is_available()
+
+    def test_initialize_disables_cloud_mode_when_client_not_installed(self, tmp_path, monkeypatch):
+        """#18875: initialize() must disable cloud mode when hindsight_client is missing."""
+        config = {"mode": "cloud", "apiKey": "test-key"}
+        config_path = tmp_path / "hindsight" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config))
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
+        )
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (False, "No module named 'hindsight_client'"),
+        )
+
+        p = HindsightMemoryProvider()
+        p.initialize(session_id="test-session", hermes_home=str(tmp_path), platform="cli")
+        assert p._mode == "disabled"
+
+    def test_initialize_disables_local_external_when_client_not_installed(self, tmp_path, monkeypatch):
+        """#18875: initialize() must disable local_external mode when hindsight_client is missing."""
+        config = {"mode": "local_external"}
+        config_path = tmp_path / "hindsight" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config))
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home", lambda: tmp_path
+        )
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._check_cloud_client",
+            lambda: (False, "No module named 'hindsight_client'"),
         )
 
         p = HindsightMemoryProvider()
