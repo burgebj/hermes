@@ -7595,16 +7595,15 @@ class HermesCLI:
         in_main_thread = threading.current_thread() is threading.main_thread()
 
         if self._app and in_main_thread:
-            from prompt_toolkit.application import run_in_terminal
+            from prompt_toolkit.shortcuts import prompt as ptk_prompt
             was_visible = self._status_bar_visible
             self._status_bar_visible = False
             self._app.invalidate()
             try:
-                run_in_terminal(_ask)
+                result[0] = ptk_prompt(prompt_text).strip() or None
+            except (KeyboardInterrupt, EOFError):
+                pass
             except Exception:
-                # WSL / Warp / certain terminal emulators silently drop the
-                # scheduled coroutine.  Fall back to a direct input() so the
-                # user's keystrokes don't leak into the agent buffer.
                 try:
                     _ask()
                 except Exception:
