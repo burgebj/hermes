@@ -698,6 +698,7 @@ app.get('/chat/:id', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: connectionState,
+    mode: WHATSAPP_MODE,
     queueLength: messageQueue.length,
     uptime: process.uptime(),
   });

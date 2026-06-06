@@ -701,3 +701,116 @@ class TestNoCredsPreflight:
         # but the fatal-error code is NOT the "not paired" one.
         assert result is False
         assert adapter._fatal_error_code != "whatsapp_not_paired"
+
+
+# ---------------------------------------------------------------------------
+# Bridge mode reuse (WHATSAPP_MODE vs /health mode)
+# ---------------------------------------------------------------------------
+
+class TestBridgeModeReuse:
+    """Gateway must not reuse a bridge running the wrong WHATSAPP_MODE."""
+
+    @pytest.mark.asyncio
+    async def test_reuses_bridge_when_health_mode_matches(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_MODE", "bot")
+        adapter = _make_adapter()
+        adapter._acquire_platform_lock = MagicMock(return_value=True)
+
+        mock_client_cls = _mock_aiohttp(
+            status=200,
+            json_data={"status": "connected", "mode": "bot"},
+        )
+
+        with patch("gateway.platforms.whatsapp.check_whatsapp_requirements", return_value=True), \
+             patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "mkdir", return_value=None), \
+             patch("subprocess.Popen") as mock_popen, \
+             patch("aiohttp.ClientSession", mock_client_cls), \
+             patch.object(type(adapter), "_poll_messages", return_value=MagicMock()):
+            result = await adapter.connect()
+
+        assert result is True
+        mock_popen.assert_not_called()
+        assert adapter._bridge_process is None
+
+    @pytest.mark.asyncio
+    async def test_restarts_bridge_when_health_mode_mismatches(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_MODE", "bot")
+        adapter = _make_adapter()
+        adapter._acquire_platform_lock = MagicMock(return_value=True)
+
+        health_responses = [
+            {"status": "connected", "mode": "self-chat"},
+            {"status": "connected", "mode": "bot"},
+        ]
+        call_count = {"n": 0}
+
+        async def _json():
+            idx = min(call_count["n"], len(health_responses) - 1)
+            call_count["n"] += 1
+            return health_responses[idx]
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.json = _json
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=_AsyncCM(mock_resp))
+        mock_client_cls = MagicMock(return_value=_AsyncCM(mock_session))
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_fh = MagicMock()
+        patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
+
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("gateway.platforms.whatsapp._kill_port_process"), \
+             patch("gateway.platforms.whatsapp._kill_stale_bridge_by_pidfile"), \
+             patch.object(type(adapter), "_poll_messages", return_value=MagicMock()):
+            result = await adapter.connect()
+
+        assert result is True
+        assert call_count["n"] >= 2
+        mock_popen.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_restarts_legacy_bridge_without_mode_when_bot_requested(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_MODE", "bot")
+        adapter = _make_adapter()
+        adapter._acquire_platform_lock = MagicMock(return_value=True)
+
+        health_responses = [
+            {"status": "connected"},  # legacy bridge — no mode field
+            {"status": "connected", "mode": "bot"},
+        ]
+        call_count = {"n": 0}
+
+        async def _json():
+            idx = min(call_count["n"], len(health_responses) - 1)
+            call_count["n"] += 1
+            return health_responses[idx]
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.json = _json
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=_AsyncCM(mock_resp))
+        mock_client_cls = MagicMock(return_value=_AsyncCM(mock_session))
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_fh = MagicMock()
+        patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
+
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("gateway.platforms.whatsapp._kill_port_process"), \
+             patch("gateway.platforms.whatsapp._kill_stale_bridge_by_pidfile"), \
+             patch.object(type(adapter), "_poll_messages", return_value=MagicMock()):
+            result = await adapter.connect()
+
+        assert result is True
+        assert call_count["n"] >= 2
+        mock_popen.assert_called()
