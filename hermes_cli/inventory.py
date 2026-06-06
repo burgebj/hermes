@@ -108,6 +108,12 @@ def load_picker_context() -> ConfigContext:
 # ─── Public: payload builder ────────────────────────────────────────────
 
 
+# Per-provider model cap for interactive pickers.  200 covers known
+# large catalogs such as NVIDIA NIM (~120 models) while still bounding
+# unusually large provider lists.
+_DEFAULT_PICKER_MAX_MODELS = 200
+
+
 def build_models_payload(
     ctx: ConfigContext,
     *,
@@ -116,7 +122,7 @@ def build_models_payload(
     canonical_order: bool = False,
     pricing: bool = False,
     capabilities: bool = False,
-    max_models: int = 50,
+    max_models: Optional[int] = None,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer
     needs from a single substrate call.
@@ -139,8 +145,14 @@ def build_models_payload(
       ``{model: {fast, reasoning}}`` so pickers can gate the model-options
       controls (fast toggle / reasoning) to what each model actually
       supports, instead of offering knobs the backend would reject.
+    - ``max_models``: per-provider model cap passed to
+      :func:`list_authenticated_providers`.  Defaults to 200 so large
+      catalogs such as NVIDIA NIM are not silently truncated at 50.
     """
     from hermes_cli.model_switch import list_authenticated_providers
+
+    if max_models is None:
+        max_models = _DEFAULT_PICKER_MAX_MODELS
 
     rows = list_authenticated_providers(
         current_provider=ctx.current_provider,

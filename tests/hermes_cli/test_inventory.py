@@ -378,3 +378,37 @@ def test_payload_shape_compatible_with_modelpickerdialog_frontend():
     for row in payload["providers"]:
         missing = required_keys - row.keys()
         assert not missing, f"row {row['slug']} missing keys: {missing}"
+
+# ─── model picker max_models cap (#40601) ──────────────────────────────
+
+def _provider_with_models(slug: str, count: int, *, total: int | None = None) -> dict:
+    return {
+        "slug": slug,
+        "name": slug.title(),
+        "models": [f"{slug}/model-{i:03d}" for i in range(count)],
+        "total_models": count if total is None else total,
+        "is_current": False,
+        "is_user_defined": False,
+        "source": "built-in",
+    }
+
+
+def test_build_models_payload_defaults_to_200_models_per_provider():
+    """Large providers such as NVIDIA NIM must not be capped at 50."""
+    rows = [_provider_with_models("nvidia", 120)]
+    with _list_auth_returning(rows) as mock_lap:
+        payload = build_models_payload(_empty_ctx())
+
+    assert len(payload["providers"][0]["models"]) == 120
+    assert mock_lap.call_args.kwargs["max_models"] == 200
+
+
+def test_build_models_payload_explicit_max_models_still_wins():
+    rows = [_provider_with_models("openrouter", 8, total=120)]
+    with _list_auth_returning(rows) as mock_lap:
+        payload = build_models_payload(_empty_ctx(), max_models=8)
+
+    assert len(payload["providers"][0]["models"]) == 8
+    assert payload["providers"][0]["total_models"] == 120
+    assert mock_lap.call_args.kwargs["max_models"] == 8
+
