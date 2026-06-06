@@ -182,6 +182,89 @@ def _escape_invalid_chars_in_json_strings(raw: str) -> str:
     return "".join(out)
 
 
+# Tools whose arguments end in a single free-form text field that routinely
+# carries the double-quotes and braces of real source code (``write_file``
+# content, ``patch`` replacement text).  Weak/local models frequently emit
+# this field WITHOUT escaping the inner quotes — e.g.
+#   {"path": "a.py", "content": "env.get("KEY", "default")"}
+# — producing JSON that none of the structural repair passes can fix: an
+# unescaped ``"`` is 0x22 so the control-char escaper skips it, and
+# brace-counting can't help when the break is *inside* a string.  For these
+# tools (and only these) we can recover the dropped content from schema
+# knowledge — see :func:`_recover_unescaped_tail_string`.  Keyed by tool
+# name → the candidate tail field(s), tried in order.
+_TAIL_TEXT_FIELDS: dict[str, tuple[str, ...]] = {
+    "write_file": ("content",),
+    "patch": ("new_string", "patch"),
+}
+
+# The value's true closing quote is always within the last handful of quote
+# characters (only a few clean trailing fields like ``cross_profile`` /
+# ``replace_all`` can follow it).  Trying just the rightmost N keeps recovery
+# O(N · len) instead of O(quotes · len) on large file payloads.
+_MAX_TAIL_QUOTE_CANDIDATES = 64
+
+
+def _recover_unescaped_tail_string(raw: str, tool_name: str) -> str | None:
+    """Recover a tool call whose only defect is unescaped quotes/braces inside
+    a known free-text tail field (e.g. ``write_file.content``).
+
+    Returns canonical JSON on a confident recovery, or ``None`` to mean "not
+    recoverable — let the caller fall back to ``{}``".
+
+    The recovery is *self-validating*: for each candidate closing quote we
+    re-escape the suspect span with ``json.dumps``, splice it back between the
+    untouched clean prefix and suffix, and keep the candidate only if it
+    re-parses as strict JSON with the target field present.  Among the valid
+    candidates we pick the one yielding the MOST keys: over-grabbing a trailing
+    field (e.g. ``"path"``) collapses it into the string and strictly *drops*
+    a key, so max-keys reliably recovers the intended split whether the messy
+    field is last or has clean fields after it.  Ties break toward the longest
+    content.  This preserves the invariant that we never silently substitute a
+    value we aren't certain about — anything ambiguous yields ``None``.
+    """
+    fields = _TAIL_TEXT_FIELDS.get(tool_name)
+    if not fields:
+        return None
+
+    # Require exactly one whitelisted field to be present: zero means the
+    # arguments aren't the shape we recover, more than one is ambiguous.
+    located = []
+    for field in fields:
+        m = re.search(r'"' + re.escape(field) + r'"\s*:\s*"', raw)
+        if m is not None:
+            located.append((field, m))
+    if len(located) != 1:
+        return None
+    field, match = located[0]
+
+    # ``prefix`` is everything up to (not including) the value's opening quote;
+    # ``tail`` is the raw value plus any trailing structured fields and ``}``.
+    prefix = raw[: match.end() - 1]
+    tail = raw[match.end():]
+
+    quote_positions = [i for i, ch in enumerate(tail) if ch == '"']
+    best_score: tuple[int, int] | None = None
+    best_obj: dict | None = None
+    for q in quote_positions[-_MAX_TAIL_QUOTE_CANDIDATES:]:
+        value = tail[:q]
+        suffix = tail[q + 1:]
+        candidate = prefix + json.dumps(value) + suffix
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not (isinstance(obj, dict) and obj.get(field) == value):
+            continue
+        score = (len(obj), q)  # most keys wins; ties → longest content
+        if best_score is None or score > best_score:
+            best_score, best_obj = score, obj
+
+    if best_obj is not None:
+        return json.dumps(best_obj, separators=(",", ":"))
+    return None
+
+
 def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     """Attempt to repair malformed tool_call argument JSON.
 
@@ -268,6 +351,24 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
             return escaped
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
+
+    # Repair pass 5: schema-aware recovery of unescaped quotes/braces inside a
+    # known free-text tail field (e.g. ``write_file.content``).  This is the
+    # ONE malformation the structural passes above cannot touch — weak models
+    # routinely emit code like ``env.get("KEY", "default")`` or ``f"x {y}"``
+    # straight into the content field without escaping the inner quotes, and
+    # an unescaped ``"`` is invisible to both brace-counting and the
+    # control-char escaper.  Without this, the whole call collapsed to ``{}``
+    # and the model was told it dropped ``content`` — a confusing re-emit loop
+    # on exactly the tool where it hurts most.  Recovery is self-validating
+    # and whitelisted; see :func:`_recover_unescaped_tail_string`.
+    recovered = _recover_unescaped_tail_string(raw_stripped, tool_name)
+    if recovered is not None:
+        logger.warning(
+            "Recovered unescaped tail-string tool_call arguments for %s: %s → %s",
+            tool_name, raw_stripped[:80], recovered[:80],
+        )
+        return recovered
 
     # Last resort: replace with empty object so the API request doesn't
     # crash the entire session.
@@ -435,6 +536,7 @@ __all__ = [
     "_sanitize_structure_surrogates",
     "_sanitize_messages_surrogates",
     "_escape_invalid_chars_in_json_strings",
+    "_recover_unescaped_tail_string",
     "_repair_tool_call_arguments",
     "_strip_non_ascii",
     "_sanitize_messages_non_ascii",
