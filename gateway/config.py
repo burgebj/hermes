@@ -733,6 +733,8 @@ def load_gateway_config() -> GatewayConfig:
         if config_yaml_path.exists():
             with open(config_yaml_path, encoding="utf-8") as f:
                 yaml_cfg = yaml.safe_load(f) or {}
+            from hermes_cli.config import _expand_env_vars
+            yaml_cfg = _expand_env_vars(yaml_cfg)
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.

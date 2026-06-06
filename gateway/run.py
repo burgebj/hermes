@@ -1548,7 +1548,12 @@ def _load_gateway_config() -> dict:
     Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
     still see their fixture) and shares the mtime-keyed raw-yaml cache
     from ``hermes_cli.config.read_raw_config`` when the paths match.
+
+    Environment variable references (``${VAR}``) are expanded so that
+    downstream consumers (model resolution, custom-provider validation)
+    never see literal template strings.
     """
+    from hermes_cli.config import _expand_env_vars
     config_path = _hermes_home / 'config.yaml'
     try:
         from hermes_cli.config import get_config_path, read_raw_config
@@ -1557,7 +1562,7 @@ def _load_gateway_config() -> dict:
         # direct read (keeps test fixtures with a monkeypatched
         # _hermes_home working).
         if config_path == get_config_path():
-            return read_raw_config()
+            return _expand_env_vars(read_raw_config())
     except Exception:
         pass
 
@@ -1565,7 +1570,7 @@ def _load_gateway_config() -> dict:
         if config_path.exists():
             import yaml
             with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f) or {}
+                return _expand_env_vars(yaml.safe_load(f) or {})
     except Exception:
         logger.debug("Could not load gateway config from %s", config_path)
     return {}
