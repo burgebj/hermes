@@ -9175,6 +9175,7 @@ def _install_python_dependencies_with_optional_fallback(
     *,
     env: dict[str, str] | None = None,
     group: str = "all",
+    no_build_isolation: bool = False,
 ) -> None:
     """Install base deps plus as many optional extras as the environment supports.
 
@@ -9185,7 +9186,23 @@ def _install_python_dependencies_with_optional_fallback(
     in the venv Scripts dir before each install attempt so uv can write fresh
     copies (Windows blocks REPLACE on a running .exe but allows RENAME). See
     ``_quarantine_running_hermes_exe`` for the rationale.
+
+    On Termux or PRoot, ``UV_LINK_MODE=copy`` is auto-injected into ``env`` if
+    the caller hasn't already set it — uv's default hardlink mode fails
+    across PRoot bind-mount boundaries (``Failed to clone hardlink … is on
+    file system …``).
+
+    When ``no_build_isolation=True``, ``--no-build-isolation`` is appended to
+    every install command — needed for setuptools>=81 builds in PRoot where
+    the isolated build venv can't see pre-installed ``jaraco``/``more_itertools``
+    transitive deps.
     """
+    if env is not None and "UV_LINK_MODE" not in env:
+        if _is_termux_env(env) or _is_proot_env(env):
+            env["UV_LINK_MODE"] = "copy"
+
+    isolation_args: list[str] = ["--no-build-isolation"] if no_build_isolation else []
+
     scripts_dir = _venv_scripts_dir() if _is_windows() else None
 
     def _install(args: list[str]) -> None:
@@ -9193,7 +9210,7 @@ def _install_python_dependencies_with_optional_fallback(
         if scripts_dir is not None:
             moved = _quarantine_running_hermes_exe(scripts_dir)
         try:
-            _run_install_with_heartbeat(install_cmd_prefix + args, env=env)
+            _run_install_with_heartbeat(install_cmd_prefix + args + isolation_args, env=env)
         except BaseException:
             # Restore shims if uv didn't write replacements (e.g. install
             # failed before the entry-points step). Don't swallow the error.
@@ -9239,7 +9256,9 @@ def _install_python_dependencies_with_optional_fallback(
     # stage. Reinstall with --reinstall to force resolution if anything is
     # missing, then re-verify so the failure surfaces here instead of
     # downstream.
-    _verify_core_dependencies_installed(install_cmd_prefix, env=env, group=group)
+    _verify_core_dependencies_installed(
+        install_cmd_prefix, env=env, group=group, no_build_isolation=no_build_isolation
+    )
 
 
 def _verify_core_dependencies_installed(
@@ -9247,6 +9266,7 @@ def _verify_core_dependencies_installed(
     *,
     env: dict[str, str] | None = None,
     group: str = "all",
+    no_build_isolation: bool = False,
 ) -> None:
     """Check that every base dep from pyproject.toml is importable; if not, retry.
 
@@ -9366,7 +9386,8 @@ def _verify_core_dependencies_installed(
     # purpose — the missing dep is in *base* deps; rerunning the full all-
     # extras install can cost minutes and trips on whatever optional extra
     # was already broken upstream. Base is fast and is what's actually wrong.
-    repair_args = ["install", "--reinstall", "-e", "."]
+    verify_isolation_args: list[str] = ["--no-build-isolation"] if no_build_isolation else []
+    repair_args = ["install", "--reinstall", "-e", "."] + verify_isolation_args
     try:
         _run_install_with_heartbeat(install_cmd_prefix + repair_args, env=env)
     except subprocess.CalledProcessError as e:
@@ -9398,7 +9419,7 @@ def _verify_core_dependencies_installed(
     )
     try:
         _run_install_with_heartbeat(
-            install_cmd_prefix + ["install", "--reinstall", *specs], env=env
+            install_cmd_prefix + ["install", "--reinstall", *specs] + verify_isolation_args, env=env
         )
     except subprocess.CalledProcessError as e:
         logger.warning("dep verification: per-package repair failed: %s", e)
@@ -9450,6 +9471,32 @@ def _is_termux_env(env: dict[str, str] | None = None) -> bool:
     return _is_termux_startup_environment(env)
 
 
+def _is_proot_env(env: dict[str, str] | None = None) -> bool:
+    """Detect PRoot / fakeroot overlay environments.
+
+    PRoot bind-mounts overlay filesystems, so ``uv pip install`` hardlinks
+    (the default on Linux) fail across mount points with
+    ``Failed to clone hardlink … is on file system … but the destination is
+    on file system …``.  Setting ``UV_LINK_MODE=copy`` works around this.
+
+    Detection (in order):
+    1. ``PROOT`` env var set (set by proot itself)
+    2. ``PROOT_TMP_DIR`` env var (set by some Termux + PRoot combos)
+    3. ``/proc/self/exe`` resolves to a path containing ``proot`` (PRoot
+       rewrites the interpreter path inside the chroot)
+    """
+    check = env if env is not None else os.environ
+    if check.get("PROOT") or check.get("PROOT_TMP_DIR"):
+        return True
+    try:
+        exe = os.readlink("/proc/self/exe")
+        if exe and "proot" in exe.lower():
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def _is_android_python() -> bool:
     return sys.platform == "android"
 
@@ -9497,6 +9544,12 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
     standalone uv into ``$HERMES_HOME/bin/uv``, but on Termux the official
     installer may not work (glibc vs bionic).  Fall back to ``pip install uv``
     which gets a Termux-compatible binary.
+
+    On ARM64 (common Termux target), no prebuilt uv wheel exists on PyPI, so
+    ``pip install uv`` triggers ``cargo build --release`` of uv's entire Rust
+    codebase (jemalloc, OpenSSL, zstd-sys).  On memory-constrained phones this
+    exhausts swap and freezes the machine -- set a generous timeout so the
+    attempt fails gracefully and the update path falls back to pip instead.
     """
     from hermes_cli.managed_uv import resolve_uv
 
@@ -9507,7 +9560,14 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
         return None
     try:
         print("  → Termux detected: trying to install uv for faster dependency updates...")
-        subprocess.run(pip_cmd + ["install", "uv"], cwd=PROJECT_ROOT, check=False)
+        subprocess.run(
+            pip_cmd + ["install", "uv"],
+            cwd=PROJECT_ROOT,
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print("    ↻ uv install timed out (Rust compile on ARM64 is too slow) — falling back to pip")
     except Exception:
         pass
     # After pip install, check managed path first, then PATH
@@ -10626,16 +10686,18 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         if uv_bin:
             uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+            no_build_isolation = False
             if _is_termux_env(uv_env):
                 uv_env.pop("PYTHONPATH", None)
                 uv_env.pop("PYTHONHOME", None)
                 install_group = "termux-all"
+                no_build_isolation = True
                 print("  → Termux detected: using uv + curated termux-all optional profile...")
             if _is_termux_env(uv_env) and _is_android_python():
                 print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
                 _install_psutil_android_compat([uv_bin, "pip"], env=uv_env)
             _install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env, group=install_group
+                [uv_bin, "pip"], env=uv_env, group=install_group, no_build_isolation=no_build_isolation
             )
         else:
             # Use sys.executable to explicitly call the venv's pip module,
@@ -10656,13 +10718,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     cwd=PROJECT_ROOT,
                     check=True,
                 )
+            no_build_isolation = False
             if _is_termux_env():
                 install_group = "termux-all"
+                no_build_isolation = True
                 print("  → Termux detected: using curated termux-all optional profile...")
             if _is_termux_env() and _is_android_python():
                 print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
                 _install_psutil_android_compat(pip_cmd)
-            _install_python_dependencies_with_optional_fallback(pip_cmd, group=install_group)
+            _install_python_dependencies_with_optional_fallback(
+                pip_cmd, group=install_group, no_build_isolation=no_build_isolation
+            )
 
         _refresh_active_lazy_features()
 

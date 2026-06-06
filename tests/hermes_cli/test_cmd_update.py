@@ -825,3 +825,128 @@ termux = ["rich>=14"]
 
     assert hm._load_installable_optional_extras(group="all") == ["mcp"]
     assert hm._load_installable_optional_extras(group="termux-all") == ["termux", "mcp"]
+
+
+# === Tests for Termux/PRoot update fixes (#40328) ===
+
+
+def test_is_proot_env_true_for_proot_envvar(monkeypatch):
+    """PROOT env var indicates a PRoot session."""
+    from hermes_cli import main as hm
+
+    assert hm._is_proot_env({"PROOT": "/usr/bin/proot"}) is True
+
+
+def test_is_proot_env_true_for_proot_tmp_dir_envvar(monkeypatch):
+    """PROOT_TMP_DIR env var (set by some Termux + PRoot combos)."""
+    from hermes_cli import main as hm
+
+    assert hm._is_proot_env({"PROOT_TMP_DIR": "/data/data/com.termux/files"}) is True
+
+
+def test_is_proot_env_false_for_normal_env(monkeypatch):
+    """Empty env on a normal Linux system → not PRoot."""
+    from hermes_cli import main as hm
+
+    monkeypatch.delenv("PROOT", raising=False)
+    monkeypatch.delenv("PROOT_TMP_DIR", raising=False)
+    assert hm._is_proot_env({}) is False
+    assert hm._is_proot_env() is False
+
+
+def test_install_deps_autosets_uv_link_mode_on_termux(monkeypatch):
+    """On Termux, _install_python_dependencies_with_optional_fallback should
+    inject UV_LINK_MODE=copy into env if caller hasn't already set it."""
+    from hermes_cli import main as hm
+
+    # Force Termux detection
+    monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: True)
+    monkeypatch.setattr(hm, "_is_proot_env", lambda env=None: False)
+    # Capture the install command prefix and env
+    captured = {}
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        # Need to actually raise CalledProcessError so we don't run the
+        # full fallback logic, just the first install attempt.
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(hm, "_run_install_with_heartbeat", fake_run)
+
+    env = {"PATH": "/usr/bin"}
+    hm._install_python_dependencies_with_optional_fallback(
+        ["uv", "pip"], env=env
+    )
+
+    assert env.get("UV_LINK_MODE") == "copy", (
+        f"UV_LINK_MODE should be auto-set on Termux, got env={env}"
+    )
+
+
+def test_install_deps_preserves_user_uv_link_mode(monkeypatch):
+    """If caller already set UV_LINK_MODE, do not override it."""
+    from hermes_cli import main as hm
+
+    monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: True)
+    monkeypatch.setattr(hm, "_is_proot_env", lambda env=None: False)
+
+    def fake_run(cmd, env=None, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(hm, "_run_install_with_heartbeat", fake_run)
+
+    env = {"UV_LINK_MODE": "symlink"}
+    hm._install_python_dependencies_with_optional_fallback(
+        ["uv", "pip"], env=env
+    )
+
+    assert env["UV_LINK_MODE"] == "symlink", (
+        f"User-set UV_LINK_MODE should be preserved, got env={env}"
+    )
+
+
+def test_install_deps_passes_no_build_isolation_flag(monkeypatch):
+    """no_build_isolation=True should add --no-build-isolation to the install cmd."""
+    from hermes_cli import main as hm
+
+    monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: False)
+    monkeypatch.setattr(hm, "_is_proot_env", lambda env=None: False)
+
+    captured = {}
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured["cmd"] = cmd
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(hm, "_run_install_with_heartbeat", fake_run)
+
+    hm._install_python_dependencies_with_optional_fallback(
+        ["uv", "pip"], no_build_isolation=True
+    )
+
+    assert "--no-build-isolation" in captured["cmd"], (
+        f"--no-build-isolation should appear in install cmd, got: {captured['cmd']}"
+    )
+
+
+def test_install_deps_no_build_isolation_off_by_default(monkeypatch):
+    """no_build_isolation=False should NOT add --no-build-isolation to the install cmd."""
+    from hermes_cli import main as hm
+
+    monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: False)
+    monkeypatch.setattr(hm, "_is_proot_env", lambda env=None: False)
+
+    captured = {}
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured["cmd"] = cmd
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(hm, "_run_install_with_heartbeat", fake_run)
+
+    hm._install_python_dependencies_with_optional_fallback(["uv", "pip"])
+
+    assert "--no-build-isolation" not in captured["cmd"], (
+        f"--no-build-isolation should NOT be in default install cmd, got: {captured['cmd']}"
+    )
