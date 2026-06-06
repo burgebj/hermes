@@ -413,6 +413,263 @@ def remove_portable_tooling_windows(hermes_home: Path) -> list[Path]:
     return removed
 
 
+# ============================================================================
+# Desktop app uninstall helpers
+# ============================================================================
+#
+# The desktop app (apps/desktop) is an Electron app built and optionally
+# installed alongside the CLI.  It leaves artifacts in several places:
+#
+#   macOS:
+#     /Applications/Hermes.app          (auto-moved on first launch)
+#     Dock tile                          (pinned on first launch)
+#     ~/Library/Application Support/Hermes/  (Electron userData)
+#
+#   Windows:
+#     %APPDATA%\Hermes\                  (Electron userData)
+#
+#   All platforms (inside the install dir):
+#     apps/desktop/release/              (electron-builder output)
+#     apps/desktop/dist/                 (Vite renderer build)
+#     apps/desktop/node_modules/         (desktop-only deps, ~150MB)
+#
+#   HERMES_HOME:
+#     desktop-build-stamp.json           (content-hash skip stamp)
+#
+# The root node_modules/ is NOT removed — `npm ci` in the install dir
+# rebuilds it cleanly, and the TUI also depends on it.
+
+def _desktop_dir(project_root: Path) -> Path:
+    """Return the apps/desktop directory inside the install root."""
+    return project_root / "apps" / "desktop"
+
+
+def _electron_user_data_dir() -> Path:
+    """Return the platform-specific Electron userData directory for Hermes Desktop.
+
+    Electron uses ``app.getPath('userData')`` which resolves to:
+      - macOS:  ~/Library/Application Support/Hermes
+      - Windows: %APPDATA%\\Hermes
+      - Linux:   ~/.config/Hermes   (XDG_CONFIG_HOME if set)
+    """
+    import sys
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Hermes"
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "Hermes"
+        return home / "AppData" / "Roaming" / "Hermes"
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        config_base = Path(xdg) if xdg else (home / ".config")
+        return config_base / "Hermes"
+
+
+def _unpin_from_dock() -> bool:
+    """Remove the Hermes tile from the macOS Dock.
+
+    Best-effort: mirrors the pin logic in main.cjs (``maybePinToDock``).
+    We scan ``com.apple.dock persistent-apps`` for a file-reference URL
+    pointing at ``/Applications/Hermes.app/`` and remove matching entries.
+    Returns True if a tile was removed.
+    """
+    import sys
+    if sys.platform != "darwin":
+        return False
+
+    try:
+        # Read current Dock tiles — property-list encoded via ``defaults read``.
+        result = subprocess.run(
+            ["defaults", "read", "com.apple.dock", "persistent-apps"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return False
+
+        current = result.stdout
+        # The Dock stores tiles as file-reference URLs like:
+        #   file:///Applications/Hermes.app/
+        # We look for that pattern and nuke the whole <dict> containing it.
+        hermes_marker = "Hermes.app"
+        if hermes_marker not in current:
+            return False
+
+        # Use PlistBuddy to find and delete matching entries.
+        # PlistBuddy is more reliable than trying to re-serialize the defaults
+        # output ourselves. Probe indices until out-of-bounds — no need for
+        # a separate count query; the PlistBuddy Print call fails on an
+        # invalid index, which is our loop termination condition.
+        removed = False
+        idx = 0
+        while True:
+            entry = subprocess.run(
+                ["/usr/libexec/PlistBuddy", "-c",
+                 f"Print :persistent-apps:{idx}",
+                 "~/Library/Preferences/com.apple.dock.plist"],
+                capture_output=True, text=True, check=False,
+            )
+            if entry.returncode != 0:
+                break  # out of bounds
+            if hermes_marker in entry.stdout:
+                subprocess.run(
+                    ["/usr/libexec/PlistBuddy", "-c",
+                     f"Delete :persistent-apps:{idx}",
+                     "~/Library/Preferences/com.apple.dock.plist"],
+                    capture_output=True, text=True, check=False,
+                )
+                removed = True
+                # Don't increment — the array shifted down
+            else:
+                idx += 1
+
+        if removed:
+            # Force cfprefsd to flush our PlistBuddy edit back to disk before we
+            # restart the Dock. We wrote com.apple.dock.plist directly, so the
+            # running cfprefsd still holds the pre-delete copy in memory; a plain
+            # `defaults read` makes it reload from disk. Skip this and `killall
+            # Dock` races cfprefsd, reloads the stale (still-pinned) prefs, and
+            # the tile reappears. (Mirrors the flush before the pin in main.cjs.)
+            subprocess.run(
+                ["defaults", "read", "com.apple.dock", "persistent-apps"],
+                capture_output=True, check=False,
+            )
+            subprocess.run(["killall", "Dock"], capture_output=True, check=False)
+        return removed
+
+    except Exception as e:
+        log_warn(f"Could not unpin Hermes from Dock: {e}")
+        return False
+
+
+def _kill_desktop_process() -> None:
+    """Kill any running Hermes desktop (Electron) app process.
+
+    Safe to call from the CLI uninstaller — the desktop binary is named
+    ``Hermes`` (macOS / Linux AppImage) or ``Hermes.exe`` (Windows), while
+    the CLI itself runs as ``python3``.  We never kill ourselves.
+
+    Best-effort: if the process isn't running or the kill tool is
+    unavailable, we silently continue (the rmtree below will still
+    succeed for any files the dead process isn't holding open).
+    """
+    import sys
+    try:
+        if sys.platform == "darwin":
+            # macOS: the Electron app binary inside Hermes.app is named
+            # "Hermes" (CFBundleExecutable). The CLI runs as python3.
+            subprocess.run(["killall", "Hermes"], capture_output=True, check=False)
+        elif sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "Hermes.exe"],
+                capture_output=True, check=False,
+            )
+        elif sys.platform.startswith("linux"):
+            # Heuristic for non-NixOS Linux: match the electron-builder
+            # output path.  On NixOS the whole uninstall command is a
+            # no-op (see run_uninstall), so this pattern is only ever
+            # evaluated on conventional installs.
+            subprocess.run(
+                ["pkill", "-f", "apps/desktop/release/linux-unpacked/Hermes"],
+                capture_output=True, check=False,
+            )
+    except Exception:
+        pass  # not running or kill tool unavailable
+
+
+def _remove_desktop_external_artifacts(
+    project_root: Path, hermes_home: Path
+) -> list[str]:
+    """Remove desktop app artifacts that live OUTSIDE the install dir and
+    HERMES_HOME: the macOS ``/Applications/Hermes.app`` bundle, its Dock pin,
+    and the Electron userData directory.
+
+    Returns a list of human-readable descriptions of what was removed.
+
+    This is the shared external-cleanup path used by both the desktop-only
+    uninstall (``remove_desktop_app``, which adds the in-tree artifacts on top)
+    and the standard full/keep-data flow (whose ``rmtree(project_root)`` /
+    ``rmtree(hermes_home)`` already sweep the in-tree pieces but never touch
+    these external ones).
+    """
+    import sys
+    removed: list[str] = []
+
+    # Kill the desktop process first — on macOS the .app bundle can't be
+    # removed while the binary inside it is running.
+    _kill_desktop_process()
+
+    # macOS: /Applications/Hermes.app and Dock pin
+    if sys.platform == "darwin":
+        app_bundle = Path("/Applications/Hermes.app")
+        if app_bundle.is_dir():
+            try:
+                shutil.rmtree(app_bundle)
+                log_success(f"Removed {app_bundle}")
+                removed.append("/Applications/Hermes.app")
+            except Exception as e:
+                log_warn(f"Could not remove {app_bundle}: {e}")
+
+        if _unpin_from_dock():
+            log_success("Removed Hermes from the Dock")
+            removed.append("Dock tile")
+
+    # Electron userData (outside both project_root and hermes_home)
+    user_data = _electron_user_data_dir()
+    if user_data.exists():
+        try:
+            shutil.rmtree(user_data)
+            log_success(f"Removed Electron userData ({user_data})")
+            removed.append(f"Electron userData ({user_data})")
+        except Exception as e:
+            log_warn(f"Could not remove Electron userData ({user_data}): {e}")
+
+    return removed
+
+
+def remove_desktop_app(project_root: Path, hermes_home: Path) -> list[str]:
+    """Remove the Hermes desktop app and all its artifacts.
+
+    Returns a list of human-readable descriptions of what was removed.
+
+    This does NOT remove the root node_modules/ (the TUI uses it too),
+    the CLI install, or any user data in HERMES_HOME other than the
+    desktop build stamp.
+    """
+    removed: list[str] = []
+    desktop = _desktop_dir(project_root)
+
+    # ── External artifacts (kill process, .app bundle, Dock pin, userData) ──
+    # Shared with the standard uninstall flow — the single owner of every
+    # removal target that lives outside the install dir / HERMES_HOME.
+    removed.extend(_remove_desktop_external_artifacts(project_root, hermes_home))
+
+    # ── Built artifacts inside install dir ────────────────────────
+    for subdir in ("release", "dist", "node_modules"):
+        target = desktop / subdir
+        if target.exists():
+            try:
+                shutil.rmtree(target)
+                label = f"apps/desktop/{subdir}/"
+                log_success(f"Removed {target}")
+                removed.append(label)
+            except Exception as e:
+                log_warn(f"Could not remove {target}: {e}")
+
+    # ── Desktop build stamp in HERMES_HOME ────────────────────────
+    stamp = hermes_home / "desktop-build-stamp.json"
+    if stamp.exists():
+        try:
+            stamp.unlink()
+            log_success(f"Removed {stamp}")
+            removed.append("desktop-build-stamp.json")
+        except Exception as e:
+            log_warn(f"Could not remove {stamp}: {e}")
+
+    return removed
+
+
 def _is_windows() -> bool:
     import sys
     return sys.platform == "win32"
@@ -492,6 +749,71 @@ def _uninstall_profile(profile) -> None:
         log_warn(f"  Could not remove {profile_home}: {e}")
 
 
+def _run_desktop_uninstall(project_root: Path, hermes_home: Path, args) -> None:
+    """Run the desktop-only uninstall flow.
+
+    This is a focused uninstall that only removes the Electron desktop app
+    and its artifacts — the CLI, gateway, configs, and data are untouched.
+    """
+    skip_confirm = getattr(args, "yes", False) or getattr(args, "skip_confirm", False)
+
+    print()
+    print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA, Colors.BOLD))
+    print(color("│         ⚕ Hermes Desktop Uninstaller                   │", Colors.MAGENTA, Colors.BOLD))
+    print(color("└─────────────────────────────────────────────────────────┘", Colors.MAGENTA, Colors.BOLD))
+    print()
+    print(color("This will remove:", Colors.CYAN, Colors.BOLD))
+
+    import sys
+    if sys.platform == "darwin":
+        print("  • /Applications/Hermes.app")
+        print("  • Dock pin (if present)")
+    print("  • apps/desktop/release/  (Electron app bundle)")
+    print("  • apps/desktop/dist/     (Vite renderer)")
+    print("  • apps/desktop/node_modules/  (desktop deps)")
+    print("  • desktop-build-stamp.json")
+    print("  • Electron userData (desktop settings)")
+    print()
+    print(color("The CLI, gateway, and all configs/data will be preserved.", Colors.GREEN))
+    print()
+
+    if not skip_confirm:
+        try:
+            confirm = input(f"Type '{color('yes', Colors.YELLOW)}' to confirm: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            print("Cancelled.")
+            return
+        if confirm != "yes":
+            print()
+            print("Uninstall cancelled.")
+            return
+
+    print()
+    print(color("Uninstalling desktop app...", Colors.CYAN, Colors.BOLD))
+    print()
+
+    removed = remove_desktop_app(project_root, hermes_home)
+
+    print()
+    print(color("┌─────────────────────────────────────────────────────────┐", Colors.GREEN, Colors.BOLD))
+    print(color("│              ✓ Desktop Uninstall Complete!              │", Colors.GREEN, Colors.BOLD))
+    print(color("└─────────────────────────────────────────────────────────┘", Colors.GREEN, Colors.BOLD))
+    print()
+
+    if removed:
+        print(color("Removed:", Colors.CYAN))
+        for item in removed:
+            print(f"  • {item}")
+        print()
+
+    print("To reinstall the desktop app later:")
+    print(color("  hermes gui", Colors.DIM))
+    print()
+    print("Thank you for using Hermes Agent! ⚕")
+    print()
+
+
 def run_uninstall(args):
     """
     Run the uninstall process.
@@ -499,9 +821,29 @@ def run_uninstall(args):
     Options:
     - Full uninstall: removes code + ~/.hermes/ (configs, data, logs)
     - Keep data: removes code but keeps ~/.hermes/ for future reinstall
+    - Desktop only: removes only the desktop app (Electron, Dock pin, built artifacts)
     """
+    # ── Managed installs (NixOS, Homebrew, etc.) ────────────────────
+    # The package manager owns every file — our uninstaller has nothing
+    # to remove and would only break the managed layout.  Bail early.
+    from hermes_cli.config import is_managed, get_managed_update_command
+    if is_managed():
+        managed_cmd = get_managed_update_command() or "your package manager"
+        print()
+        print(color("⚠  Uninstall is not available for managed installs.", Colors.RED, Colors.BOLD))
+        print(color("   Hermes is managed by your system package manager.", Colors.YELLOW))
+        print(color(f"   To remove it: {managed_cmd}", Colors.YELLOW))
+        print()
+        return
+
     project_root = get_project_root()
     hermes_home = get_hermes_home()
+
+    # ── Desktop-only fast path ────────────────────────────────────
+    desktop_only = getattr(args, "desktop", False)
+    if desktop_only:
+        _run_desktop_uninstall(project_root, hermes_home, args)
+        return
 
     # Detect named profiles when uninstalling from the default root —
     # offer to clean them up too instead of leaving zombie HERMES_HOMEs
@@ -539,19 +881,26 @@ def run_uninstall(args):
     print("  2) " + color("Full uninstall", Colors.RED) + " - Remove everything including all data")
     print("     (Warning: This deletes all configs, sessions, and logs permanently)")
     print()
-    print("  3) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
+    print("  3) " + color("Desktop only", Colors.CYAN) + " - Remove only the desktop app")
+    print("     (Removes Electron app, Dock pin, and built artifacts; keeps CLI + data)")
+    print()
+    print("  4) " + color("Cancel", Colors.CYAN) + " - Don't uninstall")
     print()
     
     try:
-        choice = input(color("Select option [1/2/3]: ", Colors.BOLD)).strip()
+        choice = input(color("Select option [1/2/3/4]: ", Colors.BOLD)).strip()
     except (KeyboardInterrupt, EOFError):
         print()
         print("Cancelled.")
         return
     
-    if choice == "3" or choice.lower() in {"c", "cancel", "q", "quit", "n", "no"}:
+    if choice == "4" or choice.lower() in {"c", "cancel", "q", "quit", "n", "no"}:
         print()
         print("Uninstall cancelled.")
+        return
+    
+    if choice == "3":
+        _run_desktop_uninstall(project_root, hermes_home, args)
         return
     
     full_uninstall = (choice == "2")
@@ -664,6 +1013,13 @@ def run_uninstall(args):
             log_success(f"Removed {link}")
     else:
         log_info("No Hermes-managed node/npm/npx symlinks found")
+
+    # 3c. Remove desktop app artifacts that live OUTSIDE the install dir
+    #     and HERMES_HOME (the .app bundle in /Applications, the Dock tile,
+    #     and Electron userData). The install dir's apps/desktop/ subtree is
+    #     removed by step 4; these external ones need separate cleanup.
+    log_info("Removing desktop app artifacts...")
+    _remove_desktop_external_artifacts(project_root, hermes_home)
     
     # 4. Remove installation directory (code)
     log_info("Removing installation directory...")
