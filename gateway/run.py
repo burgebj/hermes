@@ -12326,11 +12326,16 @@ class GatewayRunner:
             if not tts_text:
                 return
 
-            # Use .mp3 extension so edge-tts conversion to opus works correctly.
-            # The TTS tool may convert to .ogg — use file_path from result.
+            # Use .ogg extension for Telegram (native voice bubble format)
+            # so providers like ElevenLabs/OpenAI output opus natively.
+            # For other platforms, .mp3 is fine. The TTS tool's opus
+            # conversion fallback handles Edge TTS and other mp3-only providers.
+            from gateway.session_context import get_session_env
+            _platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
+            _tts_ext = "ogg" if _platform == "telegram" else "mp3"
             audio_path = os.path.join(
                 tempfile.gettempdir(), "hermes_voice",
-                f"tts_reply_{_uuid.uuid4().hex[:12]}.mp3",
+                f"tts_reply_{_uuid.uuid4().hex[:12]}.{_tts_ext}",
             )
             os.makedirs(os.path.dirname(audio_path), exist_ok=True)
 
