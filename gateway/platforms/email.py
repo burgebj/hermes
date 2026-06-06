@@ -378,17 +378,35 @@ class EmailAdapter(BasePlatformAdapter):
                 for uid in data[0].split():
                     if uid in self._seen_uids:
                         continue
-                    self._seen_uids.add(uid)
-                    # Trim periodically to prevent unbounded memory growth
-                    if len(self._seen_uids) > self._seen_uids_max:
-                        self._trim_seen_uids()
 
                     status, msg_data = imap.uid("fetch", uid, "(RFC822)")
                     if status != "OK":
+                        # Don't mark UID as seen — let the next poll retry
+                        # transient FETCH failures (network/server hiccups).
+                        continue
+
+                    # Guard against expunged-during-fetch races: IMAP servers
+                    # may return [None] or [] when a UID was deleted between
+                    # SEARCH and FETCH, even with status == "OK".
+                    if (
+                        not msg_data
+                        or not msg_data[0]
+                        or not isinstance(msg_data[0], tuple)
+                        or len(msg_data[0]) < 2
+                    ):
+                        logger.debug(
+                            "[Email] Skipping UID %s: empty/expunged FETCH payload", uid
+                        )
                         continue
 
                     raw_email = msg_data[0][1]
                     msg = email_lib.message_from_bytes(raw_email)
+                    # Only mark as seen after a successful FETCH + parse so
+                    # transient FETCH failures don't permanently drop a UID.
+                    self._seen_uids.add(uid)
+                    # Trim periodically to prevent unbounded memory growth
+                    if len(self._seen_uids) > self._seen_uids_max:
+                        self._trim_seen_uids()
 
                     sender_raw = msg.get("From", "")
                     sender_addr = _extract_email_address(sender_raw)
