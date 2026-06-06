@@ -1085,14 +1085,27 @@ def resolve_skin() -> dict:
 
         init_skin_from_config(_load_cfg())
         skin = get_active_skin()
+        branding = dict(skin.branding) if skin.branding else {}
+
+        # CLI parity: prepend profile name to prompt symbol when the
+        # active profile is neither "default" nor "custom".
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            profile = get_active_profile_name()
+            if profile not in {"default", "custom"}:
+                raw_sym = branding.get("prompt_symbol", "❯")
+                branding["prompt_symbol"] = f"{profile} {raw_sym}"
+        except Exception:
+            pass
+
         return {
             "name": skin.name,
             "colors": skin.colors,
-            "branding": skin.branding,
+            "branding": branding,
             "banner_logo": skin.banner_logo,
             "banner_hero": skin.banner_hero,
             "tool_prefix": skin.tool_prefix,
-            "help_header": (skin.branding or {}).get("help_header", ""),
+            "help_header": branding.get("help_header", ""),
         }
     except Exception:
         return {}
