@@ -15080,14 +15080,15 @@ Examples:
             )
             if not sessions:
                 print("No sessions found.")
+                db.close()
                 return
             has_titles = any(s.get("title") for s in sessions)
             if has_titles:
-                print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-                print("─" * 110)
+                header = f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'Src':<6} {'ID'}"
             else:
-                print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
-                print("─" * 95)
+                header = f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}"
+            print(header)
+            print("─" * len(header))
             for s in sessions:
                 last_active = _relative_time(s.get("last_active"))
                 preview = (
@@ -15098,7 +15099,7 @@ Examples:
                 if has_titles:
                     title = (s.get("title") or "—")[:30]
                     sid = s["id"]
-                    print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
+                    print(f"{title:<32} {preview:<40} {last_active:<13} {s['source']:<6} {sid}")
                 else:
                     sid = s["id"]
                     print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
