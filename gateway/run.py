@@ -19969,6 +19969,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         pass
 
     if runner.exit_code is not None:
+        if runner.exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE:
+            # Planned service restarts must actually terminate the process so
+            # launchd/systemd can spawn a fresh gateway.  A normal SystemExit
+            # can leave the interpreter alive when non-daemon worker threads
+            # survive a drain timeout, which strands the gateway with all
+            # platforms disconnected but the launchd job still "running".
+            logging.shutdown()
+            os._exit(runner.exit_code)
         raise SystemExit(runner.exit_code)
 
     # When an unexpected SIGTERM caused the shutdown and it wasn't a planned
