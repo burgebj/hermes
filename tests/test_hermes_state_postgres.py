@@ -56,6 +56,7 @@ def test_postgres_dsn_from_config_enables_postgres_backend(tmp_path, monkeypatch
 
 def test_postgres_dsn_env_ref_is_expanded_by_load_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_STATE_DATABASE_URL", raising=False)
     monkeypatch.setenv("HERMES_STATE_POSTGRES_DSN", "postgresql://env/db")
     cfg = load_config()
     cfg["sessions"]["state_backend"] = "postgres"
