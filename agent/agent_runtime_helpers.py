@@ -49,7 +49,7 @@ def _ra():
 
 
 AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset(
-    {"todo", "session_search", "memory", "clarify", "delegate_task"}
+    {"todo", "session_search", "memory", "clarify", "delegate_task", "model_switch"}
 )
 
 
@@ -1746,6 +1746,16 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 question=function_args.get("question", ""),
                 choices=function_args.get("choices"),
                 callback=agent.clarify_callback,
+            )
+        )
+    elif function_name == "model_switch":
+        from tools.model_switch_tool import model_switch_tool as _model_switch_tool
+        return _finish_agent_tool(
+            _model_switch_tool(
+                agent,
+                slug=function_args.get("slug", ""),
+                reason=function_args.get("reason", ""),
+                scope=function_args.get("scope", "session"),
             )
         )
     elif function_name == "delegate_task":
