@@ -640,10 +640,14 @@ PLATFORM_HINTS = {
         "— when a sticker is the right response, use yb_send_sticker."
     ),
     "api_server": (
-        "You're responding through an API server. The rendering layer is unknown — "
-        "assume plain text. No markdown formatting (no asterisks, bullets, headers, "
-        "code fences). Treat this like a conversation, not a document. Keep responses "
-        "brief and natural."
+        "You're responding through an API server. The default rendering "
+        "layer is unknown — assume plain text unless the user's system "
+        "prompt explicitly requests rich formatting (markdown, LaTeX, etc.). "
+        "When plain text is appropriate, avoid markdown formatting (no "
+        "asterisks, bullets, headers, code fences). Treat this like a "
+        "conversation, not a document. Keep responses brief and natural. "
+        "If the user's system prompt specifies a rendering preference "
+        "(e.g. markdown, HTML), follow that preference instead."
     ),
     "webui": (
         "You are in the Hermes WebUI, a browser-based chat interface. "
