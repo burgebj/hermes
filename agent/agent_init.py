@@ -1111,15 +1111,17 @@ def init_agent(
         try:
             mem_config = _agent_cfg.get("memory", {})
             agent._memory_enabled = mem_config.get("memory_enabled", False)
-            agent._user_profile_enabled = mem_config.get("user_profile_enabled", False)
             # Identity-safety gate: USER.md describes the agent owner. In gateway
             # chats with non-owner contacts, injecting it as "USER PROFILE (who
             # the user is)" makes the model address the contact by the owner's
             # name. The gateway computes skip_user_profile from the inbound
-            # source; honor it here. MEMORY.md stays available (it carries
-            # contact-specific facts, not a single pinned identity).
-            if skip_user_profile:
-                agent._user_profile_enabled = False
+            # source; honor it here. MEMORY.md stays available (operational
+            # facts), only the owner-identity USER.md is suppressed.
+            agent._user_profile_enabled = (
+                False
+                if skip_user_profile
+                else mem_config.get("user_profile_enabled", False)
+            )
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
             if agent._memory_enabled or agent._user_profile_enabled:
                 from tools.memory_tool import MemoryStore
