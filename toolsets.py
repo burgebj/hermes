@@ -630,6 +630,12 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
             all_tools.update(resolved)
         return sorted(all_tools)
 
+    # Documented ``server:tool`` notation: collapse ``gbrain:*`` and
+    # ``mcp:gbrain`` to the bare server-name alias before resolution (#23997).
+    _normalized = _normalize_mcp_toolset_form(name)
+    if _normalized is not None and _normalized != name:
+        return resolve_toolset(_normalized, visited)
+
     # Check for cycles / already-resolved (diamond deps).
     # Silently return [] — either this is a diamond (not a bug, tools already
     # collected via another path) or a genuine cycle (safe to skip).
@@ -770,13 +776,48 @@ def get_toolset_names() -> List[str]:
 
 
 
+def _normalize_mcp_toolset_form(name: str) -> Optional[str]:
+    """Normalize alternate MCP toolset spellings to the canonical alias.
+
+    Users following the documented ``server:tool`` notation (see ``hermes
+    tools enable`` help text) write ``gbrain:*`` or ``mcp:gbrain`` in
+    ``enabled_toolsets``. Without normalization, ``validate_toolset()``
+    rejects these forms silently and cron sessions (which run in
+    ``quiet_mode``) drop MCP tools without any user-visible warning — see
+    #23997.
+
+    Returns the canonical form (the bare server name, which the registry
+    stores as an alias for ``mcp-<server>``) when ``name`` matches one of
+    the alternate spellings AND that server is a known MCP alias. Returns
+    ``None`` when ``name`` is not an MCP-form input or the underlying
+    server is not registered (so callers fall through to the normal
+    Unknown-toolset path and the user sees a warning).
+    """
+    if not name or ":" not in name:
+        return None
+    head, _, tail = name.partition(":")
+    if head == "mcp" and tail:
+        candidate = tail            # ``mcp:gbrain`` → ``gbrain``
+    elif tail == "*":
+        candidate = head            # ``gbrain:*``  → ``gbrain``
+    else:
+        return None                 # ``gbrain:create_issue`` is an
+                                    # individual tool, not a toolset
+                                    # — handled via enabled_tools, not
+                                    # enabled_toolsets.
+    aliases = _get_registry_toolset_aliases()
+    if candidate in aliases or candidate in _get_plugin_toolset_names():
+        return candidate
+    return None
+
+
 def validate_toolset(name: str) -> bool:
     """
     Check if a toolset name is valid.
-    
+
     Args:
         name (str): Toolset name to validate
-        
+
     Returns:
         bool: True if valid, False otherwise
     """
@@ -787,7 +828,11 @@ def validate_toolset(name: str) -> bool:
         return True
     if name in _get_plugin_toolset_names():
         return True
-    return name in _get_registry_toolset_aliases()
+    if name in _get_registry_toolset_aliases():
+        return True
+    # Documented ``server:tool`` notation — ``gbrain:*`` / ``mcp:gbrain``
+    # collapse to the canonical alias (#23997).
+    return _normalize_mcp_toolset_form(name) is not None
 
 
 def create_custom_toolset(

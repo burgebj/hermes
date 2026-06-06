@@ -147,6 +147,73 @@ class TestValidateToolset:
         assert "mcp_dynserver_ping" in resolve_toolset("dynserver")
 
 
+class TestMcpToolsetFormNormalization:
+    """Regression coverage for #23997 — the documented ``server:tool``
+    notation for MCP toolsets (``gbrain:*`` / ``mcp:gbrain``) must be
+    accepted by ``validate_toolset()`` and resolve through the existing
+    ``mcp-<server>`` alias chain. Without normalisation, cron sessions
+    (which run with ``quiet_mode=True``) silently drop MCP tools.
+    """
+
+    def _make_registry_with_mcp(self, monkeypatch):
+        reg = ToolRegistry()
+        reg.register(
+            name="mcp_gbrain_query",
+            toolset="mcp-gbrain",
+            schema=_make_schema("mcp_gbrain_query", "Query gbrain"),
+            handler=_dummy_handler,
+        )
+        reg.register_toolset_alias("gbrain", "mcp-gbrain")
+        monkeypatch.setattr("tools.registry.registry", reg)
+        return reg
+
+    def test_wildcard_form_validates(self, monkeypatch):
+        """``server:*`` is accepted and resolves to the server's tools."""
+        self._make_registry_with_mcp(monkeypatch)
+        assert validate_toolset("gbrain:*") is True
+        assert "mcp_gbrain_query" in resolve_toolset("gbrain:*")
+
+    def test_mcp_prefix_form_validates(self, monkeypatch):
+        """``mcp:server`` is accepted and resolves to the server's tools."""
+        self._make_registry_with_mcp(monkeypatch)
+        assert validate_toolset("mcp:gbrain") is True
+        assert "mcp_gbrain_query" in resolve_toolset("mcp:gbrain")
+
+    def test_specific_tool_form_rejected(self, monkeypatch):
+        """``server:specific_tool`` is NOT a toolset — that's an individual
+        tool, scoped via ``mcp_servers.<server>.enabled_tools``, not
+        ``enabled_toolsets``. Rejection here keeps the two configs from
+        silently overlapping.
+        """
+        self._make_registry_with_mcp(monkeypatch)
+        assert validate_toolset("gbrain:query") is False
+
+    def test_unknown_server_rejected(self, monkeypatch):
+        """``unknownserver:*`` looks like the documented form but the
+        server is not registered — must still fail validation so the
+        user sees the Unknown-toolset warning.
+        """
+        self._make_registry_with_mcp(monkeypatch)
+        assert validate_toolset("unknownserver:*") is False
+        assert validate_toolset("mcp:unknownserver") is False
+
+    def test_bare_server_name_still_works(self, monkeypatch):
+        """Pre-existing behaviour preserved: the bare server-name alias
+        still validates and resolves (no regression).
+        """
+        self._make_registry_with_mcp(monkeypatch)
+        assert validate_toolset("gbrain") is True
+        assert "mcp_gbrain_query" in resolve_toolset("gbrain")
+
+    def test_non_mcp_colon_form_rejected(self, monkeypatch):
+        """Garbage like ``foo:bar`` (neither known server nor mcp prefix)
+        falls through to the normal Unknown-toolset path.
+        """
+        self._make_registry_with_mcp(monkeypatch)
+        assert validate_toolset("foo:bar") is False
+        assert validate_toolset("colonbutemptytail:") is False
+
+
 class TestGetToolsetInfo:
     def test_leaf(self):
         info = get_toolset_info("web")

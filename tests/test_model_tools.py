@@ -372,6 +372,52 @@ class TestPreToolCallBlocking:
 # Legacy toolset map
 # =========================================================================
 
+class TestUnknownToolsetWarningInQuietMode:
+    """Regression coverage for #23997 — when ``enabled_toolsets`` contains a
+    name that doesn't resolve (typo, bad MCP form, etc.), the rejection
+    must be surfaced via ``logger.warning`` even when ``quiet_mode=True``
+    (cron's default). Without this, a misconfigured cron job runs without
+    the intended tools and the user sees no diagnostic anywhere.
+    """
+
+    def test_unknown_enabled_toolset_logs_warning_in_quiet_mode(self, caplog):
+        from model_tools import _compute_tool_definitions
+        with caplog.at_level("WARNING", logger="model_tools"):
+            _compute_tool_definitions(
+                enabled_toolsets=["this_toolset_does_not_exist"],
+                quiet_mode=True,
+            )
+        assert any(
+            "this_toolset_does_not_exist" in r.getMessage()
+            and "Unknown toolset" in r.getMessage()
+            for r in caplog.records
+        ), f"expected Unknown-toolset warning, got: {[r.getMessage() for r in caplog.records]}"
+
+    def test_unknown_disabled_toolset_logs_warning_in_quiet_mode(self, caplog):
+        from model_tools import _compute_tool_definitions
+        with caplog.at_level("WARNING", logger="model_tools"):
+            _compute_tool_definitions(
+                enabled_toolsets=["web"],
+                disabled_toolsets=["definitely_not_a_toolset"],
+                quiet_mode=True,
+            )
+        assert any(
+            "definitely_not_a_toolset" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_known_toolsets_dont_warn(self, caplog):
+        """No false-positive warnings for valid toolset names."""
+        from model_tools import _compute_tool_definitions
+        with caplog.at_level("WARNING", logger="model_tools"):
+            _compute_tool_definitions(
+                enabled_toolsets=["web", "terminal"],
+                quiet_mode=True,
+            )
+        for r in caplog.records:
+            assert "Unknown toolset" not in r.getMessage()
+
+
 class TestLegacyToolsetMap:
     def test_expected_legacy_names(self):
         expected = [

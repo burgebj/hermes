@@ -364,8 +364,15 @@ def _compute_tool_definitions(
                 tools_to_include.update(legacy_tools)
                 if not quiet_mode:
                     print(f"✅ Enabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
-            elif not quiet_mode:
-                print(f"⚠️  Unknown toolset: {toolset_name}")
+            else:
+                # Surface the rejection even when ``quiet_mode`` suppresses
+                # the visual print — cron sessions run quiet by default and
+                # without this log message a misspelled or unrecognised
+                # toolset name (e.g. ``gbrain:*`` before MCP normalisation,
+                # or a typo) is dropped invisibly. See #23997.
+                logger.warning("Unknown toolset in enabled_toolsets: %r", toolset_name)
+                if not quiet_mode:
+                    print(f"⚠️  Unknown toolset: {toolset_name}")
     else:
         # Default: start with everything
         from toolsets import get_all_toolsets
@@ -388,8 +395,10 @@ def _compute_tool_definitions(
                 tools_to_include.difference_update(legacy_tools)
                 if not quiet_mode:
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
-            elif not quiet_mode:
-                print(f"⚠️  Unknown toolset: {toolset_name}")
+            else:
+                logger.warning("Unknown toolset in disabled_toolsets: %r", toolset_name)
+                if not quiet_mode:
+                    print(f"⚠️  Unknown toolset: {toolset_name}")
 
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()
