@@ -534,6 +534,23 @@ class ContextCompressor(ContextEngine):
     def name(self) -> str:
         return "compressor"
 
+    @staticmethod
+    def _compute_threshold_tokens(context_length: int, threshold_percent: float) -> int:
+        """Return the auto-compression trigger for a model context window.
+
+        Keep the historical 64K floor for larger windows, but never let that
+        floor consume the entire window on minimum-context models. Otherwise a
+        64K model configured for a 50% or 70% threshold does not compress
+        until the full context window is already exhausted.
+        """
+        threshold_tokens = max(
+            int(context_length * threshold_percent),
+            MINIMUM_CONTEXT_LENGTH,
+        )
+        if context_length <= MINIMUM_CONTEXT_LENGTH and threshold_tokens >= context_length:
+            return int(context_length * threshold_percent)
+        return threshold_tokens
+
     def on_session_reset(self) -> None:
         """Reset all per-session state for /new or /reset."""
         super().on_session_reset()
@@ -569,9 +586,9 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
-        self.threshold_tokens = max(
-            int(context_length * self.threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
+        self.threshold_tokens = self._compute_threshold_tokens(
+            context_length,
+            self.threshold_percent,
         )
         # Recalculate token budgets for the new context length so the
         # compressor stays calibrated after a model switch (e.g. 200K → 32K).
@@ -618,13 +635,11 @@ class ContextCompressor(ContextEngine):
             config_context_length=config_context_length,
             provider=provider,
         )
-        # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
-        # the percentage would suggest a lower value.  This prevents premature
-        # compression on large-context models at 50% while keeping the % sane
-        # for models right at the minimum.
-        self.threshold_tokens = max(
-            int(self.context_length * threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
+        # Keep the historical 64K floor for larger windows without letting it
+        # suppress compression entirely on minimum-context models.
+        self.threshold_tokens = self._compute_threshold_tokens(
+            self.context_length,
+            threshold_percent,
         )
         self.compression_count = 0
 

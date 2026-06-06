@@ -1577,12 +1577,28 @@ class TestSummaryTargetRatio:
         assert c.summary_target_ratio == 0.80
 
     def test_default_threshold_is_50_percent(self):
-        """Default compression threshold should be 50%, with a 64K floor."""
+        """Default compression threshold should keep the historical 64K floor."""
         with patch("agent.context_compressor.get_model_context_length", return_value=100_000):
             c = ContextCompressor(model="test", quiet_mode=True)
         assert c.threshold_percent == 0.50
         # 50% of 100K = 50K, but the floor is 64K
         assert c.threshold_tokens == 64_000
+
+    def test_minimum_context_window_uses_percentage_threshold(self):
+        """At the 64K minimum, the floor must not suppress compression entirely."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=64_000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        assert c.threshold_percent == 0.50
+        assert c.threshold_tokens == 32_000
+        assert c.should_compress(prompt_tokens=31_999) is False
+        assert c.should_compress(prompt_tokens=32_000) is True
+
+    def test_update_model_preserves_percentage_threshold_at_minimum_context(self):
+        """Model switches should not restore the broken 100% threshold at 64K."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        c.update_model("test", 64_000)
+        assert c.threshold_tokens == 32_000
 
     def test_threshold_floor_does_not_apply_above_128k(self):
         """On large-context models the 50% percentage is used directly."""
