@@ -1005,6 +1005,24 @@ def handle_function_call(
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
+        # Refuse dispatch of tools the model wasn't actually shown. Tool
+        # handlers are registered globally at import time, so a model that
+        # remembers a tool name from earlier in the session (or hallucinates
+        # one) could otherwise drive a disabled toolset — even after the
+        # user turned it off via ``hermes tools``.  See #26568.
+        if enabled_tools is not None and function_name not in enabled_tools:
+            logger.warning(
+                "Refusing dispatch of %r — tool is not in the active toolset for this session",
+                function_name,
+            )
+            return json.dumps({
+                "error": (
+                    f"Tool '{function_name}' is not enabled for this session. "
+                    f"Enable its toolset via ``hermes tools`` or pass ``--toolsets`` "
+                    f"to use it."
+                )
+            })
+
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to
         # avoid double-firing the hook).
