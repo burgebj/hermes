@@ -273,7 +273,13 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         msg_signature = request.query.get("msg_signature", "")
         timestamp = request.query.get("timestamp", "")
         nonce = request.query.get("nonce", "")
-        body = await request.text()
+        # Guard against oversized payloads (zip bombs, DoS) before XML parse.
+        _MAX_BODY = 65_536  # 64 KB is ample for any WeCom message
+        body_bytes = await request.read()
+        if len(body_bytes) > _MAX_BODY:
+            logger.warning("[WecomCallback] Payload too large (%d bytes) — rejected", len(body_bytes))
+            return web.Response(status=413, text="payload too large")
+        body = body_bytes.decode("utf-8", errors="replace")
 
         for app in self._apps:
             try:
@@ -332,7 +338,12 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self, app: Dict[str, Any], body: str,
         msg_signature: str, timestamp: str, nonce: str,
     ) -> str:
-        root = ET.fromstring(body)
+        # Use defusedxml to prevent billion-laughs / malformed XML DoS pre-auth.
+        try:
+            import defusedxml.ElementTree as _safe_ET
+            root = _safe_ET.fromstring(body)
+        except ImportError:
+            root = ET.fromstring(body)
         encrypt = root.findtext("Encrypt", default="")
         crypt = self._crypt_for_app(app)
         return crypt.decrypt(msg_signature, timestamp, nonce, encrypt).decode("utf-8")
