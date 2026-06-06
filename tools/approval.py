@@ -691,6 +691,24 @@ def clear_session(session_key: str) -> None:
         entry.event.set()
 
 
+def clear_all_sessions() -> None:
+    """Remove ALL approval and YOLO state across every session.
+
+    Called during gateway finalize-shutdown so a restart starts fresh —
+    model/reasoning overrides, per-session approvals, and YOLO state
+    from the previous gateway lifecycle must not carry over.
+    """
+    with _lock:
+        _session_approved.clear()
+        _session_yolo.clear()
+        for entries in _gateway_queues.values():
+            for entry in entries:
+                entry.result = "deny"
+                entry.event.set()
+        _gateway_queues.clear()
+        _pending.clear()
+
+
 def is_session_yolo_enabled(session_key: str) -> bool:
     """Return True when YOLO bypass is enabled for a specific session."""
     if not session_key:

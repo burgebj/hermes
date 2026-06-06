@@ -3865,6 +3865,22 @@ class GatewayRunner:
                 pass
             self._cleanup_agent_resources(agent)
 
+        # Clear session-level state so gateway restart starts fresh:
+        # model/reasoning overrides, pending approvals, and YOLO state
+        # must not survive a shutdown boundary.
+        self._session_model_overrides.clear()
+        if hasattr(self, "_session_reasoning_overrides"):
+            self._session_reasoning_overrides.clear()
+        if hasattr(self, "_pending_approvals"):
+            self._pending_approvals.clear()
+        if hasattr(self, "_pending_model_notes"):
+            self._pending_model_notes.clear()
+        try:
+            from tools.approval import clear_all_sessions
+            clear_all_sessions()
+        except Exception:
+            pass
+
     def _cleanup_agent_resources(self, agent: Any) -> None:
         """Best-effort cleanup for temporary or cached agent instances."""
         if agent is None:
@@ -8872,6 +8888,34 @@ class GatewayRunner:
             _platform_name, source.user_name or source.user_id or "unknown",
             source.chat_id or "unknown", _msg_preview,
         )
+
+        # ── Auth-failure auto-restart ────────────────────────────────
+        # When _try_refresh_nous_client_credentials exhausts every
+        # credential path (Portal OAuth, refresh token, shared store),
+        # the agent writes ~/.hermes/.auth_restart_requested.  Check
+        # here at the start of each message and auto-restart if the
+        # marker is present and recent.  This is the "last resort" step:
+        # if session clearing and shared creds don't help, restart the
+        # gateway process to start with a clean credential state.
+        _restart_marker = _hermes_home / ".auth_restart_requested"
+        if _restart_marker.exists():
+            try:
+                _data = json.loads(_restart_marker.read_text())
+                _ts = _data.get("timestamp", 0)
+                if time.time() - _ts < 300:  # < 5 minutes
+                    logger.warning(
+                        "Auth-restart marker found (.auth_restart_requested) for session %s "
+                        "— triggering gateway restart as last resort.",
+                        session_key,
+                    )
+                    _restart_marker.unlink(missing_ok=True)
+                    self.request_restart(detached=True, via_service=False)
+                    return ""
+            except Exception:
+                try:
+                    _restart_marker.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         # Get or create session
         # Topic-mode DMs: rewrite a stale/foreign thread_id to the user's
