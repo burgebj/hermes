@@ -1,0 +1,7 @@
+name: google
+version: 1.0.0
+description: "Google Gemini image generation backend (gemini-2.5-flash-image) via OpenAI-compatible API."
+author: AitoolsPro / Hermes Agent
+kind: backend
+requires_env:
+  - GOOGLE_API_KEY

@@ -111,6 +111,32 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_cached_headless_mode: Optional[bool] = None
+_headless_mode_resolved = False
+
+
+def _is_headless_mode() -> bool:
+    """Return True when local agent-browser should run headless.
+
+    Hermes defaults to headless for server safety. On 北冥's Mac mini, setting
+    `browser.headless: false` in config.yaml intentionally requests a visible
+    desktop browser window for debugging, demos, and visual verification.
+    """
+    global _cached_headless_mode, _headless_mode_resolved
+    if _headless_mode_resolved:
+        return bool(_cached_headless_mode)
+
+    _headless_mode_resolved = True
+    try:
+        from hermes_cli.config import read_raw_config
+        cfg = read_raw_config()
+        headless = cfg.get("browser", {}).get("headless", True)
+        _cached_headless_mode = bool(headless)
+    except Exception as exc:
+        logger.debug("Could not read browser.headless from config: %s", exc)
+        _cached_headless_mode = True
+    return bool(_cached_headless_mode)
+
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
 # Includes Android/Termux and macOS Homebrew locations needed for agent-browser,
 # npx, node, and Android's glibc runner (grun).
@@ -1946,13 +1972,16 @@ def _run_browser_command(
     # Local mode: --session <name> launches a local headless Chromium.
     # The rest of the command (--json, command, args) is identical.
     if session_info.get("cdp_url"):
-        # Cloud mode — connect to remote Browserbase browser via CDP
+        # Cloud/CDP mode — --headed only applies to locally launched browsers.
         # IMPORTANT: Do NOT use --session with --cdp. In agent-browser >=0.13,
         # --session creates a local browser instance and silently ignores --cdp.
         backend_args = ["--cdp", session_info["cdp_url"]]
+        headless_args: list[str] = []
     else:
-        # Local mode — launch a headless Chromium instance
+        # Local mode — default is headless Chromium; browser.headless=false
+        # requests a visible desktop browser window via agent-browser --headed.
         backend_args = ["--session", session_info["session_name"]]
+        headless_args = [] if _is_headless_mode() else ["--headed"]
 
     # Lightpanda engine injection (local mode only, agent-browser v0.25.3+).
     # Use the resolved session backend rather than global cloud-provider state:
@@ -1971,7 +2000,7 @@ def _run_browser_command(
     else:
         cmd_prefix = [browser_cmd]
 
-    cmd_parts = cmd_prefix + backend_args + [
+    cmd_parts = cmd_prefix + backend_args + headless_args + [
         "--json",
         command
     ] + args
@@ -1997,6 +2026,11 @@ def _run_browser_command(
         # used during CLI discovery.
         browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
         browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
+        if not _is_headless_mode() and not session_info.get("cdp_url"):
+            browser_env["AGENT_BROWSER_HEADED"] = "true"
+            # macOS Hermes sessions may have no DISPLAY set; agent-browser needs
+            # DISPLAY=:0 to show a visible window on the desktop session.
+            browser_env.setdefault("DISPLAY", ":0")
 
         # Tell the agent-browser daemon to self-terminate after being idle
         # for our configured inactivity timeout.  This is the daemon-side

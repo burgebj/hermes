@@ -1,0 +1,32 @@
+{
+  "task": "最终命名表统一收口任务",
+  "start_time": "2026-04-23T21:31:16.208212+08:00",
+  "backup_path": "docs/exec-plans/in-progress/backups/empire-constitution.md.20260423_213116.bak",
+  "steps": [
+    {
+      "id": 1,
+      "action": "恢复法典主干与账本现场",
+      "status": "completed"
+    },
+    {
+      "id": 2,
+      "action": "建立本轮任务合同/状态台账/验证链",
+      "status": "completed"
+    },
+    {
+      "id": 3,
+      "action": "按语义统一正式称呼并评估必要重命名",
+      "status": "completed"
+    },
+    {
+      "id": 4,
+      "action": "修复引用并完成验证",
+      "status": "completed"
+    }
+  ],
+  "rollback_command": "cp docs/exec-plans/in-progress/backups/empire-constitution.md.20260423_213116.bak docs/agents/empire-constitution.md",
+  "risk_level": "medium",
+  "requires_confirmation": false,
+  "user_confirmed": true,
+  "authorization_basis": "用户在当前会话中明确要求加载 safe-refactor-loop 并立即接管最终命名表统一收口任务，不要先提问。"
+}

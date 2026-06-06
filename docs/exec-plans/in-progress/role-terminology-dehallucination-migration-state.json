@@ -1,0 +1,15 @@
+{
+  "task": "角色术语去幻觉清理任务",
+  "scope": "仅文档/协议/模板/Skill 文本；不改执行逻辑",
+  "rename": {
+    "old": "docs/agents/commander-report-template-v2.md",
+    "new": "docs/agents/beiming-report-template-v2.md"
+  },
+  "status": "in_progress",
+  "user_instruction": "不要先提问，按语义逐文件审查并修正引用",
+  "watchouts": [
+    "不得改 M3/M5/M6 判定逻辑",
+    "不得改任何业务代码",
+    "不得遗漏重命名后的引用修复"
+  ]
+}
