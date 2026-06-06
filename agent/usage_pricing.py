@@ -710,6 +710,11 @@ def normalize_usage(
     - Codex Responses: input_tokens includes cache tokens; input_tokens_details.cached_tokens separates them
     - OpenAI Chat Completions: prompt_tokens includes cache tokens; prompt_tokens_details.cached_tokens separates them
 
+    Reasoning token accounting: prefer ``output_tokens_details.reasoning_tokens`` (Codex /
+    Responses-style); when zero or absent, fall back to
+    ``completion_tokens_details.reasoning_tokens`` as returned by Chat Completions for
+    reasoning-capable models.
+
     In both Codex and OpenAI modes, input_tokens is derived by subtracting cache
     tokens from the total — the API contract is that input/prompt totals include
     cached tokens and the details object breaks them out.
@@ -760,6 +765,10 @@ def normalize_usage(
     output_details = getattr(response_usage, "output_tokens_details", None)
     if output_details:
         reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
+    if not reasoning_tokens:
+        completion_details = getattr(response_usage, "completion_tokens_details", None)
+        if completion_details:
+            reasoning_tokens = _to_int(getattr(completion_details, "reasoning_tokens", 0))
 
     return CanonicalUsage(
         input_tokens=input_tokens,
