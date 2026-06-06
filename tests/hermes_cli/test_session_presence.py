@@ -1,10 +1,17 @@
 import os
 
+import pytest
+
 from hermes_cli.session_presence import (
     clear_session_presence,
     list_session_presence,
     write_session_presence,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_presence_env(monkeypatch):
+    monkeypatch.delenv("HERMES_SESSION_PRESENCE_DIR", raising=False)
 
 
 def test_session_presence_write_list_and_clear(tmp_path, monkeypatch):
