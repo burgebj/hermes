@@ -219,6 +219,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
     "piper": 5000,        # local VITS model, phoneme-based; practical cap
+    "supertonic": 5000,   # local ONNX model (supertonic-3), auto-chunks long text
 }
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
@@ -365,6 +366,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "neutts",
     "kittentts",
     "piper",
+    "supertonic",
 })
 
 DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
