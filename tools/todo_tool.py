@@ -153,8 +153,26 @@ class TodoStore:
         return [todos[i] for i in sorted(last_index.values())]
 
 
+def _normalize_todos_arg(todos: Any) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Accept JSON-string todo lists while rejecting malformed input cleanly."""
+    if isinstance(todos, str):
+        try:
+            todos = json.loads(todos)
+        except json.JSONDecodeError as exc:
+            return None, f"Invalid JSON string for 'todos': {exc.msg}"
+
+    if not isinstance(todos, list):
+        return None, "'todos' must be a list of todo objects"
+
+    for index, item in enumerate(todos):
+        if not isinstance(item, dict):
+            return None, f"Todo item at index {index} must be an object"
+
+    return todos, None
+
+
 def todo_tool(
-    todos: Optional[List[Dict[str, Any]]] = None,
+    todos: Optional[List[Dict[str, Any]] | str] = None,
     merge: bool = False,
     store: Optional[TodoStore] = None,
 ) -> str:
@@ -173,7 +191,10 @@ def todo_tool(
         return tool_error("TodoStore not initialized")
 
     if todos is not None:
-        items = store.write(todos, merge)
+        normalized_todos, error = _normalize_todos_arg(todos)
+        if error is not None:
+            return tool_error(error, success=False)
+        items = store.write(normalized_todos, merge)
     else:
         items = store.read()
 

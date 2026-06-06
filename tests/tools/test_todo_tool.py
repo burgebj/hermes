@@ -114,6 +114,44 @@ class TestTodoToolFunction:
         ))
         assert result["summary"]["in_progress"] == 1
 
+    def test_write_accepts_json_string_list(self):
+        store = TodoStore()
+        result = json.loads(todo_tool(
+            todos=json.dumps([
+                {"id": "1", "content": "New", "status": "in_progress"},
+            ]),
+            store=store,
+        ))
+        assert result["summary"]["in_progress"] == 1
+        assert result["todos"][0]["content"] == "New"
+
+    def test_write_rejects_invalid_json_string(self):
+        store = TodoStore()
+        result = json.loads(todo_tool(todos='[{"id": "1"', store=store))
+        assert result["success"] is False
+        assert "Invalid JSON string" in result["error"]
+        assert store.read() == []
+
+    def test_write_rejects_json_string_non_list(self):
+        store = TodoStore()
+        result = json.loads(todo_tool(
+            todos=json.dumps({"id": "1", "content": "New"}),
+            store=store,
+        ))
+        assert result["success"] is False
+        assert "must be a list" in result["error"]
+        assert store.read() == []
+
+    def test_write_rejects_json_string_non_object_items(self):
+        store = TodoStore()
+        result = json.loads(todo_tool(
+            todos=json.dumps(["not an object"]),
+            store=store,
+        ))
+        assert result["success"] is False
+        assert "index 0" in result["error"]
+        assert store.read() == []
+
     def test_no_store_returns_error(self):
         result = json.loads(todo_tool())
         assert "error" in result
