@@ -1,7 +1,9 @@
 """Tests for save_config_value() in cli.py — atomic write behavior."""
 
-import yaml
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import yaml
 
 import pytest
 
@@ -132,3 +134,57 @@ class TestSaveConfigValueAtomic:
 
         assert result is False
         assert config_env.read_text() == original_content
+
+
+class TestSaveConfigValueWriteTarget:
+    """save_config_value() must always write to user config, never repo config."""
+
+    def test_writes_to_user_config_when_it_does_not_exist(self, tmp_path, monkeypatch):
+        """When ~/.hermes/config.yaml doesn't exist yet, create it there
+        instead of falling back to the repo's cli-config.yaml (#14714)."""
+        hermes_home = tmp_path / ".hermes"
+        # Do NOT create hermes_home or config.yaml — simulate first run
+        monkeypatch.setattr("cli._hermes_home", hermes_home)
+
+        from cli import save_config_value
+        result = save_config_value("model.default", "gpt-5")
+
+        assert result is True
+        user_config = hermes_home / "config.yaml"
+        assert user_config.exists(), "config.yaml must be created in ~/.hermes/"
+        saved = yaml.safe_load(user_config.read_text())
+        assert saved["model"]["default"] == "gpt-5"
+
+    def test_does_not_write_to_repo_config(self, tmp_path, monkeypatch):
+        """Repo cli-config.yaml must never be modified by save_config_value."""
+        hermes_home = tmp_path / ".hermes"
+        # No user config — triggers the old bug path
+        monkeypatch.setattr("cli._hermes_home", hermes_home)
+
+        repo_config = Path(__file__).resolve().parent.parent.parent / "cli-config.yaml"
+        if repo_config.exists():
+            original_content = repo_config.read_text()
+        else:
+            original_content = None
+
+        from cli import save_config_value
+        save_config_value("test_sentinel.value", "should-not-appear-in-repo")
+
+        if original_content is not None:
+            assert repo_config.read_text() == original_content, \
+                "repo cli-config.yaml was modified by save_config_value"
+        # If repo config didn't exist, it still shouldn't
+        # (but we only check if it was present to begin with)
+
+    def test_value_round_trips_through_fresh_user_config(self, tmp_path, monkeypatch):
+        """Value written to a new user config can be read back."""
+        hermes_home = tmp_path / ".hermes"
+        monkeypatch.setattr("cli._hermes_home", hermes_home)
+
+        from cli import save_config_value
+        save_config_value("agent.system_prompt", "Be helpful")
+        save_config_value("display.skin", "moonsong")
+
+        config = yaml.safe_load((hermes_home / "config.yaml").read_text())
+        assert config["agent"]["system_prompt"] == "Be helpful"
+        assert config["display"]["skin"] == "moonsong"
