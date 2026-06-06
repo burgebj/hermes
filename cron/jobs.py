@@ -565,6 +565,8 @@ def create_job(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: bool = False,
+    ambient: bool = False,
+    max_messages: int = 3,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -614,6 +616,9 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        ambient: When True, use ambient initiative cron semantics: the scheduled
+                wake is low priority and may report nothing via ``[SILENT]``.
+        max_messages: Soft visible-message budget for ambient jobs.
 
     Returns:
         The created job dict
@@ -649,6 +654,11 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
+    normalized_ambient = bool(ambient)
+    try:
+        normalized_max_messages = max(0, int(max_messages))
+    except (TypeError, ValueError):
+        normalized_max_messages = 3
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -680,6 +690,8 @@ def create_job(
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
+        "ambient": normalized_ambient,
+        "max_messages": normalized_max_messages,
         "context_from": context_from,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
