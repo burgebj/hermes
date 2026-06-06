@@ -38,6 +38,7 @@ def _ensure_feishu_mocks():
 _ensure_feishu_mocks()
 
 from gateway.config import PlatformConfig
+from gateway.platforms.base import MessageType
 import gateway.platforms.feishu as feishu_module
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -59,12 +60,13 @@ def _make_card_action_data(
     chat_id: str = "oc_12345",
     open_id: str = "ou_user1",
     token: str = "tok_abc",
+    open_message_id: str = "om_card_message",
 ) -> SimpleNamespace:
     """Create a mock Feishu card action callback data object."""
     return SimpleNamespace(
         event=SimpleNamespace(
             token=token,
-            context=SimpleNamespace(open_chat_id=chat_id),
+            context=SimpleNamespace(open_chat_id=chat_id, open_message_id=open_message_id),
             operator=SimpleNamespace(open_id=open_id),
             action=SimpleNamespace(
                 tag="button",
@@ -78,6 +80,56 @@ def _close_submitted_coro(coro, _loop):
     """Close scheduled coroutines in sync-handler tests to avoid unawaited warnings."""
     coro.close()
     return SimpleNamespace(add_done_callback=lambda *_args, **_kwargs: None)
+
+
+# ===========================================================================
+# Generic interactive cards and group sender attribution
+# ===========================================================================
+
+class TestFeishuGenericCardsAndSenderContext:
+    """Regression tests for local Feishu extensions that must survive upgrades."""
+
+    @pytest.mark.asyncio
+    async def test_send_card_sends_interactive_payload(self):
+        adapter = _make_adapter()
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "Hermes 测试卡片"}},
+            "elements": [{"tag": "markdown", "content": "hello"}],
+        }
+        mock_response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_card"))
+        with patch.object(
+            adapter, "_feishu_send_with_retry", new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_send:
+            result = await adapter.send_card(
+                chat_id="oc_chat",
+                card=card,
+                reply_to="om_parent",
+                metadata={"thread_id": "omt-thread"},
+            )
+
+        assert result.success is True
+        assert result.message_id == "om_card"
+        mock_send.assert_awaited_once()
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs["chat_id"] == "oc_chat"
+        assert kwargs["msg_type"] == "interactive"
+        assert kwargs["reply_to"] == "om_parent"
+        assert kwargs["metadata"] == {"thread_id": "omt-thread"}
+        assert json.loads(kwargs["payload"]) == card
+
+    def test_prefix_group_sender_context_preserves_mention_hint(self):
+        text = feishu_module._prefix_group_sender_context(
+            "[Mentioned: 臭宝机器人]\n\n今天怎么安排？",
+            chat_type="group",
+            user_id="921g931d",
+            user_name="大笨钟",
+        )
+
+        assert text.startswith("[Mentioned: 臭宝机器人]\n")
+        assert "[Feishu group message from 大笨钟 (user_id=921g931d)]" in text
+        assert text.endswith("今天怎么安排？")
 
 
 # ===========================================================================
@@ -412,10 +464,10 @@ class TestResolveApproval:
 # ===========================================================================
 
 class TestNonApprovalCardAction:
-    """Non-approval card actions should still route as synthetic commands."""
+    """Non-approval card actions should route as synthetic text."""
 
     @pytest.mark.asyncio
-    async def test_routes_as_synthetic_command(self):
+    async def test_routes_as_synthetic_text_with_open_message_id_reply_anchor(self):
         adapter = _make_adapter()
 
         data = _make_card_action_data(
@@ -435,7 +487,10 @@ class TestNonApprovalCardAction:
 
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
-        assert "/card button" in event.text
+        assert event.message_type == MessageType.TEXT
+        assert event.message_id == "om_card_message"
+        assert event.text.startswith("card_action:button")
+        assert '"custom_action": "something_else"' in event.text
 
 
 # ===========================================================================
@@ -462,6 +517,33 @@ def _patch_callback_card_types(monkeypatch):
 
 class TestCardActionCallbackResponse:
     """Test that _on_card_action_trigger returns updated card inline."""
+
+    def test_non_approval_card_click_is_one_shot(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        first = _make_card_action_data(
+            {"hermes_test": "post_restart_card"},
+            token="tok_first",
+            open_message_id="om_same_card",
+        )
+        second = _make_card_action_data(
+            {"hermes_test": "post_restart_card"},
+            token="tok_second",
+            open_message_id="om_same_card",
+        )
+
+        def _close_and_accept(_loop, coro):
+            coro.close()
+            return True
+
+        with patch.object(adapter, "_submit_on_loop", side_effect=_close_and_accept) as mock_submit:
+            first_response = adapter._on_card_action_trigger(first)
+            second_response = adapter._on_card_action_trigger(second)
+
+        assert mock_submit.call_count == 1
+        assert first_response.card.data["header"]["title"]["content"] == "✅ 已收到"
+        assert second_response.card.data["header"]["title"]["content"] == "✅ 已处理过"
 
     def test_drops_action_when_loop_not_ready(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -537,7 +619,7 @@ class TestCardActionCallbackResponse:
         assert response.card is None
         mock_submit.assert_not_called()
 
-    def test_no_card_for_non_approval_action(self, _patch_callback_card_types):
+    def test_non_approval_action_returns_received_card(self, _patch_callback_card_types):
         adapter = _make_adapter()
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
@@ -547,7 +629,8 @@ class TestCardActionCallbackResponse:
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
-        assert response.card is None
+        assert response.card is not None
+        assert response.card.data["header"]["title"]["content"] == "✅ 已收到"
 
     def test_falls_back_to_open_id_when_name_not_cached(self, _patch_callback_card_types):
         adapter = _make_adapter()
