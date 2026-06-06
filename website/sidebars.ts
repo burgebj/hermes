@@ -698,6 +698,7 @@ const sidebars: SidebarsConfig = {
         'guides/migrate-from-openclaw',
         'guides/aws-bedrock',
         'guides/azure-foundry',
+        'guides/upstash-box',
         'guides/xai-grok-oauth',
         'guides/oauth-over-ssh',
         'guides/microsoft-graph-app-registration',
