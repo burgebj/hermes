@@ -7,7 +7,7 @@ protecting head and tail context.
 Improvements over v2:
   - Structured summary template with Resolved/Pending question tracking
   - Filter-safe summarizer preamble that treats prior turns as source material
-  - "Remaining Work" replaces "Next Steps" to avoid reading as active instructions
+  - "Prior Activity" replaces "Next Steps" to avoid reading as active instructions
   - Clear separator when summary merges into tail message
   - Iterative summary updates (preserves info across multiple compactions)
   - Token-budget tail protection instead of fixed message count
@@ -46,8 +46,8 @@ SUMMARY_PREFIX = (
     "If the latest user message is consistent with the '## Active Task' "
     "section, you may use the summary as background. If the latest user "
     "message contradicts, supersedes, changes topic from, or in any way "
-    "diverges from '## Active Task' / '## In Progress' / '## Pending User "
-    "Asks' / '## Remaining Work', the latest message WINS — discard those "
+    "diverges from '## Active Task' / '## In Progress' / '## Outstanding "
+    "Context' / '## Prior Activity', the latest message WINS — discard those "
     "stale items entirely and do not 'wrap up the old task first'. "
     "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
     "back', 'just verify', 'don't do that anymore', 'never mind', a new "
@@ -1168,13 +1168,13 @@ None recoverable from deterministic fallback.
 ## Resolved Questions
 None recoverable from deterministic fallback.
 
-## Pending User Asks
+## Outstanding Context
 {active_task}
 
 ## Relevant Files
 {_bullets(relevant_files, limit=12)}
 
-## Remaining Work
+## Prior Activity
 Continue from the most recent unfulfilled user ask and protected tail messages. Verify state with tools before making claims.
 
 ## Last Dropped Turns
@@ -1222,7 +1222,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         """Generate a structured summary of conversation turns.
 
         Uses a structured template (Goal, Progress, Decisions, Resolved/Pending
-        Questions, Files, Remaining Work) with explicit preamble telling the
+        Questions, Files, Prior Activity) with explicit preamble telling the
         summarizer not to answer questions.  When a previous summary exists,
         generates an iterative update instead of summarizing from scratch.
 
@@ -1324,13 +1324,13 @@ Be specific with file paths, commands, line numbers, and results.]
 ## Resolved Questions
 [Questions the user asked that were ALREADY answered — include the answer so it is not repeated]
 
-## Pending User Asks
+## Outstanding Context
 [Questions or requests from the user that have NOT yet been answered or fulfilled. If none, write "None."]
 
 ## Relevant Files
 [Files read, modified, or created — with brief note on each]
 
-## Remaining Work
+## Prior Activity
 [What remains to be done — framed as context, not instructions]
 
 ## Critical Context
@@ -1706,7 +1706,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         Context compressor bug (#10896): ``_align_boundary_backward`` can pull
         ``cut_idx`` past a user message when it tries to keep tool_call/result
         groups together.  If the last user message ends up in the *compressed*
-        middle region the LLM summariser writes it into "Pending User Asks",
+        middle region the LLM summariser writes it into "Outstanding Context",
         but ``SUMMARY_PREFIX`` tells the next model to respond only to user
         messages *after* the summary — so the task effectively disappears from
         the active context, causing the agent to stall, repeat completed work,
