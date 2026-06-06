@@ -189,6 +189,11 @@ try:
         _MCP_HTTP_AVAILABLE = True
     except ImportError:
         _MCP_HTTP_AVAILABLE = False
+    try:
+        from mcp.client.sse import sse_client as _sse_client
+        _MCP_SSE_AVAILABLE = True
+    except ImportError:
+        _MCP_SSE_AVAILABLE = False
     # Prefer the non-deprecated API (mcp >= 1.24.0); fall back to the
     # deprecated wrapper for older SDK versions.
     try:
@@ -1166,6 +1171,10 @@ class MCPServerTask:
         """Check if this server uses HTTP transport."""
         return "url" in self._config
 
+    def _is_sse(self) -> bool:
+        """Check if this server uses legacy SSE transport."""
+        return self._config.get("transport", "").lower() == "sse"
+
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
     async def _refresh_tools_task(self):
@@ -1741,6 +1750,41 @@ class MCPServerTask:
                             "tearing down legacy HTTP session", self.name,
                         )
 
+    async def _run_sse(self, config: dict):
+        """Run the server using legacy SSE transport (GET /sse + POST /messages/)."""
+        if not _MCP_SSE_AVAILABLE:
+            raise ImportError(
+                f"MCP server '{self.name}' requires SSE transport but "
+                "mcp.client.sse is not available. "
+                "Upgrade the mcp package to get SSE support."
+            )
+
+        url = config["url"]
+        headers = dict(config.get("headers") or {})
+        connect_timeout = config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
+
+        sampling_kwargs = self._sampling.session_kwargs() if self._sampling else {}
+        if _MCP_NOTIFICATION_TYPES and _MCP_MESSAGE_HANDLER_SUPPORTED:
+            sampling_kwargs["message_handler"] = self._make_message_handler()
+
+        async with _sse_client(
+            url,
+            headers=headers,
+            timeout=float(connect_timeout),
+            sse_read_timeout=300.0,
+        ) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
+                await session.initialize()
+                self.session = session
+                await self._discover_tools()
+                self._ready.set()
+                reason = await self._wait_for_lifecycle_event()
+                if reason == "reconnect":
+                    logger.info(
+                        "MCP server '%s': reconnect requested — "
+                        "tearing down SSE session", self.name,
+                    )
+
     async def _discover_tools(self):
         """Discover tools from the connected session."""
         if self.session is None:
@@ -1822,7 +1866,10 @@ class MCPServerTask:
         while True:
             try:
                 if self._is_http():
-                    await self._run_http(config)
+                    if self._is_sse():
+                        await self._run_sse(config)
+                    else:
+                        await self._run_http(config)
                 else:
                     await self._run_stdio(config)
                 # Transport returned cleanly. Two cases:
