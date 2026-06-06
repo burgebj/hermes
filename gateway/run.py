@@ -66,6 +66,7 @@ _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+_CRON_REPLY_PREFIX = "Cronjob Response: "
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not Telegram chat
@@ -365,6 +366,27 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
         return f"/{sanitized}" if sanitized else match.group(0)
 
     return _TELEGRAM_COMMAND_MENTION_RE.sub(_replace, text)
+
+
+def _render_reply_context_prefix(reply_text: str) -> str:
+    """Render the reply-context prefix injected into inbound user turns.
+
+    Ordinary replies preserve the quoted text verbatim because the prefix is a
+    disambiguation pointer. Cron-delivery replies are different: scheduled job
+    output often contains stale actionable text, so replaying the full cron
+    body into a live turn can incorrectly revive old tasks. In that case keep
+    only the cron job label and mark the quote as reference-only.
+    """
+    reply_snippet = reply_text[:500]
+    if reply_snippet.startswith(_CRON_REPLY_PREFIX):
+        first_line = reply_snippet.splitlines()[0]
+        job_label = first_line[len(_CRON_REPLY_PREFIX):].strip() or "unknown cron job"
+        return (
+            "[Replying to an earlier cron delivery"
+            f' "{job_label}". Treat that scheduled output as reference only unless '
+            "the user explicitly asks to act on it.]"
+        )
+    return f'[Replying to: "{reply_snippet}"]'
 
 
 # Only auto-continue interrupted gateway turns while the interruption is fresh.
@@ -8774,8 +8796,8 @@ class GatewayRunner:
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
-            message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            reply_prefix = _render_reply_context_prefix(event.reply_to_text)
+            message_text = f"{reply_prefix}\n\n{message_text}"
 
         if "@" in message_text:
             try:
