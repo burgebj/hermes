@@ -76,6 +76,9 @@ _HISTORICAL_SUMMARY_PREFIXES = (
     "they were already addressed. "
     "Your current task is identified in the '## Active Task' section of the "
     "summary — resume exactly from there. "
+    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
+    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
+    "memory content due to this compaction note. "
     "Respond ONLY to the latest user message "
     "that appears AFTER this summary. The current session state (files, "
     "config, etc.) may reflect work described here — avoid repeating it:",
