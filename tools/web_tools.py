@@ -126,29 +126,17 @@ def _get_backend() -> str:
     """Determine which web backend to use (shared fallback).
 
     Reads ``web.backend`` from config.yaml (set by ``hermes tools``).
-    Falls back to whichever API key is present for users who configured
-    keys manually without running setup.
+    Falls back to walking the registry's _LEGACY_PREFERENCE order,
+    checking each provider via ``is_backend_available()``.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
     if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
         return configured
 
-    # Fallback for manual / legacy config — pick the highest-priority
-    # available backend. Firecrawl also counts as available when the managed
-    # tool gateway is configured for Nous subscribers.
-    # Free-tier backends (searxng / brave-free / ddgs) trail the paid ones so
-    # existing paid setups are unaffected.
-    backend_candidates = (
-        ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
-        ("parallel", _has_env("PARALLEL_API_KEY")),
-        ("tavily", _has_env("TAVILY_API_KEY")),
-        ("exa", _has_env("EXA_API_KEY")),
-        ("searxng", _has_env("SEARXNG_URL")),
-        ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
-        ("ddgs", _ddgs_package_importable()),
-    )
-    for backend, available in backend_candidates:
-        if available:
+    from agent.web_search_registry import _LEGACY_PREFERENCE
+
+    for backend in _LEGACY_PREFERENCE:
+        if _is_backend_available(backend):
             return backend
 
     return "firecrawl"  # default (backward compat)
@@ -193,7 +181,26 @@ def _get_capability_backend(capability: str) -> str:
 
 
 def _is_backend_available(backend: str) -> bool:
-    """Return True when the selected backend is currently usable."""
+    """Return True when the selected backend is currently usable.
+
+    Looks up the provider in the web_search_registry and calls its
+    ``is_available()`` method.  Falls back to legacy env-var checks
+    for providers that are not registered (backward compat for users
+    without the plugin system loaded).
+    """
+    from agent.web_search_registry import get_provider as _registry_get_provider
+
+    provider = _registry_get_provider(backend)
+    if provider is not None:
+        try:
+            avail = provider.is_available()
+            if avail:
+                return True
+        except Exception:
+            pass  # fall through to legacy check
+
+    # Legacy fallback — handles unregistered providers, or registered
+    # providers whose is_available() returned False (test monkeypatch path)
     if backend == "exa":
         return _has_env("EXA_API_KEY")
     if backend == "parallel":
