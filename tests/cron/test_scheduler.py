@@ -1114,6 +1114,67 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["terminal"]
 
+    def test_cron_session_search_uses_passed_session_db(self, tmp_path):
+        job = {
+            "id": "session-search-job",
+            "name": "session search test",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        class FakeAgent:
+            def __init__(self, *args, **kwargs):
+                self._session_db = kwargs["session_db"]
+                self.session_id = kwargs["session_id"]
+
+            def run_conversation(self, *args, **kwargs):
+                result = self._invoke_tool("session_search", {"query": "cron jobs"}, effective_task_id="cron")
+                return {"final_response": result}
+
+            def _invoke_tool(self, function_name, function_args, effective_task_id=None, tool_call_id=None):
+                if function_name == "session_search":
+                    from tools.session_search_tool import session_search as _session_search
+                    return _session_search(
+                        query=function_args.get("query", ""),
+                        role_filter=function_args.get("role_filter"),
+                        limit=function_args.get("limit", 3),
+                        db=self._session_db,
+                        current_session_id=self.session_id,
+                    )
+                raise AssertionError(f"Unexpected tool: {function_name}")
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent", FakeAgent), \
+             patch("tools.session_search_tool._summarize_session", side_effect=AssertionError("should not summarize when there are no matches")), \
+             patch("model_tools._discover_tools", return_value=None):
+            fake_db.search_messages.return_value = []
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        payload = json.loads(final_response)
+        assert payload["success"] is True
+        assert payload["count"] == 0
+        fake_db.search_messages.assert_called_once_with(
+            query="cron jobs",
+            role_filter=None,
+            exclude_sources=["tool"],
+            limit=50,
+            offset=0,
+        )
+
     def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
 
