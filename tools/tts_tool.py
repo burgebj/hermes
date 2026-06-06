@@ -1591,7 +1591,7 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
     if result.returncode != 0:
         stderr = result.stderr.strip()
         # Filter out the "OK:" line from stderr
-        error_lines = [l for l in stderr.splitlines() if not l.startswith("OK:")]
+        error_lines = [line for line in stderr.splitlines() if not line.startswith("OK:")]
         raise RuntimeError(f"NeuTTS synthesis failed: {chr(10).join(error_lines) or 'unknown error'}")
 
     # If the caller wanted .mp3 or .ogg, convert from WAV
