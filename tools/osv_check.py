@@ -147,7 +147,17 @@ def _query_osv(
         method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    import socket as _socket
+    # urllib timeout= does not always cover the SSL handshake phase.
+    # Set a socket-level default timeout as a belt-and-suspenders guard
+    # so hung SSL handshakes don't block indefinitely (issue #29184).
+    _prev_timeout = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(_TIMEOUT)
+    try:
+        _urlopen_ctx = urllib.request.urlopen(req, timeout=_TIMEOUT)
+    finally:
+        _socket.setdefaulttimeout(_prev_timeout)
+    with _urlopen_ctx as resp:
         result = json.loads(resp.read())
 
     vulns = result.get("vulns", [])
