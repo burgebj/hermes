@@ -5,10 +5,11 @@ adds latency to the user-facing reply.
 """
 
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
-from agent.auxiliary_client import call_llm
+from agent.auxiliary_client import call_llm, extract_content_or_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,65 @@ _TITLE_PROMPT = (
     "following exchange. The title should capture the main topic or intent. "
     "Return ONLY the title text, nothing else. No quotes, no punctuation at the end, no prefixes."
 )
+
+
+def _extract_title_from_reasoning(raw: str) -> str:
+    """Extract a clean title from raw LLM output (may contain reasoning).
+
+    For reasoning models (e.g. --reasoning-format deepseek), the output
+    is mostly thinking process.  We look for the final selected title
+    among the options.
+    """
+    if not raw:
+        return raw
+
+    # Step 1: Try to find the "best option" or final selection
+    for pattern in [
+        r"(?:Select|Choose|Best|Final)[\s:]*['\"]?(.+?)['\"]?\s*$",
+        r"(?:Best option|Best choice|Final choice)[\s:]*['\"]?(.+?)['\"]?\s*$",
+        r"(?:I recommend|I choose|I select)[\s:]*['\"]?(.+?)['\"]?\s*$",
+    ]:
+        match = re.search(pattern, raw, re.IGNORECASE | re.DOTALL)
+        if match:
+            candidate = match.group(1).strip()
+            candidate = re.sub(r'^[\s\*\-\u2022]+', '', candidate)
+            candidate = re.sub(r'\s*\(.*?\)', '', candidate)
+            candidate = candidate.strip(' \t\n\r.,!?;:"\'')
+            if 3 <= len(candidate) <= 80:
+                return candidate
+
+    # Step 2: Look for quoted title candidates in the reasoning.
+    # The model often lists options like "Python 快速排序算法" (Python Quick Sort)
+    skip_patterns = re.compile(r'(?:words?|characters?|char\.?|characters\.?)$', re.IGNORECASE)
+    quoted_titles = re.findall(r'["\u201c\u201d](.+?)["\u201c\u201d]', raw)
+    for qt in quoted_titles:
+        clean = qt.strip()
+        if skip_patterns.search(clean):
+            continue
+        clean = re.sub(r'\s*\(.*?\)', '', clean)
+        clean = clean.strip(' \t\n\r.,!?;:"\'')
+        if 3 <= len(clean) <= 30 and re.search(r'[\u4e00-\u9fff]|[a-zA-Z]{2,}', clean):
+            return clean
+
+    # Step 3: If no quoted titles, try the last plausible phrase
+    lines = [l.strip() for l in raw.split('\n') if l.strip()]
+    for line in reversed(lines):
+        if any(kw in line for kw in (
+            "Thinking Process", "Analysis:", "Step ", "Draft",
+            "Constraint", "Output Format", "Content:", "Topic:",
+            "Specific", "Intent:", "Length:", "Select",
+        )):
+            continue
+        clean = re.sub(r'^[\s\*\-\u2022]+', '', line)
+        clean = re.sub(r'\s*\(.*?\)', '', clean)
+        clean = re.sub(r'^\d+\.\s*', '', clean)
+        clean = clean.strip(' \t\n\r.,!?;:"\'')
+        if 3 <= len(clean) <= 80:
+            return clean
+
+    # Step 4: Fallback — don't truncate here; let generate_title() handle
+    # the 80-char limit so it can append "..." consistently.
+    return raw.strip()
 
 
 def generate_title(
@@ -62,7 +122,11 @@ def generate_title(
             timeout=timeout,
             main_runtime=main_runtime,
         )
-        title = (response.choices[0].message.content or "").strip()
+        # Use extract_content_or_reasoning to handle reasoning models
+        # (e.g., Qwen3.5-4B with --reasoning-format deepseek outputs to
+        # reasoning_content instead of content).
+        raw = extract_content_or_reasoning(response)
+        title = _extract_title_from_reasoning(raw)
         # Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
         title = title.strip('"\'')
         if title.lower().startswith("title:"):
