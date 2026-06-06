@@ -8,7 +8,7 @@ description: "Authoritative reference for Hermes built-in tools, grouped by tool
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~64 tools — 10 browser tools (core) + 2 CDP-gated browser tools, 4 file tools, 4 Home Assistant tools, 2 terminal tools, 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 9 kanban tools (registered when the kanban dispatcher spawns the agent), 2 Discord tools, and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `video_generate`, `vision_analyze`, `video_analyze`, `mixture_of_agents`, `send_message`, `todo`, `computer_use`, `process`).
+**Quick counts (current registry):** ~70 tools — 10 browser tools (core) + 2 CDP-gated browser tools, 4 file tools, 10 RL tools, 4 Home Assistant tools, 2 terminal tools, 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 7 kanban tools (registered when the kanban dispatcher spawns the agent), 2 Discord tools, and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `video_generate`, `vision_analyze`, `video_analyze`, `mixture_of_agents`, `send_message`, `todo`, `cursor_agent`, explicit `computer_use_*` tools, `process`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp_<server>_` (e.g., `mcp_github_create_issue` for the `github` MCP server). See [MCP Integration](/user-guide/features/mcp) for configuration.
@@ -55,6 +55,14 @@ These two tools live in the `browser` toolset but only register when a Chrome De
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
 | `cronjob` | Unified scheduled-task manager. Use `action="create"`, `"list"`, `"update"`, `"pause"`, `"resume"`, `"run"`, or `"remove"` to manage jobs. Supports skill-backed jobs with one or more attached skills, and `skills=[]` on update clears attached skills. Cron runs happen in fresh sessions with no current-chat context. | — |
+
+## `cursor_agent` toolset
+
+Opt-in Cursor SDK bridge for running Composer 2.5 and other Cursor models through Cursor's own agent runtime. Enable it with `hermes tools enable cursor_agent`, set `CURSOR_API_KEY`, and install the bridge dependencies with `cd tools/cursor_agent_bridge && npm install --omit=dev` from the Hermes repo checkout.
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `cursor_agent` | Run a Cursor SDK agent locally against a working tree or in Cursor cloud. Supports `action="run"` for tasks and `action="list_models"` for catalog checks. Defaults to `model="composer-2.5"`. | `CURSOR_API_KEY`, Node.js >= 18, bridge npm dependencies |
 
 ## `delegation` toolset
 
@@ -103,7 +111,19 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `computer_use` | Background macOS desktop control via cua-driver — screenshots (SOM / vision / AX), click / drag / scroll / type / key / wait, list_apps, focus_app. Does NOT steal the user's cursor or keyboard focus. Works with any tool-capable model. macOS only. | `cua-driver` on `$PATH` (install via `hermes tools`). |
+| `computer_use_list_apps` | List apps/windows available to Computer Use. | Computer Use installed/enabled on macOS. |
+| `computer_use_launch_app` | Launch a macOS app by app name or bundle id before inspecting it. | Computer Use installed/enabled on macOS. |
+| `computer_use_get_app_state` | Read app/window state (`ax`, `som`, or `vision`). Call before and after actions. | Computer Use installed/enabled on macOS. |
+| `computer_use_click` | Click an element index or coordinate in the current app state. | Computer Use installed/enabled on macOS. |
+| `computer_use_perform_secondary_action` | Perform an accessibility secondary action such as showing a menu. | Computer Use installed/enabled on macOS. |
+| `computer_use_scroll` | Scroll an app/window/element. | Computer Use installed/enabled on macOS. |
+| `computer_use_drag` | Drag between elements or coordinates. | Computer Use installed/enabled on macOS. |
+| `computer_use_type_text` | Type text into the targeted app/window. | Computer Use installed/enabled on macOS. |
+| `computer_use_set_value` | Set a control value directly. | Computer Use installed/enabled on macOS. |
+| `computer_use_press_key` | Press a key or combo in the targeted app/window. | Computer Use installed/enabled on macOS. |
+| `computer_use_select_text` | Select text in an element or field. | Computer Use installed/enabled on macOS. |
+| `computer_use_daemon` | Status/start/stop the cua-driver daemon without shelling out. | Computer Use installed/enabled on macOS. |
+
 
 
 :::note

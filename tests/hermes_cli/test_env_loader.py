@@ -69,6 +69,36 @@ def test_user_env_takes_precedence_over_project_env(tmp_path, monkeypatch):
     assert os.getenv("OPENAI_API_KEY") == "project-key"
 
 
+def test_path_shell_references_expand_against_original_environment(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    user_env = home / ".env"
+    user_env.write_text("PATH=$HOME/.local/bin:$PATH\n", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", "/Users/tester")
+    monkeypatch.setenv("PATH", "/opt/node/bin:/usr/bin:/bin")
+
+    loaded = load_hermes_dotenv(hermes_home=home)
+
+    assert loaded == [user_env]
+    assert os.getenv("PATH") == "/Users/tester/.local/bin:/opt/node/bin:/usr/bin:/bin"
+
+
+def test_path_shell_references_do_not_reinject_literal_parent_placeholders(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    user_env = home / ".env"
+    user_env.write_text("PATH=$HOME/.local/bin:$PATH\n", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", "/Users/tester")
+    monkeypatch.setenv("PATH", "/opt/node/bin:$HOME/bin:$PATH:/usr/bin")
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert "$" not in os.getenv("PATH")
+    assert os.getenv("PATH") == "/Users/tester/.local/bin:/opt/node/bin:/Users/tester/bin:/usr/bin"
+
+
 def test_null_bytes_in_user_env_are_stripped(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     home.mkdir()

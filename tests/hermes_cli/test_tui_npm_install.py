@@ -259,11 +259,12 @@ def test_make_tui_argv_keeps_desktop_workspace_install_behaviour(
         "--no-fund",
         "--no-audit",
         "--progress=false",
+        "--include=dev",
     ]
     assert calls[0][1]["cwd"] == str(tmp_path)
 
 
-def test_make_tui_argv_keeps_desktop_always_build_behaviour(
+def test_make_tui_argv_skips_build_when_bundle_is_fresh_on_desktop(
     tmp_path: Path, main_mod, monkeypatch
 ) -> None:
     _touch_tui_entry(tmp_path)
@@ -272,18 +273,83 @@ def test_make_tui_argv_keeps_desktop_always_build_behaviour(
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: False)
     monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
     monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("fresh warm TUI launch must not install or rebuild")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fail_run)
+
+    argv, cwd = main_mod._make_tui_argv(tmp_path, tui_dev=False)
+
+    assert argv == ["/bin/node", "--expose-gc", str(tmp_path / "dist" / "entry.js")]
+    assert cwd == tmp_path
+
+
+def test_make_tui_argv_skips_install_when_bundle_is_fresh_without_node_modules(
+    tmp_path: Path, main_mod, monkeypatch
+) -> None:
+    """dist/entry.js is self-contained, so dependency-cold launches can skip npm."""
+    _touch_tui_entry(tmp_path)
+    monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: True)
+    monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: False)
+    monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("fresh bundled TUI launch must not install or rebuild")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fail_run)
+
+    argv, cwd = main_mod._make_tui_argv(tmp_path, tui_dev=False)
+
+    assert argv == ["/bin/node", "--expose-gc", str(tmp_path / "dist" / "entry.js")]
+    assert cwd == tmp_path
+
+
+def test_make_tui_argv_installs_dev_deps_when_cold_building(
+    tmp_path: Path, main_mod, monkeypatch
+) -> None:
+    """Cold builds need dev deps and install from the npm workspace root."""
+    tui_dir = tmp_path / "ui-tui"
+    tui_dir.mkdir()
+    (tui_dir / "package.json").write_text("{}")
+    (tmp_path / "package-lock.json").write_text("{}")
     calls = []
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: True)
+    monkeypatch.setattr(main_mod, "_tui_need_rebuild", lambda _root: True)
+    monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
 
-    def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
 
-    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+    def record_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return Result()
 
-    main_mod._make_tui_argv(tmp_path, tui_dev=False)
+    monkeypatch.setattr(main_mod.subprocess, "run", record_run)
 
-    assert calls
-    assert calls[0][0][0] == ["/bin/npm", "run", "build"]
+    argv, cwd = main_mod._make_tui_argv(tui_dir, tui_dev=False)
+
+    assert argv == ["/bin/node", "--expose-gc", str(tui_dir / "dist" / "entry.js")]
+    assert cwd == tui_dir
+    assert len(calls) == 2
+    assert calls[0][0][:2] == ["/bin/npm", "install"]
+    assert "--include=dev" in calls[0][0]
+    assert calls[0][1]["cwd"] == str(tmp_path)
+    assert calls[0][1]["env"]["CI"] == "1"
+    assert calls[1][0] == ["/bin/npm", "run", "build"]
+    assert calls[1][1]["cwd"] == str(tui_dir)
+
+
+def test_tui_initial_skin_env_serializes_configured_skin(main_mod) -> None:
+    raw = main_mod._tui_initial_skin_env({"display": {"skin": "mono"}})
+
+    assert raw
+    assert '"name":"mono"' in raw
+    assert '"colors"' in raw
+    assert '"branding"' in raw
 
 
 # ── _workspace_root helper ──────────────────────────────────────────
@@ -325,16 +391,7 @@ def test_workspace_root_returns_dir_when_no_parent_lockfile(
 def test_workspace_root_consistent_with_need_npm_install(
     tmp_path: Path, main_mod
 ) -> None:
-    """Divergence regression: if someone creates ui-tui/package-lock.json
-    by accident, _workspace_root (used by both _tui_need_npm_install AND
-    the npm install cwd) returns ui-tui/ for both, so they never disagree.
-
-    Before the shared helper, _tui_need_npm_install used a 3-condition
-    check (falling back to ui-tui/ when its own lockfile exists) while
-    the npm install cwd used a simpler check (still going to the parent
-    because the parent lockfile still exists).  The shared helper
-    eliminates the split.
-    """
+    """The install decision and install cwd share the same workspace root helper."""
     sub = tmp_path / "ui-tui"
     sub.mkdir()
     (sub / "package.json").write_text("{}")
@@ -343,43 +400,19 @@ def test_workspace_root_consistent_with_need_npm_install(
     (tmp_path / "package-lock.json").write_text("{}")
 
     ws = main_mod._workspace_root(sub)
-    # _workspace_root sees sub has its own lockfile → treats it as standalone
     assert ws == sub
-
-    # _tui_need_npm_install also uses _workspace_root, so both agree
     assert main_mod._tui_need_npm_install.__code__.co_names
-    # (Smoke test: just confirm _tui_need_npm_install doesn't crash)
-    # It won't need install because the lockfile exists and there's no
-    # hidden lockfile to compare against, and ink is missing → True.
-    # But the key invariant is: ws_root for the need-check == ws_root
-    # for the install cwd — both use _workspace_root(sub).
 
 
 def test_no_stray_lockfiles_in_workspace_subdirs(main_mod) -> None:
-    """Workspace sub-directories must not contain their own package-lock.json.
-
-    With a single workspace root lockfile, per-directory lockfiles are
-    always accidental (typically from running ``npm install`` inside the
-    wrong directory).  They cause ``_workspace_root`` to treat the
-    sub-package as standalone, which breaks hoisted ``node_modules``
-    resolution and can silently diverge the install cwd from the
-    lockfile-check root.
-
-    This is an invariant, not a change-detector: the workspace structure
-    is not expected to gain per-dir lockfiles.
-    """
+    """Workspace sub-directories must not contain their own package-lock.json."""
     root = main_mod.PROJECT_ROOT
-    # Workspace members that live one level below the root and should
-    # NOT have their own lockfile.  (ui-tui/packages/* members are
-    # two levels deep and even less likely to get accidental lockfiles,
-    # but we check them too for completeness.)
     subdirs = [
         root / "ui-tui",
         root / "web",
         root / "apps" / "desktop",
         root / "apps" / "shared",
     ]
-    # Also sweep ui-tui/packages/* (hermes-ink etc.)
     tui_pkgs = root / "ui-tui" / "packages"
     if tui_pkgs.is_dir():
         subdirs.extend(d for d in tui_pkgs.iterdir() if d.is_dir())

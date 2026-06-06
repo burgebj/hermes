@@ -4089,17 +4089,22 @@ class GatewayRunner:
             f"while kill -0 {current_pid} 2>/dev/null; do sleep 0.2; done; "
             f"{cmd} gateway restart"
         )
+        # Do not rely on PATH here. Gateway tool execution can temporarily inherit
+        # sparse or user-mutated environments, and a missing /bin caused /restart
+        # to shut Hazel down without respawning.
+        bash_bin = shutil.which("bash") or "/bin/bash"
         setsid_bin = shutil.which("setsid")
+        bash_bin = shutil.which("bash") or "/bin/bash"
         if setsid_bin:
             subprocess.Popen(
-                [setsid_bin, "bash", "-lc", shell_cmd],
+                [setsid_bin, bash_bin, "-lc", shell_cmd],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
         else:
             subprocess.Popen(
-                ["bash", "-lc", shell_cmd],
+                [bash_bin, "-lc", shell_cmd],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -17701,6 +17706,28 @@ class GatewayRunner:
         else:
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
+        _clarify_metadata = dict(_status_thread_metadata or {})
+        if source.user_id:
+            _clarify_metadata["user_id"] = source.user_id
+
+        def _clarify_callback_sync(question: str, choices=None) -> str:
+            if not _status_adapter or not hasattr(_status_adapter, "ask_clarify"):
+                return "Clarify is not supported on this gateway platform."
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _status_adapter.ask_clarify(
+                        _status_chat_id,
+                        question,
+                        choices=choices,
+                        metadata=_clarify_metadata,
+                    ),
+                    _loop_for_step,
+                )
+                return str(fut.result(timeout=660)).strip()
+            except Exception as exc:
+                logger.warning("gateway clarify callback failed: %s", exc, exc_info=True)
+                return f"Clarify failed: {exc}"
+
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
                 return
@@ -17983,6 +18010,10 @@ class GatewayRunner:
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
+            # Clarify callback is assigned below after the per-turn bridge is
+            # defined. Assigning it here makes Python treat the later nested
+            # definition as a local and raises UnboundLocalError before the
+            # definition executes.
 
             # Credits / out-of-band notices (usage bands, depletion, restored).
             # Messaging has no persistent status bar, so each notice is a

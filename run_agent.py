@@ -4380,10 +4380,10 @@ class AIAgent:
             return content
 
         summary = _multimodal_text_summary(result)
-        if tool_name == "computer_use":
+        if tool_name.startswith("computer_use_"):
             return json.dumps({
                 "error": (
-                    "computer_use returned screenshot/image content, but the active "
+                    "Computer Use returned screenshot/image content, but the active "
                     "model/provider does not support image input. Switch to a "
                     "vision-capable model for desktop computer use, or use browser "
                     "tools for browser tasks."

@@ -875,6 +875,12 @@ def set_approval_callback(*args, **kwargs):
     return _set_approval_callback(*args, **kwargs)
 
 
+def set_computer_use_approval_callback(*args, **kwargs):
+    from tools.computer_use.tool import set_approval_callback as _set_computer_use_approval_callback
+
+    return _set_computer_use_approval_callback(*args, **kwargs)
+
+
 def set_secret_capture_callback(*args, **kwargs):
     from tools.skills_tool import set_secret_capture_callback as _set_secret_capture_callback
 
@@ -3306,9 +3312,12 @@ class HermesCLI:
             _resolve_prefill_messages_file(CLI_CONFIG)
         )
         
-        # Reasoning config (OpenRouter reasoning effort level)
+        # Reasoning config (OpenRouter/Responses effort level).  The env var
+        # gives subprocess orchestrators (e.g. hermes update conflict resolver)
+        # a one-shot override without mutating the user's global config.
         self.reasoning_config = _parse_reasoning_config(
-            CLI_CONFIG["agent"].get("reasoning_effort", "")
+            os.getenv("HERMES_REASONING_EFFORT", "")
+            or CLI_CONFIG["agent"].get("reasoning_effort", "")
         )
         self.service_tier = _parse_service_tier_config(
             CLI_CONFIG["agent"].get("service_tier", "")
@@ -9346,6 +9355,7 @@ class HermesCLI:
         def run_background():
             set_sudo_password_callback(self._sudo_password_callback)
             set_approval_callback(self._approval_callback)
+            set_computer_use_approval_callback(self._computer_use_approval_callback)
             try:
                 set_secret_capture_callback(self._secret_capture_callback)
             except Exception:
@@ -9453,6 +9463,7 @@ class HermesCLI:
                 try:
                     set_sudo_password_callback(None)
                     set_approval_callback(None)
+                    set_computer_use_approval_callback(None)
                     set_secret_capture_callback(None)
                 except Exception:
                     pass
@@ -12440,6 +12451,7 @@ class HermesCLI:
                 # by acp_adapter/server.py for ACP sessions.
                 set_sudo_password_callback(self._sudo_password_callback)
                 set_approval_callback(self._approval_callback)
+                set_computer_use_approval_callback(self._computer_use_approval_callback)
                 try:
                     set_secret_capture_callback(self._secret_capture_callback)
                 except Exception:
@@ -12508,6 +12520,7 @@ class HermesCLI:
                     try:
                         set_sudo_password_callback(None)
                         set_approval_callback(None)
+                        set_computer_use_approval_callback(None)
                         set_secret_capture_callback(None)
                     except Exception:
                         pass

@@ -6,11 +6,10 @@ Three distinct failure modes the user community hit during rollout:
    `error`")`` on multi-turn xAI OAuth conversations.  The OpenAI SDK's
    Responses streaming state machine collapses an upstream ``error`` SSE
    frame into a generic stream-ordering error.  ``_run_codex_stream``
-   now treats this the same way it already treats the missing
-   ``response.completed`` postlude — fall back to a non-stream
-   ``responses.create(stream=True)`` which surfaces the real provider
-   error.  Also closes #8133 (``response.in_progress`` prelude on custom
-   relays) and #14634 (``codex.rate_limits`` prelude on codex-lb).
+   now consumes the event stream directly via ``responses.create(stream=True)``
+   and surfaces the real provider error.  Also closes #8133
+   (``response.in_progress`` prelude on custom relays) and #14634
+   (``codex.rate_limits`` prelude on codex-lb).
 
 2. The HTTP 403 entitlement error xAI returns when an OAuth token lacks
    SuperGrok / X Premium ("You have either run out of available
