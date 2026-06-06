@@ -231,6 +231,63 @@ managed_persistence: true
 If the flag is placed at the wrong path, Hermes silently falls back to a random ephemeral `userId` and your login state will be lost on every session.
 :::
 
+#### Cookie import
+
+Hermes can import cookies from a Netscape-format `cookies.txt` file into a
+live Camofox session via the `browser_import_cookies` tool — useful for
+authenticating to sites like LinkedIn or Amazon without a fresh interactive
+login every time.
+
+**1. Generate a shared API key** and set it on both the Camofox server and
+the Hermes environment. Cookie import is disabled unless this key is set.
+
+```bash
+# Generate
+openssl rand -hex 32
+```
+
+```bash
+# ~/.hermes/.env
+CAMOFOX_API_KEY=your-generated-key
+# optional — defaults to ~/.camofox/cookies
+CAMOFOX_COOKIES_DIR=~/.camofox/cookies
+```
+
+The Camofox server needs the **same** `CAMOFOX_API_KEY` in its own
+environment (Docker `-e CAMOFOX_API_KEY=...`, Fly.io secret, or shell
+profile on the server host).
+
+**2. Export cookies** from your browser in Netscape format using an
+extension like "cookies.txt" for Chrome/Firefox, then drop the file under
+`CAMOFOX_COOKIES_DIR`:
+
+```bash
+mkdir -p ~/.camofox/cookies
+cp ~/Downloads/linkedin_cookies.txt ~/.camofox/cookies/linkedin.txt
+```
+
+**3. Ask the agent to import them:**
+
+> Import my LinkedIn cookies from `linkedin.txt`, then open my feed.
+
+The agent calls `browser_import_cookies` with the relative path. Hermes
+parses the file, optionally filters by `domain_suffix` (e.g.
+`.linkedin.com`), sanitizes to Playwright cookie fields, and POSTs to
+`POST /sessions/{userId}/cookies` with a Bearer token. Subsequent
+`browser_navigate` calls against that domain arrive authenticated.
+
+**Safety rails:**
+
+- Paths are resolved strictly inside `CAMOFOX_COOKIES_DIR` — traversal
+  (`../secret`) and absolute paths are rejected.
+- Max file size: 5 MB. Max cookies per import: 500. Both enforced
+  client-side before hitting the server.
+- Cookie values are never logged; only counts and user IDs appear in
+  `hermes.log`.
+- The tool is hidden from the agent unless `CAMOFOX_URL` is set — it
+  cannot be called against Browserbase, Firecrawl, or agent-browser
+  backends.
+
 ##### What Hermes does
 - Sends a deterministic profile-scoped `userId` to Camofox so the server can reuse the same Firefox profile across sessions.
 - Skips server-side context destruction on cleanup, so cookies and logins survive between agent tasks.

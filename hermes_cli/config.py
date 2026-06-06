@@ -2980,6 +2980,21 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "tool",
     },
+    "CAMOFOX_API_KEY": {
+        "description": "Bearer token required by the Camofox server to accept cookie-import requests. Generate with `openssl rand -hex 32` and set on both the Camofox server and Hermes.",
+        "prompt": "Camofox API key (for cookie import)",
+        "url": "https://github.com/jo-inc/camofox-browser#cookie-import",
+        "tools": ["browser_import_cookies"],
+        "password": True,
+        "category": "tool",
+    },
+    "CAMOFOX_COOKIES_DIR": {
+        "description": "Directory containing Netscape-format cookie files importable via browser_import_cookies (default: ~/.camofox/cookies)",
+        "prompt": "Cookies directory",
+        "tools": ["browser_import_cookies"],
+        "password": False,
+        "category": "tool",
+    },
     "FAL_KEY": {
         "description": "FAL API key for image and video generation",
         "prompt": "FAL API key",

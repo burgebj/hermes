@@ -484,6 +484,11 @@ TOOL_CATEGORIES = {
                 "env_vars": [
                     {"key": "CAMOFOX_URL", "prompt": "Camofox server URL", "default": "http://localhost:9377",
                      "url": "https://github.com/jo-inc/camofox-browser"},
+                    {"key": "CAMOFOX_API_KEY", "prompt": "Camofox API key (optional, enables cookie import)",
+                     "optional": True,
+                     "url": "https://github.com/jo-inc/camofox-browser#cookie-import"},
+                    {"key": "CAMOFOX_COOKIES_DIR", "prompt": "Cookies directory (optional)",
+                     "optional": True, "default": "~/.camofox/cookies"},
                 ],
                 "browser_provider": "camofox",
                 "post_setup": "camofox",
