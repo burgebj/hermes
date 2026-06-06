@@ -363,15 +363,33 @@ class TestAspectRatioNormalization:
 
 class TestRegistryIntegration:
 
-    def test_schema_exposes_only_prompt_and_aspect_ratio_to_agent(self, image_tool):
-        """The agent-facing schema must stay tight — model selection is a
-        user-level config choice, not an agent-level arg."""
+    def test_schema_exposes_supported_gpt_image_2_controls_to_agent(self, image_tool):
+        """The agent-facing schema stays tight while allowing supported
+        image-to-image/reference workflows."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-        assert set(props.keys()) == {"prompt", "aspect_ratio"}
+        assert set(props.keys()) == {
+            "prompt", "aspect_ratio", "reference_images",
+            "size", "quality", "n", "output_format", "mask_image",
+        }
+
+    def test_reference_images_schema_is_string_array(self, image_tool):
+        ref_schema = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["reference_images"]
+        assert ref_schema["type"] == "array"
+        assert ref_schema["items"]["type"] == "string"
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
         assert set(enum) == {"landscape", "square", "portrait"}
+
+    def test_new_gpt_image_2_controls_have_tight_enums(self, image_tool):
+        props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
+        assert set(props["quality"]["enum"]) == {"low", "medium", "high", "auto"}
+        assert set(props["output_format"]["enum"]) == {"png", "jpeg", "webp"}
+        assert props["n"]["minimum"] == 1
+        assert props["n"]["maximum"] == 4
+        assert props["size"]["type"] == "string"
+        assert set(props["size"]["enum"]) == {"auto", "1024x1024", "1536x1024", "1024x1536"}
+        assert props["mask_image"]["type"] == "string"
 
 
 # ---------------------------------------------------------------------------

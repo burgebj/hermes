@@ -906,6 +906,47 @@ IMAGE_GENERATE_SCHEMA = {
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
             },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional reference images for image-to-image workflows. "
+                    "Each item may be an HTTP(S) URL, data URL, or local file path. "
+                    "Only providers that support image input will use this parameter."
+                ),
+            },
+            "size": {
+                "type": "string",
+                "enum": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+                "description": (
+                    "Optional exact GPT-Image output size: '1024x1024', "
+                    "'1536x1024', '1024x1536', or 'auto'. "
+                    "When omitted, aspect_ratio chooses the provider default."
+                ),
+            },
+            "quality": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "auto"],
+                "description": "Optional GPT-Image quality override for this call.",
+            },
+            "n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4,
+                "description": "Optional number of images to request in one call. Providers may cap or return only supported outputs.",
+            },
+            "output_format": {
+                "type": "string",
+                "enum": ["png", "jpeg", "webp"],
+                "description": "Optional output image format. Defaults to png.",
+            },
+            "mask_image": {
+                "type": "string",
+                "description": (
+                    "Optional mask image for local edits/inpainting. May be a local file path, "
+                    "HTTP(S) URL, or data URL when the active provider supports masks."
+                ),
+            },
         },
         "required": ["prompt"],
     },
@@ -951,7 +992,16 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(
+    prompt: str,
+    aspect_ratio: str,
+    reference_images=None,
+    size=None,
+    quality=None,
+    n=None,
+    output_format=None,
+    mask_image=None,
+):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -1006,6 +1056,17 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
 
     try:
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+        if reference_images:
+            kwargs["reference_images"] = reference_images
+        for key, value in {
+            "size": size,
+            "quality": quality,
+            "n": n,
+            "output_format": output_format,
+            "mask_image": mask_image,
+        }.items():
+            if value is not None:
+                kwargs[key] = value
         if configured_model:
             kwargs["model"] = configured_model
         result = provider.generate(**kwargs)
@@ -1035,12 +1096,39 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    reference_images = args.get("reference_images") or []
+    size = args.get("size")
+    quality = args.get("quality")
+    n = args.get("n")
+    output_format = args.get("output_format")
+    mask_image = args.get("mask_image")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(
+        prompt,
+        aspect_ratio,
+        reference_images=reference_images,
+        size=size,
+        quality=quality,
+        n=n,
+        output_format=output_format,
+        mask_image=mask_image,
+    )
     if dispatched is not None:
         return dispatched
+
+    if reference_images or any(v is not None for v in (size, quality, n, output_format, mask_image)):
+        return json.dumps({
+            "success": False,
+            "image": None,
+            "error": (
+                "GPT-Image-2 controls such as reference_images, size, quality, n, "
+                "output_format, and mask_image require an image generation plugin "
+                "provider that supports them, such as image_gen.provider='openai-codex'."
+            ),
+            "error_type": "advanced_image_controls_unsupported",
+        })
 
     return image_generate_tool(
         prompt=prompt,
