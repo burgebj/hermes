@@ -1,0 +1,7 @@
+name: stability
+version: 1.0.0
+description: "Stability AI video generation backend. Stable Video Diffusion — open-weight image-to-video model."
+author: 0z1
+kind: backend
+requires_env:
+  - STABILITY_API_KEY
