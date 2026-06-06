@@ -1545,6 +1545,11 @@ class AIAgent:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+            # Fix: if _last_flushed_db_idx overshoots len(messages) after
+            # _drop_trailing_empty_response_scaffolding popped trailing
+            # messages, reset to start_idx so new messages aren't skipped.
+            if flush_from >= len(messages):
+                flush_from = start_idx
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")

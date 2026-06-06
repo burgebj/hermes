@@ -61,7 +61,9 @@ skills/.hub/
 ignored/
 .worktrees/
 environments/benchmarks/evals/
-
+build/
+build1/
+dist/
 # Web UI build output
 hermes_cli/web_dist/
 apps/desktop/build/
