@@ -9497,6 +9497,12 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
     standalone uv into ``$HERMES_HOME/bin/uv``, but on Termux the official
     installer may not work (glibc vs bionic).  Fall back to ``pip install uv``
     which gets a Termux-compatible binary.
+
+    On ARM64 (common Termux target), no prebuilt uv wheel exists on PyPI, so
+    ``pip install uv`` triggers ``cargo build --release`` of uv's entire Rust
+    codebase (jemalloc, OpenSSL, zstd-sys).  On memory-constrained phones this
+    exhausts swap and freezes the machine -- set a generous timeout so the
+    attempt fails gracefully and the update path falls back to pip instead.
     """
     from hermes_cli.managed_uv import resolve_uv
 
@@ -9507,7 +9513,14 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
         return None
     try:
         print("  → Termux detected: trying to install uv for faster dependency updates...")
-        subprocess.run(pip_cmd + ["install", "uv"], cwd=PROJECT_ROOT, check=False)
+        subprocess.run(
+            pip_cmd + ["install", "uv"],
+            cwd=PROJECT_ROOT,
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print("    ↻ uv install timed out (Rust compile on ARM64 is too slow) — falling back to pip")
     except Exception:
         pass
     # After pip install, check managed path first, then PATH
