@@ -964,6 +964,17 @@ def restore_primary_runtime(agent) -> bool:
             provider=rt["compressor_provider"],
             api_mode=rt.get("compressor_api_mode", ""),
         )
+        if hasattr(cc, "set_threshold_tokens_override"):
+            cc.set_threshold_tokens_override(
+                rt.get("compressor_threshold_tokens_override")
+            )
+        runtime_threshold = rt.get("compressor_threshold_tokens")
+        if (
+            runtime_threshold
+            and hasattr(cc, "apply_runtime_threshold_cap")
+            and runtime_threshold < getattr(cc, "threshold_tokens", runtime_threshold)
+        ):
+            cc.apply_runtime_threshold_cap(runtime_threshold, update_percent=True)
 
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
@@ -1581,6 +1592,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         "compressor_context_length": _cc.context_length if _cc else 0,
         "compressor_api_mode": getattr(_cc, "api_mode", agent.api_mode) if _cc else agent.api_mode,
         "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
+        "compressor_threshold_tokens_override": getattr(_cc, "threshold_tokens_override", None) if _cc else None,
     }
     if api_mode == "anthropic_messages":
         agent._primary_runtime.update({

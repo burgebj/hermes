@@ -534,6 +534,88 @@ class ContextCompressor(ContextEngine):
     def name(self) -> str:
         return "compressor"
 
+    def _normalize_threshold_tokens_override(
+        self,
+        threshold_tokens_override: Optional[int],
+    ) -> Optional[int]:
+        """Validate an absolute compression threshold override."""
+        if threshold_tokens_override is None:
+            return None
+        try:
+            value = int(threshold_tokens_override)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value
+
+    def _recompute_threshold_budget(self) -> None:
+        """Recalculate the active threshold and derived tail budget."""
+        override = getattr(self, "threshold_tokens_override", None)
+        if override is None:
+            threshold_tokens = max(
+                int(self.context_length * self.threshold_percent),
+                MINIMUM_CONTEXT_LENGTH,
+            )
+        else:
+            threshold_tokens = override
+            if self.context_length and threshold_tokens > self.context_length:
+                threshold_tokens = self.context_length
+
+        runtime_cap = getattr(self, "_runtime_threshold_tokens_cap", None)
+        if runtime_cap is not None:
+            threshold_tokens = min(threshold_tokens, runtime_cap)
+
+        self.threshold_tokens = threshold_tokens
+        self.tail_token_budget = int(
+            self.threshold_tokens * self.summary_target_ratio
+        )
+
+    def apply_runtime_threshold_cap(
+        self,
+        threshold_tokens: Optional[int],
+        *,
+        update_percent: bool = False,
+    ) -> None:
+        """Apply a live-session threshold cap without changing user override.
+
+        Auxiliary compression-model feasibility lowering is an operational
+        safety clamp for the active session.  It must survive fallback restore
+        and model updates, but it is not the user's configured absolute
+        ``threshold_tokens_override``.
+        """
+        normalized = self._normalize_threshold_tokens_override(threshold_tokens)
+        self._runtime_threshold_tokens_cap = normalized
+        if normalized is not None and update_percent and self.context_length:
+            self.threshold_percent = normalized / self.context_length
+        self._recompute_threshold_budget()
+
+    def set_threshold_tokens_override(
+        self,
+        threshold_tokens_override: Optional[int],
+        *,
+        update_percent: bool = False,
+    ) -> None:
+        """Persist a session-scoped absolute threshold and refresh budgets.
+
+        The stored override is the user's/configured absolute value.  It may be
+        larger than the current model's context window; in that case only the
+        active ``threshold_tokens`` is clamped by ``_recompute_threshold_budget``
+        so switching back to a larger model can restore the explicit value.
+        """
+        normalized = self._normalize_threshold_tokens_override(
+            threshold_tokens_override
+        )
+        if normalized is None:
+            self.threshold_tokens_override = None
+            self._recompute_threshold_budget()
+            return
+
+        self.threshold_tokens_override = normalized
+        if update_percent and self.context_length:
+            self.threshold_percent = normalized / self.context_length
+        self._recompute_threshold_budget()
+
     def on_session_reset(self) -> None:
         """Reset all per-session state for /new or /reset."""
         super().on_session_reset()
@@ -569,14 +651,9 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
-        self.threshold_tokens = max(
-            int(context_length * self.threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
-        )
+        self._recompute_threshold_budget()
         # Recalculate token budgets for the new context length so the
         # compressor stays calibrated after a model switch (e.g. 200K → 32K).
-        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
-        self.tail_token_budget = target_tokens
         self.max_summary_tokens = min(
             int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
@@ -596,6 +673,7 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        threshold_tokens_override: int | None = None,
     ):
         self.model = model
         self.base_url = base_url
@@ -603,6 +681,10 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.threshold_percent = threshold_percent
+        self.threshold_tokens_override = self._normalize_threshold_tokens_override(
+            threshold_tokens_override
+        )
+        self._runtime_threshold_tokens_cap: Optional[int] = None
         self.protect_first_n = protect_first_n
         self.protect_last_n = protect_last_n
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
@@ -618,19 +700,10 @@ class ContextCompressor(ContextEngine):
             config_context_length=config_context_length,
             provider=provider,
         )
-        # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
-        # the percentage would suggest a lower value.  This prevents premature
-        # compression on large-context models at 50% while keeping the % sane
-        # for models right at the minimum.
-        self.threshold_tokens = max(
-            int(self.context_length * threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
-        )
         self.compression_count = 0
 
         # Derive token budgets: ratio is relative to the threshold, not total context
-        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
-        self.tail_token_budget = target_tokens
+        self._recompute_threshold_budget()
         self.max_summary_tokens = min(
             int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )

@@ -1079,6 +1079,62 @@ class TestAbortOnSummaryFailure:
         assert len(result) < len(msgs)
 
 
+class TestThresholdTokensOverride:
+    def test_explicit_threshold_tokens_override_is_honored(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+            c = ContextCompressor(
+                model="test",
+                threshold_percent=0.50,
+                threshold_tokens_override=180_000,
+                quiet_mode=True,
+            )
+
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 180_000
+        assert c.tail_token_budget == int(180_000 * c.summary_target_ratio)
+        assert c.should_compress(179_999) is False
+        assert c.should_compress(180_000) is True
+
+    def test_explicit_threshold_tokens_override_survives_model_update(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+            c = ContextCompressor(
+                model="test",
+                threshold_percent=0.50,
+                threshold_tokens_override=180_000,
+                quiet_mode=True,
+            )
+
+        c.update_model("smaller", context_length=128_000)
+
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 128_000
+        assert c.tail_token_budget == int(128_000 * c.summary_target_ratio)
+
+        c.update_model("larger", context_length=200_000)
+
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 180_000
+        assert c.tail_token_budget == int(180_000 * c.summary_target_ratio)
+
+    def test_set_threshold_tokens_override_clamps_active_threshold_only(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=128_000):
+            c = ContextCompressor(
+                model="small",
+                threshold_percent=0.50,
+                threshold_tokens_override=180_000,
+                quiet_mode=True,
+            )
+
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 128_000
+        assert c.tail_token_budget == int(128_000 * c.summary_target_ratio)
+
+        c.update_model("large", context_length=200_000)
+
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 180_000
+
+
 class TestSummaryPrefixNormalization:
     def test_legacy_prefix_is_replaced(self):
         summary = ContextCompressor._with_summary_prefix("[CONTEXT SUMMARY]: did work")

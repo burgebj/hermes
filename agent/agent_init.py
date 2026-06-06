@@ -1248,6 +1248,18 @@ def init_agent(
     except Exception:
         pass
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
+    try:
+        _threshold_tokens_cfg = _compression_cfg.get("threshold_tokens")
+        compression_threshold_tokens = (
+            int(_threshold_tokens_cfg)
+            if _threshold_tokens_cfg is not None
+            else None
+        )
+        if compression_threshold_tokens is not None and compression_threshold_tokens <= 0:
+            compression_threshold_tokens = None
+    except (TypeError, ValueError):
+        compression_threshold_tokens = None
+    agent._compression_threshold_tokens_config = compression_threshold_tokens
     compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
     compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
     # protect_first_n is the number of non-system messages to protect at
@@ -1479,6 +1491,7 @@ def init_agent(
             provider=agent.provider,
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
+            threshold_tokens_override=agent._compression_threshold_tokens_config,
         )
     agent.compression_enabled = compression_enabled
 
@@ -1657,6 +1670,7 @@ def init_agent(
         "compressor_provider": getattr(_cc, "provider", agent.provider),
         "compressor_context_length": _cc.context_length,
         "compressor_threshold_tokens": _cc.threshold_tokens,
+        "compressor_threshold_tokens_override": getattr(_cc, "threshold_tokens_override", None),
     }
     if agent.api_mode == "anthropic_messages":
         agent._primary_runtime.update({

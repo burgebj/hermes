@@ -31,6 +31,7 @@ def _make_agent(
     compression_enabled: bool = True,
     threshold_percent: float = 0.50,
     main_context: int = 200_000,
+    threshold_tokens_override: int | None = None,
 ) -> AIAgent:
     """Build a minimal AIAgent with a compressor, skipping __init__."""
     agent = AIAgent.__new__(AIAgent)
@@ -56,7 +57,18 @@ def _make_agent(
 
     compressor = MagicMock(spec=ContextCompressor)
     compressor.context_length = main_context
+    compressor.threshold_percent = threshold_percent
+    compressor.summary_target_ratio = 0.20
     compressor.threshold_tokens = int(main_context * threshold_percent)
+    compressor.threshold_tokens_override = threshold_tokens_override
+
+    def _apply_runtime_threshold_cap(threshold_tokens, *, update_percent=False):
+        compressor.threshold_tokens = threshold_tokens
+        compressor._runtime_threshold_tokens_cap = threshold_tokens
+        if update_percent and compressor.context_length:
+            compressor.threshold_percent = threshold_tokens / compressor.context_length
+
+    compressor.apply_runtime_threshold_cap.side_effect = _apply_runtime_threshold_cap
     agent.context_compressor = compressor
 
     return agent
@@ -96,6 +108,31 @@ def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_clien
     assert agent._compression_warning is not None
     # Threshold on the live compressor was actually lowered to aux_context.
     assert agent.context_compressor.threshold_tokens == 80_000
+    assert agent.context_compressor.threshold_tokens_override is None
+    agent.context_compressor.set_threshold_tokens_override.assert_not_called()
+
+
+@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_auto_correct_does_not_mutate_explicit_threshold_override(mock_get_client, mock_ctx_len):
+    """Aux-model feasibility lowering is a runtime clamp, not a stored override."""
+    agent = _make_agent(
+        main_context=200_000,
+        threshold_percent=0.50,
+        threshold_tokens_override=100_000,
+    )
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
+
+    agent._emit_status = lambda msg: None
+
+    agent._check_compression_model_feasibility()
+
+    assert agent.context_compressor.threshold_tokens == 80_000
+    assert agent.context_compressor.threshold_tokens_override == 100_000
+    agent.context_compressor.set_threshold_tokens_override.assert_not_called()
 
 
 @patch("agent.model_metadata.get_model_context_length", return_value=32_768)
