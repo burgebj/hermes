@@ -68,6 +68,7 @@ from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
+from hermes_cli.path_env import common_tool_path_dirs
 
 try:
     from tools.website_policy import check_website_access
@@ -112,20 +113,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
-# Includes Android/Termux and macOS Homebrew locations needed for agent-browser,
-# npx, node, and Android's glibc runner (grun).
-_SANE_PATH_DIRS = (
-    "/data/data/com.termux/files/usr/bin",
-    "/data/data/com.termux/files/usr/sbin",
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/usr/local/sbin",
-    "/usr/local/bin",
-    "/usr/sbin",
-    "/usr/bin",
-    "/sbin",
-    "/bin",
-)
+# Includes version-manager shims, macOS Homebrew locations, Android/Termux,
+# and standard Unix directories needed for agent-browser, npx, node, and grun.
+_SANE_PATH_DIRS = common_tool_path_dirs(existing_only=False)
 _SANE_PATH = os.pathsep.join(_SANE_PATH_DIRS)
 
 
