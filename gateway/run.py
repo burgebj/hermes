@@ -9601,8 +9601,15 @@ class GatewayRunner:
                     "show_reasoning",
                     getattr(self, "_show_reasoning", False),
                 )
+                _reasoning_format = _rds(
+                    _load_gateway_config(),
+                    _platform_config_key(source.platform),
+                    "reasoning_format",
+                    "code",
+                )
             except Exception:
                 _show_reasoning_effective = getattr(self, "_show_reasoning", False)
+                _reasoning_format = "code"
             if _show_reasoning_effective and response:
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
@@ -9613,7 +9620,12 @@ class GatewayRunner:
                         display_reasoning += f"\n_... ({len(lines) - 15} more lines)_"
                     else:
                         display_reasoning = last_reasoning.strip()
-                    response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+                    if _reasoning_format == "none":
+                        pass  # skip reasoning output entirely
+                    elif _reasoning_format == "quote":
+                        response = f"💭 **Reasoning:**\n> {display_reasoning.replace(chr(10), chr(10) + '> ')}\n\n{response}"
+                    else:  # "code" (default)
+                        response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
