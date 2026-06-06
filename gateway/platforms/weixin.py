@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -1313,6 +1314,35 @@ class WeixinAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         logger.info("[%s] Disconnected", self.name)
 
+    @contextlib.asynccontextmanager
+    async def _loop_safe_session(self):
+        """Yield with self._send_session bound to the current event loop.
+
+        The gateway-owned aiohttp.ClientSession is bound to the loop that
+        created it.  When ``send_message`` is invoked from an agent tool it
+        runs in a worker thread under a fresh loop (see model_tools._run_async),
+        and reusing the original session there triggers aiohttp's
+        "Timeout context manager should be used inside a task" RuntimeError.
+        Detect that case and swap in a per-call session bound to the running
+        loop so every send_* path Just Works regardless of where it was called.
+        """
+        cur = asyncio.get_running_loop()
+        if (
+            self._send_session is None
+            or getattr(self._send_session, "_loop", None) is cur
+        ):
+            yield
+            return
+        saved = self._send_session
+        async with aiohttp.ClientSession(
+            trust_env=True, connector=_make_ssl_connector()
+        ) as ad_hoc:
+            self._send_session = ad_hoc
+            try:
+                yield
+            finally:
+                self._send_session = saved
+
     async def _poll_loop(self) -> None:
         assert self._poll_session is not None
         sync_buf = _load_sync_buf(self._hermes_home, self._account_id)
@@ -1776,33 +1806,34 @@ class WeixinAdapter(BasePlatformAdapter):
                 await self.send_document(chat_id=chat_id, file_path=path, metadata=metadata)
 
         try:
-            # Deliver extracted MEDIA: attachments first.
-            for media_path, is_voice in media_files:
-                try:
-                    await _deliver_media(media_path, is_voice)
-                except Exception as exc:
-                    logger.warning("[%s] media delivery failed for %s: %s", self.name, media_path, exc)
+            async with self._loop_safe_session():
+                # Deliver extracted MEDIA: attachments first.
+                for media_path, is_voice in media_files:
+                    try:
+                        await _deliver_media(media_path, is_voice)
+                    except Exception as exc:
+                        logger.warning("[%s] media delivery failed for %s: %s", self.name, media_path, exc)
 
-            # Deliver bare local file paths.
-            for file_path in local_files:
-                try:
-                    await _deliver_media(file_path, is_voice=False)
-                except Exception as exc:
-                    logger.warning("[%s] local file delivery failed for %s: %s", self.name, file_path, exc)
+                # Deliver bare local file paths.
+                for file_path in local_files:
+                    try:
+                        await _deliver_media(file_path, is_voice=False)
+                    except Exception as exc:
+                        logger.warning("[%s] local file delivery failed for %s: %s", self.name, file_path, exc)
 
-            # Deliver text content.
-            chunks = [c for c in self._split_text(self.format_message(final_content)) if c and c.strip()]
-            for idx, chunk in enumerate(chunks):
-                client_id = f"hermes-weixin-{uuid.uuid4().hex}"
-                await self._send_text_chunk(
-                    chat_id=chat_id,
-                    chunk=chunk,
-                    context_token=context_token,
-                    client_id=client_id,
-                )
-                last_message_id = client_id
-                if idx < len(chunks) - 1 and self._send_chunk_delay_seconds > 0:
-                    await asyncio.sleep(self._send_chunk_delay_seconds)
+                # Deliver text content.
+                chunks = [c for c in self._split_text(self.format_message(final_content)) if c and c.strip()]
+                for idx, chunk in enumerate(chunks):
+                    client_id = f"hermes-weixin-{uuid.uuid4().hex}"
+                    await self._send_text_chunk(
+                        chat_id=chat_id,
+                        chunk=chunk,
+                        context_token=context_token,
+                        client_id=client_id,
+                    )
+                    last_message_id = client_id
+                    if idx < len(chunks) - 1 and self._send_chunk_delay_seconds > 0:
+                        await asyncio.sleep(self._send_chunk_delay_seconds)
             return SendResult(success=True, message_id=last_message_id)
         except Exception as exc:
             logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
@@ -1852,22 +1883,23 @@ class WeixinAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        if image_url.startswith(("http://", "https://")):
-            file_path = await self._download_remote_media(image_url)
-            cleanup = True
-        else:
-            file_path = image_url.replace("file://", "")
-            if not os.path.isabs(file_path):
-                file_path = os.path.abspath(file_path)
-            cleanup = False
-        try:
-            return await self.send_document(chat_id, file_path, caption=caption, metadata=metadata)
-        finally:
-            if cleanup and file_path and os.path.exists(file_path):
-                try:
-                    os.unlink(file_path)
-                except OSError:
-                    pass
+        async with self._loop_safe_session():
+            if image_url.startswith(("http://", "https://")):
+                file_path = await self._download_remote_media(image_url)
+                cleanup = True
+            else:
+                file_path = image_url.replace("file://", "")
+                if not os.path.isabs(file_path):
+                    file_path = os.path.abspath(file_path)
+                cleanup = False
+            try:
+                return await self.send_document(chat_id, file_path, caption=caption, metadata=metadata)
+            finally:
+                if cleanup and file_path and os.path.exists(file_path):
+                    try:
+                        os.unlink(file_path)
+                    except OSError:
+                        pass
 
     async def send_image_file(
         self,
@@ -1879,12 +1911,13 @@ class WeixinAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         del reply_to, kwargs
-        return await self.send_document(
-            chat_id=chat_id,
-            file_path=image_path,
-            caption=caption,
-            metadata=metadata,
-        )
+        async with self._loop_safe_session():
+            return await self.send_document(
+                chat_id=chat_id,
+                file_path=image_path,
+                caption=caption,
+                metadata=metadata,
+            )
 
     async def send_document(
         self,
@@ -1900,7 +1933,8 @@ class WeixinAdapter(BasePlatformAdapter):
         if not self._send_session or not self._token:
             return SendResult(success=False, error="Not connected")
         try:
-            message_id = await self._send_file(chat_id, file_path, caption or "")
+            async with self._loop_safe_session():
+                message_id = await self._send_file(chat_id, file_path, caption or "")
             return SendResult(success=True, message_id=message_id)
         except Exception as exc:
             logger.error("[%s] send_document failed to=%s: %s", self.name, _safe_id(chat_id), exc)
@@ -1917,7 +1951,8 @@ class WeixinAdapter(BasePlatformAdapter):
         if not self._send_session or not self._token:
             return SendResult(success=False, error="Not connected")
         try:
-            message_id = await self._send_file(chat_id, video_path, caption or "")
+            async with self._loop_safe_session():
+                message_id = await self._send_file(chat_id, video_path, caption or "")
             return SendResult(success=True, message_id=message_id)
         except Exception as exc:
             logger.error("[%s] send_video failed to=%s: %s", self.name, _safe_id(chat_id), exc)
@@ -1939,12 +1974,13 @@ class WeixinAdapter(BasePlatformAdapter):
         # fallback so users at least receive playable audio, even for .silk.
         fallback_caption = caption or "[voice message as attachment]"
         try:
-            message_id = await self._send_file(
-                chat_id,
-                audio_path,
-                fallback_caption,
-                force_file_attachment=True,
-            )
+            async with self._loop_safe_session():
+                message_id = await self._send_file(
+                    chat_id,
+                    audio_path,
+                    fallback_caption,
+                    force_file_attachment=True,
+                )
             return SendResult(success=True, message_id=message_id)
         except Exception as exc:
             logger.error("[%s] send_voice failed to=%s: %s", self.name, _safe_id(chat_id), exc)

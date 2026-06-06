@@ -362,6 +362,84 @@ class TestWeixinSendMessageIntegration:
         )
 
 
+class TestWeixinLoopSafeSession:
+    """Regression coverage for issues #13099, #12154, #13281, #16293.
+
+    The gateway-owned aiohttp.ClientSession is bound to the loop that
+    created it. When ``send_message`` is invoked from an agent tool it runs
+    in a worker thread under a fresh loop and reusing that session there
+    triggers aiohttp's "Timeout context manager should be used inside a task".
+
+    ``WeixinAdapter._loop_safe_session`` swaps in a per-call session bound
+    to the current running loop when it detects the cached session belongs
+    to a different loop.
+    """
+
+    def test_loop_safe_session_swaps_when_session_loop_differs(self):
+        """A session bound to a foreign loop is replaced inside the helper."""
+        foreign_loop = asyncio.new_event_loop()
+        try:
+            class _FakeForeignSession:
+                closed = False
+                _loop = foreign_loop
+
+            adapter = _make_adapter()
+            adapter._send_session = _FakeForeignSession()
+            saw_session = {}
+
+            async def _scenario():
+                async with adapter._loop_safe_session():
+                    saw_session["inside"] = adapter._send_session
+                saw_session["after"] = adapter._send_session
+
+            with patch("gateway.platforms.weixin._make_ssl_connector", return_value=None):
+                asyncio.run(_scenario())
+
+            # Inside the helper the foreign session was swapped out for an
+            # aiohttp.ClientSession bound to the current loop.
+            assert saw_session["inside"] is not None
+            assert not isinstance(saw_session["inside"], _FakeForeignSession)
+            # After the helper exits, the original (foreign) session is restored.
+            assert isinstance(saw_session["after"], _FakeForeignSession)
+        finally:
+            foreign_loop.close()
+
+    def test_loop_safe_session_passes_through_when_session_loop_matches(self):
+        """A session already on the current loop is left untouched."""
+        adapter = _make_adapter()
+        observations = {}
+
+        async def _scenario():
+            current = asyncio.get_running_loop()
+
+            class _FakeSameLoopSession:
+                closed = False
+                _loop = current
+
+            same_loop_session = _FakeSameLoopSession()
+            adapter._send_session = same_loop_session
+            async with adapter._loop_safe_session():
+                observations["inside"] = adapter._send_session
+            observations["after"] = adapter._send_session
+            observations["expected"] = same_loop_session
+
+        asyncio.run(_scenario())
+
+        assert observations["inside"] is observations["expected"]
+        assert observations["after"] is observations["expected"]
+
+    def test_loop_safe_session_is_noop_when_no_session(self):
+        """No swap when adapter has not yet connected (defensive)."""
+        adapter = _make_adapter()
+        adapter._send_session = None
+
+        async def _scenario():
+            async with adapter._loop_safe_session():
+                assert adapter._send_session is None
+
+        asyncio.run(_scenario())
+
+
 class TestWeixinChunkDelivery:
     def _connected_adapter(self) -> WeixinAdapter:
         adapter = _make_adapter()
