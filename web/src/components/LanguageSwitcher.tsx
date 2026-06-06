@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
  * the I18n context.
  *
  * Replaces the older two-state EN↔ZH toggle now that we ship 16 locales
- * (en, zh, zh-hant, ja, de, es, fr, tr, uk, af, ko, it, ga, pt, ru, hu).
+ * (en, zh, zh-hant, ja, de, es, fr, ar, tr, uk, af, ko, it, ga, pt, ru, hu).
  *
  * No country flags by design — languages aren't countries, and flag pairings
  * inevitably create political mismappings (e.g. Mandarin variants ≠ any single

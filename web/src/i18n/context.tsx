@@ -7,6 +7,7 @@ import { ja } from "./ja";
 import { de } from "./de";
 import { es } from "./es";
 import { fr } from "./fr";
+import { ar } from "./ar";
 import { tr } from "./tr";
 import { uk } from "./uk";
 import { af } from "./af";
@@ -25,6 +26,7 @@ const TRANSLATIONS: Record<Locale, Translations> = {
   de,
   es,
   fr,
+  ar,
   tr,
   uk,
   af,
@@ -40,11 +42,6 @@ const TRANSLATIONS: Record<Locale, Translations> = {
 // recognize their language even if they don't speak the current UI language.
 // Exposed as a constant so the LanguageSwitcher and any future settings page
 // can share the same list.
-//
-// We intentionally do NOT pair locales with country flags. Languages are not
-// countries (English ≠ GB, Portuguese ≠ PT, Spanish ≠ ES, Chinese variants ≠
-// any single jurisdiction). Endonyms are unambiguous and avoid the political
-// mismapping that flag pairings inevitably create.
 export const LOCALE_META: Record<Locale, { name: string }> = {
   en: { name: "English" },
   zh: { name: "简体中文" },
@@ -62,6 +59,7 @@ export const LOCALE_META: Record<Locale, { name: string }> = {
   pt: { name: "Português" },
   ru: { name: "Русский" },
   hu: { name: "Magyar" },
+  ar: { name: "العربية" },
 };
 
 const SUPPORTED_LOCALES = Object.keys(TRANSLATIONS) as Locale[];
