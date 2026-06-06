@@ -9970,9 +9970,11 @@ class GatewayRunner:
 
         model = _resolve_gateway_model()
         config_context_length = None
+        config_context_source = None
         provider = None
         base_url = None
         api_key = None
+        data = {}
         custom_provs = None
         data = None
 
@@ -9985,6 +9987,7 @@ class GatewayRunner:
                     if raw_ctx is not None:
                         try:
                             config_context_length = int(raw_ctx)
+                            config_context_source = "config"
                         except (TypeError, ValueError):
                             pass
                     provider = model_cfg.get("provider") or None
@@ -10041,6 +10044,25 @@ class GatewayRunner:
         except Exception:
             pass
 
+        # For custom providers, prefer a per-model context override over the
+        # top-level model.context_length. A single custom endpoint often serves
+        # models with different windows, so the gateway reset banner must report
+        # the active model's window rather than whatever top-level default was
+        # configured for another model.
+        try:
+            from hermes_cli.config import get_custom_provider_context_length
+            model_ctx = get_custom_provider_context_length(
+                model=model,
+                base_url=base_url or "",
+                custom_providers=custom_provs,
+                config=data,
+            )
+            if model_ctx:
+                config_context_length = model_ctx
+                config_context_source = "model config"
+        except Exception:
+            pass
+
         context_length = get_model_context_length(
             model,
             base_url=base_url or "",
@@ -10052,7 +10074,7 @@ class GatewayRunner:
 
         # Format context source hint
         if config_context_length is not None:
-            ctx_source = "config"
+            ctx_source = config_context_source or "config"
         elif context_length == DEFAULT_FALLBACK_CONTEXT:
             ctx_source = "default — set model.context_length in config to override"
         else:
