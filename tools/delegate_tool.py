@@ -1974,19 +1974,31 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    model: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context, toolsets, role)
-      - Batch:  provide tasks array [{goal, context, toolsets, role}, ...]
+      - Single: provide goal (+ optional context, toolsets, role, model)
+      - Batch:  provide tasks array [{goal, context, toolsets, role, model}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'model' parameter lets the caller override which model a child uses
+    on a per-task basis — useful for cost-aware routing (e.g. spawn a
+    haiku child for a trivial subtask while the main session is on opus).
+    Precedence: per-task model > top-level model > delegation.model
+    config > parent_agent.model.  When a model is overridden but
+    delegation.provider is NOT set, the child still inherits the parent's
+    provider/base_url/api_key — only the model identifier changes.  Any
+    override is silently ignored when delegation.provider IS set (the
+    delegation config wins) so users explicitly routing children to a
+    different provider get predictable credentials.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2068,7 +2080,13 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "model": model,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2102,6 +2120,22 @@ def delegate_task(
     # Build all child agents on the main thread (thread-safe construction)
     # Wrapped in try/finally so the global is always restored even if a
     # child build raises (otherwise _last_resolved_tool_names stays corrupted).
+    # Precedence for the child model:
+    #   1. per-task `model` field
+    #   2. top-level `model` arg (already plumbed into the synthesized
+    #      single-task dict above; in batch mode the caller can set it
+    #      per task instead)
+    #   3. delegation.model from config (resolved into creds["model"])
+    #   4. parent_agent.model (resolved inside _build_child_agent when
+    #      effective_model is still None)
+    #
+    # When delegation.provider IS set, the user has explicitly routed
+    # children to a different provider — honour that bundle's model so
+    # credentials/model stay coherent (and skip the override).  When
+    # delegation.provider is NOT set, the user-supplied per-task model
+    # rides on top of the parent's credentials (provider/base_url/api_key
+    # are inherited unchanged).
+    _provider_override_active = bool(creds.get("provider"))
     children = []
     try:
         for i, t in enumerate(task_list):
@@ -2109,12 +2143,32 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Honour per-task model override only when the delegation
+            # config has NOT pinned a provider bundle (see comment above).
+            # Precedence (highest to lowest):
+            #   - per-task t["model"]
+            #   - top-level `model` arg (applies to every task in batch
+            #     mode that didn't set its own)
+            #   - creds["model"] (delegation.model config, or None for
+            #     parent inheritance via _build_child_agent)
+            task_model = t.get("model") or model
+            if (
+                task_model
+                and isinstance(task_model, str)
+                and task_model.strip()
+                and not _provider_override_active
+            ):
+                child_model = task_model.strip()
+            else:
+                child_model = creds["model"]
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=child_model,
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
@@ -2795,6 +2849,18 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override (e.g. 'anthropic/claude-haiku-4' or 'anthropic/claude-opus-4.7'). "
+                                "Lets the parent route this child to a cheaper or more powerful model "
+                                "than its own — typical cost-aware routing: trivial subtasks go to haiku, "
+                                "deep reasoning goes to opus. "
+                                "Precedence: per-task model > top-level model > delegation.model config > parent model. "
+                                "Silently ignored when delegation.provider is configured (the delegation "
+                                "config wins so credentials and model stay coherent)."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2830,6 +2896,18 @@ DELEGATE_TASK_SCHEMA = {
                     "Leave empty unless acp_command is explicitly provided."
                 ),
             },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Top-level model override applied to every child in this call "
+                    "(e.g. 'anthropic/claude-haiku-4'). Equivalent to setting "
+                    "`model` on every task in `tasks`; per-task `model` still "
+                    "wins when both are set. Useful for cost-aware routing: "
+                    "send a batch of trivial subtasks to a cheaper model "
+                    "without overriding your main session model. "
+                    "Silently ignored when delegation.provider is configured."
+                ),
+            },
         },
         "required": [],
     },
@@ -2852,6 +2930,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
