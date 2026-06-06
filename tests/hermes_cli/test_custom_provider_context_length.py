@@ -183,11 +183,10 @@ class TestGetModelContextLengthHonorsOverride:
                 p.stop()
         assert ctx == 1_050_000
 
-    def test_explicit_config_context_length_still_wins(self):
-        """Top-level model.context_length (step 0) outranks custom_providers (step 0b).
-
-        Users who set both should see the top-level value — that's the
-        documented precedence and matches the long-standing step-0 behavior.
+    def test_custom_providers_overrides_config_context_length(self):
+        """Per-model custom_providers context_length outranks the global
+        model.context_length.  The per-model override is more specific and
+        should win — step 0b now runs before step 0's early return.
         """
         from agent.model_metadata import get_model_context_length
         custom = [
@@ -200,10 +199,10 @@ class TestGetModelContextLengthHonorsOverride:
             "m",
             base_url="https://example.invalid/v1",
             provider="custom",
-            config_context_length=500_000,  # explicit top-level wins
+            config_context_length=500_000,
             custom_providers=custom,
         )
-        assert ctx == 500_000
+        assert ctx == 1_050_000
 
     def test_no_override_falls_through_to_default(self):
         """With custom_providers=None and all probes disabled, resolver

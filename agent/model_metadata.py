@@ -1514,7 +1514,23 @@ def get_model_context_length(
     8. Local server query (last resort)
     9. Default fallback (256K)"""
     # 0. Explicit config override — user knows best
+    # BUT: if the current provider is a custom provider with its own per-model
+    # context_length, check that FIRST so the custom provider's setting isn't
+    # overridden by the global model.context_length (fixes context jumping to
+    # 200K when using a custom provider configured for 131K).
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
+        if custom_providers and base_url and model:
+            try:
+                from hermes_cli.config import get_custom_provider_context_length
+                cp_ctx = get_custom_provider_context_length(
+                    model=model,
+                    base_url=base_url,
+                    custom_providers=custom_providers,
+                )
+                if cp_ctx:
+                    return cp_ctx
+            except Exception:
+                pass
         return config_context_length
 
     # 0b. custom_providers per-model override — check before any probe.

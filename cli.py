@@ -7964,12 +7964,16 @@ class HermesCLI:
         mi = result.model_info
         try:
             from hermes_cli.model_switch import resolve_display_context_length
+            from hermes_cli.config import load_config, get_compatible_custom_providers
+            _cp_cfg = load_config()
+            _cp_list = get_compatible_custom_providers(_cp_cfg)
             ctx = resolve_display_context_length(
                 result.new_model,
                 result.target_provider,
                 base_url=result.base_url or self.base_url or "",
                 api_key=result.api_key or self.api_key or "",
                 model_info=mi,
+                custom_providers=_cp_list,
                 config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None,
             )
             if ctx:
@@ -8210,12 +8214,16 @@ class HermesCLI:
         # (e.g. gpt-5.5 is 1.05M on openai but 272K on Codex OAuth).
         mi = result.model_info
         from hermes_cli.model_switch import resolve_display_context_length
+        from hermes_cli.config import load_config, get_compatible_custom_providers
+        _cp2_cfg = load_config()
+        _cp2_list = get_compatible_custom_providers(_cp2_cfg)
         ctx = resolve_display_context_length(
             result.new_model,
             result.target_provider,
             base_url=result.base_url or self.base_url or "",
             api_key=result.api_key or self.api_key or "",
             model_info=mi,
+            custom_providers=_cp2_list,
             config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None,
         )
         if ctx:
