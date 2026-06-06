@@ -3661,6 +3661,51 @@ class AIAgent:
             )
         except Exception as exc:
             logger.debug("Nous credential refresh failed: %s", exc)
+            # ── Fallback: try shared credentials store ──────────────
+            # When the Portal OAuth token and refresh token are both
+            # expired (common ~15-min lifetime), resolve_nous_runtime_credentials
+            # can't mint a new key.  The shared store may carry a fresher
+            # refresh_token from another profile's login that can still
+            # produce a valid inference key.
+            try:
+                from hermes_cli.auth import _try_import_shared_nous_state
+                shared = _try_import_shared_nous_state(
+                    timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
+                )
+                if shared and shared.get("api_key"):
+                    self.api_key = shared["api_key"].strip()
+                    _base = shared.get("base_url", "").strip().rstrip("/")
+                    if _base:
+                        self.base_url = _base
+                    self._client_kwargs["api_key"] = self.api_key
+                    self._client_kwargs["base_url"] = self.base_url
+                    self._client_kwargs.pop("default_headers", None)
+                    if self._replace_primary_openai_client(reason="nous_shared_import"):
+                        logger.info("Nous credentials rehydrated from shared store after Portal refresh failure.")
+                        return True
+            except Exception as shared_exc:
+                logger.debug("Nous shared credential import also failed: %s", shared_exc)
+            # ── Last resort: request gateway restart ─────────────────
+            # Every credential path has been exhausted.  Write a restart
+            # marker so the GatewayRunner's next message handler can
+            # auto-trigger a gateway restart — the process restart is
+            # the only reliable way to clear stale token caches, expired
+            # refresh tokens, and stuck credential-manager state.
+            try:
+                from hermes_constants import get_hermes_home
+                _marker = get_hermes_home() / ".auth_restart_requested"
+                _marker.write_text(
+                    json.dumps({
+                        "reason": "nous_auth_exhausted",
+                        "timestamp": __import__("time").time(),
+                    })
+                )
+                logger.warning(
+                    "All Nous credential refresh paths exhausted — wrote "
+                    ".auth_restart_requested marker for gateway auto-restart."
+                )
+            except Exception as marker_exc:
+                logger.debug("Failed to write auth restart marker: %s", marker_exc)
             return False
 
         api_key = creds.get("api_key")
