@@ -1547,14 +1547,45 @@ def resolve_provider(
     if explicit_api_key or explicit_base_url:
         return "openrouter"
 
-    # Check auth store for an active OAuth provider
+    # Check model.provider from config.yaml before auth.json active_provider
+    # so explicitly configured providers always take precedence over stale
+    # OAuth login state (e.g. after token exhaustion).  See #29285.
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _model_cfg = _cfg.get("model")
+        if isinstance(_model_cfg, dict):
+            _cfg_provider = (_model_cfg.get("provider") or "").strip().lower()
+            if _cfg_provider and _cfg_provider in PROVIDER_REGISTRY:
+                return _cfg_provider
+    except Exception:
+        pass
+
+    # Check auth store for an active OAuth provider.  Only return it when
+    # the credential pool has at least one non-exhausted entry — otherwise
+    # a stale active_provider with exhausted tokens hijacks inference even
+    # though every retry will fail with 429.  See #29285.
     try:
         auth_store = _load_auth_store()
         active = auth_store.get("active_provider")
         if active and active in PROVIDER_REGISTRY:
             status = get_auth_status(active)
             if status.get("logged_in"):
-                return active
+                try:
+                    from agent.credential_pool import load_pool
+                    pool = load_pool(active)
+                    if pool and pool.has_credentials():
+                        _non_exhausted = False
+                        for _entry in pool.entries():
+                            if getattr(_entry, "last_status", None) != "exhausted":
+                                _non_exhausted = True
+                                break
+                        if _non_exhausted:
+                            return active
+                    else:
+                        return active
+                except Exception:
+                    return active
     except Exception as e:
         logger.debug("Could not detect active auth provider: %s", e)
 
