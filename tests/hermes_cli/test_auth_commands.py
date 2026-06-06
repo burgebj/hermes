@@ -611,6 +611,123 @@ def test_auth_remove_prefers_exact_numeric_label_over_index(tmp_path, monkeypatc
     assert labels == ["first", "third"]
 
 
+def test_auth_remove_skips_suppression_when_other_pool_entries_share_source(tmp_path, monkeypatch):
+    """Removing one credential must not suppress the source when other pool
+    entries still carry it (#24390)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "agent.credential_pool._seed_from_singletons",
+        lambda provider, entries: (False, set()),
+    )
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "cred-a",
+                        "label": "account-a",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "***",
+                    },
+                    {
+                        "id": "cred-b",
+                        "label": "account-b",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual:device_code",
+                        "access_token": "***",
+                    },
+                    {
+                        "id": "cred-c",
+                        "label": "account-c",
+                        "auth_type": "oauth",
+                        "priority": 2,
+                        "source": "manual:device_code",
+                        "access_token": "***",
+                    },
+                ]
+            },
+        },
+    )
+
+    from hermes_cli.auth_commands import auth_remove_command
+    from hermes_cli.auth import is_source_suppressed
+
+    class _Args:
+        provider = "openai-codex"
+        target = "account-a"
+
+    auth_remove_command(_Args())
+
+    # After removing only one of three siblings, the source must NOT
+    # be suppressed — the other two entries still depend on it.
+    assert not is_source_suppressed("openai-codex", "manual:device_code"), (
+        "Source should not be suppressed — siblings still exist"
+    )
+    assert not is_source_suppressed("openai-codex", "device_code"), (
+        "Canonical source should not be suppressed — siblings still exist"
+    )
+
+    # Verify both siblings remain in the pool
+    from agent.credential_pool import load_pool
+    pool = load_pool("openai-codex")
+    remaining_sources = [e.source for e in pool.entries()]
+    assert remaining_sources == ["manual:device_code", "manual:device_code"]
+    assert [e.label for e in pool.entries()] == ["account-b", "account-c"]
+
+
+def test_auth_remove_suppresses_when_last_entry_with_source(tmp_path, monkeypatch):
+    """Removing the last credential carrying a source MUST suppress it."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "agent.credential_pool._seed_from_singletons",
+        lambda provider, entries: (False, set()),
+    )
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "cred-only",
+                        "label": "only-account",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "***",
+                    },
+                ]
+            },
+        },
+    )
+
+    from hermes_cli.auth_commands import auth_remove_command
+    from hermes_cli.auth import is_source_suppressed
+
+    class _Args:
+        provider = "openai-codex"
+        target = "1"
+
+    auth_remove_command(_Args())
+
+    # After removing the last entry with this source, suppression must
+    # kick in to prevent re-seed.
+    assert is_source_suppressed("openai-codex", "manual:device_code"), (
+        "Source must be suppressed — no siblings remain"
+    )
+
+
 def test_auth_reset_clears_provider_statuses(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(

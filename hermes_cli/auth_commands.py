@@ -473,7 +473,17 @@ def auth_remove_command(args) -> None:
     for line in result.cleaned:
         print(line)
     if result.suppress:
-        suppress_credential_source(provider, removed.source)
+        # Only suppress when no remaining pool entries share this source.
+        # Multiple credentials commonly share a source tag (e.g. every
+        # device-code add becomes manual:device_code), so suppressing on
+        # a single removal silently gags the survivors (#24390).
+        has_siblings = any(e.source == removed.source for e in pool.entries())
+        if not has_siblings:
+            suppress_credential_source(provider, removed.source)
+        else:
+            # Drop the misleading "will not be re-seeded" hint when we
+            # deliberately skip suppression because siblings still exist.
+            result.hints = [h for h in result.hints if "re-seeded" not in h]
     for line in result.hints:
         print(line)
 

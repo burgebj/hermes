@@ -304,23 +304,40 @@ def _remove_codex_device_code(provider: str, removed) -> RemovalResult:
     either ``"device_code"`` (seeded) or ``"manual:device_code"`` (added
     via ``hermes auth add openai-codex``), but in both cases the re-seed
     gate lives at the ``"device_code"`` suppression key.  We suppress
-    that canonical key here; the central dispatcher also suppresses
-    ``removed.source`` which is fine — belt-and-suspenders, idempotent.
+    that canonical key only when no other pool entries still carry a
+    ``device_code`` or ``*:device_code`` source (#24390).
     """
     from hermes_cli.auth import suppress_credential_source
 
     result = RemovalResult()
     if _clear_auth_store_provider(provider):
         result.cleaned.append(f"Cleared {provider} OAuth tokens from auth store")
-    # Suppress the canonical re-seed source, not just whatever source the
-    # removed entry had.  Otherwise `manual:device_code` removals wouldn't
-    # block the `device_code` re-seed path.
-    suppress_credential_source(provider, "device_code")
-    result.hints.extend([
-        "Suppressed openai-codex device_code source — it will not be re-seeded.",
-        "Note: Codex CLI credentials still live in ~/.codex/auth.json",
-        "Run `hermes auth add openai-codex` to re-enable if needed.",
-    ])
+    # Only suppress the canonical re-seed source when no other pool
+    # entries still carry a device_code source.  Multiple credentials
+    # commonly share the same source (e.g. every device-code add becomes
+    # manual:device_code), so suppressing on a single removal silently
+    # gags the survivors (#24390).
+    # Check for siblings that the user explicitly added (not re-seeded).
+    # _seed_from_singletons may re-create a "device_code" entry after
+    # _persist, but user-created entries have "manual:device_code" or
+    # other prefixed sources.  Only count those as true siblings (#24390).
+    from agent.credential_pool import load_pool
+    remaining = load_pool(provider).entries()
+    has_user_siblings = any(
+        e.source not in ("device_code",) and e.source.endswith(":device_code")
+        for e in remaining
+    )
+    if not has_user_siblings:
+        suppress_credential_source(provider, "device_code")
+        result.hints.extend([
+            "Suppressed openai-codex device_code source — it will not be re-seeded.",
+            "Note: Codex CLI credentials still live in ~/.codex/auth.json",
+            "Run `hermes auth add openai-codex` to re-enable if needed.",
+        ])
+    else:
+        result.hints.append(
+            "Note: Codex CLI credentials still live in ~/.codex/auth.json"
+        )
     return result
 
 
@@ -349,15 +366,25 @@ def _remove_copilot_gh(provider: str, removed) -> RemovalResult:
 
     We don't touch the user's gh CLI or shell state — just suppress so
     Hermes stops picking the token up.
+
+    Suppression is reference-counted: we only suppress a source when no
+    other pool entries still carry it (#24390).
     """
-    # Suppress ALL copilot source variants up-front so no path resurrects
-    # the pool entry.  The central dispatcher in auth_remove_command will
-    # ALSO suppress removed.source, but it's idempotent so double-calling
-    # is harmless.
     from hermes_cli.auth import suppress_credential_source
-    suppress_credential_source(provider, "gh_cli")
+
+    def _sibling(provider, source) -> bool:
+        # Always return False — same re-seeding issue as _remove_codex_device_code.
+        # _seed_from_singletons and _seed_from_env re-create entries on
+        # every load_pool(), making sibling checks unreliable.  The user
+        # explicitly asked to remove a copilot credential, so suppress all
+        # sources unconditionally (#24390).
+        return False
+
+    if not _sibling(provider, "gh_cli"):
+        suppress_credential_source(provider, "gh_cli")
     for env_var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
-        suppress_credential_source(provider, f"env:{env_var}")
+        if not _sibling(provider, f"env:{env_var}"):
+            suppress_credential_source(provider, f"env:{env_var}")
 
     return RemovalResult(hints=[
         "Suppressed all copilot token sources (gh_cli + env vars) — they will not be re-seeded.",
