@@ -83,6 +83,7 @@ APP_CMD_PING = "ping"
 APP_CMD_UPLOAD_MEDIA_INIT = "aibot_upload_media_init"
 APP_CMD_UPLOAD_MEDIA_CHUNK = "aibot_upload_media_chunk"
 APP_CMD_UPLOAD_MEDIA_FINISH = "aibot_upload_media_finish"
+APP_CMD_GET_MSG_MEDIA = "aibot_get_msg_media"  # fetch download URL for inbound image_keys
 
 CALLBACK_COMMANDS = {APP_CMD_CALLBACK, APP_CMD_LEGACY_CALLBACK}
 NON_RESPONSE_COMMANDS = CALLBACK_COMMANDS | {APP_CMD_EVENT_CALLBACK}
@@ -744,6 +745,20 @@ class WeComAdapter(BasePlatformAdapter):
                 media_paths.append(path)
                 media_types.append(content_type)
 
+        # Handle WeCom AI Bot image_keys — a list of opaque keys that must be
+        # resolved to download URLs via aibot_get_msg_media (issue #11495).
+        image_keys = body.get("image_keys")
+        if isinstance(image_keys, list):
+            for key in image_keys:
+                key = str(key or "").strip()
+                if not key:
+                    continue
+                cached = await self._cache_media_by_key(key)
+                if cached:
+                    path, content_type = cached
+                    media_paths.append(path)
+                    media_types.append(content_type)
+
         return media_paths, media_types
 
     async def _cache_media(self, kind: str, media: Dict[str, Any]) -> Optional[Tuple[str, str]]:
@@ -795,6 +810,30 @@ class WeComAdapter(BasePlatformAdapter):
 
         filename = self._guess_filename(url, headers.get("content-disposition"), content_type)
         return cache_document_from_bytes(raw, filename), content_type
+
+    async def _cache_media_by_key(self, image_key: str) -> Optional[Tuple[str, str]]:
+        # Resolve a WeCom AI Bot image_key to a download URL and cache it.
+        # WeCom AI Bot delivers inbound images as opaque image_keys rather
+        # than inline base64 or pre-signed URLs. The key must be exchanged for
+        # a download URL via aibot_get_msg_media before bytes can be fetched.
+        # Fixes issue #11495.
+        try:
+            resp = await self._send_request(
+                APP_CMD_GET_MSG_MEDIA,
+                {"image_key": image_key},
+                timeout=10.0,
+            )
+        except Exception as exc:
+            logger.debug("[%s] aibot_get_msg_media failed for key %r: %s", self.name, image_key, exc)
+            return None
+
+        resp_body = resp.get("body") if isinstance(resp.get("body"), dict) else resp
+        url = str(resp_body.get("url") or "").strip()
+        if not url:
+            logger.debug("[%s] aibot_get_msg_media returned no url for key %r", self.name, image_key)
+            return None
+
+        return await self._cache_media("image", {"url": url})
 
     @staticmethod
     def _decode_base64(data: str) -> bytes:
