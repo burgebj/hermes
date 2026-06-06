@@ -348,13 +348,14 @@ def _resolve_codex_usage_url(base_url: str) -> str:
     return normalized + "/api/codex/usage"
 
 
-def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
+def _fetch_codex_account_usage(api_key: Optional[str] = None) -> Optional[AccountUsageSnapshot]:
     creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
     token_data = _read_codex_tokens()
     tokens = token_data.get("tokens") or {}
     account_id = str(tokens.get("account_id", "") or "").strip() or None
+    effective_key = api_key or creds["api_key"]
     headers = {
-        "Authorization": f"Bearer {creds['api_key']}",
+        "Authorization": f"Bearer {effective_key}",
         "Accept": "application/json",
         "User-Agent": "codex-cli",
     }
@@ -396,8 +397,8 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
     )
 
 
-def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
-    token = (resolve_anthropic_token() or "").strip()
+def _fetch_anthropic_account_usage(api_key: Optional[str] = None) -> Optional[AccountUsageSnapshot]:
+    token = (api_key or resolve_anthropic_token() or "").strip()
     if not token:
         return None
     if not _is_oauth_token(token):
@@ -540,9 +541,9 @@ def fetch_account_usage(
         return None
     try:
         if normalized == "openai-codex":
-            return _fetch_codex_account_usage()
+            return _fetch_codex_account_usage(api_key=api_key)
         if normalized == "anthropic":
-            return _fetch_anthropic_account_usage()
+            return _fetch_anthropic_account_usage(api_key=api_key)
         if normalized == "openrouter":
             return _fetch_openrouter_account_usage(base_url, api_key)
     except Exception:
