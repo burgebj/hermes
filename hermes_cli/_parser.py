@@ -250,6 +250,11 @@ def build_top_level_parser():
         "-q", "--query", help="Single query (non-interactive mode)"
     )
     chat_parser.add_argument(
+        "-i",
+        "--initial",
+        help="Submit an initial prompt, then remain in interactive chat",
+    )
+    chat_parser.add_argument(
         "--image", help="Optional local image path to attach to a single query"
     )
     _inherited_flag(
