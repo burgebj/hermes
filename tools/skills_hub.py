@@ -3161,7 +3161,10 @@ def ensure_hub_dirs() -> None:
     QUARANTINE_DIR.mkdir(exist_ok=True)
     INDEX_CACHE_DIR.mkdir(exist_ok=True)
     if not LOCK_FILE.exists():
-        LOCK_FILE.write_text('{"version": 1, "installed": {}}\n')
+        LOCK_FILE.write_text(
+            '{"version": 1, "installed": {}}\n',
+            encoding="utf-8",
+        )
     if not AUDIT_LOG.exists():
         AUDIT_LOG.touch()
     if not TAPS_FILE.exists():
