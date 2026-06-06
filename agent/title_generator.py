@@ -20,9 +20,10 @@ FailureCallback = Callable[[str, BaseException], None]
 TitleCallback = Callable[[str], None]
 
 _TITLE_PROMPT = (
-    "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
-    "following exchange. The title should capture the main topic or intent. "
-    "Return ONLY the title text, nothing else. No quotes, no punctuation at the end, no prefixes."
+    "You are a conversation titler. Given a User/Assistant exchange, output a "
+    "3-7 word title describing the topic or user intent.\n"
+    "Rules: no quotes, no trailing punctuation, no prefix like 'Title:'. "
+    "Output only the title."
 )
 
 
@@ -50,7 +51,16 @@ def generate_title(
 
     messages = [
         {"role": "system", "content": _TITLE_PROMPT},
-        {"role": "user", "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"},
+        {
+            "role": "user",
+            "content": (
+                "The following is the conversation to title:\n\n"
+                "---\n"
+                f"User: {user_snippet}\n\n"
+                f"Assistant: {assistant_snippet}\n"
+                "---"
+            ),
+        },
     ]
 
     try:
@@ -62,7 +72,9 @@ def generate_title(
             timeout=timeout,
             main_runtime=main_runtime,
         )
-        title = (response.choices[0].message.content or "").strip()
+        raw_content = response.choices[0].message.content or ""
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        title = raw_content.strip()
         # Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
         title = title.strip('"\'')
         if title.lower().startswith("title:"):
@@ -70,7 +82,13 @@ def generate_title(
         # Enforce reasonable length
         if len(title) > 80:
             title = title[:77] + "..."
-        return title if title else None
+        if not title:
+            logger.warning(
+                "Title generation produced empty title: finish_reason=%r raw_len=%d raw=%r",
+                finish_reason, len(raw_content), raw_content[:200],
+            )
+            return None
+        return title
     except Exception as e:
         # Log at WARNING so this shows up in agent.log without debug mode.
         # Full detail at debug level for operators who need the stack.
