@@ -1632,14 +1632,11 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     reasoning_content injection for Kimi/DeepSeek endpoints.
     """
     content = m.get("content", "")
-    blocks = _extract_preserved_thinking_blocks(m)
-    if content:
-        if isinstance(content, list):
-            converted_content = _convert_content_to_anthropic(content)
-            if isinstance(converted_content, list):
-                blocks.extend(converted_content)
-        else:
-            blocks.append({"type": "text", "text": str(content)})
+    thinking_blocks = _extract_preserved_thinking_blocks(m)
+    interleaved_order = m.get("_anthropic_interleaved_order")
+
+    # Build tool_use blocks list (needed for both paths)
+    tool_use_list = []
     for tc in m.get("tool_calls", []):
         if not tc or not isinstance(tc, dict):
             continue
@@ -1649,12 +1646,62 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
             parsed_args = json.loads(args) if isinstance(args, str) else args
         except (json.JSONDecodeError, ValueError):
             parsed_args = {}
-        blocks.append({
+        tool_use_list.append({
             "type": "tool_use",
             "id": _sanitize_tool_id(tc.get("id", "")),
             "name": fn.get("name", ""),
             "input": parsed_args,
         })
+
+    if interleaved_order and thinking_blocks and tool_use_list:
+        # Preserve original interleaved order so signed thinking blocks
+        # remain at their original positions. Reordering invalidates
+        # Anthropic's per-block signatures → HTTP 400. See #35975.
+        blocks = []
+        covered_thinking: set = set()
+        covered_tools: set = set()
+        for item_type, idx in interleaved_order:
+            if item_type == "thinking" and idx < len(thinking_blocks):
+                blocks.append(thinking_blocks[idx])
+                covered_thinking.add(idx)
+            elif item_type == "tool_use" and idx < len(tool_use_list):
+                blocks.append(tool_use_list[idx])
+                covered_tools.add(idx)
+        # Prepend any uncovered thinking blocks (edge case: order list incomplete)
+        for i, tb in enumerate(thinking_blocks):
+            if i not in covered_thinking:
+                blocks.insert(0, tb)
+        # Append any uncovered tool_use blocks
+        for i, ub in enumerate(tool_use_list):
+            if i not in covered_tools:
+                blocks.append(ub)
+        # Insert text before first tool_use block
+        if content:
+            first_tu = next(
+                (
+                    i for i, b in enumerate(blocks)
+                    if isinstance(b, dict) and b.get("type") == "tool_use"
+                ),
+                len(blocks),
+            )
+            if isinstance(content, list):
+                converted = _convert_content_to_anthropic(content)
+                if isinstance(converted, list):
+                    for cb in reversed(converted):
+                        blocks.insert(first_tu, cb)
+            else:
+                blocks.insert(first_tu, {"type": "text", "text": str(content)})
+    else:
+        blocks = thinking_blocks
+        if content:
+            if isinstance(content, list):
+                converted_content = _convert_content_to_anthropic(content)
+                if isinstance(converted_content, list):
+                    blocks.extend(converted_content)
+            else:
+                blocks.append({"type": "text", "text": str(content)})
+        blocks.extend(tool_use_list)
+
     # Kimi's /coding endpoint (Anthropic protocol) requires assistant
     # tool-call messages to carry reasoning_content when thinking is
     # enabled server-side.  Preserve it as a thinking block so Kimi
