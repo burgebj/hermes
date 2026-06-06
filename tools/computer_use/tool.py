@@ -38,7 +38,7 @@ import os
 import re
 import sys
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from tools.computer_use.backend import (
     ActionResult,
@@ -681,11 +681,15 @@ def _maybe_follow_capture(
     if not res.ok:
         return _text_response(res)
     try:
-        # Preserve the app context established by the preceding capture/focus_app so
-        # that capture_after=True re-captures the same app rather than the frontmost
-        # window (which may have changed if the action caused a focus shift).
-        last_app = getattr(backend, "_last_app", None)
-        cap = backend.capture(mode="som", app=last_app)
+        capture_active = getattr(backend, "capture_active", None)
+        if callable(capture_active):
+            cap = cast(Callable[..., CaptureResult], capture_active)(mode="som")
+        else:
+            # Preserve the app context established by the preceding capture/focus_app so
+            # that capture_after=True re-captures the same app rather than the frontmost
+            # window (which may have changed if the action caused a focus shift).
+            last_app = getattr(backend, "_last_app", None)
+            cap = backend.capture(mode="som", app=last_app)
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
