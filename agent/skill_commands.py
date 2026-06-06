@@ -70,9 +70,9 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
                 pass
 
             # Prefer the lexical path under a trusted skill root before
-            # resolving symlinks.  Slash-command discovery can legitimately
+            # resolving symlinks. Slash-command discovery can legitimately
             # find a skill via ~/.hermes/skills/<name> where <name> is a
-            # symlink to a checked-out skill elsewhere.  Resolving first turns
+            # symlink to a checked-out skill elsewhere. Resolving first turns
             # that trusted visible path into an arbitrary absolute path that
             # skill_view() refuses to load.
             for root in trusted_roots:
@@ -82,11 +82,19 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
                 except ValueError:
                     continue
 
+            # Fall back to resolved-path matching for non-symlinked absolute
+            # paths under local or external skill roots. If no trusted root
+            # matches, pass the raw absolute path through so skill_view() can
+            # return its normal validation error.
             if normalized is None:
-                try:
-                    normalized = str(identifier_path.resolve().relative_to(SKILLS_DIR.resolve()))
-                except Exception:
-                    normalized = raw_identifier
+                for root in trusted_roots:
+                    try:
+                        normalized = str(identifier_path.resolve().relative_to(root.resolve()))
+                        break
+                    except Exception:
+                        continue
+            if normalized is None:
+                normalized = raw_identifier
         else:
             normalized = raw_identifier.lstrip("/")
 
