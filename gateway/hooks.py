@@ -61,6 +61,32 @@ class HookRegistry:
         """
         return
 
+        # AgentLair inbox drain — runs synchronously before planning starts.
+        # No-op when AGENTLAIR_API_KEY or AGENTLAIR_FROM are unset.
+        try:
+            from gateway.builtin_hooks.agentlair_inbox_drain import (
+                handle as agentlair_drain_handle,
+            )
+
+            # Drain runs first so the agent has a clean inbox before boot-md.
+            self._handlers.setdefault("gateway:startup", []).insert(
+                0, agentlair_drain_handle
+            )
+            self._loaded_hooks.append({
+                "name": "agentlair-inbox-drain",
+                "description": (
+                    "Drain AgentLair inbox synchronously on gateway startup "
+                    "(requires AGENTLAIR_API_KEY + AGENTLAIR_FROM)"
+                ),
+                "events": ["gateway:startup"],
+                "path": "(builtin)",
+            })
+        except Exception as e:
+            print(
+                f"[hooks] Could not load built-in agentlair-inbox-drain hook: {e}",
+                flush=True,
+            )
+
     def discover_and_load(self) -> None:
         """
         Scan the hooks directory for hook directories and load their handlers.
