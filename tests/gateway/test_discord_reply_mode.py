@@ -238,6 +238,34 @@ class TestConfigSerialization:
         config = PlatformConfig.from_dict(data)
         assert config.reply_to_mode == "first"
 
+    def test_from_dict_bool_false_normalised_to_off(self):
+        """Legacy YAML 1.1 parses `reply_to_mode: off` as boolean False.
+        from_dict must map that to the string "off" so that the Discord
+        adapter does not see a falsy value and fall back to "first"."""
+        data = {"enabled": True, "token": "***", "reply_to_mode": False}
+        config = PlatformConfig.from_dict(data)
+        assert config.reply_to_mode == "off"
+
+    def test_from_dict_bool_true_normalised_to_first(self):
+        """Boolean True maps to the default "first" string."""
+        data = {"enabled": True, "token": "***", "reply_to_mode": True}
+        config = PlatformConfig.from_dict(data)
+        assert config.reply_to_mode == "first"
+
+    def test_adapter_bool_false_config_does_not_fall_back_to_first(self):
+        """End-to-end: PlatformConfig(reply_to_mode=False) must not produce
+        adapter._reply_to_mode == "first" (the historical regression)."""
+        # Simulate old config objects that may carry a raw bool
+        config = PlatformConfig(enabled=True, token="test", reply_to_mode=False)  # type: ignore[arg-type]
+        adapter = DiscordAdapter(config)
+        assert adapter._reply_to_mode == "off"
+
+    def test_adapter_from_dict_bool_false_off(self):
+        """Full pipeline: from_dict with bool False -> adapter sees 'off'."""
+        config = PlatformConfig.from_dict({"enabled": True, "token": "t", "reply_to_mode": False})
+        adapter = DiscordAdapter(config)
+        assert adapter._reply_to_mode == "off"
+
 
 class TestEnvVarOverride:
     """Tests for DISCORD_REPLY_TO_MODE environment variable override."""

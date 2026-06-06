@@ -620,7 +620,13 @@ class DiscordAdapter(BasePlatformAdapter):
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off" (no replies), "first" (reply on first
         # chunk only, default), "all" (reply-reference on every chunk).
-        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        # Guard: PlatformConfig.from_dict normalizes bools upstream, but
+        # defense-in-depth handles any residual bool False (falsy) by
+        # treating it as "off" rather than falling back to "first".
+        _rtm = getattr(config, 'reply_to_mode', 'first')
+        if isinstance(_rtm, bool):
+            _rtm = 'off' if not _rtm else 'first'
+        self._reply_to_mode: str = _rtm or 'first'
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # In-memory cache of the bot's last message ID per channel, used by
         # history backfill to skip the full scan on hot paths.  Falls back to
