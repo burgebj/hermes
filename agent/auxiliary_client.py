@@ -1006,6 +1006,13 @@ class _AnthropicCompletionsAdapter:
             if not _forbids_sampling_params(model):
                 anthropic_kwargs["temperature"] = temperature
 
+        # OAuth + Opus 4.6 rejects any temperature other than 1.0 with a
+        # cryptic "Invalid request data" 400. Clamp to 1.0 to keep vision
+        # and other low-temp auxiliary calls working.
+        if self._is_oauth and "opus-4-6" in str(model).lower():
+            if anthropic_kwargs.get("temperature") not in (None, 1, 1.0):
+                anthropic_kwargs["temperature"] = 1.0
+
         response = self._client.messages.create(**anthropic_kwargs)
         _transport = get_transport("anthropic_messages")
         _nr = _transport.normalize_response(
