@@ -8892,6 +8892,20 @@ class GatewayRunner:
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
         self._cache_session_source(session_key, source)
+
+        # Channel routing: resolve profile overrides for this chat_id
+        _route_ctx = None
+        try:
+            from gateway.channel_routing import resolve_channel_route
+
+            _gw_cfg = _load_gateway_config()
+            _route_ctx = resolve_channel_route(
+                source.chat_id,
+                _gw_cfg.get("channel_routes", {}),
+            )
+        except Exception as _route_err:
+            logger.debug("Channel route resolution failed (non-fatal): %s", _route_err)
+
         if self._is_telegram_topic_lane(source):
             try:
                 binding = self._session_db.get_telegram_topic_binding(
@@ -9509,6 +9523,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                route_context=_route_ctx,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -17016,6 +17031,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        route_context: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -17901,6 +17917,30 @@ class GatewayRunner:
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
 
+            # Channel routing overrides — if a profile route matched for this
+            # chat_id, override the model, credentials, and ephemeral prompt.
+            _skip_context = False
+            _skip_memory = False
+            if route_context:
+                from gateway.channel_routing import (
+                    build_routed_runtime_kwargs,
+                    build_routed_ephemeral_prompt,
+                )
+
+                _routed_runtime = build_routed_runtime_kwargs(route_context)
+                turn_route = {
+                    "model": route_context.model or turn_route["model"],
+                    "runtime": _routed_runtime,
+                }
+                combined_ephemeral = build_routed_ephemeral_prompt(
+                    route_context,
+                    platform_context=context_prompt or "",
+                )
+                if self._ephemeral_system_prompt:
+                    combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
+                _skip_context = True
+                _skip_memory = True
+
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
@@ -17964,6 +18004,8 @@ class GatewayRunner:
                     gateway_session_key=session_key,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    skip_context_files=_skip_context,
+                    skip_memory=_skip_memory,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
@@ -19219,6 +19261,7 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    route_context=route_context,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:
