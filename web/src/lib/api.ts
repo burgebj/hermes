@@ -1542,6 +1542,8 @@ export interface AnalyticsResponse {
     total_sessions: number;
     total_api_calls: number;
   };
+  period_days: number;
+  span_days: number;
   skills: {
     summary: AnalyticsSkillsSummary;
     top_skills: AnalyticsSkillEntry[];
