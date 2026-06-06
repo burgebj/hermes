@@ -891,11 +891,17 @@ def _normalize_approval_mode(mode) -> str:
     intended string mode instead of falling back to manual approvals.
     """
     if isinstance(mode, bool):
-        return "off" if mode is False else "manual"
+        return "off" if mode is False else "smart"
     if isinstance(mode, str):
         normalized = mode.strip().lower()
-        return normalized or "manual"
-    return "manual"
+        valid = ("manual", "smart", "off")
+        if normalized in valid:
+            return normalized
+        
+        logger.warning("Invalid approval mode '%s' — defaulting to 'smart'", mode)
+        return "smart"
+    
+    return "smart"
 
 
 def _get_approval_config() -> dict:
