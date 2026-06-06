@@ -342,7 +342,9 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
     if entry:
         ctx = _extract_context(entry)
         if ctx:
-            return ctx
+            ctx = _apply_context_override(model, ctx)
+            if ctx:
+                return ctx
 
     # Case-insensitive match
     model_lower = model.lower()
@@ -350,7 +352,9 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
         if mid.lower() == model_lower:
             ctx = _extract_context(mdata)
             if ctx:
-                return ctx
+                ctx = _apply_context_override(model, ctx)
+                if ctx:
+                    return ctx
 
     # Suffix-aware fallback: some providers (e.g. ollama-cloud) store
     # model IDs with :cloud / -cloud suffixes in models.dev while the
@@ -365,22 +369,68 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
         if entry:
             ctx = _extract_context(entry)
             if ctx:
-                return ctx
+                ctx = _apply_context_override(model, ctx)
+                if ctx:
+                    return ctx
         # Also try case-insensitive
         suffixed_lower = model_lower + suffix
         for mid, mdata in models.items():
             if mid.lower() == suffixed_lower:
                 ctx = _extract_context(mdata)
                 if ctx:
-                    return ctx
+                    ctx = _apply_context_override(model, ctx)
+                    if ctx:
+                        return ctx
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Known-incorrect context lengths from the upstream models.dev registry
+# (https://models.dev/api.json). The registry is community-maintained and
+# occasionally lags behind actual model specs.  These overrides replace
+# extracted values that match a known-wrong figure with the correct figure
+# so users get the right context window without waiting for an upstream fix.
+#
+# Key: model_id_lower -> { wrong_context_value: correct_context_value }
+# ---------------------------------------------------------------------------
+_MODELS_DEV_CONTEXT_OVERRIDES: dict[str, dict[int, int]] = {
+    # MiniMax-M3 is specced at 1,048,576 (1M) tokens. The models.dev
+    # registry was temporarily seeded with 512,000 (half the actual
+    # context) from a stale spec scrape. This entry exists under both
+    # the native ``minimax`` provider section and the generic
+    # ``opencode-go``-like provider section.
+    "minimax-m3": {
+        512000: 1048576,
+    },
+}
+
+
+def _apply_context_override(model: str, ctx: int) -> Optional[int]:
+    """Apply a known-correct context override if the extracted value matches
+    a known-incorrect value from the upstream models.dev registry.
+
+    Returns the corrected context if an override applies, or the original
+    context unchanged if no override is known.
+    """
+    model_lower = model.lower()
+    overrides = _MODELS_DEV_CONTEXT_OVERRIDES.get(model_lower)
+    if overrides and ctx in overrides:
+        corrected = overrides[ctx]
+        logger.info(
+            "Applying models.dev context override for %r: %s -> %s",
+            model, f"{ctx:,}", f"{corrected:,}",
+        )
+        return corrected
+    return ctx
 
 
 def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
     """Extract context_length from a models.dev model entry.
 
     Returns None for invalid/zero values (some audio/image models have context=0).
+    Applies ``_MODELS_DEV_CONTEXT_OVERRIDES`` to fix known-incorrect values
+    from the upstream registry (#user-found).
     """
     if not isinstance(entry, dict):
         return None
