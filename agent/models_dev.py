@@ -170,6 +170,7 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     # catalog, so model metadata should resolve through the xAI provider.
     "xai-oauth": "xai",
     "xiaomi": "xiaomi",
+    "qiniu": "qiniu",
     "nvidia": "nvidia",
     "groq": "groq",
     "mistral": "mistral",
