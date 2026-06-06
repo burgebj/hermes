@@ -99,6 +99,33 @@ def test_clean_text_for_capture_strips_injected_context():
     assert _clean_text_for_capture(text) == "hello\nworld"
 
 
+def test_clean_text_for_capture_handles_multimodal_parts():
+    content = [
+        {"type": "text", "text": "remember this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,secret-ish-bulk"}},
+    ]
+    cleaned = _clean_text_for_capture(content)
+    assert "remember this" in cleaned
+    assert "image omitted" in cleaned
+    assert "secret-ish-bulk" not in cleaned
+
+
+def test_sync_turn_accepts_multimodal_user_content(provider):
+    provider.sync_turn(
+        [
+            {"type": "text", "text": "Please remember this multimodal request"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,raw-image"}},
+        ],
+        "I will store the text safely without raw image data.",
+        session_id="session-1",
+    )
+    provider._sync_thread.join(timeout=1)
+    assert len(provider._client.add_calls) == 1
+    content = provider._client.add_calls[0]["content"]
+    assert "Please remember this multimodal request" in content
+    assert "raw-image" not in content
+
+
 def test_format_prefetch_context_deduplicates_overlap():
     result = _format_prefetch_context(
         static_facts=["Jordan prefers short answers"],

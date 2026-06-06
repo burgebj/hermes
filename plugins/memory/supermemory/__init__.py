@@ -251,7 +251,39 @@ def _format_prefetch_context(static_facts: list, dynamic_facts: list, search_res
     return f"<supermemory-context>\n{intro}\n\n{body}\n</supermemory-context>"
 
 
-def _clean_text_for_capture(text: str) -> str:
+def _stringify_message_content(value: Any) -> str:
+    """Convert OpenAI-style message content into safe text for capture.
+
+    Gateway turns may include multimodal content as a list of parts. Keep user
+    text, omit raw image/data payloads, and avoid passing non-strings to regexes.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            rendered = _stringify_message_content(item).strip()
+            if rendered:
+                parts.append(rendered)
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        part_type = str(value.get("type") or "").strip()
+        if part_type == "text":
+            return _stringify_message_content(value.get("text"))
+        if part_type in ("image_url", "input_image"):
+            return "[image omitted from memory capture]"
+        if "content" in value:
+            return _stringify_message_content(value.get("content"))
+        if "text" in value:
+            return _stringify_message_content(value.get("text"))
+        return ""
+    return str(value)
+
+
+def _clean_text_for_capture(text: Any) -> str:
+    text = _stringify_message_content(text)
     text = _CONTEXT_STRIP_RE.sub("", text or "")
     text = _CONTAINERS_STRIP_RE.sub("", text)
     return text.strip()
