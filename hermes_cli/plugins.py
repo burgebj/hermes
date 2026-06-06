@@ -173,6 +173,87 @@ ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
 _NS_PARENT = "hermes_plugins"
 
+VALID_UPDATE_CHANNELS = {"stable", "beta", "dev"}
+
+
+def _normalize_channel(channel: str) -> str:
+    """Validate and normalize update channel, falling back to 'stable'."""
+    if channel not in VALID_UPDATE_CHANNELS:
+        logger.warning("Invalid update_channel '%s', falling back to 'stable'. Valid: %s",
+                       channel, sorted(VALID_UPDATE_CHANNELS))
+        return "stable"
+    return channel
+
+
+def _normalize_depends(deps: Any) -> Dict[str, str]:
+    """Normalize depends_on to dict format (list → {name: ''})."""
+    if isinstance(deps, list):
+        return {d: "" for d in deps if isinstance(d, str)}
+    if isinstance(deps, dict):
+        return {k: str(v) for k, v in deps.items()}
+    return {}
+
+
+def _parse_version(ver: str) -> tuple:
+    """Parse '1.2.3' into (1, 2, 3) for comparison. Returns () on failure."""
+    try:
+        return tuple(int(p) for p in ver.split("."))
+    except (ValueError, AttributeError):
+        return ()
+
+
+def _satisfies_version(installed: str, constraint: str) -> bool:
+    """Check if *installed* version satisfies a constraint like '>=1.0.0' or '^1.0'."""
+    iv = _parse_version(installed)
+    if not constraint:
+        return True
+    constraint = constraint.strip()
+    if constraint.startswith(">="):
+        return iv >= _parse_version(constraint[2:])
+    if constraint.startswith(">"):
+        return iv > _parse_version(constraint[1:])
+    if constraint.startswith("<="):
+        return iv <= _parse_version(constraint[2:])
+    if constraint.startswith("<"):
+        return iv < _parse_version(constraint[1:])
+    if constraint.startswith("^"):
+        # ^1.2.3 means >=1.2.3, <2.0.0;  ^1 means >=1.0.0, <2.0.0
+        c = _parse_version(constraint[1:])
+        if not c:
+            return True
+        return iv >= c and iv < (c[0] + 1, 0, 0)
+    if constraint.startswith("~"):
+        # ~1.2.3 means >=1.2.3, <1.3.0;  ~1 means >=1.0.0, <2.0.0 (like ^)
+        c = _parse_version(constraint[1:])
+        if not c:
+            return True
+        if len(c) < 2:
+            return iv >= c and iv < (c[0] + 1, 0, 0)
+        return iv >= c and iv < (c[0], c[1] + 1, 0)
+    return _parse_version(constraint) == iv if constraint else True
+
+
+def _resolve_dependencies(
+    plugins: Dict[str, "PluginManifest"],
+    manifest: "PluginManifest",
+    chain: Optional[Set[str]] = None,
+) -> List[str]:
+    """Resolve dependencies for a plugin manifest. Returns list of missing deps."""
+    if chain is None:
+        chain = set()
+    missing = []
+    for dep_name, constraint in manifest.depends_on.items():
+        if dep_name in chain:
+            logger.warning("Circular dependency detected: %s -> %s", chain, dep_name)
+            continue
+        if dep_name not in plugins:
+            missing.append(f"{dep_name} ({constraint})" if constraint else dep_name)
+            continue
+        installed_ver = plugins[dep_name].version
+        if constraint and not _satisfies_version(installed_ver, constraint):
+            missing.append(f"{dep_name} (installed {installed_ver}, need {constraint})")
+    return missing
+
 
 def _env_enabled(name: str) -> bool:
     """Return True when an env var is set to a truthy opt-in value."""
@@ -267,6 +348,14 @@ class PluginManifest:
     # category plugin at ``plugins/image_gen/openai/`` the key is
     # ``image_gen/openai``. When empty, falls back to ``name``.
     key: str = ""
+    # Registry URL for discovering updates
+    registry_url: str = ""
+    # Update channel — controls update cadence: stable, beta, dev
+    update_channel: str = "stable"
+    # Plugin dependencies — mapping of plugin name to version constraint.
+    # Accepts YAML list syntax (converted to dict with empty constraint)
+    # or dict syntax: depends_on: {"plugin_a": ">=1.0"}
+    depends_on: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1388,6 +1477,9 @@ class PluginManager:
                 path=str(plugin_dir),
                 kind=kind,
                 key=key,
+                registry_url=data.get("registry_url", ""),
+                update_channel=_normalize_channel(data.get("update_channel", "stable")),
+                depends_on=_normalize_depends(data.get("depends_on", {})),
             )
         except Exception as exc:
             logger.warning(
@@ -1664,6 +1756,97 @@ class PluginManager:
                 }
             )
         return result
+
+    # -----------------------------------------------------------------------
+    # Plugin Registry & Distribution
+    # -----------------------------------------------------------------------
+
+    def check_dependencies(self, manifest: PluginManifest) -> List[str]:
+        """Check if all dependency constraints for a manifest are satisfied.
+
+        Returns a list of missing/unsatisfied dependency descriptions.
+        """
+        manifests = {k: v.manifest for k, v in self._plugins.items()}
+        manifests[manifest.key or manifest.name] = manifest
+        return _resolve_dependencies(manifests, manifest)
+
+    def install_plugin(
+        self, name: str, registry_url: str = "", version: str = ""
+    ) -> Dict[str, Any]:
+        """Register a plugin distribution entry.
+
+        Args:
+            name: Plugin name
+            registry_url: URL for updates or git repository
+            version: Installed version string
+
+        Returns:
+            Dict with success/error info
+        """
+        target = get_hermes_home() / "plugins" / name
+        if target.exists():
+            return {"success": False, "error": f"Plugin '{name}' already installed at {target}"}
+        if not registry_url:
+            return {"success": False, "error": "registry_url is required for installation"}
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "plugin.yaml").write_text(
+                f"name: {name}\nversion: {version or '0.1.0'}\nsource: user\nregistry_url: {registry_url}\n",
+                encoding="utf-8",
+            )
+            (target / "__init__.py").write_text(
+                'def register(ctx):\n    """Auto-generated."""\n    pass\n',
+                encoding="utf-8",
+            )
+            logger.info("Plugin '%s' installed from %s", name, registry_url)
+            return {"success": True, "path": str(target)}
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+
+    def uninstall_plugin(self, name: str) -> Dict[str, Any]:
+        """Remove a user-installed plugin directory and clean up registered items."""
+        target = get_hermes_home() / "plugins" / name
+        if not target.exists():
+            return {"success": False, "error": f"Plugin '{name}' not found"}
+        loaded = self._plugins.get(name)
+        if loaded and loaded.manifest.source != "user":
+            return {"success": False, "error": f"Cannot uninstall {loaded.manifest.source} plugin '{name}'"}
+        import shutil
+        try:
+            if loaded:
+                for tool in loaded.tools_registered:
+                    self._plugin_tool_names.discard(tool)
+                for hook in loaded.hooks_registered:
+                    self._hooks.pop(hook, None)
+                for cmd in loaded.commands_registered:
+                    self._plugin_commands.pop(cmd, None)
+                self._plugins.pop(name, None)
+            shutil.rmtree(target)
+            logger.info("Plugin '%s' uninstalled with cleanup", name)
+            return {"success": True, "message": f"Plugin '{name}' uninstalled"}
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+
+    def list_registry_plugins(self) -> List[Dict[str, Any]]:
+        """List plugins that have a registry_url configured for updates.
+
+        This is a listing-only method. It does not fetch remote manifests
+        or compare versions. Returns metadata about each registered plugin
+        that has a registry URL set.
+        """
+        updates = []
+        for key, loaded in sorted(self._plugins.items()):
+            m = loaded.manifest
+            if not m.registry_url:
+                continue
+            updates.append({
+                "name": m.name,
+                "version": m.version,
+                "channel": m.update_channel,
+                "registry_url": m.registry_url,
+                "source": m.source,
+            })
+        return updates
 
     # -----------------------------------------------------------------------
     # Plugin skill lookups
