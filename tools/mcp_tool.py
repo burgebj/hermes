@@ -1377,7 +1377,7 @@ class MCPServerTask:
 
         # Check package against OSV malware database before spawning
         from tools.osv_check import check_package_for_malware
-        malware_error = check_package_for_malware(command, args)
+        malware_error = await asyncio.to_thread(check_package_for_malware, command, args)
         if malware_error:
             raise ValueError(
                 f"MCP server '{self.name}': {malware_error}"
