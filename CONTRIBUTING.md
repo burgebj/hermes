@@ -129,6 +129,38 @@ scripts/run_tests.sh
 pytest tests/ -v
 ```
 
+#### TUI tests (Vitest, `ui-tui/`)
+
+The terminal UI lives in the `ui-tui/` workspace package and ships its own
+TypeScript test suite powered by [Vitest](https://vitest.dev). If you change
+anything under `ui-tui/src/`, run the suite locally before opening a PR:
+
+```bash
+# From the repo root
+npm --prefix ui-tui test                     # one-shot run
+npm --prefix ui-tui run test:watch           # watch mode while iterating
+
+# Or from inside the package
+cd ui-tui
+npm test                                     # one-shot run
+npm test -- src/__tests__/foo.test.ts        # single file
+npm test -- -t "cursorLayout"                # by test name pattern
+```
+
+Conventions used by the existing TUI tests:
+
+- Test files live in `ui-tui/src/__tests__/` with the `.test.ts` suffix and
+  are picked up by Vitest's default discovery; `ui-tui/vitest.config.ts`
+  only excludes `dist/` and `node_modules/`, so no registration is needed.
+- Prefer extracting pure helpers (e.g. `cursorLayout`, `lineNav`) and
+  unit-testing them directly rather than rendering the full Ink component.
+  Tests stay fast and don't need a TTY.
+- For composer/state behavior, exercise the corresponding `useComposerState`
+  / `useInputHandlers` hooks; they have dedicated test files that work as
+  templates.
+- Avoid `console.log` in test code — Vitest treats stray output as noise
+  and it bloats CI logs.
+
 ---
 
 ## Project Structure
