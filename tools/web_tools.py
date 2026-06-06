@@ -1308,7 +1308,7 @@ WEB_SEARCH_SCHEMA = {
 
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
+    "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. By default, pages under 5000 chars return full markdown and larger pages are LLM-summarized and capped at ~5000 chars per page. For official docs, diagnostics, or source-fidelity/speed-sensitive work, set use_llm_processing=false to return raw extracted markdown without summarization. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1317,11 +1317,53 @@ WEB_EXTRACT_SCHEMA = {
                 "items": {"type": "string"},
                 "description": "List of URLs to extract content from (max 5 URLs per call)",
                 "maxItems": 5
+            },
+            "use_llm_processing": {
+                "type": "boolean",
+                "description": "Whether to summarize/process long pages with an auxiliary LLM. Set false for fast/raw extraction of official docs or diagnostics.",
+                "default": True
+            },
+            "min_length": {
+                "type": "integer",
+                "description": "Minimum content length before LLM summarization is attempted. Raise this to avoid summarizing medium-sized docs pages.",
+                "default": DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION,
+                "minimum": 0
             }
         },
         "required": ["urls"]
     }
 }
+
+def _coerce_bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+        return default
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _web_extract_handler(args, **kw):
+    urls = args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else []
+    use_llm_processing = _coerce_bool(args.get("use_llm_processing", True), default=True)
+    min_length = args.get("min_length", DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION)
+    try:
+        min_length = int(min_length)
+    except (TypeError, ValueError):
+        min_length = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION
+    return web_extract_tool(
+        urls,
+        "markdown",
+        use_llm_processing=use_llm_processing,
+        min_length=max(0, min_length),
+    )
+
 
 registry.register(
     name="web_search",
@@ -1337,8 +1379,7 @@ registry.register(
     name="web_extract",
     toolset="web",
     schema=WEB_EXTRACT_SCHEMA,
-    handler=lambda args, **kw: web_extract_tool(
-        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown"),
+    handler=_web_extract_handler,
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     is_async=True,
