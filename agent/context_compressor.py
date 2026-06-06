@@ -1393,7 +1393,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
             response = call_llm(**call_kwargs)
-            content = response.choices[0].message.content
+            message = response.choices[0].message
+            if isinstance(message, dict):
+                content = message.get("content")
+            else:
+                content = getattr(message, "content", message)
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):
                 content = str(content) if content else ""
