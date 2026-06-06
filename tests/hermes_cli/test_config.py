@@ -477,6 +477,66 @@ class TestSanitizeEnvLines:
         assert result[0].startswith("GLM_API_KEY=")
         assert result[1].startswith("LM_API_KEY=")
 
+    def test_preserves_unknown_prefix_before_known_concatenation(self):
+        """Regression for #26804: when an unknown-to-Hermes key gets jammed
+        in front of a known one (no newline between them), the splitter
+        used to emit only the known-key tail and silently drop the
+        prefix.  That's how ``hermes update`` was eating user-added
+        ``TELEGRAM_BOT_TOKEN`` / ``DEEPSEEK_API_KEY`` / ``BROWSERBASE_*``
+        lines on real installs.  Both pieces must survive.
+        """
+        # Two known-key needles AFTER an unknown user-defined env var.
+        # ``BROWSERBASE_PROXIES`` is not registered in OPTIONAL_ENV_VARS /
+        # _EXTRA_ENV_KEYS, so it is invisible to the concatenation
+        # splitter — exactly the shape that triggered the silent strip.
+        lines = [
+            "BROWSERBASE_PROXIES=http://proxy.example.com:8080"
+            "TELEGRAM_BOT_TOKEN=123:abc"
+            "DEEPSEEK_API_KEY=ds-xyz\n"
+        ]
+        result = _sanitize_env_lines(lines)
+        joined = "".join(result)
+        assert "BROWSERBASE_PROXIES=http://proxy.example.com:8080" in joined
+        assert "TELEGRAM_BOT_TOKEN=123:abc\n" in result
+        assert "DEEPSEEK_API_KEY=ds-xyz\n" in result
+
+    def test_ignores_garbled_prefix_without_key_shape(self):
+        """The prefix-rescue path must still drop genuine noise — text
+        that doesn't look like ``KEY=VALUE`` is not silently turned into
+        a malformed env line.
+        """
+        # ``hello world`` prefix isn't a plausible env key, so it stays
+        # dropped (current behavior is preserved for non-KEY= prefixes).
+        lines = ["hello worldOPENROUTER_API_KEY=sk-or-xxxFIRECRAWL_API_KEY=fc-xxx\n"]
+        result = _sanitize_env_lines(lines)
+        joined = "".join(result)
+        assert "hello world" not in joined
+        assert "OPENROUTER_API_KEY=sk-or-xxx\n" in result
+        assert "FIRECRAWL_API_KEY=fc-xxx\n" in result
+
+    def test_sanitize_env_file_preserves_user_env_vars(self, tmp_path):
+        """End-to-end regression for #26804: ``sanitize_env_file`` (called
+        by ``hermes update`` / ``hermes config migrate``) must keep every
+        user-added key that happens to be unknown to the splitter, even
+        when it shares a physical line with concatenated known keys.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENROUTER_API_KEY=sk-or-good\n"
+            # User-added key (unknown to splitter) jammed against a known
+            # one — exactly the failure mode from the bug report.
+            "TELEGRAM_ALLOWED_USERS=alice,bobDEEPSEEK_API_KEY=ds-xyz\n"
+            "FAL_KEY=keep-me\n"
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            sanitize_env_file()
+            content = env_file.read_text()
+
+        assert "OPENROUTER_API_KEY=sk-or-good" in content
+        assert "TELEGRAM_ALLOWED_USERS=alice,bob" in content
+        assert "DEEPSEEK_API_KEY=ds-xyz" in content
+        assert "FAL_KEY=keep-me" in content
+
     def test_save_env_value_fixes_corruption_on_write(self, tmp_path):
         """save_env_value sanitizes corrupted lines when writing a new key."""
         env_file = tmp_path / ".env"

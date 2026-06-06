@@ -287,6 +287,13 @@ _EXTRA_ENV_KEYS = frozenset({
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
 })
+
+# Matches the head of a plausible env var line (``FOO=`` / ``FOO_BAR=``).
+# Used by ``_sanitize_env_lines`` to decide whether a prefix slice before
+# the first known KEY= needle is actually a user-defined env var we
+# should preserve (#26804) versus genuine noise we should still drop.
+_ENV_KEY_LINE_RE = re.compile(r"^[A-Z_][A-Z0-9_]*=")
+
 import yaml
 
 from hermes_cli.colors import Colors, color
@@ -5400,6 +5407,19 @@ def _sanitize_env_lines(lines: list) -> list:
         })
 
         if len(split_positions) > 1:
+            # Anything before the first known needle is the user's own
+            # ``FOO=bar`` (or an unknown-to-us third-party key) jammed up
+            # against a Hermes-known key. Without this slice the splitter
+            # silently drops it — that's how ``hermes update`` was eating
+            # custom Telegram/Browserbase/DeepSeek lines in #26804.
+            #
+            # Only emit prefixes that actually look like ``KEY=VALUE``;
+            # this keeps us from reintroducing genuinely corrupted noise
+            # while preserving legitimate env vars the splitter doesn't
+            # recognise as anchors.
+            prefix = stripped[: split_positions[0]].strip()
+            if prefix and _ENV_KEY_LINE_RE.match(prefix):
+                sanitized.append(prefix + "\n")
             for i, pos in enumerate(split_positions):
                 end = split_positions[i + 1] if i + 1 < len(split_positions) else len(stripped)
                 part = stripped[pos:end].strip()
