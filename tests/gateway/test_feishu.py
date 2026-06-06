@@ -340,7 +340,13 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         captured = {}
 
         class _MessageAPI:
+            def patch(self, request):
+                captured["method"] = "patch"
+                captured["request"] = request
+                return SimpleNamespace(success=lambda: True)
+
             def update(self, request):
+                captured["method"] = "update"
                 captured["request"] = request
                 return SimpleNamespace(success=lambda: True)
 
@@ -366,12 +372,49 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.message_id, "om_progress")
+        self.assertEqual(captured["method"], "patch")
         self.assertEqual(captured["request"].message_id, "om_progress")
         self.assertEqual(captured["request"].request_body.msg_type, "text")
         self.assertEqual(
             captured["request"].request_body.content,
             json.dumps({"text": "📖 read_file: \"/tmp/image.png\""}, ensure_ascii=False),
         )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_edit_message_falls_back_to_update_when_patch_is_unavailable(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def update(self, request):
+                captured["request"] = request
+                return SimpleNamespace(success=lambda: True)
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_progress",
+                    content="plain text",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["request"].message_id, "om_progress")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_edit_message_falls_back_to_text_when_post_update_is_rejected(self):

@@ -98,6 +98,8 @@ try:
         GetMessageRequest,
         GetMessageResourceRequest,
         P2ImMessageMessageReadV1,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
         ReplyMessageRequest,
         ReplyMessageRequestBody,
         UpdateMessageRequest,
@@ -1843,7 +1845,8 @@ class FeishuAdapter(BasePlatformAdapter):
             msg_type, payload = self._build_outbound_payload(content)
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
             request = self._build_update_message_request(message_id=message_id, request_body=body)
-            response = await asyncio.to_thread(self._client.im.v1.message.update, request)
+            send_edit = getattr(self._client.im.v1.message, "patch", None) or self._client.im.v1.message.update
+            response = await asyncio.to_thread(send_edit, request)
             result = self._finalize_send_result(response, "update failed")
             if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
                 logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
@@ -1852,7 +1855,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     content=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
                 )
                 fallback_request = self._build_update_message_request(message_id=message_id, request_body=fallback_body)
-                fallback_response = await asyncio.to_thread(self._client.im.v1.message.update, fallback_request)
+                fallback_response = await asyncio.to_thread(send_edit, fallback_request)
                 result = self._finalize_send_result(fallback_response, "update failed")
             if result.success:
                 result.message_id = message_id
@@ -4714,9 +4717,9 @@ class FeishuAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _build_update_message_body(*, msg_type: str, content: str) -> Any:
-        if "UpdateMessageRequestBody" in globals():
+        if "PatchMessageRequestBody" in globals():
             return (
-                UpdateMessageRequestBody.builder()
+                PatchMessageRequestBody.builder()
                 .msg_type(msg_type)
                 .content(content)
                 .build()
@@ -4725,9 +4728,9 @@ class FeishuAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _build_update_message_request(message_id: str, request_body: Any) -> Any:
-        if "UpdateMessageRequest" in globals():
+        if "PatchMessageRequest" in globals():
             return (
-                UpdateMessageRequest.builder()
+                PatchMessageRequest.builder()
                 .message_id(message_id)
                 .request_body(request_body)
                 .build()
