@@ -29,6 +29,7 @@ import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { sendReadReceipt } from './read_receipts.js';
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -444,6 +445,8 @@ async function startSocket() {
       if (messageQueue.length > MAX_QUEUE_SIZE) {
         messageQueue.shift();
       }
+
+      await sendReadReceipt(sock, msg);
     }
   });
 }
