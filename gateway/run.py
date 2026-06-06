@@ -8676,10 +8676,21 @@ class GatewayRunner:
                     )
 
             if audio_paths:
+                self._pending_voice_transcripts = []
                 message_text = await self._enrich_message_with_transcription(
                     message_text,
                     audio_paths,
                 )
+                if self._pending_voice_transcripts:
+                    _echo_adapter = self.adapters.get(source.platform)
+                    _echo_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    if _echo_adapter:
+                        try:
+                            _echo_text = "\n".join(f'🎤 "{t}"' for t in self._pending_voice_transcripts)
+                            await _echo_adapter.send(source.chat_id, _echo_text, metadata=_echo_meta)
+                        except Exception:
+                            pass
+                    self._pending_voice_transcripts = []
                 _stt_fail_markers = (
                     "No STT provider",
                     "STT is disabled",
@@ -15838,6 +15849,9 @@ class GatewayRunner:
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
+                    if not hasattr(self, "_pending_voice_transcripts"):
+                        self._pending_voice_transcripts = []
+                    self._pending_voice_transcripts.append(transcript)
                     enriched_parts.append(
                         f'[The user sent a voice message~ '
                         f'Here\'s what they said: "{transcript}"]'
