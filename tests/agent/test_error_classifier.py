@@ -127,6 +127,13 @@ class TestExtractErrorBody:
         e = MockAPIError("fail", body={"error": {"message": "bad"}})
         assert _extract_error_body(e) == {"error": {"message": "bad"}}
 
+    def test_from_cause_chain(self):
+        inner = MockAPIError("inner", body={"error": {"message": "nested"}})
+        outer = Exception("outer")
+        outer.__cause__ = inner
+
+        assert _extract_error_body(outer) == {"error": {"message": "nested"}}
+
     def test_empty_when_no_body(self):
         assert _extract_error_body(Exception("generic")) == {}
 
@@ -1177,6 +1184,37 @@ class TestAdversarialEdgeCases:
         result = classify_api_error(e)
         # "try again" is only in body, not in str(e)
         assert result.reason == FailoverReason.rate_limit
+
+    def test_wrapped_402_uses_nested_body_for_transient_limit(self):
+        """Wrapped SDK errors should keep the nested body used for 402 disambiguation."""
+        inner = MockAPIError(
+            "Usage limit",
+            status_code=402,
+            body={"error": {"message": "Usage limit reached, try again in 5 minutes"}},
+        )
+        outer = Exception("Usage limit")
+        outer.__cause__ = inner
+
+        result = classify_api_error(outer)
+
+        assert result.status_code == 402
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+
+    def test_wrapped_402_billing_without_transient_signal(self):
+        inner = MockAPIError(
+            "Payment required",
+            status_code=402,
+            body={"error": {"message": "Your credit balance is too low"}},
+        )
+        outer = Exception("outer")
+        outer.__cause__ = inner
+
+        result = classify_api_error(outer)
+
+        assert result.status_code == 402
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
 
     def test_disconnect_pattern_ordering(self):
         """Disconnect + large session must beat generic transport catch."""
