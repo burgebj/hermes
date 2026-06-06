@@ -1309,6 +1309,21 @@ class HonchoMemoryProvider(MemoryProvider):
         if not self._manager or not self._session_key:
             return tool_error("Honcho is not active for this session.")
 
+        # Fix race condition: sync_turn runs in a background thread and accesses
+        # the same _cache dict. Wait for it to complete before tool calls.
+        # See: https://github.com/NousResearch/hermes-agent/issues/5102
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
+            if self._sync_thread.is_alive():
+                return json.dumps(
+                    {
+                        "error": (
+                            "Honcho is still synchronizing session state. "
+                            "Please retry the tool call."
+                        )
+                    }
+                )
+
         try:
             if tool_name == "honcho_profile":
                 peer = args.get("peer", "user")
