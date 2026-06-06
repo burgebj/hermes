@@ -768,6 +768,77 @@ def _find_skill_dir(skill_name: str) -> Optional[Path]:
     return None
 
 
+def _archived_skill_exists(skill_name: str) -> bool:
+    """Return whether an archived skill exists for *skill_name*.
+
+    Archive entries are normally flat (``.archive/<skill>/SKILL.md``), but
+    older imports may preserve category directories. Match by frontmatter name
+    when possible so timestamped archive directories still reconcile cleanly.
+    """
+    archive_root = _archive_dir()
+    if not archive_root.exists():
+        return False
+
+    for skill_md in archive_root.rglob("SKILL.md"):
+        if _read_skill_name(skill_md, fallback=skill_md.parent.name) == skill_name:
+            return True
+
+    return any(p.is_dir() and p.name == skill_name for p in archive_root.rglob("*"))
+
+
+def repair_orphan_usage_records() -> Dict[str, List[str]]:
+    """Repair curator-managed usage records that do not match disk state.
+
+    Reconciles only records explicitly opted into curator management and still
+    eligible for local curation. Bundled, hub-installed, and unmanaged records
+    are left untouched.
+
+    Returns a summary with three sorted lists:
+    - ``marked_active``: archived records whose skill dir is active again
+    - ``marked_archived``: active/stale records whose skill dir is archived
+    - ``removed``: managed records with no active or archived skill dir
+    """
+    removed: List[str] = []
+    marked_archived: List[str] = []
+    marked_active: List[str] = []
+
+    with _usage_file_lock():
+        data = load_usage()
+        for name, rec in list(data.items()):
+            if not _is_curator_managed_record(rec) or not is_agent_created(name):
+                continue
+
+            active_dir = _find_skill_dir(name)
+            archived_exists = _archived_skill_exists(name)
+            state = rec.get("state", STATE_ACTIVE)
+
+            if active_dir is not None:
+                if state == STATE_ARCHIVED:
+                    rec["state"] = STATE_ACTIVE
+                    rec["archived_at"] = None
+                    marked_active.append(name)
+                continue
+
+            if archived_exists:
+                if state != STATE_ARCHIVED:
+                    rec["state"] = STATE_ARCHIVED
+                    rec["archived_at"] = rec.get("archived_at") or _now_iso()
+                    marked_archived.append(name)
+                continue
+
+            removed.append(name)
+            data.pop(name, None)
+
+        if removed or marked_archived or marked_active:
+            save_usage(data)
+
+    return {
+        "marked_active": sorted(marked_active),
+        "marked_archived": sorted(marked_archived),
+        "removed": sorted(removed),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Reporting — for the curator CLI / slash command
 # ---------------------------------------------------------------------------

@@ -453,6 +453,61 @@ def test_archive_collision_gets_suffix(skills_home):
     assert any(n.startswith("dup-") and n != "dup" for n in archived)
 
 
+def test_repair_orphan_usage_records_reconciles_managed_records(skills_home):
+    import tools.skill_usage as skill_usage
+
+    skills_dir = skills_home / "skills"
+
+    _write_skill(skills_dir, "back-active")
+    skill_usage.mark_agent_created("back-active")
+    skill_usage.set_state("back-active", skill_usage.STATE_ARCHIVED)
+
+    archived = skills_dir / ".archive" / "imports" / "archived-only"
+    archived.mkdir(parents=True)
+    (archived / "SKILL.md").write_text(
+        "---\nname: archived-only\ndescription: archived\n---\n",
+        encoding="utf-8",
+    )
+    skill_usage.mark_agent_created("archived-only")
+
+    skill_usage.mark_agent_created("missing-skill")
+    data = skill_usage.load_usage()
+    data["manual-record"] = {"created_by": None, "state": skill_usage.STATE_ACTIVE}
+    data["bundled-record"] = {"created_by": "agent", "state": skill_usage.STATE_ACTIVE}
+    skill_usage.save_usage(data)
+    (skills_dir / ".bundled_manifest").write_text("bundled-record:abc\n", encoding="utf-8")
+
+    summary = skill_usage.repair_orphan_usage_records()
+
+    assert summary == {
+        "marked_active": ["back-active"],
+        "marked_archived": ["archived-only"],
+        "removed": ["missing-skill"],
+    }
+    repaired = skill_usage.load_usage()
+    assert repaired["back-active"]["state"] == skill_usage.STATE_ACTIVE
+    assert repaired["back-active"]["archived_at"] is None
+    assert repaired["archived-only"]["state"] == skill_usage.STATE_ARCHIVED
+    assert repaired["archived-only"]["archived_at"] is not None
+    assert "missing-skill" not in repaired
+    assert repaired["manual-record"]["state"] == skill_usage.STATE_ACTIVE
+    assert repaired["bundled-record"]["state"] == skill_usage.STATE_ACTIVE
+
+
+def test_repair_orphan_usage_records_noops_when_already_consistent(skills_home):
+    import tools.skill_usage as skill_usage
+
+    skills_dir = skills_home / "skills"
+    _write_skill(skills_dir, "steady")
+    skill_usage.mark_agent_created("steady")
+
+    assert skill_usage.repair_orphan_usage_records() == {
+        "marked_active": [],
+        "marked_archived": [],
+        "removed": [],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
