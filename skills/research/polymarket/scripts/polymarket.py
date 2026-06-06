@@ -11,6 +11,8 @@ Usage:
     python3 polymarket.py history <condition_id> [--interval all] [--fidelity 50]
     python3 polymarket.py trades [--limit 10] [--market CONDITION_ID]
 """
+from __future__ import annotations
+
 
 import json
 import sys

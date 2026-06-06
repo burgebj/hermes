@@ -8,6 +8,8 @@ Dependencies (optional):
     pip install sounddevice numpy
     or: pip install hermes-agent[voice]
 """
+from __future__ import annotations
+
 
 import logging
 import os
