@@ -1248,11 +1248,14 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: failed to download image: %s", e)
                 return SendResult(success=False, error=str(e))
 
-        if not file_path or not Path(file_path).exists():
+        if not file_path:
             return SendResult(success=False, error="Image file not found")
 
-        # Validate size
-        file_size = Path(file_path).stat().st_size
+        # Validate size (use stat() directly to avoid TOCTOU race with exists())
+        try:
+            file_size = Path(file_path).stat().st_size
+        except FileNotFoundError:
+            return SendResult(success=False, error=f"Image file not found: {file_path}")
         if file_size > SIGNAL_MAX_ATTACHMENT_SIZE:
             return SendResult(success=False, error=f"Image too large ({file_size} bytes)")
 
