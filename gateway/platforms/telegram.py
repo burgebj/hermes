@@ -694,6 +694,11 @@ class TelegramAdapter(BasePlatformAdapter):
         return int(thread_id)
 
     @staticmethod
+    def _is_forum_chat(chat: Any) -> bool:
+        """Return True when Telegram marks a group/supergroup as a forum."""
+        return bool(getattr(chat, "is_forum", False))
+
+    @staticmethod
     def _is_thread_not_found_error(error: Exception) -> bool:
         return "thread not found" in str(error).lower()
 
@@ -4310,9 +4315,11 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_type = "dm"
             if chat.type == ChatType.GROUP:
                 chat_type = "group"
+                if self._is_forum_chat(chat):
+                    chat_type = "forum"
             elif chat.type == ChatType.SUPERGROUP:
                 chat_type = "group"
-                if chat.is_forum:
+                if self._is_forum_chat(chat):
                     chat_type = "forum"
             elif chat.type == ChatType.CHANNEL:
                 chat_type = "channel"
@@ -5889,7 +5896,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # can hit Telegram's 'Message thread not found' error (#3206).
         thread_id_raw = message.message_thread_id
         is_topic_message = bool(getattr(message, "is_topic_message", False))
-        is_forum_group = getattr(chat, "is_forum", False) is True
+        is_forum_group = self._is_forum_chat(chat)
         thread_id_str = None
         if thread_id_raw is not None:
             if chat_type == "group" and (is_topic_message or is_forum_group):

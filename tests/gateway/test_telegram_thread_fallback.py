@@ -228,6 +228,41 @@ def test_forum_general_topic_without_message_thread_id_keeps_thread_context():
 
 
 @pytest.mark.asyncio
+async def test_get_chat_info_marks_forum_groups_and_supergroups():
+    """Forum chat detection should use raw Telegram chat type, not normalized labels."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    chats = iter([
+        SimpleNamespace(
+            type=telegram_mod.ChatType.GROUP,
+            is_forum=True,
+            title="Group forum",
+            full_name=None,
+            username=None,
+        ),
+        SimpleNamespace(
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=True,
+            title="Supergroup forum",
+            full_name=None,
+            username=None,
+        ),
+    ])
+
+    async def mock_get_chat(_chat_id):
+        return next(chats)
+
+    adapter._bot = SimpleNamespace(get_chat=mock_get_chat)
+
+    group_info = await adapter.get_chat_info("-100111")
+    supergroup_info = await adapter.get_chat_info("-100222")
+
+    assert group_info["type"] == "forum"
+    assert supergroup_info["type"] == "forum"
+
+
+@pytest.mark.asyncio
 async def test_send_omits_general_topic_thread_id():
     """Telegram sends to forum General should omit message_thread_id=1."""
     adapter = _make_adapter()
