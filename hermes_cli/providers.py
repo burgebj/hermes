@@ -211,6 +211,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="bedrock_converse",
         auth_type="aws_sdk",
     ),
+    "zenmux": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="ZENMUX_BASE_URL",
+    ),
 }
 
 
@@ -347,6 +352,9 @@ ALIASES: Dict[str, str] = {
     # gmi
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
+
+    # zenmux
+    "zenmux.ai": "zenmux",
 
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
