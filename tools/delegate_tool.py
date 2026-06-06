@@ -1184,7 +1184,15 @@ def _build_child_agent(
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
-    child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
+    # SKIP pool inheritance when delegation overrides base_url to a different
+    # endpoint -- otherwise pool rotation will swap the child back to the
+    # parent endpoint (#bug observed with mistral-parent + local-child).
+    _parent_base_norm = (getattr(parent_agent, "base_url", "") or "").rstrip("/")
+    _child_base_norm = (override_base_url or "").rstrip("/")
+    if _child_base_norm and _child_base_norm != _parent_base_norm:
+        child_pool = None
+    else:
+        child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
     if child_pool is not None:
         child._credential_pool = child_pool
 
