@@ -794,6 +794,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
+        elif platform == Platform.WECOM_CALLBACK:
+            result = await _send_wecom_callback(pconfig.extra, chat_id, chunk)
         elif platform == Platform.BLUEBUBBLES:
             result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
         elif platform == Platform.QQBOT:
@@ -1772,6 +1774,27 @@ async def _send_yuanbao(chat_id, message, media_files=None):
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
     except Exception as e:
         return _error(f"Yuanbao send failed: {e}")
+
+
+async def _send_wecom_callback(extra, chat_id, message):
+    """Send via WeCom Callback (webhook) using the adapter's send pipeline."""
+    try:
+        from gateway.platforms.wecom_callback import WecomCallbackAdapter
+        from gateway.config import PlatformConfig
+        pconfig = PlatformConfig(extra=extra)
+        adapter = WecomCallbackAdapter(pconfig)
+        connected = await adapter.connect()
+        if not connected:
+            return _error(f"WeCom Callback: failed to connect - {adapter.fatal_error_message or 'unknown error'}")
+        try:
+            result = await adapter.send(chat_id, message)
+            if not result.success:
+                return _error(f"WeCom Callback send failed: {result.error}")
+            return {"success": True, "platform": "wecom_callback", "chat_id": chat_id, "message_id": result.message_id}
+        finally:
+            await adapter.disconnect()
+    except Exception as e:
+        return _error(f"WeCom Callback send failed: {e}")
 
 
 # --- Registry ---
