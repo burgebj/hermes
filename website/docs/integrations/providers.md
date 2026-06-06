@@ -643,11 +643,28 @@ model:
   api_key: your-key-or-leave-empty-for-local
 ```
 
+If your endpoint supports a non-default API surface, set `model.api_mode` explicitly instead of relying on URL heuristics:
+
+```yaml
+model:
+  default: gpt-5.4
+  provider: custom
+  base_url: https://example.com/my-relay
+  api_mode: codex_responses
+```
+
+Supported values are:
+- `chat_completions` — standard OpenAI-compatible `/v1/chat/completions`
+- `codex_responses` — OpenAI Responses API / Codex-style backends
+- `anthropic_messages` — Anthropic-compatible `/v1/messages`
+
+When `model.api_mode` is set, Hermes uses it as the source of truth for that endpoint. If you leave it unset, Hermes falls back to its existing provider- and URL-based auto-detection.
+
 :::warning Legacy env vars
 `LLM_MODEL` in `.env` is **removed** — `config.yaml` is the single source of truth for model and endpoint configuration. `OPENAI_BASE_URL` is still honored, but **only** for the `openai-api` provider (it overrides the OpenAI endpoint for direct API-key access). For other providers and custom endpoints, use `hermes model` or set `model.base_url` in `config.yaml` directly. If you have stale entries in your `.env`, they are automatically cleared on the next `hermes setup` or config migration.
 :::
 
-Both approaches persist to `config.yaml`, which is the source of truth for model, provider, and base URL.
+Both approaches persist to `config.yaml`, which is the source of truth for model, provider, base URL, and optional `api_mode`.
 
 ### Switching Models with `/model`
 
