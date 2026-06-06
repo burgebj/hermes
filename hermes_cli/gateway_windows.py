@@ -34,6 +34,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -51,6 +52,13 @@ _ACCESS_DENIED_PATTERN = re.compile(r"(access is denied|acceso denegado)", re.IG
 
 _TASK_NAME_DEFAULT = "Hermes_Gateway"
 _TASK_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
+_GATEWAY_RESTART_WAIT_TIMEOUT_S = 20.0
+_GATEWAY_RESTART_POLL_INTERVAL_S = 0.25
+_GATEWAY_PORT_CONNECT_TIMEOUT_S = 0.2
+
+
+class GatewayRestartPrerequisiteError(RuntimeError):
+    """Raised when Windows restart cannot safely start a replacement gateway."""
 
 
 def _schtasks_encoding() -> str:
@@ -984,6 +992,100 @@ def _gateway_pids() -> list[int]:
     return list(find_gateway_pids())
 
 
+def _gateway_api_port() -> int:
+    """Return the loopback API port the gateway normally binds."""
+    try:
+        from gateway.platforms.api_server import DEFAULT_PORT
+    except Exception:
+        DEFAULT_PORT = 8642
+
+    raw = os.getenv("API_SERVER_PORT")
+    if raw is None:
+        return DEFAULT_PORT
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+    return port if port > 0 else DEFAULT_PORT
+
+
+def _is_loopback_port_open(port: int) -> bool:
+    """Return True when something is still listening on the gateway API port."""
+    try:
+        with socket.create_connection(
+            ("127.0.0.1", int(port)),
+            timeout=_GATEWAY_PORT_CONNECT_TIMEOUT_S,
+        ):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_gateway_restart_slot(
+    old_pids: list[int] | tuple[int, ...],
+    *,
+    wait_for_port: bool,
+    port: int | None = None,
+    timeout_s: float = _GATEWAY_RESTART_WAIT_TIMEOUT_S,
+    interval_s: float = _GATEWAY_RESTART_POLL_INTERVAL_S,
+    pid_exists=None,
+    port_is_open=None,
+    sleep_func=time.sleep,
+    monotonic=time.monotonic,
+) -> None:
+    """Wait until the old gateway process and API port are gone before start."""
+    from gateway.status import _pid_exists
+
+    pid_exists = pid_exists or _pid_exists
+    port_is_open = port_is_open or _is_loopback_port_open
+
+    normalized_pids: list[int] = []
+    for raw_pid in old_pids:
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and pid not in normalized_pids:
+            normalized_pids.append(pid)
+
+    if wait_for_port:
+        port = _gateway_api_port() if port is None else int(port)
+        if port <= 0:
+            wait_for_port = False
+
+    if not normalized_pids and not wait_for_port:
+        return
+
+    deadline = monotonic() + max(timeout_s, 0.1)
+    sleep_interval = max(interval_s, 0.05)
+    alive_pids: list[int] = []
+    port_open = False
+
+    while True:
+        alive_pids = [pid for pid in normalized_pids if pid_exists(pid)]
+        port_open = bool(wait_for_port and port is not None and port_is_open(port))
+        if not alive_pids and not port_open:
+            return
+
+        if monotonic() >= deadline:
+            details: list[str] = []
+            if alive_pids:
+                details.append(
+                    "old gateway PID(s) still running: "
+                    + ", ".join(str(pid) for pid in alive_pids)
+                )
+            if port_open and port is not None:
+                details.append(f"API port {port} is still in use")
+            reason = "; ".join(details) or "restart prerequisites did not settle"
+            raise GatewayRestartPrerequisiteError(
+                "Gateway restart aborted because "
+                f"{reason}. Stop the leftover Windows gateway process "
+                "(for example, taskkill /F /PID <pid>) and retry."
+            )
+
+        sleep_func(sleep_interval)
+
+
 def status(deep: bool = False) -> None:
     """Print a status report for the Windows gateway service."""
     _assert_windows()
@@ -1151,7 +1253,13 @@ def stop() -> None:
 def restart() -> None:
     """Stop the gateway then start it again."""
     _assert_windows()
+    old_pids = _gateway_pids()
+    api_port = _gateway_api_port()
+    wait_for_port = _is_loopback_port_open(api_port)
     stop()
-    # Give Windows a moment to release the listening port.
-    time.sleep(1.0)
+    _wait_for_gateway_restart_slot(
+        old_pids,
+        wait_for_port=wait_for_port,
+        port=api_port,
+    )
     start()

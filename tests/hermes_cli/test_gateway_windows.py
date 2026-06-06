@@ -782,3 +782,115 @@ def test_drain_helper_still_waits_if_marker_write_fails(monkeypatch):
 
     # Returns True because _pid_exists immediately says "gone".
     assert gateway_windows._drain_gateway_pid(pid, drain_timeout=5.0) is True
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, delay):
+        self.sleeps.append(delay)
+        self.now += delay
+
+
+def test_restart_slot_waits_until_old_pid_exits():
+    """restart should poll old PID liveness instead of using a fixed sleep."""
+    pid = 100476
+    clock = _FakeClock()
+    alive_states = [True, True, False]
+    checked = []
+
+    def fake_pid_exists(check_pid):
+        checked.append(check_pid)
+        return alive_states.pop(0)
+
+    gateway_windows._wait_for_gateway_restart_slot(
+        [pid],
+        wait_for_port=False,
+        timeout_s=5.0,
+        interval_s=0.1,
+        pid_exists=fake_pid_exists,
+        sleep_func=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    assert checked == [pid, pid, pid]
+    assert clock.sleeps == [0.1, 0.1]
+
+
+def test_restart_slot_errors_when_old_pid_never_exits():
+    """A stuck old Windows gateway must stop restart before start() is called."""
+    pid = 100476
+    clock = _FakeClock()
+
+    with pytest.raises(
+        gateway_windows.GatewayRestartPrerequisiteError,
+        match="old gateway PID\\(s\\) still running: 100476",
+    ):
+        gateway_windows._wait_for_gateway_restart_slot(
+            [pid],
+            wait_for_port=False,
+            timeout_s=0.25,
+            interval_s=0.1,
+            pid_exists=lambda check_pid: True,
+            sleep_func=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+
+def test_restart_slot_waits_for_gateway_api_port_release():
+    """When the old API port was open, restart waits until it is closed."""
+    clock = _FakeClock()
+    port_states = [True, True, False]
+    checked_ports = []
+
+    def fake_port_is_open(port):
+        checked_ports.append(port)
+        return port_states.pop(0)
+
+    gateway_windows._wait_for_gateway_restart_slot(
+        [],
+        wait_for_port=True,
+        port=8642,
+        timeout_s=5.0,
+        interval_s=0.1,
+        pid_exists=lambda check_pid: False,
+        port_is_open=fake_port_is_open,
+        sleep_func=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    assert checked_ports == [8642, 8642, 8642]
+    assert clock.sleeps == [0.1, 0.1]
+
+
+def test_restart_waits_for_release_between_stop_and_start(monkeypatch):
+    """restart() must verify the old gateway slot before launching a new one."""
+    calls = []
+
+    def fail_fixed_sleep(delay):
+        raise AssertionError(f"restart used fixed sleep({delay})")
+
+    def fake_wait(old_pids, *, wait_for_port, port):
+        calls.append(("wait", list(old_pids), wait_for_port, port))
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [100476])
+    monkeypatch.setattr(gateway_windows, "_gateway_api_port", lambda: 8642)
+    monkeypatch.setattr(gateway_windows, "_is_loopback_port_open", lambda port: True)
+    monkeypatch.setattr(gateway_windows, "stop", lambda: calls.append(("stop",)))
+    monkeypatch.setattr(gateway_windows, "_wait_for_gateway_restart_slot", fake_wait)
+    monkeypatch.setattr(gateway_windows, "start", lambda: calls.append(("start",)))
+    monkeypatch.setattr(gateway_windows.time, "sleep", fail_fixed_sleep)
+
+    gateway_windows.restart()
+
+    assert calls == [
+        ("stop",),
+        ("wait", [100476], True, 8642),
+        ("start",),
+    ]

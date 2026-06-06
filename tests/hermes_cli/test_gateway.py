@@ -335,6 +335,44 @@ def test_gateway_restart_on_windows_preserves_failure_fallback(monkeypatch):
     assert calls == ["restart", "stop", "wait", "run"]
 
 
+def test_gateway_restart_on_windows_wait_failure_exits_without_fallback(monkeypatch, capsys):
+    """If the old Windows PID stays alive, do not start via the fallback path."""
+    import hermes_cli.gateway_windows as gateway_windows
+
+    calls = []
+
+    def fail_restart_wait():
+        calls.append("restart")
+        raise gateway_windows.GatewayRestartPrerequisiteError(
+            "Gateway restart aborted because old gateway PID(s) still running: 100476."
+        )
+
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway, "is_macos", lambda: False)
+    monkeypatch.setattr(gateway, "is_windows", lambda: True)
+    monkeypatch.setattr(gateway_windows, "is_installed", lambda: False)
+    monkeypatch.setattr(gateway_windows, "restart", fail_restart_wait)
+    monkeypatch.setattr(
+        gateway,
+        "stop_profile_gateway",
+        lambda: pytest.fail("wait failure must not use generic stop fallback"),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "run_gateway",
+        lambda *args, **kwargs: pytest.fail("wait failure must not start gateway"),
+    )
+
+    args = SimpleNamespace(gateway_command="restart", system=False, all=False)
+    with pytest.raises(SystemExit) as exc:
+        gateway.gateway_command(args)
+
+    assert exc.value.code == 1
+    assert calls == ["restart"]
+    out = capsys.readouterr().out
+    assert "old gateway PID(s) still running: 100476" in out
+
+
 def test_systemd_status_warns_when_linger_disabled(monkeypatch, tmp_path, capsys):
     unit_path = tmp_path / "hermes-gateway.service"
     unit_path.write_text("[Unit]\n")
