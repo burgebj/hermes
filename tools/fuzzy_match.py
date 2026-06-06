@@ -29,6 +29,7 @@ Usage:
     )
 """
 
+import math
 import re
 from typing import Tuple, Optional, List, Callable
 from difflib import SequenceMatcher
@@ -633,8 +634,11 @@ def _strategy_context_aware(content: str, pattern: str) -> List[Tuple[int, int]]
             if sim >= 0.80:
                 high_similarity_count += 1
         
-        # Need at least 50% of lines to have high similarity
-        if high_similarity_count >= len(pattern_lines) * 0.5:
+        # Need at least 50% of lines to have high similarity.
+        # Use math.ceil so a 1-line pattern requires 1 matching line (not 0.5),
+        # preventing every single-line block from matching.
+        required = max(1, math.ceil(len(pattern_lines) * 0.5))
+        if high_similarity_count >= required:
             start_pos, end_pos = _calculate_line_positions(
                 content_lines, i, i + pattern_line_count, len(content)
             )
