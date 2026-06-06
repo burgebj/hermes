@@ -332,10 +332,16 @@ class TestBedrockPreserveDotsFlag:
         """Unrelated AWS endpoints (e.g. ``s3.us-east-1.amazonaws.com``)
         must not accidentally activate the dot-preservation heuristic —
         the heuristic is scoped to the ``bedrock-runtime.`` substring
-        specifically."""
+        specifically.
+
+        Use an empty provider so the URL heuristic is exercised in
+        isolation: #13061 makes ``provider="custom"`` always preserve
+        dots (the user configured the exact upstream model ID), which
+        would bypass the URL branch this test targets.
+        """
         from types import SimpleNamespace
         agent = SimpleNamespace(
-            provider="custom",
+            provider="",
             base_url="https://s3.us-east-1.amazonaws.com",
         )
         from run_agent import AIAgent

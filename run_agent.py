@@ -4491,14 +4491,21 @@ class AIAgent:
         ``us.anthropic.claude-sonnet-4-5-20250929-v1:0``) and rejects
         the hyphenated form with
         ``HTTP 400 The provided model identifier is invalid``.
+        Custom providers (``custom`` / ``custom:<name>``) always preserve
+        dots: the user configured the exact model ID the upstream expects,
+        and Hermes cannot second-guess an arbitrary third-party API
+        (e.g. zenmux's ``z-ai/glm-5.1``, #13061).
         Regression for #11976; mirrors the opencode-go fix for #5211
         (commit f77be22c), which extended this same allowlist."""
-        if (getattr(self, "provider", "") or "").lower() in {
+        provider = (getattr(self, "provider", "") or "").lower()
+        if provider in {
             "alibaba", "minimax", "minimax-cn",
             "opencode-go", "opencode-zen",
             "zai", "bedrock",
             "xiaomi",
         }:
+            return True
+        if provider == "custom" or provider.startswith("custom:"):
             return True
         base = (getattr(self, "base_url", "") or "").lower()
         return (

@@ -412,6 +412,40 @@ class TestMinimaxPreserveDots:
         assert normalize_model_name("claude-opus-4.6", preserve_dots=False) == "claude-opus-4-6"
 
 
+class TestCustomProviderPreserveDots:
+    """Verify that custom providers preserve dots by default — #13061.
+
+    Arbitrary third-party Anthropic-compatible endpoints (zenmux, etc.)
+    are not in the hardcoded allowlist, but the user has already
+    configured the exact model ID the upstream expects. Hermes must
+    not second-guess it with ``normalize_model_name()``.
+    """
+
+    def test_bare_custom_provider_preserves_dots(self):
+        from types import SimpleNamespace
+        agent = SimpleNamespace(provider="custom", base_url="https://zenmux.ai/api/anthropic")
+        from run_agent import AIAgent
+        assert AIAgent._anthropic_preserve_dots(agent) is True
+
+    def test_named_custom_provider_preserves_dots(self):
+        from types import SimpleNamespace
+        agent = SimpleNamespace(provider="custom:zenmux", base_url="https://zenmux.ai/api/anthropic")
+        from run_agent import AIAgent
+        assert AIAgent._anthropic_preserve_dots(agent) is True
+
+    def test_custom_provider_unknown_url_preserves_dots(self):
+        from types import SimpleNamespace
+        agent = SimpleNamespace(provider="custom", base_url="https://some-random-host.example/anthropic")
+        from run_agent import AIAgent
+        assert AIAgent._anthropic_preserve_dots(agent) is True
+
+    def test_custom_provider_model_id_not_mangled(self):
+        from agent.anthropic_adapter import normalize_model_name
+        # #13061: zenmux model IDs like ``z-ai/glm-5.1`` must pass through
+        # unchanged when the caller opts in via ``preserve_dots=True``.
+        assert normalize_model_name("z-ai/glm-5.1", preserve_dots=True) == "z-ai/glm-5.1"
+
+
 class TestMinimaxSwitchModelCredentialGuard:
     """Verify switch_model() does not leak Anthropic credentials to MiniMax.
 
