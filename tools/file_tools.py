@@ -232,11 +232,32 @@ def _is_blocked_device(filepath: str) -> bool:
 
 # Paths that file tools should refuse to write to without going through the
 # terminal tool's approval system.  These match prefixes after os.path.realpath.
+#
+# SECURITY: Unlike terminal_tool, write_file_tool does NOT pass through
+# check_all_command_guards / _smart_approve.  File writes execute directly,
+# so this list is the only approval gate for write_file and patch.
+#
+# User auth directories (~/.ssh, ~/.gnupg) are included because a successful
+# prompt-injection attack could otherwise silently write an attacker's SSH
+# public key to ~/.ssh/authorized_keys, granting full host access without
+# triggering any approval prompt.
+#
+# os.path.expanduser is evaluated at module load time so the resolved path
+# is always available even when running under a non-default user.
 _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
     "/private/etc/", "/private/var/",
+    # User auth/config: writes here bypass all approval gates
+    os.path.expanduser("~/.ssh") + os.sep,
+    os.path.expanduser("~/.gnupg") + os.sep,
 )
-_SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+_SENSITIVE_EXACT_PATHS = {
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    # Exact-match so e.g. ~/.ssh itself (without trailing sep) is also blocked
+    os.path.expanduser("~/.ssh"),
+    os.path.expanduser("~/.gnupg"),
+}
 
 _hermes_config_resolved: str | None = None
 _hermes_config_resolved_loaded = False
