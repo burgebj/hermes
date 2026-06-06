@@ -1203,5 +1203,131 @@ class TestImapIdExtensionForNetEase(unittest.TestCase):
         mock_imap.xatom.assert_called_once()
 
 
+class TestProcessExistingFlag(unittest.TestCase):
+    """Test EMAIL_PROCESS_EXISTING env-var branching inside connect()."""
+
+    def _make_adapter(self, extra_env=None):
+        """Return an EmailAdapter with controllable env."""
+        from gateway.config import PlatformConfig
+        env = {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_IMAP_PORT": "993",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_SMTP_PORT": "587",
+        }
+        if extra_env:
+            env.update(extra_env)
+        # Remove EMAIL_PROCESS_EXISTING from the real env so each test is clean
+        env_clear = {k: v for k, v in env.items()}
+        with patch.dict(os.environ, env_clear, clear=True):
+            from gateway.platforms.email import EmailAdapter
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+        return adapter
+
+    def _connect_with_uids(self, adapter, uid_bytes=b"1 2 3"):
+        """Run adapter.connect() with mocked IMAP returning uid_bytes and a mock SMTP.
+
+        The poll task is cancelled immediately after connect() returns so it
+        cannot add unexpected entries to _seen_uids before the caller checks.
+        """
+        import asyncio
+
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [uid_bytes])
+
+        async def _run():
+            with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
+                 patch("smtplib.SMTP") as mock_smtp:
+                mock_smtp.return_value = MagicMock()
+                result = await adapter.connect()
+                # Cancel the background poll task before it can touch _seen_uids
+                adapter._running = False
+                if adapter._poll_task:
+                    adapter._poll_task.cancel()
+                    try:
+                        await adapter._poll_task
+                    except asyncio.CancelledError:
+                        pass
+                    adapter._poll_task = None
+            return result
+
+        result = asyncio.run(_run())
+        return result, mock_imap
+
+    # ------------------------------------------------------------------
+    # Default behaviour — no EMAIL_PROCESS_EXISTING set
+    # ------------------------------------------------------------------
+    def test_default_skips_existing(self):
+        """Without EMAIL_PROCESS_EXISTING, UIDs are pre-filled (upstream behaviour)."""
+        adapter = self._make_adapter()
+        self.assertFalse(adapter._process_existing)
+
+        result, mock_imap = self._connect_with_uids(adapter, b"10 20 30")
+
+        self.assertTrue(result)
+        self.assertGreater(len(adapter._seen_uids), 0)
+        # The ALL search must have been issued
+        search_calls = [c for c in mock_imap.uid.call_args_list if c.args[0] == "search"]
+        self.assertTrue(search_calls, "uid('search', None, 'ALL') should have been issued")
+
+    # ------------------------------------------------------------------
+    # Explicit EMAIL_PROCESS_EXISTING=0 — same as default
+    # ------------------------------------------------------------------
+    def test_set_zero_skips_existing(self):
+        """EMAIL_PROCESS_EXISTING=0 must behave identically to default (UIDs pre-filled)."""
+        adapter = self._make_adapter({"EMAIL_PROCESS_EXISTING": "0"})
+        self.assertFalse(adapter._process_existing)
+
+        result, mock_imap = self._connect_with_uids(adapter, b"4 5 6")
+
+        self.assertTrue(result)
+        self.assertGreater(len(adapter._seen_uids), 0)
+        search_calls = [c for c in mock_imap.uid.call_args_list if c.args[0] == "search"]
+        self.assertTrue(search_calls)
+
+    # ------------------------------------------------------------------
+    # EMAIL_PROCESS_EXISTING=1 — skip pre-fill so first poll picks them up
+    # ------------------------------------------------------------------
+    def test_set_one_processes_existing(self):
+        """EMAIL_PROCESS_EXISTING=1 leaves _seen_uids empty and skips ALL search."""
+        adapter = self._make_adapter({"EMAIL_PROCESS_EXISTING": "1"})
+        self.assertTrue(adapter._process_existing)
+
+        result, mock_imap = self._connect_with_uids(adapter, b"7 8 9")
+
+        self.assertTrue(result)
+        self.assertEqual(len(adapter._seen_uids), 0)
+        # The ALL search must NOT have been issued
+        search_calls = [c for c in mock_imap.uid.call_args_list if c.args[0] == "search"]
+        self.assertFalse(search_calls, "uid('search', None, 'ALL') must NOT be issued when EMAIL_PROCESS_EXISTING=1")
+
+    # ------------------------------------------------------------------
+    # Truthy and falsy aliases
+    # ------------------------------------------------------------------
+    @unittest.skipIf(False, "parametrised via subTest")
+    def test_truthy_aliases(self):
+        """All accepted truthy values enable the flag; falsy values disable it."""
+        truthy_values = ["1", "true", "yes", "on", "TRUE", "True", "YES", "ON"]
+        falsy_values = ["0", "", "false", "no", "random", "False", "NO", "2"]
+
+        for val in truthy_values:
+            with self.subTest(value=val):
+                adapter = self._make_adapter({"EMAIL_PROCESS_EXISTING": val})
+                self.assertTrue(
+                    adapter._process_existing,
+                    f"EMAIL_PROCESS_EXISTING={val!r} should enable the flag",
+                )
+
+        for val in falsy_values:
+            with self.subTest(value=val):
+                adapter = self._make_adapter({"EMAIL_PROCESS_EXISTING": val})
+                self.assertFalse(
+                    adapter._process_existing,
+                    f"EMAIL_PROCESS_EXISTING={val!r} should NOT enable the flag",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
