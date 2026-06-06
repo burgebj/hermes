@@ -40,6 +40,7 @@ import os
 import socket as _socket
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -689,6 +690,67 @@ except ImportError:
     _cron_trigger = None
 
 
+class _RateLimiter:
+    """Simple sliding-window rate limiter per API key.
+
+    When max_requests is 0 (or negative), rate limiting is disabled (all
+    requests allowed).  Thread-safe for use with aiohttp's executor threads.
+
+    Memory management: keys whose timestamp lists become empty after pruning
+    are evicted from the internal dict so that the memory footprint is bounded
+    by the number of keys that have made requests *within the current window*,
+    not the total number of keys ever seen.
+    """
+
+    def __init__(self, max_requests: int = 0, window_seconds: int = 60):
+        self._max = max_requests
+        self._window = window_seconds
+        self._buckets: dict = {}  # key -> list of timestamps
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> bool:
+        """Check if a request from this key is allowed.
+
+        Returns True if allowed, False if rate limited.
+        """
+        if self._max <= 0:
+            return True  # Rate limiting disabled
+
+        now = time.time()
+        cutoff = now - self._window
+
+        with self._lock:
+            # Prune expired entries and evict empty buckets to bound memory use.
+            if key in self._buckets:
+                active = [t for t in self._buckets[key] if t > cutoff]
+                if active:
+                    self._buckets[key] = active
+                else:
+                    del self._buckets[key]
+
+            # Check limit
+            bucket = self._buckets.get(key)
+            if bucket is not None and len(bucket) >= self._max:
+                return False
+
+            # Record this request
+            if key not in self._buckets:
+                self._buckets[key] = []
+            self._buckets[key].append(now)
+            return True
+
+    def retry_after(self, key: str) -> int:
+        """Return seconds until the oldest request in the window expires."""
+        if self._max <= 0:
+            return 0
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if not bucket:
+                return 0
+            oldest = min(bucket)
+            return max(1, int(oldest + self._window - time.time()))
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -730,6 +792,10 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._rate_limiter = _RateLimiter(
+            max_requests=int(os.environ.get("API_SERVER_RATE_LIMIT_RPM", "0")),
+            window_seconds=60,
+        )
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -867,7 +933,18 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
             if hmac.compare_digest(token, self._api_key):
-                return None  # Auth OK
+                # Auth OK — check rate limit
+                if not self._rate_limiter.is_allowed(token):
+                    return web.json_response(
+                        _openai_error(
+                            "Rate limit exceeded",
+                            err_type="rate_limit_error",
+                            code="rate_limit_exceeded",
+                        ),
+                        status=429,
+                        headers={"Retry-After": str(self._rate_limiter.retry_after(token))},
+                    )
+                return None
 
         logger.warning(
             "API server rejected invalid API key: %s",
