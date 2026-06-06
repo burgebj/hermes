@@ -1979,29 +1979,37 @@ def terminal_tool(
         if not force:
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
-                # Check if this is an approval_required (gateway ask mode)
-                if approval.get("status") == "pending_approval":
+                approval_status = approval.get("status")
+                approval_message = approval.get("message")
+                approval_description = approval.get("description", "command flagged")
+                approval_pattern_key = approval.get("pattern_key", "")
+                # Keep the model-facing error terse and typed; the verbose
+                # human approval prompt stays in approval_message.
+                if approval_status in {"approval_required", "pending_approval"}:
                     return json.dumps({
                         "output": "",
                         "exit_code": -1,
-                        "error": "",
+                        "error": "Command blocked pending user approval.",
                         "status": "pending_approval",
                         "approval_pending": True,
                         "command": approval.get("command", command),
-                        "description": approval.get("description", "command flagged"),
-                        "pattern_key": approval.get("pattern_key", ""),
+                        "description": approval_description,
+                        "pattern_key": approval_pattern_key,
+                        "approval_message": approval_message,
                     }, ensure_ascii=False)
                 # Command was blocked
-                desc = approval.get("description", "command flagged")
                 fallback_msg = (
-                    f"Command denied: {desc}. "
+                    f"Command denied: {approval_description}. "
                     "Use the approval prompt to allow it, or rephrase the command."
                 )
                 return json.dumps({
                     "output": "",
                     "exit_code": -1,
-                    "error": approval.get("message", fallback_msg),
-                    "status": "blocked"
+                    "error": fallback_msg,
+                    "status": "blocked",
+                    "description": approval_description,
+                    "pattern_key": approval_pattern_key,
+                    "approval_message": approval_message,
                 }, ensure_ascii=False)
             # Track whether approval was explicitly granted by the user
             if approval.get("user_approved"):
