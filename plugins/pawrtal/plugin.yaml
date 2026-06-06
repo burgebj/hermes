@@ -1,0 +1,17 @@
+name: pawrtal
+version: 0.1.0
+description: Use Pawrtal/Codex animated pets inside Hermes Agent sessions.
+author: nativ3ai
+kind: standalone
+provides_tools:
+  - pawrtal_list
+  - pawrtal_use
+  - pawrtal_status
+  - pawrtal_spawn
+  - pawrtal_vanish
+  - pawrtal_update
+hooks:
+  - pre_llm_call
+  - post_llm_call
+  - pre_tool_call
+  - post_tool_call
