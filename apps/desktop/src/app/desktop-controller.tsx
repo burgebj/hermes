@@ -81,6 +81,7 @@ import { usePreviewRouting } from './session/hooks/use-preview-routing'
 import { usePromptActions } from './session/hooks/use-prompt-actions'
 import { useRouteResume } from './session/hooks/use-route-resume'
 import { useSessionActions } from './session/hooks/use-session-actions'
+import { useSessionPresence } from './session/hooks/use-session-presence'
 import { useSessionStateCache } from './session/hooks/use-session-state-cache'
 import { AppShell } from './shell/app-shell'
 import { useOverlayRouting } from './shell/hooks/use-overlay-routing'
@@ -349,6 +350,8 @@ export function DesktopController() {
     gatewayState,
     requestGateway
   })
+
+  useSessionPresence(gatewayState, requestGateway)
 
   const hydrateFromStoredSession = useCallback(
     async (

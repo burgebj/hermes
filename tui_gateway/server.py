@@ -23,6 +23,11 @@ from hermes_constants import (
     set_hermes_home_override,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.session_presence import (
+    clear_session_presence,
+    list_session_presence,
+    write_session_presence,
+)
 from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
@@ -333,7 +338,16 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
             pass
 
     session_key = session.get("session_key")
+    runtime_session_id = session.get("runtime_session_id")
     session_id = getattr(agent, "session_id", None) or session_key
+    if runtime_session_id:
+        try:
+            clear_session_presence(
+                session_id=runtime_session_id,
+                hermes_home=_session_presence_home(session),
+            )
+        except Exception:
+            logger.debug("failed to clear session presence", exc_info=True)
     _notify_session_boundary("on_session_finalize", session_id)
 
     # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
@@ -2618,6 +2632,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     with _sessions_lock:
         _sessions[sid] = {
             "agent": agent,
+            "runtime_session_id": sid,
             "session_key": key,
             "history": history,
             "history_lock": threading.Lock(),
@@ -2680,6 +2695,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         # session startup resilient).
         pass
     _wire_callbacks(sid)
+    _publish_session_presence(sid, _sessions.get(sid) or {})
     with _sessions_lock:
         if sid in _sessions:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
@@ -3420,6 +3436,37 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
     }
 
 
+def _session_presence_home(session: dict) -> Path:
+    profile_home = str(session.get("profile_home") or "").strip()
+    return Path(profile_home) if profile_home else _hermes_home
+
+
+def _publish_session_presence(sid: str, session: dict) -> None:
+    if not sid or not session or session.get("_finalized"):
+        return
+    try:
+        item = _session_live_item(sid, session)
+        write_session_presence(
+            session_id=sid,
+            session_key=str(session.get("session_key") or sid),
+            status=str(item.get("status") or "idle"),
+            title=str(item.get("title") or ""),
+            model=str(item.get("model") or ""),
+            cwd=str(session.get("cwd") or ""),
+            source="tui_gateway",
+            client=os.environ.get("HERMES_CLIENT_NAME", "tui"),
+            profile=_current_profile_name(),
+            endpoint=os.environ.get("HERMES_SESSION_PRESENCE_ENDPOINT", ""),
+            metadata={
+                "message_count": item.get("message_count", 0),
+                "session_key": item.get("session_key") or sid,
+            },
+            hermes_home=_session_presence_home(session),
+        )
+    except Exception:
+        logger.debug("failed to publish session presence", exc_info=True)
+
+
 def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
     for sid, session in list(_sessions.items()):
         if session.get("_finalized"):
@@ -3474,6 +3521,7 @@ def _live_session_payload(
     }
     if inflight:
         payload["inflight"] = inflight
+    _publish_session_presence(sid, session)
     return payload
 
 
@@ -3496,7 +3544,27 @@ def _(rid, params: dict) -> dict:
     # frontend marks the focused session with ``current``; it should not jump to
     # the top just because the user switched to it.
     rows = [_session_live_item(sid, session, current) for sid, session in snapshot]
+    for sid, session in snapshot:
+        _publish_session_presence(sid, session)
     return _ok(rid, {"sessions": rows})
+
+
+@method("session.presence_list")
+def _(rid, params: dict) -> dict:
+    """Return active Hermes session presence records visible to this profile."""
+    include_expired = bool(params.get("include_expired", False))
+    try:
+        return _ok(
+            rid,
+            {
+                "sessions": list_session_presence(
+                    hermes_home=_hermes_home,
+                    include_expired=include_expired,
+                )
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5037, f"could not enumerate session presence: {e}")
 
 
 @method("session.activate")
