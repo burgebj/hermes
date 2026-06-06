@@ -7,6 +7,8 @@ Future dead-config regressions can accumulate here.
 
 import inspect
 
+from hermes_cli.config import DEFAULT_CONFIG
+
 
 def test_delegation_default_toolsets_removed_from_cli_config():
     """delegation.default_toolsets was dead config — never read by
@@ -33,4 +35,20 @@ def test_delegation_default_toolsets_removed_from_cli_config():
         "Do not re-add it to cli.py's CLI_CONFIG default dict; "
         "use tools/delegate_tool.py's DEFAULT_TOOLSETS module constant or "
         "wire a new config key through _load_config()."
+    )
+
+
+
+def test_delegation_result_detail_level_default_present_in_canonical_config():
+    assert DEFAULT_CONFIG["delegation"]["result_detail_level"] == "detailed"
+
+
+def test_cli_and_canonical_result_detail_level_defaults_match():
+    from cli import load_cli_config
+
+    config = load_cli_config()
+    assert config["delegation"]["result_detail_level"] == "detailed"
+    assert (
+        config["delegation"]["result_detail_level"]
+        == DEFAULT_CONFIG["delegation"]["result_detail_level"]
     )

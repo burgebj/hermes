@@ -69,6 +69,8 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("detail_level", props)
+        self.assertEqual(props["detail_level"]["enum"], ["slim", "detailed"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -142,6 +144,12 @@ class TestChildSystemPrompt(unittest.TestCase):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
 
+    def test_prompt_instructs_tool_output_compression(self):
+        prompt = _build_child_system_prompt("Analyze logs")
+        self.assertIn("compress tool output", prompt)
+        self.assertIn("Do not paste raw logs", prompt)
+        self.assertIn("large output", prompt)
+
 
 class TestStripBlockedTools(unittest.TestCase):
     def test_removes_blocked_toolsets(self):
@@ -196,7 +204,73 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["status"], "completed")
         self.assertEqual(result["results"][0]["summary"], "Done!")
+        self.assertEqual(result["results"][0]["api_calls"], 3)
         mock_run.assert_called_once()
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_single_task_detailed_mode_keeps_observability(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "Done!", "api_calls": 3, "duration_seconds": 5.0,
+            "model": "test-model", "tokens": {"input": 1, "output": 2, "total": 3},
+            "tool_trace": [{"tool": "terminal", "status": "ok"}],
+        }
+        parent = _make_mock_parent()
+        result = json.loads(delegate_task(goal="Fix tests", parent_agent=parent, detail_level="detailed"))
+        entry = result["results"][0]
+        self.assertEqual(entry["api_calls"], 3)
+        self.assertEqual(entry["model"], "test-model")
+        self.assertIn("tool_trace", entry)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_config_can_opt_in_slim_mode(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "Done!", "api_calls": 3, "duration_seconds": 5.0,
+            "model": "test-model", "tokens": {"input": 1, "output": 2, "total": 3},
+            "tool_trace": [{"tool": "terminal", "status": "ok"}],
+        }
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._load_config", return_value={"result_detail_level": "slim"}):
+            entry = json.loads(delegate_task(goal="Fix tests", parent_agent=parent))["results"][0]
+        self.assertNotIn("api_calls", entry)
+        self.assertNotIn("model", entry)
+        self.assertNotIn("tool_trace", entry)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_call_detail_level_overrides_config_default(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "Done!", "api_calls": 3, "duration_seconds": 5.0,
+            "model": "test-model", "tokens": {"input": 1, "output": 2, "total": 3},
+            "tool_trace": [{"tool": "terminal", "status": "ok"}],
+        }
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._load_config", return_value={"result_detail_level": "slim"}):
+            entry = json.loads(
+                delegate_task(goal="Fix tests", parent_agent=parent, detail_level="detailed")
+            )["results"][0]
+        self.assertEqual(entry["api_calls"], 3)
+        self.assertIn("tool_trace", entry)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_failed_child_keeps_diagnostics_in_slim_mode(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "failed", "summary": None,
+            "error": "Connection error", "error_type": "APIConnectionError",
+            "provider": "openai-codex", "model": "gpt-5.4",
+            "tokens": {"input": 78000, "output": 0, "reasoning": 0, "total": 78000},
+            "request_dump_path": "/tmp/request_dump.json",
+            "api_calls": 3, "duration_seconds": 5.0, "exit_reason": "error",
+        }
+        parent = _make_mock_parent()
+        entry = json.loads(delegate_task(goal="Break", parent_agent=parent, detail_level="slim"))["results"][0]
+        self.assertEqual(entry["error_type"], "APIConnectionError")
+        self.assertEqual(entry["provider"], "openai-codex")
+        self.assertEqual(entry["model"], "gpt-5.4")
+        self.assertEqual(entry["tokens"]["total"], 78000)
+        self.assertEqual(entry["request_dump_path"], "/tmp/request_dump.json")
+        self.assertNotIn("tool_trace", entry)
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode(self, mock_run):
@@ -539,7 +613,7 @@ class TestDelegateObservability(unittest.TestCase):
             }
             MockAgent.return_value = mock_child
 
-            result = json.loads(delegate_task(goal="Test observability", parent_agent=parent))
+            result = json.loads(delegate_task(goal="Test observability", parent_agent=parent, detail_level="detailed"))
             entry = result["results"][0]
 
             # Core observability fields
@@ -643,7 +717,7 @@ class TestDelegateObservability(unittest.TestCase):
             }
             MockAgent.return_value = mock_child
 
-            result = json.loads(delegate_task(goal="Test error trace", parent_agent=parent))
+            result = json.loads(delegate_task(goal="Test error trace", parent_agent=parent, detail_level="detailed"))
             trace = result["results"][0]["tool_trace"]
             self.assertEqual(trace[0]["status"], "error")
 
@@ -675,7 +749,7 @@ class TestDelegateObservability(unittest.TestCase):
             }
             MockAgent.return_value = mock_child
 
-            result = json.loads(delegate_task(goal="Test parallel", parent_agent=parent))
+            result = json.loads(delegate_task(goal="Test parallel", parent_agent=parent, detail_level="detailed"))
             trace = result["results"][0]["tool_trace"]
 
             # All three tool calls should have results
@@ -936,7 +1010,6 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["provider"])
         self.assertIsNone(creds["base_url"])
         self.assertIsNone(creds["api_key"])
-
 
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):

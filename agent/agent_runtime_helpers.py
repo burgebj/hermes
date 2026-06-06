@@ -1138,6 +1138,9 @@ def dump_api_request_debug(
         dump_file = agent.logs_dir / f"request_dump_{agent.session_id}_{timestamp}.json"
         atomic_json_write(dump_file, dump_payload, default=str)
 
+        agent._last_api_request_dump_path = str(dump_file)
+        agent._last_api_request_dump_reason = reason
+        agent._last_api_request_error_type = type(error).__name__ if error is not None else None
         agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
         if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
