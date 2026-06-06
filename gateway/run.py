@@ -9409,6 +9409,12 @@ class GatewayRunner:
                                                 "Failed to deliver aux-model-fallback notice to user: %s",
                                                 _werr,
                                             )
+                                    # Evict the cached agent so the next turn
+                                    # rebuilds its system prompt from current
+                                    # SOUL.md, memory, and skills (not the stale
+                                    # pre-compression snapshot).
+                                    self._evict_cached_agent(session_key)
+
                                 finally:
                                     # Evict the cached agent so the next turn
                                     # rebuilds its system prompt from current
@@ -13292,6 +13298,9 @@ class GatewayRunner:
                 # note so they can fix their config.
                 _aux_fail_model = getattr(compressor, "_last_aux_model_failure_model", None)
                 _aux_fail_err = getattr(compressor, "_last_aux_model_failure_error", None)
+                # Evict cached agent so next turn rebuilds system prompt
+                # from current files (SOUL.md, memory, etc.).
+                self._evict_cached_agent(session_key)
             finally:
                 # Evict cached agent so next turn rebuilds system prompt
                 # from current files (SOUL.md, memory, etc.).
