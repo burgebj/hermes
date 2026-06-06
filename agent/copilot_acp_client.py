@@ -211,12 +211,12 @@ def _render_message_content(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
-        return content.strip()
+        return content
     if isinstance(content, dict):
         if "text" in content:
-            return str(content.get("text") or "").strip()
+            return str(content.get("text") or "")
         if "content" in content and isinstance(content.get("content"), str):
-            return str(content.get("content") or "").strip()
+            return str(content.get("content") or "")
         return json.dumps(content, ensure_ascii=True)
     if isinstance(content, list):
         parts: list[str] = []
@@ -226,9 +226,9 @@ def _render_message_content(content: Any) -> str:
             elif isinstance(item, dict):
                 text = item.get("text")
                 if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
-        return "\n".join(parts).strip()
-    return str(content).strip()
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(content)
 
 
 def _extract_tool_calls_from_text(text: str) -> tuple[list[SimpleNamespace], str]:
