@@ -8977,7 +8977,8 @@ class GatewayRunner:
             })
         
         # Build session context
-        context = build_session_context(source, self.config, session_entry)
+        context = build_session_context(source, self.config, session_entry,
+                                        message_timestamp=getattr(event, "timestamp", None))
         
         # Set session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
