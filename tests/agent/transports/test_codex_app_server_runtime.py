@@ -112,6 +112,7 @@ class TestCodexAppServerModule:
 
         assert codex_app_server.MIN_CODEX_VERSION >= (0, 1, 0)
         assert callable(codex_app_server.parse_codex_version)
+        assert callable(codex_app_server.resolve_codex_binary)
         assert callable(codex_app_server.check_codex_binary)
 
     def test_parse_codex_version_valid(self) -> None:
@@ -134,6 +135,24 @@ class TestCodexAppServerModule:
         ok, msg = check_codex_binary(codex_bin="/nonexistent/codex/binary/path")
         assert ok is False
         assert "not found" in msg.lower() or "no such" in msg.lower()
+
+    def test_resolve_codex_binary_keeps_explicit_path(self) -> None:
+        from agent.transports.codex_app_server import resolve_codex_binary
+
+        assert resolve_codex_binary("/custom/codex", env={}) == "/custom/codex"
+
+    def test_resolve_codex_binary_uses_hermes_managed_node_bin(self, tmp_path) -> None:
+        from agent.transports.codex_app_server import resolve_codex_binary
+
+        hermes_home = tmp_path / ".hermes"
+        codex = hermes_home / "node" / "bin" / "codex"
+        codex.parent.mkdir(parents=True)
+        codex.write_text("#!/usr/bin/env node\n")
+        codex.chmod(0o755)
+
+        env = {"PATH": "", "HERMES_HOME": str(hermes_home), "HOME": str(tmp_path / "home")}
+
+        assert resolve_codex_binary("codex", env=env) == str(codex)
 
     def test_codex_error_class_is_runtimeerror(self) -> None:
         from agent.transports.codex_app_server import CodexAppServerError
@@ -276,6 +295,7 @@ class TestSpawnEnvIsolation:
                 pass
 
         monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        monkeypatch.setenv("PATH", "")
         monkeypatch.setenv("HOME", "/users/alice")
         monkeypatch.setenv("HERMES_HOME", "/users/alice/.hermes/profiles/backend-worker")
         monkeypatch.setenv("HERMES_KANBAN_TASK", "t_smoke")

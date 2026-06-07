@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -28,6 +29,35 @@ from typing import Any, Optional
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
+
+
+def resolve_codex_binary(codex_bin: str = "codex", env: Optional[dict[str, str]] = None) -> str:
+    """Resolve the Codex CLI, including Hermes' managed Node install.
+
+    Gateway and cron processes often run with a minimal PATH that omits
+    ``~/.hermes/node/bin`` even though Hermes installed Codex there. Keep
+    explicit paths untouched, then try PATH, then Hermes' managed location.
+    """
+    if os.path.isabs(codex_bin) or os.sep in codex_bin:
+        return codex_bin
+
+    search_env = env or os.environ
+    found = shutil.which(codex_bin, path=search_env.get("PATH"))
+    if found:
+        return found
+
+    candidates: list[str] = []
+    hermes_home = (search_env.get("HERMES_HOME") or "").strip()
+    home = (search_env.get("HOME") or "").strip()
+    if hermes_home:
+        candidates.append(os.path.join(hermes_home, "node", "bin", codex_bin))
+    if home:
+        candidates.append(os.path.join(home, ".hermes", "node", "bin", codex_bin))
+
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return codex_bin
 
 
 @dataclass
@@ -110,7 +140,7 @@ class CodexAppServerClient:
                 ]
             )
 
-        cmd = [codex_bin, "app-server"] + app_server_args
+        cmd = [resolve_codex_binary(codex_bin, spawn_env), "app-server"] + app_server_args
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
@@ -374,7 +404,7 @@ def check_codex_binary(
     Returns (ok, message). Used by setup wizard and runtime startup."""
     try:
         proc = subprocess.run(
-            [codex_bin, "--version"],
+            [resolve_codex_binary(codex_bin), "--version"],
             capture_output=True,
             text=True,
             timeout=10,
