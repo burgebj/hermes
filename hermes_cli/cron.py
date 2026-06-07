@@ -115,6 +115,10 @@ def cron_list(show_all: bool = False):
         script = job.get("script")
         if script:
             print(f"    Script:    {script}")
+        prompt = job.get("prompt")
+        if prompt:
+            prompt_display = prompt[:80] + "..." if len(prompt) > 80 else prompt
+            print(f"    Prompt:    {prompt_display}")
         if job.get("no_agent"):
             print(f"    Mode:      {color('no-agent', Colors.DIM)} (script stdout delivered directly)")
         workdir = job.get("workdir")
