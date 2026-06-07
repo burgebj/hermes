@@ -19339,6 +19339,68 @@ class GatewayRunner:
                             "Failed to edit streamed message for session %s: %s",
                             session_key or "?", _edit_err,
                         )
+            elif (
+                not _is_empty_sentinel
+                and _sc is not None
+                and getattr(_sc, "already_sent", False)
+                and getattr(_sc, "message_id", None)
+                and getattr(_sc, "message_id", None) != "__no_edit__"
+                and _status_adapter is not None
+                and hasattr(_status_adapter, "delete_message")
+                and session_key
+                and hasattr(_status_adapter, "register_post_delivery_callback")
+            ):
+                # A streamed preview bubble is visible, but final delivery was
+                # not confirmed (e.g. Telegram finalize edit hit long flood
+                # control and the gateway will now send a fresh final message).
+                # Delete the stale preview AFTER the fresh final message lands
+                # so the user sees one canonical answer instead of a preview
+                # bubble plus a near-duplicate final bubble.
+                _stale_preview_id = _sc.message_id
+                _adapter_snapshot = _status_adapter
+                _chat_id_snapshot = source.chat_id
+                _loop_snapshot = asyncio.get_running_loop()
+
+                def _cleanup_stale_stream_preview() -> None:
+                    async def _delete_preview() -> None:
+                        try:
+                            await _adapter_snapshot.delete_message(
+                                _chat_id_snapshot,
+                                _stale_preview_id,
+                            )
+                            logger.info(
+                                "Deleted stale streamed preview %s for session %s after fresh final send.",
+                                _stale_preview_id,
+                                session_key or "?",
+                            )
+                        except Exception as _delete_err:
+                            logger.debug(
+                                "Stale streamed preview cleanup failed for session %s (%s): %s",
+                                session_key or "?",
+                                _stale_preview_id,
+                                _delete_err,
+                            )
+
+                    try:
+                        safe_schedule_threadsafe(
+                            _delete_preview(),
+                            _loop_snapshot,
+                            logger=logger,
+                            log_message="Stale streamed preview cleanup scheduling error",
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    _status_adapter.register_post_delivery_callback(
+                        session_key,
+                        _cleanup_stale_stream_preview,
+                        generation=run_generation,
+                    )
+                except Exception as _rpe:
+                    logger.debug(
+                        "Stale preview cleanup registration failed: %s", _rpe
+                    )
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as

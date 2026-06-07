@@ -121,6 +121,61 @@ class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
         raise AssertionError("non-editable adapters should not receive edit_message calls")
 
 
+class FailingFinalizePreviewAdapter(ProgressCaptureAdapter):
+    """Simulate a visible streamed preview whose finalize edit fails.
+
+    This matches the Telegram failure mode behind duplicate near-final bubbles:
+    a preview message is already visible, but the final edit hits long flood
+    control so the gateway falls back to a fresh final send.
+    """
+
+    REQUIRES_EDIT_FINALIZE = True
+
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(platform=platform)
+        self._next_id = 0
+        self.callbacks = {}
+        self.deleted = []
+
+    def _mint_id(self):
+        self._next_id += 1
+        return f"progress-{self._next_id}"
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "content": content,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=self._mint_id())
+
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "finalize": finalize,
+                "metadata": metadata,
+            }
+        )
+        if finalize:
+            return SendResult(success=False, error="flood_control:150.0", retryable=False)
+        return SendResult(success=True, message_id=message_id)
+
+    def register_post_delivery_callback(self, session_key, callback, *, generation=None):
+        self.callbacks[session_key] = (generation, callback)
+
+    async def delete_message(self, chat_id, message_id) -> SendResult:
+        self.deleted.append({"chat_id": chat_id, "message_id": message_id})
+        return SendResult(success=True, message_id=message_id)
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         # Capture anything passed via kwargs (older code path) but don't
@@ -620,6 +675,22 @@ class StreamingRefineAgent:
         }
 
 
+class StreamingFinalizeFailureAgent:
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.stream_delta_callback:
+            self.stream_delta_callback("Partial streamed preview")
+        time.sleep(0.05)
+        return {
+            "final_response": "Partial streamed preview — completed final answer.",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class QueuedCommentaryAgent:
     calls = 0
 
@@ -916,6 +987,37 @@ async def test_run_agent_previewed_final_marks_already_sent(monkeypatch, tmp_pat
 
     assert result.get("already_sent") is True
     assert [call["content"] for call in adapter.sent] == ["You're welcome."]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_registers_cleanup_for_stale_stream_preview(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        StreamingFinalizeFailureAgent,
+        session_id="sess-stale-stream-preview",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="123456789",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=FailingFinalizePreviewAdapter,
+    )
+
+    session_key = "agent:main:telegram:dm:123456789"
+    assert result.get("already_sent") is not True
+    assert session_key in adapter.callbacks, "expected stale preview cleanup callback"
+
+    _generation, callback = adapter.callbacks[session_key]
+    callback()
+    await asyncio.sleep(0.05)
+
+    assert adapter.deleted == [
+        {"chat_id": "123456789", "message_id": "progress-1"}
+    ]
 
 
 @pytest.mark.asyncio
