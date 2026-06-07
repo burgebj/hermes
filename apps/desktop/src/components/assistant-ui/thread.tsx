@@ -576,6 +576,16 @@ const AssistantActionBar: FC<MessageActionProps> = ({ messageId, messageText, on
   const copy = t.assistant.thread
   const [menuOpen, setMenuOpen] = useState(false)
 
+  const handleReply = useCallback(() => {
+    if (!messageText?.trim()) return
+    const quoted = messageText
+      .split('\n')
+      .map(line => `> ${line}`)
+      .join('\n')
+    requestComposerInsert(quoted, { mode: 'block', target: 'main' })
+    triggerHaptic('selection')
+  }, [messageText])
+
   return (
     <div className="relative flex w-full shrink-0 justify-end">
       <ActionBarPrimitive.Root
@@ -598,6 +608,9 @@ const AssistantActionBar: FC<MessageActionProps> = ({ messageId, messageText, on
             <Codicon name="refresh" />
           </TooltipIconButton>
         </ActionBarPrimitive.Reload>
+        <TooltipIconButton disabled={!messageText} onClick={handleReply} tooltip="Reply">
+          <Codicon name="reply" />
+        </TooltipIconButton>
         <DropdownMenu onOpenChange={setMenuOpen} open={menuOpen}>
           <DropdownMenuTrigger asChild>
             <TooltipIconButton tooltip={copy.moreActions}>
@@ -832,6 +845,25 @@ const UserMessage: FC<{
               )}
               {(showStop || showRestore) && (
                 <div className="pointer-events-none absolute right-2 bottom-2 z-10 flex items-center justify-center opacity-0 transition-opacity group-hover/user-message:opacity-100 group-focus-within/user-message:opacity-100">
+                  <button
+                    aria-label="Reply"
+                    className={cn('pointer-events-auto mr-0.5 size-5', USER_ACTION_ICON_BUTTON_CLASS)}
+                    onClick={event => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      if (!messageText?.trim()) return
+                      const quoted = messageText
+                        .split('\n')
+                        .map(line => `> ${line}`)
+                        .join('\n')
+                      requestComposerInsert(quoted, { mode: 'block', target: 'main' })
+                      triggerHaptic('selection')
+                    }}
+                    title="Reply"
+                    type="button"
+                  >
+                    <Codicon name="reply" size="0.75rem" />
+                  </button>
                   {showStop ? (
                     <button
                       aria-label={copy.stop}
