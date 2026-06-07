@@ -259,6 +259,29 @@ def _build_skill_message(
 
     return "\n".join(parts)
 
+_CORE_COMMAND_NAMES: Optional[set] = None
+
+
+def _get_core_command_names() -> set:
+    """Return the set of reserved core command names (lowercase).
+
+    Core Hermes CLI commands (and their aliases) take precedence over
+    skill-generated slash commands.  This set is computed once at first
+    call and cached in the module-level _CORE_COMMAND_NAMES variable.
+    """
+    global _CORE_COMMAND_NAMES
+    if _CORE_COMMAND_NAMES is not None:
+        return _CORE_COMMAND_NAMES
+    _CORE_COMMAND_NAMES = set()
+    try:
+        from hermes_cli.commands import COMMAND_REGISTRY
+        for cmd in COMMAND_REGISTRY:
+            _CORE_COMMAND_NAMES.add(cmd.name.lower())
+            for alias in cmd.aliases:
+                _CORE_COMMAND_NAMES.add(alias.lower())
+    except ImportError:
+        pass
+    return _CORE_COMMAND_NAMES
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     """Scan ~/.hermes/skills/ and return a mapping of /command -> skill info.
@@ -317,7 +340,19 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
                     if not cmd_name:
                         continue
+                    # Skip if this skill's auto-generated /command collides
+                    # with a core Hermes CLI slash command (e.g. /handoff,
+                    # /config).  The skill remains loadable via /skill <name>.
+                    if cmd_name in _get_core_command_names():
+                        logger.warning(
+                            "Skill '%s' generates slash command '/%s' which "
+                            "collides with a core Hermes command. Skipping "
+                            "auto-generated command. Load via '/skill %s' instead.",
+                            name, cmd_name, name,
+                        )
+                        continue
                     _skill_commands[f"/{cmd_name}"] = {
+
                         "name": name,
                         "description": description or f"Invoke the {name} skill",
                         "skill_md_path": str(skill_md),

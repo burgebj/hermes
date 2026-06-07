@@ -377,6 +377,14 @@ class TestScanSkillCommands:
         assert "/sonarr-v3v4-api" in result
         assert any("/" in k[1:] for k in result) is False  # no unescaped /
 
+    def test_skill_collides_with_core_command_is_skipped(self, tmp_path):
+        """A skill whose auto-generated /command collides with a core Hermes
+        command (e.g. 'handoff') should be excluded from the slash-command map.
+        The skill remains loadable via /skill <name>."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "handoff")
+            result = scan_skill_commands()
+        assert "/handoff" not in result
 
 class TestResolveSkillCommandKey:
     """Telegram bot-command names disallow hyphens, so the menu registers
