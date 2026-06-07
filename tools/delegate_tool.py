@@ -2044,7 +2044,7 @@ def delegate_task(
     # used by CLI/gateway startup.  When unconfigured, returns None values so
     # children inherit from the parent.
     try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
+        default_creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
 
@@ -2109,26 +2109,49 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Per-task model/provider override: when provider differs from default,
+            # re-resolve the full credential bundle for the override provider.
+            if t.get("provider") and t["provider"] != default_creds.get("provider"):
+                try:
+                    task_creds = _resolve_delegation_credentials(
+                        {"provider": t["provider"], "model": t.get("model", "")},
+                        parent_agent,
+                    )
+                except ValueError as exc:
+                    return tool_error(
+                        f"Task {i} ({t['goal'][:40]}...): {exc}"
+                    )
+                # If model was also set, apply it on top of the resolved default
+                if t.get("model"):
+                    task_creds["model"] = t["model"]
+            elif t.get("model"):
+                # Same provider, just override model name
+                task_creds = dict(default_creds)
+                task_creds["model"] = t["model"]
+            else:
+                task_creds = default_creds
+
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=task_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=task_creds["provider"],
+                override_base_url=task_creds["base_url"],
+                override_api_key=task_creds["api_key"],
+                override_api_mode=task_creds["api_mode"],
                 override_acp_command=t.get("acp_command")
                 or acp_command
-                or creds.get("command"),
+                or task_creds.get("command"),
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (acp_args if acp_args is not None else task_creds.get("args"))
                 ),
                 role=effective_role,
             )
@@ -2794,6 +2817,25 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override. When set without 'provider', "
+                                "sends a different model name to the default delegation "
+                                "provider/endpoint. When combined with 'provider', "
+                                "the provider's credentials are re-resolved and the model "
+                                "name is overridden within that provider."
+                            ),
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Per-task provider override. When set, re-resolves the "
+                                "full credential bundle (base_url, api_key, api_mode) for "
+                                "that provider, including its default model. Combined with "
+                                "'model' to override the model name within the provider."
+                            ),
                         },
                     },
                     "required": ["goal"],
