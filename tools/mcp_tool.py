@@ -297,15 +297,27 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
     """Build a filtered environment dict for stdio subprocesses.
 
     Only passes through safe baseline variables (PATH, HOME, etc.) and XDG_*
-    variables from the current process environment, plus any variables
+    variables from the current process environment, Bitwarden-injected secrets
+    that Hermes explicitly tagged during dotenv loading, plus any variables
     explicitly specified by the user in the server config.
 
     This prevents accidentally leaking secrets like API keys, tokens, or
-    credentials to MCP server subprocesses.
+    credentials to MCP server subprocesses. Bitwarden-sourced secrets are an
+    exception because users configured that secret backend specifically so
+    Hermes subprocesses can consume those credentials without duplicating them
+    in every MCP server's ``env:`` block.
     """
     env = {}
+    try:
+        from hermes_cli.env_loader import get_secret_source
+    except Exception:  # pragma: no cover — early bootstrap/import fallback
+        get_secret_source = None
     for key, value in os.environ.items():
-        if key in _SAFE_ENV_KEYS or key.startswith("XDG_"):
+        if (
+            key in _SAFE_ENV_KEYS
+            or key.startswith("XDG_")
+            or (get_secret_source is not None and get_secret_source(key) == "bitwarden")
+        ):
             env[key] = value
     if user_env:
         env.update(user_env)

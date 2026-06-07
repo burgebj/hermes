@@ -1378,6 +1378,38 @@ class TestBuildSafeEnv:
         assert "DATABASE_URL" not in result
         assert "API_SECRET" not in result
 
+    def test_bitwarden_sourced_secrets_are_passed(self, monkeypatch):
+        """Bitwarden-injected secrets are deliberately allowed for MCP stdio servers."""
+        from hermes_cli import env_loader
+        from tools.mcp_tool import _build_safe_env
+
+        monkeypatch.setitem(env_loader._SECRET_SOURCES, "ALPACA_API_KEY", "bitwarden")
+        monkeypatch.setitem(env_loader._SECRET_SOURCES, "ALPACA_SECRET_KEY", "bitwarden")
+        fake_env = {
+            "PATH": "/usr/bin",
+            "ALPACA_API_KEY": "from-bws-key",
+            "ALPACA_SECRET_KEY": "from-bws-secret",
+            "UNTRACKED_SECRET_KEY": "still-filtered",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None)
+
+        assert result["PATH"] == "/usr/bin"
+        assert result["ALPACA_API_KEY"] == "from-bws-key"
+        assert result["ALPACA_SECRET_KEY"] == "from-bws-secret"
+        assert "UNTRACKED_SECRET_KEY" not in result
+
+    def test_user_env_overrides_bitwarden_sourced_secret(self, monkeypatch):
+        """Explicit MCP server env config remains the highest-precedence source."""
+        from hermes_cli import env_loader
+        from tools.mcp_tool import _build_safe_env
+
+        monkeypatch.setitem(env_loader._SECRET_SOURCES, "ALPACA_API_KEY", "bitwarden")
+        with patch.dict("os.environ", {"PATH": "/usr/bin", "ALPACA_API_KEY": "from-bws"}, clear=True):
+            result = _build_safe_env({"ALPACA_API_KEY": "from-config"})
+
+        assert result["ALPACA_API_KEY"] == "from-config"
+
 
 # ---------------------------------------------------------------------------
 # _sanitize_error
