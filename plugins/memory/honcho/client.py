@@ -687,21 +687,24 @@ class HonchoClientConfig:
         """
         import re
 
+        # Honcho enforces a 100-char limit on session IDs (#13868).
+        _MAX_SESSION_ID_LEN = 100
+
         if not cwd:
             cwd = os.getcwd()
 
         # Manual override always wins
         manual = self.sessions.get(cwd)
         if manual:
-            return manual
+            return manual[:_MAX_SESSION_ID_LEN]
 
         # /title mid-session remap
         if session_title:
             sanitized = re.sub(r'[^a-zA-Z0-9_-]+', '-', session_title).strip('-')
             if sanitized:
                 if self.session_peer_prefix and self.peer_name:
-                    return f"{self.peer_name}-{sanitized}"
-                return sanitized
+                    return f"{self.peer_name}-{sanitized}"[:_MAX_SESSION_ID_LEN]
+                return sanitized[:_MAX_SESSION_ID_LEN]
 
         # Gateway session key: stable per-chat identifier passed by the gateway
         # (e.g. "agent:main:telegram:dm:8439114563"). Sanitize colons to hyphens
@@ -716,25 +719,25 @@ class HonchoClientConfig:
         # per-session: inherit Hermes session_id (new Honcho session each run)
         if self.session_strategy == "per-session" and session_id:
             if self.session_peer_prefix and self.peer_name:
-                return f"{self.peer_name}-{session_id}"
-            return session_id
+                return f"{self.peer_name}-{session_id}"[:_MAX_SESSION_ID_LEN]
+            return session_id[:_MAX_SESSION_ID_LEN]
 
         # per-repo: one Honcho session per git repository
         if self.session_strategy == "per-repo":
             base = self._git_repo_name(cwd) or Path(cwd).name
             if self.session_peer_prefix and self.peer_name:
-                return f"{self.peer_name}-{base}"
-            return base
+                return f"{self.peer_name}-{base}"[:_MAX_SESSION_ID_LEN]
+            return base[:_MAX_SESSION_ID_LEN]
 
         # per-directory: one Honcho session per working directory (default)
         if self.session_strategy in {"per-directory", "per-session"}:
             base = Path(cwd).name
             if self.session_peer_prefix and self.peer_name:
-                return f"{self.peer_name}-{base}"
-            return base
+                return f"{self.peer_name}-{base}"[:_MAX_SESSION_ID_LEN]
+            return base[:_MAX_SESSION_ID_LEN]
 
         # global: single session across all directories
-        return self.workspace_id
+        return self.workspace_id[:_MAX_SESSION_ID_LEN]
 
 
 _honcho_client: Honcho | None = None
