@@ -218,6 +218,18 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+
+    # Plugin-provided backends: check the web provider registry.
+    # This allows user-installed plugins (e.g. firecrawl-crawl4ai) to
+    # be selected via web.extract_backend without hardcoding their names.
+    try:
+        from agent.web_search_registry import get_provider as _wsp_get_provider
+        p = _wsp_get_provider(backend)
+        if p is not None and p.is_available():
+            return True
+    except Exception:
+        pass
+
     return False
 
 
