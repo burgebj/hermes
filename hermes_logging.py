@@ -66,6 +66,8 @@ _NOISY_LOGGERS = (
     "websockets",
     "charset_normalizer",
     "markdown_it",
+    "minisweagent",
+    "minisweagent.environment",
 )
 
 

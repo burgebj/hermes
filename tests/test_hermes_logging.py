@@ -150,6 +150,8 @@ class TestSetupLogging:
         assert logging.getLogger("openai").level >= logging.WARNING
         assert logging.getLogger("httpx").level >= logging.WARNING
         assert logging.getLogger("httpcore").level >= logging.WARNING
+        assert logging.getLogger("minisweagent").level >= logging.WARNING
+        assert logging.getLogger("minisweagent.environment").level >= logging.WARNING
 
     def test_writes_to_agent_log(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
