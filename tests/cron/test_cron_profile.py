@@ -447,3 +447,123 @@ class TestTickProfilePartition:
             assert seq_thread.startswith("cron-seq"), seq_thread
         par_thread = next(t for job_id, t in calls if job_id == "c")
         assert par_thread.startswith("cron-parallel"), par_thread
+
+
+class TestProfileScopedSessionWritesToRoot:
+    """Regression for #32091.
+
+    When an agent session runs under ``hermes -p <profile>``, ``HERMES_HOME``
+    points at the profile directory (``<root>/profiles/<name>``).  Cron jobs
+    created from that session must still land in the gateway-shared root
+    ``jobs.json`` — otherwise the gateway scheduler (which reads only its own
+    root) never sees them and they silently orphan.
+    """
+
+    def test_module_paths_resolve_to_root_under_profile_hermes_home(
+        self, tmp_path, monkeypatch
+    ):
+        """Reloading cron.jobs under a profile-scoped HERMES_HOME must still
+        resolve JOBS_FILE to the gateway-shared root jobs.json, not the
+        profile-local one."""
+        import importlib
+        from pathlib import Path as _Path
+
+        root = tmp_path / "hermes-root"
+        profile_home = root / "profiles" / "support"
+        profile_home.mkdir(parents=True)
+
+        # Pretend the agent session is profile-scoped: HERMES_HOME = profile dir.
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+        import cron.jobs as cron_jobs
+
+        importlib.reload(cron_jobs)
+        try:
+            # The canonical write/read location must be the gateway root,
+            # not <root>/profiles/<name>/cron/jobs.json.
+            assert cron_jobs.JOBS_FILE == root / "cron" / "jobs.json"
+            assert cron_jobs.CRON_DIR == root / "cron"
+            assert cron_jobs.OUTPUT_DIR == root / "cron" / "output"
+
+            assert profile_home not in cron_jobs.JOBS_FILE.parents
+        finally:
+            # Reload again with a clean env so other tests in the run see
+            # the module-level constants resolved from the real default root.
+            monkeypatch.delenv("HERMES_HOME", raising=False)
+            importlib.reload(cron_jobs)
+
+    def test_create_job_writes_to_root_jobs_file_when_profile_active(
+        self, tmp_path, monkeypatch
+    ):
+        """An agent session running under -p <profile> creates a cron job;
+        the job must land in the root jobs.json that the gateway reads."""
+        import importlib
+        from pathlib import Path as _Path
+
+        root = tmp_path / "hermes-root"
+        profile_home = root / "profiles" / "support"
+        profile_home.mkdir(parents=True)
+
+        # Profile session: HERMES_HOME points at the profile, not the root.
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+        # Reload cron.jobs so the module-level CRON_DIR/JOBS_FILE recompute
+        # against the patched environment.
+        import cron.jobs as cron_jobs
+
+        importlib.reload(cron_jobs)
+        try:
+            job = cron_jobs.create_job(prompt="ping", schedule="every 1h")
+
+            root_jobs_file = root / "cron" / "jobs.json"
+            profile_jobs_file = profile_home / "cron" / "jobs.json"
+
+            assert root_jobs_file.exists(), (
+                f"Job must be written to gateway-shared root, not profile-local."
+                f"  root_jobs_file={root_jobs_file} profile_jobs_file_exists="
+                f"{profile_jobs_file.exists()}"
+            )
+            # The profile-local path must remain empty — that is the orphan
+            # location described by #32091.
+            assert not profile_jobs_file.exists(), (
+                "Cron job was written to profile-local jobs.json — the "
+                "gateway scheduler will never read it (regression of #32091)."
+            )
+
+            data = json.loads(root_jobs_file.read_text())
+            stored_ids = [j["id"] for j in data.get("jobs", [])]
+            assert job["id"] in stored_ids
+
+            # The profile name should be auto-stamped so the scheduler runs
+            # the job under the user's profile context.
+            stored = next(j for j in data["jobs"] if j["id"] == job["id"])
+            assert stored["profile"] == "support"
+        finally:
+            monkeypatch.delenv("HERMES_HOME", raising=False)
+            importlib.reload(cron_jobs)
+
+    def test_create_job_without_profile_active_does_not_stamp_profile(
+        self, tmp_path, monkeypatch
+    ):
+        """In a default (non-profile) session, create_job must not stamp a
+        profile field on jobs that don't request one."""
+        import importlib
+        from pathlib import Path as _Path
+
+        root = tmp_path / "hermes-root"
+        root.mkdir(parents=True)
+
+        monkeypatch.setenv("HERMES_HOME", str(root))
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+        import cron.jobs as cron_jobs
+
+        importlib.reload(cron_jobs)
+        try:
+            job = cron_jobs.create_job(prompt="ping", schedule="every 1h")
+            assert job.get("profile") is None
+        finally:
+            monkeypatch.delenv("HERMES_HOME", raising=False)
+            importlib.reload(cron_jobs)
