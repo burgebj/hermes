@@ -1603,6 +1603,84 @@ class TestCallLlmPaymentFallback:
         # Fallback client should have been used
         assert fallback_client.chat.completions.create.called
 
+    def test_non_streaming_provider_timeout_triggers_fallback_with_audit(self, monkeypatch, caplog):
+        """Non-streaming provider no-response timeout must enter fallback and emit audit fields."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        primary_client = MagicMock()
+        primary_client.chat.completions.create.side_effect = RuntimeError(
+            "Non-streaming API call timed out after 180s with no response"
+        )
+
+        fallback_client = MagicMock()
+        fallback_client.chat.completions.create.return_value = MagicMock(choices=[
+            MagicMock(message=MagicMock(content="fallback response"))
+        ])
+
+        with patch("agent.auxiliary_client._get_cached_client",
+                    return_value=(primary_client, "gpt-5.5")), \
+             patch("agent.auxiliary_client._resolve_task_provider_model",
+                    return_value=("auto", "gpt-5.5", None, None, None)), \
+             patch("agent.auxiliary_client._try_payment_fallback",
+                    return_value=(fallback_client, "fallback-model", "openrouter")), \
+             caplog.at_level("WARNING", logger="agent.auxiliary_client"):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+                timeout=180,
+            )
+
+        assert result is not None
+        assert fallback_client.chat.completions.create.called
+        audit_records = [r for r in caplog.records if "fallback_audit" in r.message]
+        assert audit_records, f"Expected fallback_audit log, got: {[r.message for r in caplog.records]}"
+        audit = audit_records[-1].args
+        assert audit["event_type"] == "provider_timeout_fallback"
+        assert audit["model"] == "gpt-5.5"
+        assert audit["provider"] == "auto"
+        assert audit["timeout_seconds"] == 180
+        assert audit["retry_count"] == 0
+        assert audit["fallback_attempted"] is True
+        assert audit["fallback_result"] == "success"
+        assert audit["next_action"] == "continue_with_fallback"
+        assert audit["merge_allowed"] is False
+        assert audit["full_unattended_ready"] is False
+
+    def test_non_streaming_provider_timeout_fallback_failure_logs_next_action(self, monkeypatch, caplog):
+        """Fallback failure must not fail silently: audit includes fallback_result and next_action."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        primary_client = MagicMock()
+        primary_client.chat.completions.create.side_effect = RuntimeError(
+            "Provider no response timeout after 180s"
+        )
+
+        fallback_client = MagicMock()
+        fallback_client.chat.completions.create.side_effect = RuntimeError("fallback unavailable")
+
+        with patch("agent.auxiliary_client._get_cached_client",
+                    return_value=(primary_client, "gpt-5.5")), \
+             patch("agent.auxiliary_client._resolve_task_provider_model",
+                    return_value=("auto", "gpt-5.5", None, None, None)), \
+             patch("agent.auxiliary_client._try_payment_fallback",
+                    return_value=(fallback_client, "fallback-model", "openrouter")), \
+             caplog.at_level("WARNING", logger="agent.auxiliary_client"):
+            with pytest.raises(RuntimeError, match="fallback unavailable"):
+                call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "hello"}],
+                    timeout=180,
+                )
+
+        audit_records = [r for r in caplog.records if "fallback_audit" in r.message]
+        assert audit_records, f"Expected fallback_audit log, got: {[r.message for r in caplog.records]}"
+        audit = audit_records[-1].args
+        assert audit["fallback_attempted"] is True
+        assert audit["fallback_result"] == "failed"
+        assert audit["next_action"] == "surface_fallback_failure_to_operator"
+        assert audit["merge_allowed"] is False
+        assert audit["full_unattended_ready"] is False
+
 
 class TestAuxiliaryFallbackLayering:
     """Explicit-provider users get layered fallback: configured_chain → main agent → warn."""

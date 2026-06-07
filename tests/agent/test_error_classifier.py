@@ -53,7 +53,7 @@ class TestFailoverReason:
     def test_enum_members_exist(self):
         expected = {
             "auth", "auth_permanent", "billing", "rate_limit",
-            "overloaded", "server_error", "timeout",
+            "overloaded", "server_error", "timeout", "PROVIDER_TIMEOUT",
             "context_overflow", "payload_too_large", "image_too_large",
             "model_not_found", "format_error",
             "invalid_encrypted_content",
@@ -832,6 +832,26 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.timeout
         assert result.retryable is True
+
+    @pytest.mark.parametrize("message", [
+        "Non-streaming API call timed out after 180s with no response",
+        "Provider no response timeout after 180s",
+        "180s no response timeout waiting for provider",
+    ])
+    def test_non_streaming_provider_timeout_classifies_as_provider_timeout(self, message):
+        result = classify_api_error(
+            RuntimeError(message),
+            provider="openai-codex",
+            model="gpt-5.5",
+        )
+
+        assert result.reason == FailoverReason.provider_timeout
+        assert result.reason.value == "PROVIDER_TIMEOUT"
+        assert result.retryable is True
+        assert result.should_fallback is True
+        assert result.should_compress is False
+        assert result.error_context["defect_code"] == "non_streaming_provider_timeout_not_falling_back"
+        assert result.error_context["timeout_seconds"] == 180
 
     def test_runtime_error_deadline_exceeded_classifies_as_timeout(self):
         e = RuntimeError("deadline exceeded")

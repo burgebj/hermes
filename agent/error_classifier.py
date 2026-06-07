@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -38,6 +39,7 @@ class FailoverReason(enum.Enum):
 
     # Transport
     timeout = "timeout"                  # Connection/read timeout — rebuild client + retry
+    provider_timeout = "PROVIDER_TIMEOUT"  # Provider produced no non-streaming response before timeout — fallback
 
     # Context / payload
     context_overflow = "context_overflow"  # Context too large — compress, not failover
@@ -362,6 +364,18 @@ _TIMEOUT_MESSAGE_PATTERNS = [
     "deadline exceeded",
     "operation timed out",
     "upstream timed out",
+]
+
+# Narrow fingerprints for the named P1 defect: non-streaming provider calls
+# timing out with no response were being treated as generic timeouts/unknowns,
+# which could skip the provider fallback/audit path. Keep these separate from
+# ordinary connection errors so connection reset / rate-limit behavior remains
+# unchanged.
+_PROVIDER_TIMEOUT_MESSAGE_PATTERNS = [
+    "non-streaming api call timed out",
+    "provider no response timeout",
+    "no response timeout",
+    "timed out after 180s with no response",
 ]
 
 # Transport error type names
@@ -1202,6 +1216,29 @@ def _classify_by_message(
             FailoverReason.model_not_found,
             retryable=False,
             should_fallback=True,
+        )
+
+    # Named provider timeout defect: non-streaming/no-response timeouts must
+    # be explicit PROVIDER_TIMEOUT and must opt into fallback/audit. This runs
+    # before the generic timeout bucket so the recovery layer can distinguish
+    # provider no-response from an ordinary socket hiccup.
+    if any(p in error_msg for p in _PROVIDER_TIMEOUT_MESSAGE_PATTERNS):
+        timeout_match = re.search(r"(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?", error_msg)
+        timeout_seconds = None
+        if timeout_match:
+            raw_timeout = float(timeout_match.group(1))
+            timeout_seconds = int(raw_timeout) if raw_timeout.is_integer() else raw_timeout
+        return result_fn(
+            FailoverReason.provider_timeout,
+            retryable=True,
+            should_fallback=True,
+            should_compress=False,
+            error_context={
+                "defect_code": "non_streaming_provider_timeout_not_falling_back",
+                "category": "provider_timeout",
+                "severity": "recoverable",
+                "timeout_seconds": timeout_seconds,
+            },
         )
 
     # Timeout message patterns — generic exception types (e.g. RuntimeError)

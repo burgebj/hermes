@@ -50,6 +50,8 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
 
+from agent.error_classifier import FailoverReason, classify_api_error
+
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # openai SDK pulls a large type tree (~240 ms cold, including responses/*,
 # graders/*). We expose `OpenAI` here as a thin proxy that imports the SDK on
@@ -5324,22 +5326,39 @@ def call_llm(
         # When the provider returns a 429 rate-limit (not billing), fall
         # back to an alternative provider instead of exhausting retries
         # against the same rate-limited endpoint.
+        classified = classify_api_error(first_err, provider=resolved_provider, model=final_model)
+        is_provider_timeout = classified.reason == FailoverReason.provider_timeout
         should_fallback = (
             _is_payment_error(first_err)
             or _is_connection_error(first_err)
             or _is_rate_limit_error(first_err)
+            or is_provider_timeout
         )
         # Respect explicit provider choice for transient errors (auth, request
         # validation, etc.) but allow fallback when the provider clearly cannot
-        # serve the request due to capacity: payment/quota exhaustion and
-        # connection failures are capacity problems, not request constraints.
+        # serve the request due to capacity: payment/quota exhaustion,
+        # provider no-response timeouts, and connection failures are capacity
+        # problems, not request constraints.
         # See #26803: daily token quota (429 + "too many tokens per day") must
         # fall back just like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         # Capacity errors bypass the explicit-provider gate: the provider
         # literally cannot serve this request regardless of user intent.
-        is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
+        is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err) or is_provider_timeout
         if should_fallback and (is_auto or is_capacity_error):
+            audit_event_type = "provider_timeout_fallback" if is_provider_timeout else "auxiliary_provider_fallback"
+            audit = {
+                "event_type": audit_event_type,
+                "model": final_model,
+                "provider": resolved_provider or "auto",
+                "timeout_seconds": classified.error_context.get("timeout_seconds") if is_provider_timeout else effective_timeout,
+                "retry_count": 0,
+                "fallback_attempted": False,
+                "fallback_result": "not_attempted",
+                "next_action": "attempt_fallback",
+                "merge_allowed": False,
+                "full_unattended_ready": False,
+            }
             if _is_payment_error(first_err):
                 reason = "payment error"
                 # Resolve the actual provider label (resolved_provider may be
@@ -5349,6 +5368,8 @@ def call_llm(
                 _mark_provider_unhealthy(
                     _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime) or resolved_provider
                 )
+            elif is_provider_timeout:
+                reason = "provider timeout"
             elif _is_rate_limit_error(first_err):
                 reason = "rate limit"
             else:
@@ -5373,6 +5394,7 @@ def call_llm(
                     fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
                         resolved_provider, task, reason=reason)
 
+            audit["fallback_attempted"] = True
             if fb_client is not None:
                 fb_kwargs = _build_call_kwargs(
                     fb_label, fb_model, messages,
@@ -5380,11 +5402,24 @@ def call_llm(
                     tools=tools, timeout=effective_timeout,
                     extra_body=effective_extra_body,
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
-                return _validate_llm_response(
-                    fb_client.chat.completions.create(**fb_kwargs), task)
+                try:
+                    response = _validate_llm_response(
+                        fb_client.chat.completions.create(**fb_kwargs), task)
+                except Exception:
+                    audit["fallback_result"] = "failed"
+                    audit["next_action"] = "surface_fallback_failure_to_operator"
+                    logger.warning("fallback_audit %s", audit)
+                    raise
+                audit["fallback_result"] = "success"
+                audit["next_action"] = "continue_with_fallback"
+                logger.warning("fallback_audit %s", audit)
+                return response
             # All fallback layers exhausted — emit a single user-visible
             # warning so the operator knows aux task is about to fail.
             # (#26882) The error itself is re-raised below.
+            audit["fallback_result"] = "unavailable"
+            audit["next_action"] = "surface_original_error_to_operator"
+            logger.warning("fallback_audit %s", audit)
             logger.warning(
                 "Auxiliary %s: %s on %s and all fallbacks exhausted "
                 "(fallback_chain + main agent model). Raising original error.",
