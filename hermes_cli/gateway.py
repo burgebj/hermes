@@ -4347,6 +4347,25 @@ _PLATFORMS = [
         ],
     },
     {
+        "key": "nextcloud_talk",
+        "label": "Nextcloud Talk",
+        "emoji": "☁️",
+        "token_var": "NEXTCLOUD_TALK_APP_PASSWORD",
+        "setup_instructions": [
+            "On your Nextcloud server, run:",
+            "  sudo -u www-data php occ talk:bot:install \"Hermes\" <secret> http://<hermes-host>:8765/talk/webhook \"Hermes AI Agent\" --feature=webhook --feature=response",
+            "Then attach the bot to each conversation:",
+            "  sudo -u www-data php occ talk:bot:setup <bot-id> <conv-token>",
+            "See scripts/register_talk_bot.sh for a helper that generates the secret.",
+        ],
+        "vars": [
+            {"name": "NEXTCLOUD_TALK_URL", "prompt": "Nextcloud base URL (https://nextcloud.example.com)", "password": False,
+             "help": "Base URL of your Nextcloud instance."},
+            {"name": "NEXTCLOUD_TALK_APP_PASSWORD", "prompt": "Nextcloud app password for Talk", "password": True,
+             "help": "The shared secret you passed to talk:bot:install."},
+        ],
+    },
+    {
         "key": "yuanbao",
         "label": "Yuanbao",
         "emoji": "💎",

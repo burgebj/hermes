@@ -96,6 +96,13 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # Nextcloud Talk: use config-defined channel_aliases instead of
+    # session-derived display names. NC Talk bot API has no endpoint
+    # to list conversations, so the user manually defines aliases in
+    # config.yaml gateway.nextcloud_talk.extra.channel_aliases.
+    if "nextcloud_talk" not in platforms:
+        platforms["nextcloud_talk"] = _build_nextcloud_talk_aliases()
+
     directory = {
         "updated_at": datetime.now().isoformat(),
         "platforms": platforms,
@@ -206,6 +213,34 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
             seen_ids.add(entry.get("id"))
 
     return channels
+
+
+def _build_nextcloud_talk_aliases() -> List[Dict[str, str]]:
+    """Build NC Talk directory from config conversations + aliases."""
+    try:
+        from gateway.config import load_gateway_config, Platform
+        cfg = load_gateway_config()
+        pcfg = cfg.platforms.get(Platform.NEXTCLOUD_TALK)
+        if not pcfg or not pcfg.enabled:
+            return []
+        extra = pcfg.extra or {}
+        entries = []
+        # From conversations list
+        for conv in (extra.get("conversations") or []):
+            alias = conv.get("alias")
+            token = conv.get("token")
+            if alias and token:
+                entries.append({"id": str(token), "name": str(alias), "type": "dm"})
+        # From manual channel_aliases
+        aliases = extra.get("channel_aliases") or {}
+        if isinstance(aliases, dict):
+            for alias, token in aliases.items():
+                if alias and token:
+                    entries.append({"id": str(token), "name": str(alias), "type": "dm"})
+        return entries
+    except Exception as e:
+        logger.debug("Channel directory: failed to load nextcloud_talk aliases: %s", e)
+        return []
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:

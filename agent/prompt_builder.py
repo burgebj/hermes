@@ -552,6 +552,14 @@ PLATFORM_HINTS = {
         "When referring to a file you created or changed, just state its "
         "absolute path in plain text; the user can open it from there."
     ),
+    "nextcloud_talk": (
+        "You are on Nextcloud Talk. The platform supports Markdown "
+        "formatting and has a 32KB per-message limit. Replies are plain "
+        "text with Markdown. Code blocks are rendered with syntax "
+        "highlighting in the Talk Web UI. There is no typing indicator "
+        "— users see a ⏳ Thinking... acknowledgment when you start "
+        "working, followed by your actual answer when ready."
+    ),
     "sms": (
         "You are communicating via SMS. Keep responses concise and use plain text "
         "only — no markdown, no formatting. SMS messages are limited to ~1600 "
