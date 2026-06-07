@@ -4,6 +4,7 @@ import {
   activeSessionCountLabel,
   canTypeOrchestratorPrompt,
   clampOrchestratorSelection,
+  clearPendingNewSessionDraft,
   closeFallbackAfterClose,
   currentSessionSelectionIndex,
   draftModelArgFromPickerValue,
@@ -20,11 +21,13 @@ import {
   orchestratorHintSegmentColor,
   orchestratorRowClickAction,
   orchestratorVisibleRowIndexes,
+  readPendingNewSessionDraft,
   relativeSessionAge,
   resumableHistory,
   selectedSessionRowStyle,
   sessionRowKindAt,
-  sessionsCountLabel
+  sessionsCountLabel,
+  writePendingNewSessionDraft
 } from '../components/activeSessionSwitcher.js'
 import type { SessionActiveItem } from '../gatewayTypes.js'
 import type { SessionListItem } from '../gatewayTypes.js'
@@ -91,6 +94,23 @@ describe('session orchestrator helpers', () => {
     expect(draftModelArgFromPickerValue('openai/gpt-5.5 --provider openai-codex --global')).toBe(
       'openai/gpt-5.5 --provider openai-codex'
     )
+  })
+
+  it('persists pending new-session drafts across overlay remounts until submit clears them', () => {
+    clearPendingNewSessionDraft()
+    expect(readPendingNewSessionDraft()).toEqual({ modelArg: '', prompt: '' })
+
+    writePendingNewSessionDraft({
+      modelArg: 'kimi-k2.6 --provider ollama-cloud',
+      prompt: 'Build the websocket orchestrator panel'
+    })
+    expect(readPendingNewSessionDraft()).toEqual({
+      modelArg: 'kimi-k2.6 --provider ollama-cloud',
+      prompt: 'Build the websocket orchestrator panel'
+    })
+
+    clearPendingNewSessionDraft()
+    expect(readPendingNewSessionDraft()).toEqual({ modelArg: '', prompt: '' })
   })
 
   it('highlights the current live session when the picker opens', () => {
