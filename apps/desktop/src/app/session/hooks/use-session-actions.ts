@@ -437,14 +437,22 @@ export function useSessionActions({
       const requestId = resumeRequestRef.current + 1
       resumeRequestRef.current = requestId
 
-      const isCurrentResume = () =>
-        resumeRequestRef.current === requestId && selectedStoredSessionIdRef.current === storedSessionId
+      const isLatestResume = () => resumeRequestRef.current === requestId
+      const isCurrentResume = () => isLatestResume() && selectedStoredSessionIdRef.current === storedSessionId
 
       // Swap the single live gateway to this session's profile before any
       // gateway call (no-op when it's already on that profile / single-profile).
       const storedForProfile = $sessions.get().find(session => session.id === storedSessionId)
       const sessionProfile = storedForProfile?.profile
       await ensureGatewayProfile(sessionProfile)
+
+      // A slower, older resume can finish its profile switch after a newer
+      // sidebar click already selected a different route. Stop before touching
+      // shared selection/message stores, otherwise the stale resume can reselect
+      // the wrong row and leave the previous transcript painted under it.
+      if (!isLatestResume()) {
+        return
+      }
 
       const cachedRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
       const cachedState = cachedRuntimeId && sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)
