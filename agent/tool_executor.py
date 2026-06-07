@@ -489,6 +489,16 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # ContextVars are propagated by propagate_context_to_thread() at the
         # submit site below (GHSA-qg5c-hvr5-hjgr, #13617).
         start = time.time()
+        # ToolExecutionAudit: vor echter Execution (Fail-Soft, blockt nie)
+        try:
+            from agent.tool_audit import get_audit
+            get_audit().audit(
+                agent_id=getattr(agent, "session_id", "unknown"),
+                tool_name=function_name,
+                args=function_args,
+            )
+        except Exception:
+            pass  # Defensive: get_audit() raise darf Tool-Call nie blocken
         try:
             try:
                 result = agent._invoke_tool(
@@ -874,6 +884,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             else:
                 args_preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
                 print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
+
+        # ToolExecutionAudit: vor echter Execution (nicht bei blockierten Calls)
+        if not _execution_blocked:
+            try:
+                from agent.tool_audit import get_audit
+                get_audit().audit(
+                    agent_id=getattr(agent, "session_id", "unknown"),
+                    tool_name=function_name,
+                    args=function_args,
+                )
+            except Exception:
+                pass  # Defensive: get_audit() raise darf Tool-Call nie blocken
 
         if not _execution_blocked:
             agent._current_tool = function_name
