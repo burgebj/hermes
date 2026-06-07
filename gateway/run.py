@@ -7638,6 +7638,25 @@ class GatewayRunner:
         try:
             from tools import clarify_gateway as _clarify_mod
             _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            # P46 fix: when _quick_key doesn't match (e.g. due to
+            # thread_sessions_per_user config mismatch), fall back to the
+            # canonical session key from get_or_create_session.  Without
+            # this, the clarify is not found → message falls through
+            # → a new Session is created → two Sessions run in parallel
+            # in the same Thread (Session split).
+            # Guard: only in Thread contexts where session key mismatch
+            # can actually occur — non-Thread paths (DM, channel root)
+            # always have _quick_key == canonical key, so calling
+            # get_or_create_session here breaks Telegram topic mode lobby
+            # (which asserts it's never called).
+            if _pending_clarify is None and source.thread_id:
+                try:
+                    _canonical_entry = self.session_store.get_or_create_session(source)
+                    _canonical_key = _canonical_entry.session_key
+                    if _canonical_key != _quick_key:
+                        _pending_clarify = _clarify_mod.get_pending_for_session(_canonical_key)
+                except Exception:
+                    pass
         except Exception:
             _pending_clarify = None
         if _pending_clarify is not None:
@@ -8920,6 +8939,28 @@ class GatewayRunner:
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+        # P46 concurrency guard: belt-and-suspenders clarify check using
+        # the canonical session key.  The earlier check in _handle_message
+        # uses _quick_key which may differ from session_key when
+        # thread_sessions_per_user configs diverge.  When keys differ and
+        # no agent is found in _running_agents under _quick_key, a new
+        # Session is spawned before the clarify-blocked agent can respond.
+        if session_key != _quick_key:
+            try:
+                from tools import clarify_gateway as _clarify_mod2
+                _pc = _clarify_mod2.get_pending_for_session(session_key)
+                if _pc is not None:
+                    _raw = (event.text or '').strip()
+                    if _raw and not _raw.startswith('/'):
+                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)
+                        logger.info(
+                            'Gateway intercepted clarify at session guard '
+                            '(session=%s, clarify_id=%s)',
+                            session_key, _pc.clarify_id,
+                        )
+                        return None  # consumed by clarify — no new turn
+            except Exception:
+                pass
         self._cache_session_source(session_key, source)
         if self._is_telegram_topic_lane(source):
             try:
