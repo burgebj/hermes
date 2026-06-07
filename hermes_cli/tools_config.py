@@ -3036,6 +3036,11 @@ def _configure_simple_requirements(ts_key: str):
                 save_config(_cfg)
                 if is_native_openai:
                     save_env_value("AUXILIARY_VISION_MODEL", "gpt-4o-mini")
+                else:
+                    # Custom endpoint — prompt for model name
+                    model = _prompt("    Model name (e.g. gpt-4o, gemini-2.0-flash)").strip()
+                    if model:
+                        save_env_value("AUXILIARY_VISION_MODEL", model)
                 _print_success("    Saved")
             else:
                 _print_warning("    Skipped")
