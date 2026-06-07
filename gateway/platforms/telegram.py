@@ -5953,6 +5953,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=thread_id_str,
             chat_topic=chat_topic,
             message_id=str(message.message_id),
+            is_bot=getattr(user, "is_bot", False),
         )
         
         # Extract reply context if this message is a reply.
