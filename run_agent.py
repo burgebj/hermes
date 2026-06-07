@@ -4823,6 +4823,37 @@ class AIAgent:
             or base_url_host_matches(self.base_url, "xiaomimimo.com")
         )
 
+    def _rejects_reasoning_content_echo(self) -> bool:
+        """Return True when the active provider REJECTS replayed reasoning_content.
+
+        Cerebras emits ``reasoning_content`` on a turn-1 response but rejects
+        it when that assistant message is echoed back in history on the next
+        turn, failing with HTTP 400 (``messages.N.assistant.reasoning_content
+        ... is unsupported`` / ``wrong_api_format``). This is the exact inverse
+        of the DeepSeek / Kimi / MiMo thinking-mode requirement enforced by
+        ``_needs_thinking_reasoning_pad()``: there the field must be present on
+        every replay; here it must be stripped from the outgoing API copy.
+        Refs #34716.
+
+        Detection is host/provider-driven (not model-name-driven), mirroring
+        the thinking-pad predicates: aggregators that re-export the same model
+        names speak their own protocol, so we only strip when the request
+        actually targets a Cerebras endpoint. Result cached on the AIAgent
+        instance keyed by (provider, model, base_url); the key comparison
+        self-invalidates whenever ``switch_model()`` / ``_try_activate_fallback()``
+        change any of those.
+        """
+        key = (self.provider, self.model, getattr(self, "_base_url_lower", self.base_url))
+        cached = getattr(self, "_rejects_echo_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        result = (
+            (self.provider or "").lower() == "cerebras"
+            or base_url_host_matches(self.base_url, "cerebras.ai")
+        )
+        self._rejects_echo_cache = (key, result)
+        return result
+
     def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
         """Forwarder — see ``agent.agent_runtime_helpers.copy_reasoning_content_for_api``."""
         from agent.agent_runtime_helpers import copy_reasoning_content_for_api

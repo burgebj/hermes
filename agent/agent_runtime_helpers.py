@@ -2044,6 +2044,19 @@ def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> No
     if source_msg.get("role") != "assistant":
         return
 
+    # 0. Some providers REJECT reasoning_content when it is replayed in
+    # assistant history. Cerebras returns reasoning_content on turn 1 but
+    # fails the next request with HTTP 400 ("messages.N.assistant.
+    # reasoning_content ... is unsupported" / wrong_api_format). This is the
+    # exact inverse of the DeepSeek / Kimi / MiMo thinking-mode echo
+    # requirement handled by the branches below — there the field must be
+    # present, here it must be stripped from the outgoing API copy. Strip it
+    # (and never promote 'reasoning' into it) so multi-turn tool use survives.
+    # Refs #34716.
+    if agent._rejects_reasoning_content_echo():
+        api_msg.pop("reasoning_content", None)
+        return
+
     # 1. Explicit reasoning_content already set — preserve it verbatim
     # (includes DeepSeek/Kimi's own space-placeholder written at creation
     # time, and any valid reasoning content from the same provider).
