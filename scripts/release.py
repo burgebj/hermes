@@ -48,6 +48,7 @@ AUTHOR_MAP = {
     "266365592+bmoore210@users.noreply.github.com": "bmoore210",
     "manishbyatroy@gmail.com": "manishbyatroy",
     "chilltulpa@gmail.com": "TheGardenGallery",
+    "rod.boev@gmail.com": "rodboev",
     "al@randomsnowflake.me": "randomsnowflake",
     "zakame@zakame.net": "zakame",
     "152110621+jiangkoumo@users.noreply.github.com": "jiangkoumo",
