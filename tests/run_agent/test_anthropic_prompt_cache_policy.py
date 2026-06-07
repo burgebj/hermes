@@ -326,6 +326,44 @@ class TestExplicitOverrides:
         assert (should, native) == (True, False)
 
 
+class TestBedrockConverse:
+    """Bedrock Converse API path: bedrock_adapter translates the upstream
+    Anthropic-style cache_control markers we inject here into Bedrock's
+    native cachePoint blocks. Without this branch the bedrock_converse
+    path would re-bill the entire prompt every turn even when the API
+    supports caching."""
+
+    def test_claude_on_bedrock_converse_caches_envelope_layout(self):
+        agent = _make_agent(
+            provider="custom",
+            base_url="",  # bedrock uses boto3, no base_url
+            api_mode="bedrock_converse",
+            model="us.anthropic.claude-opus-4-7",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, False)
+
+    def test_haiku_on_bedrock_converse_caches(self):
+        agent = _make_agent(
+            provider="bedrock",
+            base_url="",
+            api_mode="bedrock_converse",
+            model="anthropic.claude-haiku-4-5-20251001-v1:0",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, False)
+
+    def test_non_claude_on_bedrock_converse_does_not_cache(self):
+        # Llama/DeepSeek/Nova on Bedrock Converse don't go through the
+        # Anthropic cache_control plumbing — they shouldn't get the
+        # bedrock_converse branch.
+        agent = _make_agent(
+            provider="bedrock",
+            base_url="",
+            api_mode="bedrock_converse",
+            model="meta.llama3-70b-instruct-v1:0",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (False, False)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Long-lived prefix cache policy (cross-session 1h tier)
 # ─────────────────────────────────────────────────────────────────────

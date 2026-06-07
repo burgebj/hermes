@@ -435,6 +435,11 @@ def convert_tools_to_converse(tools: List[Dict]) -> List[Dict]:
                 "inputSchema": {"json": parameters},
             }
         })
+        # Forward upstream cache_control marker on the tool definition
+        # itself (rare today but supported by ``apply_anthropic_cache_control``
+        # when callers add it). Bedrock tools[] accepts a sibling
+        # ``{"cachePoint": {...}}`` block to mark the cache breakpoint.
+        _maybe_append_cache_point(result, t)
     return result
 
 
@@ -490,6 +495,56 @@ def _convert_content_to_converse(content) -> List[Dict]:
     return [{"text": str(content)}]
 
 
+def _extract_cache_control(obj: Any) -> Optional[Dict[str, str]]:
+    """Return a Bedrock ``cachePoint`` payload if ``obj`` carries an Anthropic
+    ``cache_control`` marker, else None.
+
+    Accepts either a message envelope (``{"cache_control": {...}}``) or a
+    content block (``{"type": "text", "cache_control": {...}}``). Maps the
+    Anthropic ``ttl`` field (``"5m"`` / ``"1h"``) onto Bedrock's matching
+    ``ttl`` enum on ``CachePointBlock``. Anthropic's ``type: "ephemeral"``
+    has no Bedrock counterpart — Bedrock only defines ``type: "default"`` —
+    so we always emit ``"default"``.
+
+    Returns ``{"type": "default"}`` for default-TTL markers, or
+    ``{"type": "default", "ttl": "1h"}`` when the Anthropic marker carries
+    a 1h TTL hint.
+    """
+    if not isinstance(obj, dict):
+        return None
+    cc = obj.get("cache_control")
+    if not isinstance(cc, dict):
+        return None
+    payload: Dict[str, str] = {"type": "default"}
+    ttl = cc.get("ttl")
+    if ttl in {"5m", "1h"}:
+        payload["ttl"] = ttl
+    return payload
+
+
+def _maybe_append_cache_point(
+    blocks: List[Dict],
+    source_obj: Any,
+) -> None:
+    """If ``source_obj`` carries a ``cache_control`` marker, append a
+    ``{"cachePoint": {...}}`` block to ``blocks``. Used to forward the
+    upstream Anthropic-style cache markers (injected by
+    ``apply_anthropic_cache_control``) into Bedrock's native
+    ``cachePoint`` schema, which is the only way to declare a cache
+    breakpoint on a Converse API request.
+
+    Bedrock supports cachePoint blocks at three locations:
+      - inside ``messages[].content[]``
+      - inside ``system[]``
+      - inside ``toolConfig.tools[]``
+
+    All three flow through this helper.
+    """
+    cp = _extract_cache_control(source_obj)
+    if cp is not None:
+        blocks.append({"cachePoint": cp})
+
+
 def convert_messages_to_converse(
     messages: List[Dict],
 ) -> Tuple[Optional[List[Dict]], List[Dict]]:
@@ -524,8 +579,15 @@ def convert_messages_to_converse(
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         system_blocks.append({"text": part.get("text", "")})
+                        # Preserve per-block cache_control by appending a
+                        # cachePoint immediately after the text it scopes.
+                        _maybe_append_cache_point(system_blocks, part)
                     elif isinstance(part, str):
                         system_blocks.append({"text": part})
+            # Envelope-level cache marker (e.g. system message itself carries
+            # cache_control rather than the inner part). Append at the end of
+            # the system block list so the cachePoint covers everything above.
+            _maybe_append_cache_point(system_blocks, msg)
             continue
 
         if role == "tool":
@@ -546,6 +608,9 @@ def convert_messages_to_converse(
                     "role": "user",
                     "content": [tool_result_block],
                 })
+            # Forward envelope cache_control on the tool message — append a
+            # cachePoint right after the toolResult block we just placed.
+            _maybe_append_cache_point(converse_msgs[-1]["content"], msg)
             continue
 
         if role == "assistant":
@@ -555,6 +620,13 @@ def convert_messages_to_converse(
                 content_blocks.append({"text": content})
             elif isinstance(content, list):
                 content_blocks.extend(_convert_content_to_converse(content))
+                # Per-block cache markers: any inner part carrying
+                # cache_control becomes a cachePoint right after that
+                # block in the converted output. Walk the same parts a
+                # second time and look up positions via the helper.
+                for part in content:
+                    if isinstance(part, dict) and part.get("cache_control"):
+                        _maybe_append_cache_point(content_blocks, part)
 
             # Convert tool calls
             tool_calls = msg.get("tool_calls", [])
@@ -576,6 +648,10 @@ def convert_messages_to_converse(
             if not content_blocks:
                 content_blocks = [{"text": " "}]
 
+            # Envelope cache_control on the assistant message → append
+            # cachePoint at the end of this turn's content list.
+            _maybe_append_cache_point(content_blocks, msg)
+
             # Merge with previous assistant message if needed (strict alternation)
             if converse_msgs and converse_msgs[-1]["role"] == "assistant":
                 converse_msgs[-1]["content"].extend(content_blocks)
@@ -588,6 +664,13 @@ def convert_messages_to_converse(
 
         if role == "user":
             content_blocks = _convert_content_to_converse(content)
+            # Per-block cache markers carried on user content parts.
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("cache_control"):
+                        _maybe_append_cache_point(content_blocks, part)
+            # Envelope cache_control on the user message itself.
+            _maybe_append_cache_point(content_blocks, msg)
             # Merge with previous user message if needed (strict alternation)
             if converse_msgs and converse_msgs[-1]["role"] == "user":
                 converse_msgs[-1]["content"].extend(content_blocks)
@@ -675,14 +758,36 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
         reasoning_content="\n\n".join(reasoning_parts) if reasoning_parts else None,
     )
 
-    # Build usage stats
+    # Build usage stats. Bedrock Converse surfaces prompt-cache hit/write
+    # counts in ``usage.cacheReadInputTokens`` / ``usage.cacheWriteInputTokens``
+    # — we forward both onto the OpenAI-compatible Usage namespace so the
+    # conversation loop's session bookkeeping (session_cache_read_tokens /
+    # session_cache_write_tokens) gets accurate numbers and the cost
+    # estimator can apply Anthropic's 0.1× / 1.25× cache pricing tiers.
+    #
+    # Note on field semantics: Bedrock's ``inputTokens`` does NOT include
+    # cache hit/write tokens (they're returned as separate counters), but
+    # ``normalize_usage`` in ``usage_pricing.py`` assumes the OpenAI
+    # convention where ``prompt_tokens`` is the all-up total and cache
+    # tokens are subtracted out. We compensate by reporting
+    # ``prompt_tokens = inputTokens + cacheReadInputTokens + cacheWriteInputTokens``
+    # so the downstream subtraction reproduces the real fresh-input count.
     usage_data = response.get("usage", {})
+    fresh_input = usage_data.get("inputTokens", 0) or 0
+    cache_read = usage_data.get("cacheReadInputTokens", 0) or 0
+    cache_write = usage_data.get("cacheWriteInputTokens", 0) or 0
+    output_tokens = usage_data.get("outputTokens", 0) or 0
     usage = SimpleNamespace(
-        prompt_tokens=usage_data.get("inputTokens", 0),
-        completion_tokens=usage_data.get("outputTokens", 0),
-        total_tokens=(
-            usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0)
-        ),
+        prompt_tokens=fresh_input + cache_read + cache_write,
+        completion_tokens=output_tokens,
+        total_tokens=fresh_input + cache_read + cache_write + output_tokens,
+        # Anthropic-shaped aliases so the shared cache-stats extractor in
+        # ``transports/anthropic.py:extract_cache_stats`` and
+        # ``usage_pricing.normalize_usage`` (which falls back to these
+        # top-level fields when ``prompt_tokens_details`` is absent) both
+        # pick them up.
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_write,
     )
 
     finish_reason = _converse_stop_reason_to_openai(stop_reason)
@@ -831,6 +936,12 @@ def stream_converse_with_callbacks(
             usage_data = {
                 "inputTokens": meta_usage.get("inputTokens", 0),
                 "outputTokens": meta_usage.get("outputTokens", 0),
+                # Forward cache hit/write counters from the streaming usage
+                # metadata. Same reasoning as the non-streaming path —
+                # required for accurate session token bookkeeping and cost
+                # estimation when prompt caching is enabled.
+                "cacheReadInputTokens": meta_usage.get("cacheReadInputTokens", 0),
+                "cacheWriteInputTokens": meta_usage.get("cacheWriteInputTokens", 0),
             }
 
     # Flush remaining text
@@ -844,12 +955,23 @@ def stream_converse_with_callbacks(
         reasoning_content="\n\n".join(reasoning_parts) if reasoning_parts else None,
     )
 
+    # See ``normalize_converse_response`` for the prompt_tokens semantics —
+    # ``inputTokens`` from Bedrock excludes cache, but downstream
+    # ``normalize_usage`` expects an all-up prompt_tokens then subtracts
+    # out cache tokens.
+    fresh_input = usage_data.get("inputTokens", 0) or 0
+    stream_cache_read = usage_data.get("cacheReadInputTokens", 0) or 0
+    stream_cache_write = usage_data.get("cacheWriteInputTokens", 0) or 0
+    stream_output = usage_data.get("outputTokens", 0) or 0
     usage = SimpleNamespace(
-        prompt_tokens=usage_data.get("inputTokens", 0),
-        completion_tokens=usage_data.get("outputTokens", 0),
-        total_tokens=(
-            usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0)
-        ),
+        prompt_tokens=fresh_input + stream_cache_read + stream_cache_write,
+        completion_tokens=stream_output,
+        total_tokens=fresh_input + stream_cache_read + stream_cache_write + stream_output,
+        # Anthropic-shaped aliases — see normalize_converse_response for
+        # rationale. Keep both paths in sync so streaming and non-streaming
+        # responses report cache hits identically.
+        cache_read_input_tokens=stream_cache_read,
+        cache_creation_input_tokens=stream_cache_write,
     )
 
     finish_reason = _converse_stop_reason_to_openai(stop_reason)

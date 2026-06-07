@@ -1220,6 +1220,20 @@ def anthropic_prompt_cache_policy(
         # Third-party Anthropic-compatible gateway.
         return True, True
 
+    # AWS Bedrock Converse API for Claude models. Bedrock Converse supports
+    # prompt caching via ``cachePoint`` blocks (separate from Anthropic's
+    # ``cache_control`` field). The bedrock_adapter translates the upstream
+    # ``cache_control`` markers we inject here into Bedrock's native
+    # ``cachePoint`` schema. Without this branch, bedrock_converse traffic
+    # falls through to (False, False) and re-bills the full prompt every
+    # turn even though the underlying API supports caching.
+    # Docs: https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+    if eff_api_mode == "bedrock_converse" and is_claude:
+        # Use envelope layout (native_anthropic=False) — bedrock_adapter looks
+        # for the cache_control marker on the message envelope or inner blocks
+        # and emits cachePoint blocks accordingly.
+        return True, False
+
     # MiniMax on its Anthropic-compatible endpoint serves its own
     # model family (MiniMax-M2.7, M2.5, M2.1, M2) with documented
     # cache_control support (0.1× read pricing, 5-minute TTL).  The

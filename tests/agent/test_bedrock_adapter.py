@@ -361,6 +361,163 @@ class TestConvertMessagesToConverse:
         assert system[1]["text"] == "Rule 2"
 
 
+class TestConvertMessagesCachePoint:
+    """Verify that Anthropic-style ``cache_control`` markers (injected by
+    ``apply_anthropic_cache_control``) are translated into Bedrock Converse
+    ``cachePoint`` blocks during message conversion. Without this the
+    bedrock_converse path bills the full prompt every turn even when the
+    upstream caching policy says it should be cached.
+    """
+
+    def test_envelope_cache_control_on_user_emits_cache_point(self):
+        from agent.bedrock_adapter import convert_messages_to_converse
+        messages = [
+            {
+                "role": "user",
+                "content": "Hello",
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        _, msgs = convert_messages_to_converse(messages)
+        assert msgs[0]["role"] == "user"
+        # text block + cachePoint block
+        assert any("cachePoint" in b for b in msgs[0]["content"])
+        cp = next(b for b in msgs[0]["content"] if "cachePoint" in b)
+        assert cp["cachePoint"] == {"type": "default"}
+
+    def test_inner_block_cache_control_on_system_emits_cache_point(self):
+        from agent.bedrock_adapter import convert_messages_to_converse
+        messages = [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Long system prompt here",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ]
+        system, _ = convert_messages_to_converse(messages)
+        assert system is not None
+        # text block followed by cachePoint
+        assert system[0] == {"text": "Long system prompt here"}
+        assert system[1] == {"cachePoint": {"type": "default"}}
+
+    def test_inner_block_cache_control_on_assistant(self):
+        from agent.bedrock_adapter import convert_messages_to_converse
+        messages = [
+            {"role": "user", "content": "ping"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "pong",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            },
+            {"role": "user", "content": "again"},
+        ]
+        _, msgs = convert_messages_to_converse(messages)
+        # Find the assistant turn
+        asst = next(m for m in msgs if m["role"] == "assistant")
+        assert any("cachePoint" in b for b in asst["content"])
+
+    def test_ttl_1h_marker_propagates(self):
+        from agent.bedrock_adapter import convert_messages_to_converse
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "context",
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    },
+                ],
+            },
+        ]
+        _, msgs = convert_messages_to_converse(messages)
+        cp = next(b for b in msgs[0]["content"] if "cachePoint" in b)
+        assert cp["cachePoint"] == {"type": "default", "ttl": "1h"}
+
+    def test_no_cache_control_emits_no_cache_point(self):
+        from agent.bedrock_adapter import convert_messages_to_converse
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+        ]
+        system, msgs = convert_messages_to_converse(messages)
+        # System: only text blocks, no cachePoint
+        assert all("cachePoint" not in b for b in (system or []))
+        # All converse messages: only text blocks, no cachePoint
+        for m in msgs:
+            assert all("cachePoint" not in b for b in m["content"])
+
+    def test_tool_message_envelope_cache_control(self):
+        from agent.bedrock_adapter import convert_messages_to_converse
+        messages = [
+            {"role": "user", "content": "do thing"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "do", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "result",
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        _, msgs = convert_messages_to_converse(messages)
+        # Find the user turn that absorbed the tool result
+        user_turn = next(
+            m for m in msgs
+            if m["role"] == "user" and any("toolResult" in b for b in m["content"])
+        )
+        assert any("cachePoint" in b for b in user_turn["content"])
+
+
+class TestConvertToolsCachePoint:
+    """Verify cache_control on tool definitions translates into a cachePoint
+    sibling block in the Bedrock toolConfig — preserves the prompt cache
+    breakpoint the upstream caller declared on a tool entry."""
+
+    def test_cache_control_on_tool_emits_cache_point(self):
+        from agent.bedrock_adapter import convert_tools_to_converse
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "search", "description": "d", "parameters": {}},
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        out = convert_tools_to_converse(tools)
+        assert out[0]["toolSpec"]["name"] == "search"
+        assert out[1] == {"cachePoint": {"type": "default"}}
+
+    def test_no_cache_control_no_cache_point(self):
+        from agent.bedrock_adapter import convert_tools_to_converse
+        tools = [
+            {"type": "function", "function": {"name": "a", "description": "", "parameters": {}}},
+            {"type": "function", "function": {"name": "b", "description": "", "parameters": {}}},
+        ]
+        out = convert_tools_to_converse(tools)
+        assert all("cachePoint" not in t for t in out)
+        assert len(out) == 2
+
+
 # ---------------------------------------------------------------------------
 # Response normalization: Converse → OpenAI
 # ---------------------------------------------------------------------------
@@ -475,6 +632,91 @@ class TestNormalizeConverseResponse:
         }
         result = normalize_converse_response(response)
         assert result.choices[0].finish_reason == "tool_calls"
+
+
+class TestNormalizeConverseResponseCacheUsage:
+    """Verify that prompt-cache usage from Bedrock Converse responses is
+    surfaced on the normalized Usage namespace using the Anthropic-shaped
+    field names ``cache_read_input_tokens`` /
+    ``cache_creation_input_tokens``. ``usage_pricing.normalize_usage``
+    falls back to these top-level fields on non-Anthropic api_modes, so
+    they're what makes Bedrock cache hits show up in session bookkeeping
+    and cost estimation.
+    """
+
+    def test_cache_read_and_write_forwarded(self):
+        from agent.bedrock_adapter import normalize_converse_response
+        response = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "cacheReadInputTokens": 2000,
+                "cacheWriteInputTokens": 0,
+            },
+        }
+        result = normalize_converse_response(response)
+        assert result.usage.cache_read_input_tokens == 2000
+        assert result.usage.cache_creation_input_tokens == 0
+        # prompt_tokens is reported as the all-up total (fresh + cache)
+        # so usage_pricing.normalize_usage's subtraction yields fresh=10.
+        assert result.usage.prompt_tokens == 10 + 2000 + 0
+
+    def test_cache_write_response(self):
+        from agent.bedrock_adapter import normalize_converse_response
+        response = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "cacheReadInputTokens": 0,
+                "cacheWriteInputTokens": 1500,
+            },
+        }
+        result = normalize_converse_response(response)
+        assert result.usage.cache_creation_input_tokens == 1500
+        assert result.usage.cache_read_input_tokens == 0
+        assert result.usage.prompt_tokens == 10 + 0 + 1500
+
+    def test_no_cache_fields_reports_zero(self):
+        """Backward-compat: responses without cache fields still normalize
+        cleanly with zeros for cache counters."""
+        from agent.bedrock_adapter import normalize_converse_response
+        response = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 5},
+        }
+        result = normalize_converse_response(response)
+        assert result.usage.cache_read_input_tokens == 0
+        assert result.usage.cache_creation_input_tokens == 0
+        assert result.usage.prompt_tokens == 10
+
+    def test_cache_usage_round_trips_through_normalize_usage(self):
+        """End-to-end: normalize_usage from usage_pricing should pull cache
+        counts back out correctly via the Anthropic-shaped fallback path
+        when called with api_mode='bedrock_converse'."""
+        from agent.bedrock_adapter import normalize_converse_response
+        from agent.usage_pricing import normalize_usage
+
+        response = {
+            "output": {"message": {"content": [{"text": "ok"}]}},
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 50,
+                "outputTokens": 20,
+                "cacheReadInputTokens": 5000,
+                "cacheWriteInputTokens": 100,
+            },
+        }
+        result = normalize_converse_response(response)
+        canonical = normalize_usage(result.usage, api_mode="bedrock_converse")
+        assert canonical.input_tokens == 50  # fresh, after cache subtraction
+        assert canonical.output_tokens == 20
+        assert canonical.cache_read_tokens == 5000
+        assert canonical.cache_write_tokens == 100
 
 
 # ---------------------------------------------------------------------------
