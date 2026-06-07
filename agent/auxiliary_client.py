@@ -1721,6 +1721,7 @@ _RUNTIME_MAIN_MODEL: str = ""
 _RUNTIME_MAIN_BASE_URL: str = ""
 _RUNTIME_MAIN_API_KEY: str = ""
 _RUNTIME_MAIN_API_MODE: str = ""
+_RUNTIME_MAIN_HEADERS: Dict[str, str] = {}
 
 
 def set_runtime_main(
@@ -1730,6 +1731,7 @@ def set_runtime_main(
     base_url: str = "",
     api_key: str = "",
     api_mode: str = "",
+    default_headers: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Record the live runtime provider/model/credentials for the current AIAgent.
 
@@ -1744,25 +1746,37 @@ def set_runtime_main(
     """
     global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
     global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
+    global _RUNTIME_MAIN_HEADERS
     _RUNTIME_MAIN_PROVIDER = (provider or "").strip().lower()
     _RUNTIME_MAIN_MODEL = (model or "").strip()
     _RUNTIME_MAIN_BASE_URL = (base_url or "").strip()
     _RUNTIME_MAIN_API_KEY = api_key.strip() if isinstance(api_key, str) else ""
     _RUNTIME_MAIN_API_MODE = (api_mode or "").strip()
+    _RUNTIME_MAIN_HEADERS = {}
+    if isinstance(default_headers, dict):
+        for key, value in default_headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                _RUNTIME_MAIN_HEADERS[key_str] = value_str
 
 
 def clear_runtime_main() -> None:
     """Clear the runtime override (e.g. on session end)."""
     global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
     global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
+    global _RUNTIME_MAIN_HEADERS
     _RUNTIME_MAIN_PROVIDER = ""
     _RUNTIME_MAIN_MODEL = ""
     _RUNTIME_MAIN_BASE_URL = ""
     _RUNTIME_MAIN_API_KEY = ""
     _RUNTIME_MAIN_API_MODE = ""
+    _RUNTIME_MAIN_HEADERS = {}
 
 
-def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str], Dict[str, str]]:
     """Resolve the active custom/main endpoint the same way the main CLI does.
 
     This covers both env-driven OPENAI_BASE_URL setups and config-saved custom
@@ -1781,7 +1795,7 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
         openai_base = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
         openai_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not openai_base:
-            return None, None, None
+            return None, None, None, {}
         runtime = {
             "base_url": openai_base,
             "api_key": openai_key,
@@ -1790,14 +1804,24 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
     custom_base = runtime.get("base_url")
     custom_key = runtime.get("api_key")
     custom_mode = runtime.get("api_mode")
+    raw_headers = runtime.get("headers") or runtime.get("default_headers")
+    custom_headers: Dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                custom_headers[key_str] = value_str
     if not isinstance(custom_base, str) or not custom_base.strip():
-        return None, None, None
+        return None, None, None, {}
 
     custom_base = custom_base.strip().rstrip("/")
     if base_url_host_matches(custom_base, "openrouter.ai"):
         # requested='custom' falls back to OpenRouter when no custom endpoint is
         # configured. Treat that as "no custom endpoint" for auxiliary routing.
-        return None, None, None
+        return None, None, None, {}
 
     # Local servers (Ollama, llama.cpp, vLLM, LM Studio) don't require auth.
     # Use a placeholder key — the OpenAI SDK requires a non-empty string but
@@ -1809,11 +1833,12 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
     if not isinstance(custom_mode, str) or not custom_mode.strip():
         custom_mode = None
 
-    return custom_base, custom_key.strip(), custom_mode
+    return custom_base, custom_key.strip(), custom_mode, custom_headers
 
 
 def _current_custom_base_url() -> str:
-    custom_base, _, _ = _resolve_custom_runtime()
+    runtime = _resolve_custom_runtime()
+    custom_base = runtime[0] if runtime else None
     return custom_base or ""
 
 
@@ -1869,8 +1894,12 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     if len(runtime) == 2:
         custom_base, custom_key = runtime
         custom_mode = None
-    else:
+        custom_headers = {}
+    elif len(runtime) == 3:
         custom_base, custom_key, custom_mode = runtime
+        custom_headers = {}
+    else:
+        custom_base, custom_key, custom_mode, custom_headers = runtime
     if not custom_base or not custom_key:
         return None, None
     if custom_base.lower().startswith(_CODEX_AUX_BASE_URL.lower()):
@@ -1879,6 +1908,8 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     logger.debug("Auxiliary client: custom endpoint (%s, api_mode=%s)", model, custom_mode or "chat_completions")
     _clean_base, _dq = _extract_url_query_params(custom_base)
     _extra = {"default_query": _dq} if _dq else {}
+    if custom_headers:
+        _extra["default_headers"] = custom_headers
     if custom_mode == "codex_responses":
         real_client = OpenAI(api_key=custom_key, base_url=_clean_base, **_extra)
         return CodexAuxiliaryClient(real_client, model), model
@@ -2167,6 +2198,18 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
             continue
         if isinstance(value, str) and value.strip():
             normalized[field] = value.strip()
+    raw_headers = main_runtime.get("default_headers") or main_runtime.get("headers")
+    if isinstance(raw_headers, dict):
+        default_headers: Dict[str, str] = {}
+        for key, value in raw_headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                default_headers[key_str] = value_str
+        if default_headers:
+            normalized["default_headers"] = default_headers
     provider = normalized.get("provider")
     if isinstance(provider, str):
         normalized["provider"] = provider.lower()
@@ -3091,6 +3134,11 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
         runtime_api_key = _RUNTIME_MAIN_API_KEY
     if not runtime_api_mode and _RUNTIME_MAIN_API_MODE:
         runtime_api_mode = _RUNTIME_MAIN_API_MODE
+    runtime_headers = dict(runtime.get("default_headers") or {})
+    if not runtime_headers and _RUNTIME_MAIN_HEADERS:
+        runtime_headers = dict(_RUNTIME_MAIN_HEADERS)
+    if runtime_headers:
+        runtime["default_headers"] = runtime_headers
 
     # ── Warn once if OPENAI_BASE_URL is set but config.yaml uses a named
     #    provider (not 'custom').  This catches the common "env poisoning"
@@ -3149,6 +3197,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
                 explicit_base_url=explicit_base_url,
                 explicit_api_key=explicit_api_key,
                 api_mode=runtime_api_mode or None,
+                main_runtime=runtime,
             )
             if client is not None:
                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
@@ -3516,15 +3565,16 @@ def resolve_provider_client(
             _clean_base, _dq = _extract_url_query_params(custom_base)
             if _dq:
                 extra["default_query"] = _dq
+            default_headers = dict((main_runtime or {}).get("default_headers") or {})
             if base_url_host_matches(custom_base, "api.kimi.com"):
-                extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
+                default_headers.update({"User-Agent": "claude-code/0.1.0"})
             elif base_url_host_matches(custom_base, "api.githubcopilot.com"):
                 from hermes_cli.copilot_auth import copilot_request_headers
-                extra["default_headers"] = copilot_request_headers(
+                default_headers.update(copilot_request_headers(
                     is_agent_turn=True, is_vision=is_vision
-                )
+                ))
             elif base_url_host_matches(custom_base, "integrate.api.nvidia.com"):
-                extra["default_headers"] = build_nvidia_nim_headers(custom_base)
+                default_headers.update(build_nvidia_nim_headers(custom_base))
             else:
                 # Fall back to profile.default_headers for providers that
                 # declare client-level attribution headers on their profile.
@@ -3532,9 +3582,11 @@ def resolve_provider_client(
                     from providers import get_provider_profile as _gpf_custom
                     _ph_custom = _gpf_custom(provider)
                     if _ph_custom and _ph_custom.default_headers:
-                        extra["default_headers"] = dict(_ph_custom.default_headers)
+                        default_headers.update(dict(_ph_custom.default_headers))
                 except Exception:
                     pass
+            if default_headers:
+                extra["default_headers"] = default_headers
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
             client = _wrap_if_needed(client, final_model, custom_base, custom_key)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
@@ -3611,6 +3663,10 @@ def resolve_provider_client(
                     raw_base_for_wrap = custom_base
                 _clean_base2, _dq2 = _extract_url_query_params(openai_base)
                 _extra2 = {"default_query": _dq2} if _dq2 else {}
+                named_headers = dict(custom_entry.get("headers") or {})
+                named_headers.update(dict((main_runtime or {}).get("default_headers") or {}))
+                if named_headers:
+                    _extra2["default_headers"] = named_headers
                 logger.debug(
                     "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
                     provider, final_model, entry_api_mode or "chat_completions")
@@ -3633,6 +3689,8 @@ def resolve_provider_client(
                         _fallback_base = _to_openai_base_url(custom_base)
                         _fb_clean, _fb_dq = _extract_url_query_params(_fallback_base)
                         _fb_extra = {"default_query": _fb_dq} if _fb_dq else {}
+                        if named_headers:
+                            _fb_extra["default_headers"] = named_headers
                         client = OpenAI(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
                         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                                 else (client, final_model))
@@ -4271,7 +4329,16 @@ def _client_cache_key(
     is_vision: bool = False,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
-    runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    runtime_headers = tuple(sorted((runtime.get("default_headers") or {}).items()))
+    if provider == "auto":
+        runtime_key = (
+            tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS),
+            runtime_headers,
+        )
+    elif runtime_headers:
+        runtime_key = (runtime_headers,)
+    else:
+        runtime_key = ()
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
     return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, pool_hint)
 

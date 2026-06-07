@@ -335,6 +335,7 @@ def _run_agent(
     agent = AIAgent(
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
+        default_headers=dict(runtime.get("headers") or {}),
         provider=runtime.get("provider"),
         api_mode=runtime.get("api_mode"),
         model=effective_model,

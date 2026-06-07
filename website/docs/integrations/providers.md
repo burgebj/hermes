@@ -641,13 +641,22 @@ model:
   provider: custom
   base_url: http://localhost:8000/v1
   api_key: your-key-or-leave-empty-for-local
+  api_mode: chat_completions
+  # Optional: headers required by API gateways, reverse proxies, or tenant routers
+  headers:
+    User-Agent: HermesAgent/1.0
+    X-Tenant: my-team
 ```
 
 :::warning Legacy env vars
 `LLM_MODEL` in `.env` is **removed** — `config.yaml` is the single source of truth for model and endpoint configuration. `OPENAI_BASE_URL` is still honored, but **only** for the `openai-api` provider (it overrides the OpenAI endpoint for direct API-key access). For other providers and custom endpoints, use `hermes model` or set `model.base_url` in `config.yaml` directly. If you have stale entries in your `.env`, they are automatically cleared on the next `hermes setup` or config migration.
 :::
 
-Both approaches persist to `config.yaml`, which is the source of truth for model, provider, and base URL.
+Both approaches persist to `config.yaml`, which is the source of truth for model, provider, base URL, and any extra request headers.
+
+:::tip Header-gated gateways
+Some OpenAI-compatible gateways require request headers such as `User-Agent`, tenant IDs, or routing hints in addition to the API key. Put those under `model.headers` for a single custom endpoint. Hermes forwards them to the primary model client and to auxiliary tasks that inherit the main runtime, such as automatic session-title generation.
+:::
 
 ### Switching Models with `/model`
 
@@ -1246,11 +1255,16 @@ custom_providers:
     base_url: https://gpu-server.internal.corp/v1
     key_env: CORP_API_KEY
     api_mode: chat_completions   # set explicitly by `hermes model` → Custom Endpoint wizard; auto-detection still happens as a fallback
+    headers:
+      User-Agent: HermesAgent/1.0
+      X-Tenant: research
   - name: anthropic-proxy
     base_url: https://proxy.example.com/anthropic
     key_env: ANTHROPIC_PROXY_KEY
     api_mode: anthropic_messages  # for Anthropic-compatible proxies
 ```
+
+Use `headers` when a named provider sits behind a proxy that rejects generic SDK defaults or needs tenant-specific routing. These headers are scoped to that custom provider and are merged with Hermes' provider-specific default headers when the endpoint also needs built-in attribution headers.
 
 Some OpenAI-compatible endpoints need provider-specific request body fields. Add an `extra_body` map to the matching custom provider and Hermes will merge it into each chat-completions request for that endpoint:
 

@@ -915,6 +915,7 @@ def _build_child_agent(
     override_base_url: Optional[str] = None,
     override_api_key: Optional[str] = None,
     override_api_mode: Optional[str] = None,
+    override_default_headers: Optional[dict] = None,
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
@@ -1068,6 +1069,20 @@ def _build_child_agent(
         effective_api_mode = None  # force re-derivation from provider's defaults
     else:
         effective_api_mode = getattr(parent_agent, "api_mode", None)
+    parent_user_headers = getattr(parent_agent, "_user_default_headers", None)
+    parent_default_headers = dict(parent_user_headers or {}) if isinstance(parent_user_headers, dict) else {}
+    parent_client_kwargs = getattr(parent_agent, "_client_kwargs", None)
+    if not parent_default_headers and isinstance(parent_client_kwargs, dict):
+        parent_default_headers = dict(parent_client_kwargs.get("default_headers") or {})
+    has_credential_override = any(
+        value
+        for value in (override_provider, override_base_url, override_api_key, override_api_mode, override_acp_command)
+    )
+    effective_default_headers = (
+        dict(override_default_headers)
+        if override_default_headers is not None
+        else ({} if has_credential_override else parent_default_headers)
+    )
     effective_acp_command = override_acp_command or getattr(
         parent_agent, "acp_command", None
     )
@@ -1143,6 +1158,7 @@ def _build_child_agent(
         model=effective_model,
         provider=effective_provider,
         api_mode=effective_api_mode,
+        default_headers=effective_default_headers,
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
@@ -2122,6 +2138,7 @@ def delegate_task(
                 override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
                 override_api_mode=creds["api_mode"],
+                override_default_headers=creds.get("default_headers"),
                 override_acp_command=t.get("acp_command")
                 or acp_command
                 or creds.get("command"),
@@ -2472,6 +2489,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": configured_base_url,
             "api_key": api_key,
             "api_mode": api_mode,
+            "default_headers": dict(cfg.get("headers") or {}) if isinstance(cfg.get("headers"), dict) else {},
         }
 
     if not configured_provider:
@@ -2482,6 +2500,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": None,
             "api_key": None,
             "api_mode": None,
+            "default_headers": None,
         }
 
     # Provider is configured — resolve full credentials
@@ -2510,6 +2529,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "base_url": runtime.get("base_url"),
         "api_key": api_key,
         "api_mode": runtime.get("api_mode"),
+        "default_headers": dict(runtime.get("headers") or {}),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
     }

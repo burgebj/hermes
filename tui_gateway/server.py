@@ -2612,6 +2612,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, session_db=No
         provider=runtime.get("provider"),
         base_url=runtime.get("base_url"),
         api_key=runtime.get("api_key"),
+        default_headers=runtime.get("headers"),
         api_mode=runtime.get("api_mode"),
         acp_command=runtime.get("command"),
         acp_args=runtime.get("args"),
@@ -4851,6 +4852,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         text,
                         raw,
                         session.get("history", []),
+                        main_runtime=(
+                            agent._current_main_runtime()
+                            if hasattr(agent, "_current_main_runtime")
+                            else None
+                        ),
                     )
                 except Exception:
                     pass

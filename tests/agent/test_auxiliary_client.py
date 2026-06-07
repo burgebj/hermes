@@ -736,7 +736,7 @@ class TestExpiredCodexFallback:
             "version": 1,
             "providers": {
                 "openai-codex": {
-                    "tokens": {"access_token": expired_jwt, "refresh_token": "r"},
+                    "tokens": {"access_token": expired_jwt, "refresh_token": "***"},
                 },
             },
         }))
@@ -744,12 +744,79 @@ class TestExpiredCodexFallback:
 
         # Simulate Ollama or custom endpoint
         with patch("agent.auxiliary_client._resolve_custom_runtime",
-                   return_value=("http://localhost:11434/v1", "sk-dummy")):
+                   return_value=("http://localhost:11434/v1", "sk-dummy", None, {})):
             with patch("agent.auxiliary_client.OpenAI") as mock_openai:
                 mock_openai.return_value = MagicMock()
                 from agent.auxiliary_client import _resolve_auto
                 client, model = _resolve_auto()
                 assert client is not None
+
+    def test_custom_endpoint_propagates_runtime_headers(self):
+        with patch(
+            "agent.auxiliary_client._resolve_custom_runtime",
+            return_value=(
+                "https://api.example.com/v1",
+                "sk-test",
+                "codex_responses",
+                {"User-Agent": "Mozilla/5.0", "X-Test": "1"},
+            ),
+        ), patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import _try_custom_endpoint
+
+            client, model = _try_custom_endpoint()
+
+            assert client is not None
+            kwargs = mock_openai.call_args.kwargs
+            assert kwargs["default_headers"] == {
+                "User-Agent": "Mozilla/5.0",
+                "X-Test": "1",
+            }
+
+    def test_title_generation_auto_runtime_headers_reach_codex_client(self):
+        import agent.auxiliary_client as aux_mod
+
+        final_response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(type="output_text", text="Short title")],
+                )
+            ],
+            usage=None,
+        )
+        mock_client = MagicMock()
+        mock_client.api_key = "sk-test"
+        mock_client.base_url = "https://api.duckcode.cn/v1"
+        mock_client.responses.create.return_value = []
+
+        with aux_mod._client_cache_lock:
+            aux_mod._client_cache.clear()
+
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("auto", None, None, None, None),
+        ), patch("agent.auxiliary_client.OpenAI", return_value=mock_client) as mock_openai, patch(
+            "agent.codex_runtime._consume_codex_event_stream",
+            return_value=final_response,
+        ):
+            result = call_llm(
+                task="title_generation",
+                messages=[{"role": "user", "content": "Generate a title"}],
+                main_runtime={
+                    "provider": "custom",
+                    "model": "gpt-5.4",
+                    "base_url": "https://api.duckcode.cn/v1",
+                    "api_key": "sk-test",
+                    "api_mode": "codex_responses",
+                    "default_headers": {"User-Agent": "DuckCodeClient/1.0"},
+                },
+            )
+
+        assert result.choices[0].message.content == "Short title"
+        assert mock_openai.call_args.kwargs["default_headers"] == {
+            "User-Agent": "DuckCodeClient/1.0"
+        }
 
 
     def test_hermes_oauth_file_sets_oauth_flag(self, monkeypatch):

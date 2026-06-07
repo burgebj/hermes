@@ -79,6 +79,7 @@ The runtime resolver returns data such as:
 - `api_mode`
 - `base_url`
 - `api_key`
+- custom `headers` / `default_headers`
 - `source`
 - provider-specific metadata like expiry/refresh info
 
@@ -154,6 +155,7 @@ When an auxiliary task is configured with provider `main`, Hermes resolves that 
 
 - env-driven custom endpoints still work
 - custom endpoints saved via `hermes model` / `config.yaml` also work
+- custom request headers from the main runtime are preserved
 - auxiliary routing can tell the difference between a real saved custom endpoint and the OpenRouter fallback
 
 ## Fallback models
