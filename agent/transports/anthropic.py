@@ -127,9 +127,15 @@ class AnthropicTransport(ProviderTransport):
 
         finish_reason = self._STOP_REASON_MAP.get(response.stop_reason, "stop")
 
+        # Preserve the original interleaved content array for replay to maintain
+        # thinking-block signature validity (signed against exact position).
+        raw_content = [_to_plain_data(b) for b in response.content]
+
         provider_data = {}
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
+        if raw_content:
+            provider_data["_anthropic_content_blocks"] = raw_content
 
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None,
