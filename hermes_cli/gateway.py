@@ -2347,6 +2347,11 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     _drain_timeout = int(_get_restart_drain_timeout() or 0)
     restart_timeout = max(60, _drain_timeout) + 30
 
+    # Exit 75 is Hermes' intentional "drained; please respawn me" code for
+    # service-managed gateway restarts.  RestartForceExitStatus makes
+    # older/non-`Restart=always` units relaunch on 75, while SuccessExitStatus
+    # keeps planned update/restart handoffs from being recorded as failed units
+    # (#31048).  Keep both directives in user and system units.
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
         hermes_home = _hermes_home_for_target_user(home_dir)
@@ -2388,6 +2393,7 @@ RestartSec=5
 RestartMaxDelaySec=300
 RestartSteps=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
+SuccessExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
 ExecReload=/bin/kill -USR1 $MAINPID
@@ -2423,6 +2429,7 @@ RestartSec=5
 RestartMaxDelaySec=300
 RestartSteps=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
+SuccessExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
 ExecReload=/bin/kill -USR1 $MAINPID

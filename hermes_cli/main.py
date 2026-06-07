@@ -10165,6 +10165,55 @@ def _discard_lockfile_churn(git_cmd, repo_root):
         pass
 
 
+def _refresh_systemd_units_before_update_restart() -> tuple[str, ...]:
+    """Best-effort refresh of installed systemd units before update restarts.
+
+    ``hermes update`` pulls new source first, then restarts running gateways.
+    For systemd-managed gateways the unit file lives outside git, so it can
+    still contain stale service settings during the restart that should pick up
+    new code. Refresh it before signaling the gateway so unit-template fixes
+    (for example WorkingDirectory/HERMES_HOME changes) are applied before the
+    service tries to come back.
+
+    Returns labels for scopes that were rewritten. Any scope-level failure is
+    intentionally swallowed: a non-root user may be able to update the user unit
+    but not the system unit, and failing the whole update would be worse than a
+    stale-but-running gateway.
+    """
+    try:
+        from hermes_cli.gateway import (
+            _ensure_user_systemd_env,
+            refresh_systemd_unit_if_needed,
+            supports_systemd_services,
+        )
+    except Exception as exc:
+        logger.debug("Skipping systemd unit refresh before update restart: %s", exc)
+        return ()
+
+    try:
+        if not supports_systemd_services():
+            return ()
+    except Exception as exc:
+        logger.debug("Could not detect systemd support before update restart: %s", exc)
+        return ()
+
+    try:
+        _ensure_user_systemd_env()
+    except Exception as exc:
+        # Missing XDG_RUNTIME_DIR/DBus affects some shells but not every scope;
+        # keep going so system-scope refresh still has a chance.
+        logger.debug("Could not prepare user systemd environment before update restart: %s", exc)
+
+    refreshed: list[str] = []
+    for system, label in ((False, "user"), (True, "system")):
+        try:
+            if refresh_systemd_unit_if_needed(system=system):
+                refreshed.append(label)
+        except Exception as exc:
+            logger.debug("Could not refresh %s gateway unit before update restart: %s", label, exc)
+    return tuple(refreshed)
+
+
 def cmd_update(args):
     """Update Hermes Agent to the latest version.
 
@@ -11063,6 +11112,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 _wait_for_gateway_exit,
             )
             import signal as _signal
+
+            _refreshed_units = _refresh_systemd_units_before_update_restart()
+            if _refreshed_units:
+                print(f"  ✓ Refreshed gateway systemd unit(s): {', '.join(_refreshed_units)}")
 
             def _wait_for_service_active(
                 scope_cmd_: list,
