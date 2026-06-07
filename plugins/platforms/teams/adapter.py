@@ -1076,6 +1076,48 @@ class TeamsAdapter(BasePlatformAdapter):
             reply_to=reply_to,
         )
 
+    async def send_document(
+        self,
+        chat_id: str,
+        document_url: str,
+        filename: Optional[str] = None,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if not self._app:
+            return SendResult(success=False, error="Teams app not initialized")
+
+        try:
+            import base64
+            import mimetypes
+            from microsoft_teams.api import Attachment, MessageActivityInput
+
+            if document_url.startswith("http://") or document_url.startswith("https://"):
+                content_url = document_url
+                mime_type = mimetypes.guess_type(filename or document_url)[0] or "application/octet-stream"
+            else:
+                path = document_url.removeprefix("file://")
+                mime_type = mimetypes.guess_type(filename or path)[0] or "application/octet-stream"
+                with open(path, "rb") as f:
+                    content_url = f"data:{mime_type};base64,{base64.b64encode(f.read()).decode()}"
+
+            attachment = Attachment(content_type=mime_type, content_url=content_url, name=filename)
+            activity = MessageActivityInput().add_attachments(attachment)
+            if caption:
+                activity = activity.add_text(caption)
+
+            conv_ref = self._conv_refs.get(chat_id)
+            if conv_ref:
+                result = await self._app.activity_sender.send(activity, conv_ref)
+            else:
+                result = await self._app.send(chat_id, activity)
+
+            return SendResult(success=True, message_id=getattr(result, "id", None))
+        except Exception as e:
+            logger.error("[teams] send_document failed: %s", e, exc_info=True)
+            return SendResult(success=False, error=str(e), retryable=True)
+
     async def get_chat_info(self, chat_id: str) -> dict:
         return {"name": chat_id, "type": "unknown", "chat_id": chat_id}
 
