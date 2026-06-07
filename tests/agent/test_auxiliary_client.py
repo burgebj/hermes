@@ -1293,6 +1293,16 @@ class TestIsPaymentError:
         exc.status_code = 429
         assert _is_payment_error(exc) is True
 
+    def test_429_usage_limit_reached_is_quota_exhaustion(self):
+        """Codex/ChatGPT usage-limit exhaustion should trigger provider fallback."""
+        exc = Exception(
+            "Error code: 429 - {'error': {'type': 'usage_limit_reached', "
+            "'message': 'The usage limit has been reached', "
+            "'plan_type': 'team', 'resets_in_seconds': 260790}}"
+        )
+        setattr(exc, "status_code", 429)
+        assert _is_payment_error(exc) is True
+
     def test_429_transient_rate_limit_not_quota(self):
         """Transient 429 rate limit without quota keywords is NOT a payment error."""
         exc = Exception("Rate limit exceeded. Retry after 10s.")

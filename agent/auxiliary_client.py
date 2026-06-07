@@ -2332,6 +2332,7 @@ def _is_payment_error(exc: Exception) -> bool:
             "not available on the free tier",
             # Daily / monthly / weekly quota exhaustion keywords
             "quota exceeded", "quota_exceeded",
+            "usage_limit", "usage_limit_reached",
             "too many tokens per day", "daily limit",
             "tokens per day", "daily quota",
             "resource exhausted",  # Vertex AI / gRPC quota errors
