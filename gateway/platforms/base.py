@@ -1462,6 +1462,11 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # Internal flag — set when the event was popped from _pending_messages
+    # (queued follow-up) rather than arriving as a fresh inbound message.
+    # Adapters use this to skip reactions on queued messages.
+    _from_pending: bool = False
+
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     
@@ -4389,6 +4394,7 @@ class BasePlatformAdapter(ABC):
             # Check if there's a pending message that was queued during our processing
             if session_key in self._pending_messages:
                 pending_event = self._pending_messages.pop(session_key)
+                pending_event._from_pending = True
                 logger.debug("[%s] Processing queued follow-up message", self.name)
                 # Keep the _active_sessions entry live across the turn chain
                 # and only CLEAR the interrupt Event — do NOT delete the entry.
@@ -4503,6 +4509,7 @@ class BasePlatformAdapter(ABC):
             # dropped (user never gets a reply).
             late_pending = self._pending_messages.pop(session_key, None)
             if late_pending is not None:
+                late_pending._from_pending = True
                 current_task = asyncio.current_task()
                 existing_task = self._session_tasks.get(session_key)
                 if (

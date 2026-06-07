@@ -616,6 +616,14 @@ class SignalAdapter(BasePlatformAdapter):
         # Build and dispatch event.
         # Store raw envelope data in raw_message so on_processing_start/complete
         # can extract targetAuthor + targetTimestamp for sendReaction.
+        raw_msg = {"sender": sender, "timestamp_ms": ts_ms}
+        # Store quote target info so reactions land on the quoted message
+        if quote_data and quote_data.get("id"):
+            raw_msg["quote_timestamp_ms"] = quote_data["id"]
+            # quote author comes from the quote's authorUuid or we use sender
+            # as fallback (quoted message author isn't always available in the
+            # Signal dataMessage; use the sender of the *quoted* message).
+            raw_msg["quote_author"] = quote_data.get("authorUuid") or sender
         event = MessageEvent(
             source=source,
             text=text or "",
@@ -623,7 +631,7 @@ class SignalAdapter(BasePlatformAdapter):
             media_urls=media_urls,
             media_types=media_types,
             timestamp=timestamp,
-            raw_message={"sender": sender, "timestamp_ms": ts_ms},
+            raw_message=raw_msg,
             reply_to_message_id=reply_to_id,
             reply_to_text=reply_to_text,
         )
@@ -1455,11 +1463,17 @@ class SignalAdapter(BasePlatformAdapter):
         """Extract (target_author, target_timestamp) from a MessageEvent.
 
         Returns None if the event doesn't carry the raw Signal envelope data
-        needed for sendReaction.
+        needed for sendReaction.  When the message is a quote-reply, targets
+        the quoted message so the 👀 appears on the message being replied to.
         """
         raw = event.raw_message
         if not isinstance(raw, dict):
             return None
+        # Prefer the quoted message as reaction target when available
+        quote_author = raw.get("quote_author")
+        quote_ts = raw.get("quote_timestamp_ms")
+        if quote_author and quote_ts:
+            return (quote_author, quote_ts)
         author = raw.get("sender")
         ts = raw.get("timestamp_ms")
         if not author or not ts:
@@ -1485,8 +1499,14 @@ class SignalAdapter(BasePlatformAdapter):
         return True
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """React with 👀 when processing begins."""
+        """React with 👀 when processing begins.
+
+        Skips reactions for queued follow-up messages (``_from_pending``)
+        to avoid spamming 👀 on every buffered message.
+        """
         if not self._reactions_enabled(event):
+            return
+        if getattr(event, "_from_pending", False):
             return
         target = self._extract_reaction_target(event)
         if target:
@@ -1501,6 +1521,8 @@ class SignalAdapter(BasePlatformAdapter):
         if not self._reactions_enabled(event):
             return
         if outcome == ProcessingOutcome.CANCELLED:
+            return
+        if getattr(event, "_from_pending", False):
             return
         target = self._extract_reaction_target(event)
         if not target:
