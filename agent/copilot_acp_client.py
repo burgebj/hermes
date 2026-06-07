@@ -231,6 +231,39 @@ def _render_message_content(content: Any) -> str:
     return str(content).strip()
 
 
+def _extract_session_chunk_text(content: Any) -> str:
+    """Best-effort extraction for ACP session-update content blocks.
+
+    Copilot ACP may surface assistant/user chunks as typed block objects
+    rather than plain dicts.  Preserve their text so narration is not
+    dropped when a turn mixes tool calls and assistant text.
+
+    Co-authored-by: jdell64 <jdell64@users.noreply.github.com>
+    """
+    if content is None:
+        return ""
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        nested = content.get("content")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        return ""
+    if isinstance(content, list):
+        return _render_message_content(content)
+
+    # Handle objects with .text / .content attributes (typed blocks)
+    text = getattr(content, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    nested = getattr(content, "content", None)
+    if isinstance(nested, str) and nested.strip():
+        return nested.strip()
+
+    return ""
+
+
 def _extract_tool_calls_from_text(text: str) -> tuple[list[SimpleNamespace], str]:
     if not isinstance(text, str) or not text.strip():
         return [], ""
@@ -613,9 +646,38 @@ class CopilotACPClient:
             update = params.get("update") or {}
             kind = str(update.get("sessionUpdate") or "").strip()
             content = update.get("content") or {}
-            chunk_text = ""
+            chunk_text = _extract_session_chunk_text(content)
             if isinstance(content, dict):
-                chunk_text = str(content.get("text") or "")
+                # ── tool_use / tool_result handling (#33636) ──────────
+                # Copilot CLI delivers tool calls as structured content
+                # blocks rather than embedding <tool_call> XML in the
+                # text stream.  When the kind is tool_use or tool_result
+                # the content dict carries the tool metadata directly.
+                # Serialise it as <tool_call> JSON so the existing
+                # _extract_tool_calls_from_text parser can consume it
+                # without changes, and any text accumulated before the
+                # tool event is preserved alongside it.
+                if not chunk_text and kind in ("tool_use", "tool_result"):
+                    _tool_name = content.get("name") or content.get("tool_name") or ""
+                    _tool_id = content.get("id") or content.get("call_id") or ""
+                    _tool_input = content.get("input") or content.get("arguments") or {}
+                    if isinstance(_tool_input, dict):
+                        _tool_input = json.dumps(_tool_input, ensure_ascii=False)
+                    if _tool_name and _tool_id:
+                        _tc = {
+                            "id": _tool_id,
+                            "type": "function",
+                            "function": {
+                                "name": _tool_name,
+                                "arguments": str(_tool_input),
+                            },
+                        }
+                        chunk_text = json.dumps(_tc, ensure_ascii=False)
+                        if text_parts is not None:
+                            text_parts.append(
+                                f"<tool_call>{chunk_text}</tool_call>"
+                            )
+                        return True
             if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
                 text_parts.append(chunk_text)
             elif kind == "agent_thought_chunk" and chunk_text and reasoning_parts is not None:
