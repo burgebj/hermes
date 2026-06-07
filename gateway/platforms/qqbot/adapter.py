@@ -37,6 +37,7 @@ import json
 import logging
 import mimetypes
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -224,6 +225,14 @@ class QQAdapter(BasePlatformAdapter):
         self._listen_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._heartbeat_interval: float = 30.0  # seconds, updated by Hello
+        # Wake-up signal for the heartbeat sleep. Sleeping on this Event in
+        # a worker thread (instead of asyncio.sleep on the running loop)
+        # keeps the heartbeat schedule independent of asyncio timer-wheel
+        # responsiveness while a long-running synchronous tool is holding
+        # the event loop, and lets disconnect() return immediately without
+        # leaking a worker thread that would otherwise wait out the full
+        # heartbeat interval (#33727).
+        self._heartbeat_stop: threading.Event = threading.Event()
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
         self._chat_type_map: Dict[str, str] = {}  # chat_id → "c2c"|"group"|"guild"|"dm"
@@ -323,6 +332,7 @@ class QQAdapter(BasePlatformAdapter):
 
             # 4. Start listeners
             self._listen_task = asyncio.create_task(self._listen_loop())
+            self._heartbeat_stop.clear()
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             self._mark_connected()
             logger.info("[%s] Connected", self._log_tag)
@@ -349,6 +359,10 @@ class QQAdapter(BasePlatformAdapter):
             self._listen_task = None
 
         if self._heartbeat_task:
+            # Wake the worker thread sleeping inside asyncio.to_thread before
+            # cancelling so the thread exits promptly rather than waiting out
+            # the full heartbeat interval after task cancellation (#33727).
+            self._heartbeat_stop.set()
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
@@ -707,10 +721,23 @@ class QQAdapter(BasePlatformAdapter):
 
         The interval is set from the Hello (op 10) event's heartbeat_interval.
         QQ's default is ~41s; we send at 80% of the interval to stay safe.
+
+        The interval wait runs in a worker thread (via ``asyncio.to_thread``)
+        on a ``threading.Event`` rather than via ``asyncio.sleep`` so the
+        countdown does not depend on the asyncio timer wheel staying
+        responsive while a long-running synchronous tool holds the event
+        loop. It also lets :meth:`disconnect` cut the wait short without
+        leaving a worker thread sleeping out the rest of the interval
+        (#33727).
         """
         try:
             while self._running:
-                await asyncio.sleep(self._heartbeat_interval)
+                interval = self._heartbeat_interval
+                # ``Event.wait`` returns True on set, False on timeout. Either
+                # way we re-check ``_running`` before sending.
+                await asyncio.to_thread(self._heartbeat_stop.wait, interval)
+                if not self._running or self._heartbeat_stop.is_set():
+                    break
                 if not self._ws or self._ws.closed:
                     continue
                 try:

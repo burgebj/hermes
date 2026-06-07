@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import sys
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -445,6 +447,82 @@ class TestDispatchPayload:
         adapter._dispatch_payload({"op": 0, "t": "READY", "s": 5, "d": {}})
         adapter._dispatch_payload({"op": 0, "t": "SOME_EVENT", "s": 10, "d": {}})
         assert adapter._last_seq == 10
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat loop scheduling (#33727)
+# ---------------------------------------------------------------------------
+
+class TestHeartbeatLoop:
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+        return QQAdapter(_make_config(**extra))
+
+    @pytest.mark.asyncio
+    async def test_stop_event_wakes_heartbeat_sleep_without_cancel(self):
+        """Setting `_heartbeat_stop` must wake the heartbeat sleep even when
+        ``Task.cancel()`` is not used. The original implementation slept on
+        ``asyncio.sleep(self._heartbeat_interval)``: a long-running
+        synchronous tool blocking the asyncio event loop could starve the
+        timer past the QQ Gateway's grace window, and the worker had no
+        way to wake mid-sleep without cancelling the task itself (#33727).
+
+        The fix routes the wait through ``asyncio.to_thread`` on a
+        ``threading.Event`` so a worker thread owns the countdown; setting
+        the event wakes it independently of the asyncio scheduler. We
+        assert the loop exits well before the configured interval would
+        elapse.
+        """
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._heartbeat_interval = 5.0
+        adapter._running = True
+        # `closed=True` so the loop hits the `continue` branch instead of
+        # awaiting `_ws.send_json`, isolating this test to the sleep path.
+        adapter._ws = SimpleNamespace(closed=True)
+
+        task = asyncio.create_task(adapter._heartbeat_loop())
+        # Yield long enough for the loop to enter the worker-thread wait.
+        await asyncio.sleep(0.05)
+
+        # Signal shutdown via the event ONLY, no task.cancel(). The fix
+        # guarantees the loop notices and exits within one scheduler tick.
+        adapter._running = False
+        adapter._heartbeat_stop.set()
+
+        # 5s configured interval; the event-driven wake should exit in ms.
+        # 0.5s budget is comfortably below 5s but above scheduler jitter.
+        await asyncio.sleep(0.5)
+        assert task.done(), (
+            "heartbeat loop did not exit after _heartbeat_stop was set "
+            "(asyncio.sleep would still be blocked here)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_disconnect_sets_stop_event_before_cancel(self):
+        """``disconnect()`` must set ``_heartbeat_stop`` before cancelling so
+        the worker thread inside ``asyncio.to_thread(self._heartbeat_stop.wait,
+        ...)`` returns immediately instead of sleeping out the rest of the
+        interval — otherwise reconnect storms would leak one worker thread
+        per cycle, each pinned for up to ``_heartbeat_interval`` seconds
+        (#33727).
+        """
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._heartbeat_interval = 30.0
+        adapter._running = True
+        adapter._ws = SimpleNamespace(closed=True)
+        adapter._heartbeat_task = asyncio.create_task(adapter._heartbeat_loop())
+        adapter._mark_disconnected = mock.MagicMock()
+        adapter._cleanup = mock.AsyncMock()
+        adapter._release_platform_lock = mock.MagicMock()
+        await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(adapter.disconnect(), timeout=1.0)
+
+        assert adapter._heartbeat_task is None
+        assert adapter._heartbeat_stop.is_set(), (
+            "disconnect() must set the heartbeat stop event so the worker "
+            "thread doesn't outlive the cancelled task"
+        )
 
 
 # ---------------------------------------------------------------------------
