@@ -578,7 +578,7 @@ agent:
   # The gateway stops accepting new work, waits for in-flight agents to
   # finish, then interrupts anything still running after this timeout.
   # 0 = no drain, interrupt immediately.
-  # restart_drain_timeout: 60
+  # restart_drain_timeout: 180
 
   # Max app-level retry attempts for API errors (connection drops, provider
   # timeouts, 5xx, etc.) before the agent surfaces the failure. Lower this
@@ -1002,9 +1002,9 @@ display:
   # Stream tokens to the terminal as they arrive instead of waiting for the
   # full response. The response box opens on first token and text appears
   # line-by-line. Tool calls are still captured silently.
-  #   true:  Stream tokens as they arrive (default)
-  #   false: Wait for the full response before rendering
-  streaming: true
+  #   true:  Stream tokens as they arrive
+  #   false: Wait for the full response before rendering (default)
+  streaming: false
 
   # Show [HH:MM] timestamps on user input and assistant response labels.
   # timestamps: false
