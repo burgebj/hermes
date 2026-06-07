@@ -16,10 +16,13 @@ Covers:
 
 import asyncio
 import base64
+import email.message
 import hashlib
 import hmac
+import io
 import json
 import time
+import urllib.error
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,6 +34,7 @@ from gateway.platforms.base import SendResult
 from gateway.platforms.webhook import (
     WebhookAdapter,
     _INSECURE_NO_AUTH,
+    _validate_http_callback_url,
     check_webhook_requirements,
 )
 
@@ -837,6 +841,199 @@ class TestDeliveryCleanup:
         assert "webhook:test:old" not in adapter._delivery_info_created
         assert "webhook:test:new" in adapter._delivery_info
         assert "webhook:test:new" in adapter._delivery_info_created
+
+
+# ===================================================================
+# http_callback URL validation
+# ===================================================================
+
+
+class TestHttpCallbackUrlValidation:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1:8080/admin",
+            "https://10.0.0.5/internal-api",
+            "https://[::1]/",
+        ],
+    )
+    def test_rejects_private_loopback_and_link_local_literals(self, url):
+        with pytest.raises(ValueError, match="non-public IP"):
+            _validate_http_callback_url(url)
+
+    def test_rejects_hostname_that_resolves_to_private_ip(self):
+        def _fake_getaddrinfo(*_args, **_kwargs):
+            return [(None, None, None, "", ("10.0.0.5", 443))]
+
+        with patch("gateway.platforms.webhook.socket.getaddrinfo", _fake_getaddrinfo):
+            with pytest.raises(ValueError, match="non-public IP"):
+                _validate_http_callback_url("https://callback.example.test/hook")
+
+    def test_allows_hostname_that_resolves_to_public_ip(self):
+        def _fake_getaddrinfo(*_args, **_kwargs):
+            return [(None, None, None, "", ("93.184.216.34", 443))]
+
+        with patch("gateway.platforms.webhook.socket.getaddrinfo", _fake_getaddrinfo):
+            _validate_http_callback_url("https://callback.example.test/hook")
+
+    def test_http_requires_explicit_loopback_test_escape_hatch(self):
+        with pytest.raises(ValueError, match="HTTPS required"):
+            _validate_http_callback_url("http://127.0.0.1:8080/hook")
+
+        _validate_http_callback_url(
+            "http://127.0.0.1:8080/hook",
+            allow_insecure_http=True,
+        )
+
+
+class TestHttpCallbackDelivery:
+
+    @pytest.mark.asyncio
+    async def test_http_callback_posts_templated_json_body(self):
+        """http_callback POSTs the agent response to deliver_extra.url."""
+        adapter = _make_adapter()
+        delivery = {
+            "deliver": "http_callback",
+            "deliver_extra": {
+                "url": "https://93.184.216.34/callback",
+                "body_template": {"content": "<p>{content_html}</p>"},
+            },
+        }
+        captured = {}
+
+        class _Response:
+            status = 201
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, *_args):
+                return b"{}"
+
+        class _Opener:
+            def open(self, req, timeout):
+                captured["url"] = req.full_url
+                captured["timeout"] = timeout
+                captured["headers"] = dict(req.header_items())
+                captured["body"] = req.data.decode("utf-8")
+                return _Response()
+
+        def _fake_build_opener(*handlers):
+            captured["redirect_handler"] = [
+                getattr(handler, "__name__", type(handler).__name__)
+                for handler in handlers
+            ]
+            return _Opener()
+
+        chat_id = "webhook:test:1"
+        adapter._delivery_info[chat_id] = delivery
+        with patch("gateway.platforms.webhook.urllib.request.build_opener", _fake_build_opener):
+            result = await adapter.send(chat_id, "Hello <Rob>\nDone")
+
+        assert result.success is True
+        assert captured["url"] == "https://93.184.216.34/callback"
+        assert captured["timeout"] == 30
+        assert "_NoRedirectHandler" in captured["redirect_handler"]
+        assert json.loads(captured["body"]) == {"content": "<p>Hello &lt;Rob&gt;<br>Done</p>"}
+        assert captured["headers"]["Content-type"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_http_callback_supports_bearer_token(self):
+        adapter = _make_adapter()
+        delivery = {
+            "deliver": "http_callback",
+            "deliver_extra": {
+                "url": "https://93.184.216.34/callback",
+                "bearer_token": "secret-token",
+            },
+        }
+        captured = {}
+
+        class _Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, *_args):
+                return b"{}"
+
+        class _Opener:
+            def open(self, req, timeout):
+                captured["headers"] = dict(req.header_items())
+                return _Response()
+
+        chat_id = "webhook:test:1"
+        adapter._delivery_info[chat_id] = delivery
+        with patch("gateway.platforms.webhook.urllib.request.build_opener", lambda *_handlers: _Opener()):
+            result = await adapter.send(chat_id, "Done")
+
+        assert result.success is True
+        assert captured["headers"]["Authorization"] == "Bearer secret-token"
+
+    @pytest.mark.asyncio
+    async def test_http_callback_rejects_private_ip_before_network_call(self):
+        adapter = _make_adapter()
+        delivery = {
+            "deliver": "http_callback",
+            "deliver_extra": {"url": "https://169.254.169.254/latest/meta-data/"},
+        }
+
+        adapter._delivery_info["webhook:test:1"] = delivery
+        with patch("gateway.platforms.webhook.urllib.request.build_opener") as build_opener:
+            result = await adapter.send("webhook:test:1", "Done")
+
+        assert result.success is False
+        assert result.error is not None
+        assert "non-public IP" in result.error
+        build_opener.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_http_callback_does_not_follow_redirects(self):
+        adapter = _make_adapter()
+        delivery = {
+            "deliver": "http_callback",
+            "deliver_extra": {"url": "https://93.184.216.34/callback"},
+        }
+
+        class _Opener:
+            def open(self, req, timeout):
+                headers = email.message.Message()
+                headers["Location"] = "https://127.0.0.1/admin"
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    302,
+                    "Found",
+                    headers,
+                    io.BytesIO(b"redirect"),
+                )
+
+        adapter._delivery_info["webhook:test:1"] = delivery
+        with patch("gateway.platforms.webhook.urllib.request.build_opener", lambda *_handlers: _Opener()):
+            result = await adapter.send("webhook:test:1", "Done")
+
+        assert result.success is False
+        assert result.error == "HTTP 302"
+
+    @pytest.mark.asyncio
+    async def test_http_callback_rejects_missing_url(self):
+        adapter = _make_adapter()
+        delivery = {"deliver": "http_callback", "deliver_extra": {}}
+
+        adapter._delivery_info["webhook:test:1"] = delivery
+
+        result = await adapter.send("webhook:test:1", "Done")
+
+        assert result.success is False
+        assert result.error is not None
+        assert "url" in result.error
 
 
 # ===================================================================

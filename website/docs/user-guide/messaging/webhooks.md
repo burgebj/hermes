@@ -82,7 +82,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `secret` | **Yes** | HMAC secret for signature validation. Falls back to the global `secret` if not set on the route. Set to `"INSECURE_NO_AUTH"` for testing only (skips validation). |
 | `prompt` | No | Template string with dot-notation payload access (e.g. `{pull_request.title}`). If omitted, the full JSON payload is dumped into the prompt. |
 | `skills` | No | List of skill names to load for the agent run. |
-| `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
+| `deliver` | No | Where to send the response: `github_comment`, `http_callback`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
 | `deliver_only` | No | If `true`, skip the agent entirely — the rendered `prompt` template becomes the literal message that gets delivered. Zero LLM cost, sub-second delivery. See [Direct Delivery Mode](#direct-delivery-mode) for use cases. Requires `deliver` to be a real target (not `log`). |
 
@@ -233,6 +233,7 @@ The `deliver` field controls where the agent's response goes after processing th
 |-------------|-------------|
 | `log` | Logs the response to the gateway log output. This is the default and is useful for testing. |
 | `github_comment` | Posts the response as a PR/issue comment via the `gh` CLI. Requires `deliver_extra.repo` and `deliver_extra.pr_number`. The `gh` CLI must be installed and authenticated on the gateway host (`gh auth login`). |
+| `http_callback` | POSTs the response to a templated HTTP endpoint. Requires `deliver_extra.url`. Supports optional `bearer_token`/`secret`, custom `headers`, and `body_template`. Useful for services that provide per-request callback URLs, like custom chatbots. |
 | `telegram` | Routes the response to Telegram. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `discord` | Routes the response to Discord. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `slack` | Routes the response to Slack. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
@@ -250,6 +251,35 @@ The `deliver` field controls where the agent's response goes after processing th
 | `bluebubbles` | Routes the response to BlueBubbles (iMessage). Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 
 For cross-platform delivery, the target platform must also be enabled and connected in the gateway. If no `chat_id` is provided in `deliver_extra`, the response is sent to that platform's configured home channel.
+
+### HTTP callback delivery
+
+Use `deliver: "http_callback"` when the webhook payload includes a reply URL, or when you want Hermes to POST the agent response to a custom service instead of a built-in messaging platform.
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      routes:
+        my-chatbot:
+          secret: "chatbot-hmac-secret"
+          prompt: "{command}"
+          deliver: "http_callback"
+          deliver_extra:
+            url: "{callback_url}"
+            bearer_token: "optional-shared-secret"
+            body_template:
+              content: "<p>{content_html}</p>"
+```
+
+`deliver_extra.url`, headers, and other string values are first rendered against the incoming webhook payload, so callback URLs supplied by the source can be used directly. `body_template` is rendered later against the agent response and supports:
+
+- `{content}` — raw agent response text
+- `{content_html}` — HTML-escaped response text with newlines converted to `<br>`
+- `{content_json}` — JSON-string-escaped response text without surrounding quotes
+
+By default, Hermes sends `{"content": "{content}"}` as JSON. Callback URLs must be HTTPS and resolve only to public, globally routable IP addresses; loopback, private, link-local, metadata-service, reserved, and other non-public destinations are rejected. Automatic redirects are disabled so a public callback URL cannot redirect Hermes to an internal host. For local testing only, set `allow_insecure_http: true` with an HTTP loopback URL.
 
 ---
 

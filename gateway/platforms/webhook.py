@@ -31,11 +31,16 @@ import base64
 import binascii
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
+import socket
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 try:
@@ -90,6 +95,89 @@ def _is_loopback_host(host: str) -> bool:
     if not host:
         return False
     return host.strip().lower() in _LOOPBACK_HOSTS
+
+
+def _is_public_callback_ip(ip: Any) -> bool:
+    """Return True only for globally routable callback destinations.
+
+    ``ip_address.is_global`` is intentionally stricter than checking only
+    RFC1918/private ranges: it also rejects loopback, link-local, multicast,
+    unspecified, reserved/documentation ranges, and cloud metadata addresses
+    such as 169.254.169.254.  For callback delivery, fail-closed is safer
+    than trying to enumerate every non-public network.
+    """
+    return ip.is_global
+
+
+def _resolve_callback_host(host: str) -> list[ipaddress._BaseAddress]:
+    """Resolve a callback hostname to IP addresses for SSRF filtering."""
+    try:
+        literal = ipaddress.ip_address(host)
+        return [literal]
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve callback host: {host}") from exc
+
+    addresses: list[ipaddress._BaseAddress] = []
+    seen: set[str] = set()
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        raw_ip = str(sockaddr[0])
+        # IPv6 link-local addresses may include a scope id (fe80::1%lo0).
+        ip_text = raw_ip.split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError:
+            continue
+        if str(ip) not in seen:
+            addresses.append(ip)
+            seen.add(str(ip))
+    if not addresses:
+        raise ValueError(f"Cannot resolve callback host: {host}")
+    return addresses
+
+
+def _validate_http_callback_url(url: str, *, allow_insecure_http: bool = False) -> None:
+    """Validate an outbound http_callback URL before making the request.
+
+    The webhook payload can render into ``deliver_extra.url`` (for example via
+    ``{callback_url}``), so this must defend the gateway host against SSRF.
+    HTTPS is required by default.  HTTP is allowed only for explicit local
+    testing and only to loopback hosts.  HTTPS targets must resolve solely to
+    globally routable IPs.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Invalid callback URL")
+
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError("Invalid callback URL")
+
+    if parsed.scheme == "http":
+        if not allow_insecure_http:
+            raise ValueError("HTTPS required for callback URL")
+        if not _is_loopback_host(host):
+            raise ValueError("HTTP callback URL is only allowed for loopback hosts")
+        return
+
+    ips = _resolve_callback_host(host)
+    blocked = [str(ip) for ip in ips if not _is_public_callback_ip(ip)]
+    if blocked:
+        raise ValueError("Callback URL resolves to a non-public IP address")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Disable urllib's default redirect following for callback delivery."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
 
 
 def check_webhook_requirements() -> bool:
@@ -244,6 +332,9 @@ class WebhookAdapter(BasePlatformAdapter):
 
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
+
+        if deliver_type == "http_callback":
+            return await self._deliver_http_callback(content, delivery)
 
         # Cross-platform delivery — any platform with a gateway adapter.
         # Check both built-in names and plugin-registered platforms.
@@ -828,11 +919,111 @@ class WebhookAdapter(BasePlatformAdapter):
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
+        if deliver_type == "http_callback":
+            return await self._deliver_http_callback(content, delivery)
+
         # Fall through to the cross-platform dispatcher, which validates the
         # target name and routes via the gateway runner.
         return await self._deliver_cross_platform(
             deliver_type, content, delivery
         )
+
+    def _format_http_callback_body(
+        self, template: Any, content: str
+    ) -> Any:
+        """Substitute agent response tokens in an HTTP callback body template."""
+        escaped = (
+            content.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#x27;")
+            .replace("\n", "<br>")
+        )
+        replacements = {
+            "{content}": content,
+            "{content_html}": escaped,
+            "{content_json}": json.dumps(content)[1:-1],
+        }
+        if isinstance(template, str):
+            result = template
+            for token, value in replacements.items():
+                result = result.replace(token, value)
+            return result
+        if isinstance(template, dict):
+            return {
+                key: self._format_http_callback_body(value, content)
+                for key, value in template.items()
+            }
+        if isinstance(template, list):
+            return [self._format_http_callback_body(value, content) for value in template]
+        return template
+
+    async def _deliver_http_callback(
+        self, content: str, delivery: dict
+    ) -> SendResult:
+        """POST the agent response to a templated HTTP callback URL."""
+        extra = delivery.get("deliver_extra", {})
+        url = extra.get("url", "")
+        if not isinstance(url, str) or not url:
+            logger.error("[webhook] http_callback delivery missing deliver_extra.url")
+            return SendResult(success=False, error="Missing deliver_extra.url")
+
+        try:
+            _validate_http_callback_url(
+                url,
+                allow_insecure_http=bool(extra.get("allow_insecure_http")),
+            )
+        except ValueError as exc:
+            error = str(exc)
+            logger.error("[webhook] http_callback delivery rejected URL: %s", error)
+            return SendResult(success=False, error=error)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Hermes Webhook HTTP Callback",
+        }
+        extra_headers = extra.get("headers", {})
+        if isinstance(extra_headers, dict):
+            headers.update({str(k): str(v) for k, v in extra_headers.items()})
+        bearer_token = extra.get("bearer_token") or extra.get("secret")
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+
+        body_template = extra.get("body_template", {"content": "{content}"})
+        body_obj = self._format_http_callback_body(body_template, content)
+
+        def _post() -> tuple[int, str]:
+            if headers.get("Content-Type", "").startswith("application/json"):
+                body = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
+            elif isinstance(body_obj, str):
+                body = body_obj.encode("utf-8")
+            else:
+                body = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers=headers,
+            )
+            opener = urllib.request.build_opener(_NoRedirectHandler)
+            try:
+                with opener.open(req, timeout=30) as resp:
+                    return resp.status, resp.read(1000).decode("utf-8", "replace")
+            except urllib.error.HTTPError as e:
+                return e.code, e.read(1000).decode("utf-8", "replace")
+
+        try:
+            status, response_text = await asyncio.to_thread(_post)
+        except Exception as e:
+            logger.error("[webhook] http_callback delivery error: %s", e)
+            return SendResult(success=False, error=str(e))
+        if 200 <= status < 300:
+            logger.info("[webhook] Posted HTTP callback status=%s", status)
+            return SendResult(success=True)
+        logger.error("[webhook] HTTP callback failed status=%s response=%s", status, response_text[:300])
+        return SendResult(success=False, error=f"HTTP {status}")
 
     async def _deliver_github_comment(
         self, content: str, delivery: dict
