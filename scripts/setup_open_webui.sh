@@ -16,8 +16,12 @@ set -euo pipefail
 #   OPEN_WEBUI_PORT=8080
 #   OPEN_WEBUI_HOST=127.0.0.1
 #   OPEN_WEBUI_NAME='Johnny Hermes'
-#   OPEN_WEBUI_ENABLE_SIGNUP=true
+#   OPEN_WEBUI_ENABLE_SIGNUP=false   # default false — enable only for local first-run
+#   OPEN_WEBUI_I_UNDERSTAND_LAN_SIGNUP_RACE=true  # required with signup on LAN bind
 #   OPEN_WEBUI_ENABLE_SERVICE=auto   # auto|true|false
+#
+# Flags:
+#   --i-understand-lan-signup-race   # allow signup while bound to 0.0.0.0 / non-loopback
 #   OPEN_WEBUI_VENV=~/.local/open-webui-venv
 #   OPEN_WEBUI_DATA_DIR=~/.local/share/open-webui/data
 #   HERMES_API_PORT=8642
@@ -27,7 +31,8 @@ set -euo pipefail
 OPEN_WEBUI_PORT="${OPEN_WEBUI_PORT:-8080}"
 OPEN_WEBUI_HOST="${OPEN_WEBUI_HOST:-127.0.0.1}"
 OPEN_WEBUI_NAME="${OPEN_WEBUI_NAME:-Hermes Agent WebUI}"
-OPEN_WEBUI_ENABLE_SIGNUP="${OPEN_WEBUI_ENABLE_SIGNUP:-true}"
+OPEN_WEBUI_ENABLE_SIGNUP="${OPEN_WEBUI_ENABLE_SIGNUP:-false}"
+OPEN_WEBUI_I_UNDERSTAND_LAN_SIGNUP_RACE="${OPEN_WEBUI_I_UNDERSTAND_LAN_SIGNUP_RACE:-false}"
 OPEN_WEBUI_ENABLE_SERVICE="${OPEN_WEBUI_ENABLE_SERVICE:-auto}"
 OPEN_WEBUI_VENV="${OPEN_WEBUI_VENV:-$HOME/.local/open-webui-venv}"
 OPEN_WEBUI_DATA_DIR="${OPEN_WEBUI_DATA_DIR:-$HOME/.local/share/open-webui/data}"
@@ -42,6 +47,63 @@ LOG_DIR="$HOME/.hermes/logs"
 
 log() {
   printf '[open-webui-bootstrap] %s\n' "$*"
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --i-understand-lan-signup-race)
+        OPEN_WEBUI_I_UNDERSTAND_LAN_SIGNUP_RACE=true
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: bash scripts/setup_open_webui.sh [--i-understand-lan-signup-race]
+
+Bootstrap Open WebUI for Hermes. Signup defaults to disabled so the operator
+creates the admin account deliberately. Binding to 0.0.0.0 with signup enabled
+lets the first LAN client claim admin — use loopback first or pass the flag above.
+EOF
+        exit 0
+        ;;
+      *)
+        echo "Unknown argument: $1 (try --help)" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+_is_truthy() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    true|yes|1|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_is_loopback_bind() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    127.0.0.1|localhost|::1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_signup_safe_for_bind() {
+  if _is_loopback_bind "$OPEN_WEBUI_HOST"; then
+    return 0
+  fi
+  if ! _is_truthy "$OPEN_WEBUI_ENABLE_SIGNUP"; then
+    return 0
+  fi
+  if _is_truthy "$OPEN_WEBUI_I_UNDERSTAND_LAN_SIGNUP_RACE"; then
+    log "WARNING: binding to ${OPEN_WEBUI_HOST}:${OPEN_WEBUI_PORT} with signup ENABLED."
+    log "WARNING: the first client on your network to open the UI can claim admin."
+    return 0
+  fi
+  echo "Refusing to continue: OPEN_WEBUI_HOST=${OPEN_WEBUI_HOST} is not loopback and OPEN_WEBUI_ENABLE_SIGNUP=true." >&2
+  echo "Any device on your LAN can become admin during setup (#36121)." >&2
+  echo "Fix: OPEN_WEBUI_ENABLE_SIGNUP=false (default), bind to 127.0.0.1 first, or pass --i-understand-lan-signup-race." >&2
+  exit 1
 }
 
 require_cmd() {
@@ -291,6 +353,8 @@ main() {
   require_cmd curl
   require_cmd python3
 
+  assert_signup_safe_for_bind
+
   install_macos_dependencies
 
   local api_key
@@ -346,4 +410,7 @@ main() {
   log 'Important: Open WebUI persists connection settings after first launch. If you later save a wrong API key in the Admin UI, update/delete that connection there or reset its database.'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  parse_args "$@"
+  main
+fi

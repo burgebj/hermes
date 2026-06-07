@@ -62,6 +62,8 @@ HERMES_API_MODEL_NAME='My Hermes Agent' \
 bash scripts/setup_open_webui.sh
 ```
 
+Signup defaults to **disabled** so you control when the first admin account is created. If you bind to `0.0.0.0` for LAN access, keep signup off until your account exists, or pass `--i-understand-lan-signup-race` — otherwise the first device on your network to open the UI can claim admin.
+
 On Linux, automatic background service setup requires a working `systemd --user` session. If you are on a headless SSH box and want to skip service installation, run:
 
 ```bash
