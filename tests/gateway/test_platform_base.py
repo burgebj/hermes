@@ -740,6 +740,33 @@ class TestMediaDeliveryPathValidation:
 
         assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
 
+    @pytest.mark.parametrize(
+        "rel_path",
+        [".netrc", ".git-credentials", ".npmrc", ".pypirc"],
+    )
+    def test_recency_trust_denies_home_credential_dotfiles_even_when_fresh(
+        self, tmp_path, monkeypatch, rel_path
+    ):
+        """Plaintext-credential home dotfiles must never be delivered.
+
+        Sibling of the ~/.ssh case: ~/.netrc, ~/.git-credentials, ~/.npmrc
+        and ~/.pypirc hold cleartext tokens/passwords. Even freshly touched
+        (mtime within the recency window), prompt injection must not be able
+        to exfiltrate them as a native attachment.
+        """
+        self._patch_roots(monkeypatch)
+        monkeypatch.delenv("HERMES_MEDIA_ALLOW_DIRS", raising=False)
+        monkeypatch.setenv("HERMES_MEDIA_TRUST_RECENT_FILES", "1")
+        monkeypatch.setenv("HERMES_MEDIA_TRUST_RECENT_SECONDS", "600")
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir(parents=True)
+        secret = fake_home / rel_path
+        secret.write_text("machine example.com login bob password s3cr3t")
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
+
     def test_recency_trust_allows_pdf_in_project_dir(self, tmp_path, monkeypatch):
         """The motivating case: agent produces a PDF in a project directory.
 

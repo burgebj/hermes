@@ -898,6 +898,14 @@ _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS = (
     ".azure",
     ".gcloud",
     "Library/Keychains",  # macOS
+    # Plaintext-credential dotfiles (single files, matched by exact path):
+    # ~/.netrc holds curl/git/ftp login passwords, ~/.git-credentials holds
+    # https://user:token@host git creds, ~/.npmrc / ~/.pypirc hold registry
+    # auth tokens. Same exfiltration class as ~/.aws/credentials above.
+    ".netrc",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
 )
 
 
