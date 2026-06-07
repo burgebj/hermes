@@ -6536,6 +6536,13 @@ def cmd_cron(args):
     cron_command(args)
 
 
+def cmd_loop(args):
+    """Loop (repeating prompt) management."""
+    from hermes_cli.loop_commands import loop_command
+
+    loop_command(args)
+
+
 def cmd_webhook(args):
     """Webhook subscription management."""
     from hermes_cli.webhook import webhook_command
@@ -13753,6 +13760,36 @@ def main():
     _add_accept_hooks_flag(cron_tick)
     _add_accept_hooks_flag(cron_parser)
     cron_parser.set_defaults(func=cmd_cron)
+
+    # =========================================================================
+    # loop command
+    # =========================================================================
+    loop_parser = subparsers.add_parser(
+        "loop",
+        help="Set repeating prompts on a schedule",
+        description="Create and manage scheduled repeating prompts — every interval, the prompt fires as if you sent it.",
+    )
+    loop_subparsers = loop_parser.add_subparsers(dest="loop_command")
+
+    # loop status
+    loop_subparsers.add_parser("status", help="Show active loop jobs")
+    # loop list
+    loop_subparsers.add_parser("list", help="List loop jobs")
+    # loop pause
+    loop_pause = loop_subparsers.add_parser("pause", help="Pause a loop job")
+    loop_pause.add_argument("job_id", nargs="?", help="Job ID to pause")
+    # loop resume
+    loop_resume = loop_subparsers.add_parser("resume", help="Resume a paused loop job")
+    loop_resume.add_argument("job_id", nargs="?", help="Job ID to resume")
+    # loop clear
+    loop_subparsers.add_parser("clear", help="Delete all loop jobs")
+    # loop remove
+    loop_remove = loop_subparsers.add_parser("remove", help="Delete a loop job")
+    loop_remove.add_argument("job_id", help="Job ID to remove")
+    # loop create (default: positional args)
+    loop_parser.add_argument("loop_args", nargs="*", help="Interval and prompt for new loop")
+
+    loop_parser.set_defaults(func=cmd_loop)
 
     # =========================================================================
     # webhook command
