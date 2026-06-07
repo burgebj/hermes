@@ -256,7 +256,17 @@ class HolographicMemoryProvider(MemoryProvider):
 
     # -- Tool handlers -------------------------------------------------------
 
+    _UNAVAILABLE_MSG = (
+        "Holographic memory is unavailable — provider initialization failed "
+        "(typically a corrupt $HERMES_HOME/memory_store.db, e.g. after a "
+        "crash mid-WAL-checkpoint). Check the hermes errors log for the "
+        "underlying exception. Recovery: stop hermes, remove or restore "
+        "memory_store.db, then restart."
+    )
+
     def _handle_fact_store(self, args: dict) -> str:
+        if self._store is None or self._retriever is None:
+            return tool_error(self._UNAVAILABLE_MSG)
         try:
             action = args["action"]
             store = self._store
@@ -344,6 +354,8 @@ class HolographicMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def _handle_fact_feedback(self, args: dict) -> str:
+        if self._store is None:
+            return tool_error(self._UNAVAILABLE_MSG)
         try:
             fact_id = int(args["fact_id"])
             helpful = args["action"] == "helpful"
