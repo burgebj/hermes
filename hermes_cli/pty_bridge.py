@@ -29,22 +29,64 @@ Design constraints:
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import select
 import signal
 import struct
 import sys
-import termios
 import time
 from typing import Optional, Sequence
 
 try:
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - native Windows
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import termios  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - native Windows
+    termios = None  # type: ignore[assignment]
+
+try:
     import ptyprocess  # type: ignore
-    _PTY_AVAILABLE = not sys.platform.startswith("win")
 except ImportError:  # pragma: no cover - dev env without ptyprocess
-    ptyprocess = None  # type: ignore
-    _PTY_AVAILABLE = False
+    ptyprocess = None  # type: ignore[assignment]
+
+_PTY_AVAILABLE = (
+    ptyprocess is not None
+    and fcntl is not None
+    and termios is not None
+    and not sys.platform.startswith("win")
+)
+
+
+def _pty_unavailable_message() -> str:
+    """Return an actionable reason for spawn-time PTY unavailability."""
+    if sys.platform.startswith("win"):
+        return (
+            "Pseudo-terminals are unavailable on native Windows for the "
+            "dashboard chat/TUI path. Run Hermes Agent inside WSL to use "
+            "the dashboard chat tab."
+        )
+
+    missing_modules = [
+        name
+        for name, module in (
+            ("ptyprocess", ptyprocess),
+            ("fcntl", fcntl),
+            ("termios", termios),
+        )
+        if module is None
+    ]
+    if missing_modules:
+        return (
+            "Pseudo-terminals are unavailable because this Python environment "
+            f"is missing Unix PTY module(s): {', '.join(missing_modules)}. "
+            "On Windows, run Hermes Agent inside WSL for POSIX PTY support; "
+            "otherwise install the PTY extra with: pip install -e '.[pty]'."
+        )
+
+    return "Pseudo-terminals are unavailable."
 
 
 __all__ = ["PtyBridge", "PtyUnavailableError"]
@@ -126,18 +168,7 @@ class PtyBridge:
         ordinary exec failures (missing binary, bad cwd, etc.).
         """
         if not _PTY_AVAILABLE:
-            if sys.platform.startswith("win"):
-                raise PtyUnavailableError(
-                    "Pseudo-terminals are unavailable on this platform. "
-                    "Hermes Agent supports Windows only via WSL."
-                )
-            if ptyprocess is None:
-                raise PtyUnavailableError(
-                    "The `ptyprocess` package is missing. "
-                    "Install with: pip install ptyprocess "
-                    "(or pip install -e '.[pty]')."
-                )
-            raise PtyUnavailableError("Pseudo-terminals are unavailable.")
+            raise PtyUnavailableError(_pty_unavailable_message())
         # PTY-hosted programs expect TERM to describe the terminal type.
         # CI often runs without TERM in the parent process, which makes
         # simple terminal probes like `tput cols` fail before winsize reads.

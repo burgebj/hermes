@@ -244,3 +244,36 @@ class TestPtyBridgeUnavailable:
     def test_error_carries_user_message(self):
         err = PtyUnavailableError("platform not supported")
         assert "platform" in str(err)
+
+    def test_spawn_error_names_missing_unix_pty_modules(self, monkeypatch):
+        import hermes_cli.pty_bridge as pty_bridge
+
+        monkeypatch.setattr(pty_bridge, "_PTY_AVAILABLE", False)
+        monkeypatch.setattr(pty_bridge, "ptyprocess", object())
+        monkeypatch.setattr(pty_bridge, "fcntl", None)
+        monkeypatch.setattr(pty_bridge, "termios", None)
+        monkeypatch.setattr(pty_bridge.sys, "platform", "linux")
+
+        with pytest.raises(PtyUnavailableError) as exc_info:
+            PtyBridge.spawn(["/bin/sh"])
+
+        message = str(exc_info.value)
+        assert "fcntl" in message
+        assert "termios" in message
+        assert "Unix PTY module" in message
+        assert "Windows" in message
+        assert "WSL" in message
+
+    def test_spawn_error_names_native_windows_wsl_path(self, monkeypatch):
+        import hermes_cli.pty_bridge as pty_bridge
+
+        monkeypatch.setattr(pty_bridge, "_PTY_AVAILABLE", False)
+        monkeypatch.setattr(pty_bridge.sys, "platform", "win32")
+
+        with pytest.raises(PtyUnavailableError) as exc_info:
+            PtyBridge.spawn(["cmd.exe"])
+
+        message = str(exc_info.value)
+        assert "native Windows" in message
+        assert "WSL" in message
+        assert "dashboard" in message

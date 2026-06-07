@@ -3928,6 +3928,43 @@ class TestDashboardPluginManifestExtensions:
         ]
 
 
+
+class TestNativeWindowsPtyImportFallback:
+    def test_web_server_imports_when_unix_pty_modules_are_missing(self, monkeypatch):
+        """Dashboard import should not fail just because PTY support is unavailable.
+
+        Native Windows lacks Unix-only modules such as fcntl/termios. The dashboard
+        should still import and expose non-PTY routes, while the PTY bridge reports
+        itself unavailable.
+        """
+        import builtins
+        import importlib
+        import sys
+
+        real_import = builtins.__import__
+
+        def reject_unix_pty_modules(name, globals=None, locals=None, fromlist=(), level=0):
+            importing_module = (globals or {}).get("__name__")
+            if importing_module == "hermes_cli.pty_bridge" and name in {"fcntl", "termios"}:
+                raise ModuleNotFoundError(f"No module named '{name}'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", reject_unix_pty_modules)
+        sys.modules.pop("hermes_cli.web_server", None)
+        sys.modules.pop("hermes_cli.pty_bridge", None)
+
+        try:
+            ws = importlib.import_module("hermes_cli.web_server")
+
+            assert ws.app is not None
+            assert ws.PtyBridge.is_available() is False
+            with pytest.raises(ws.PtyUnavailableError):
+                ws.PtyBridge.spawn(["hermes"])
+        finally:
+            sys.modules.pop("hermes_cli.web_server", None)
+            sys.modules.pop("hermes_cli.pty_bridge", None)
+
+
 # ---------------------------------------------------------------------------
 # /api/pty WebSocket — terminal bridge for the dashboard "Chat" tab.
 #
@@ -4114,6 +4151,8 @@ class TestPtyWebSocket:
             assert b"99" in buf and b"41" in buf
 
     def test_unavailable_platform_closes_with_message(self, monkeypatch):
+        from starlette.websockets import WebSocketDisconnect
+
         from hermes_cli.pty_bridge import PtyUnavailableError
 
         def _raise(argv, **kwargs):
@@ -4127,12 +4166,21 @@ class TestPtyWebSocket:
         # Patch PtyBridge.spawn at the web_server module's binding.
         import hermes_cli.web_server as ws_mod
 
-        monkeypatch.setattr(ws_mod.PtyBridge, "spawn", classmethod(lambda cls, *a, **k: _raise(*a, **k)))
+        monkeypatch.setattr(
+            ws_mod.PtyBridge,
+            "spawn",
+            classmethod(lambda cls, *a, **k: _raise(*a, **k)),
+        )
 
         with self.client.websocket_connect(self._url()) as conn:
-            # Expect a final text frame with the error message, then close.
+            # Expect a final text frame with the error message, then a clean
+            # endpoint-level close. The dashboard server must stay alive even
+            # when the embedded chat PTY cannot start.
             msg = conn.receive_text()
             assert "pty missing" in msg or "unavailable" in msg.lower() or "pty" in msg.lower()
+            with pytest.raises(WebSocketDisconnect) as exc:
+                conn.receive_text()
+            assert exc.value.code == 1011
 
     def test_resume_parameter_is_forwarded_to_argv(self, monkeypatch):
         captured: dict = {}
