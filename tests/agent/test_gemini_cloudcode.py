@@ -1180,6 +1180,45 @@ class TestAuthStatus:
         s = get_auth_status("google-gemini-cli")
         assert s["logged_in"] is False
 
+    def test_expired_unrefreshable_token_is_not_logged_in(self):
+        from agent.google_oauth import GoogleCredentials, save_credentials
+        from hermes_cli.auth import get_auth_status
+
+        save_credentials(GoogleCredentials(
+            access_token="expired-at",
+            refresh_token="",
+            expires_ms=int((time.time() - 3600) * 1000),
+            email="tek@nous.ai",
+            project_id="tek-proj",
+        ))
+
+        s = get_auth_status("google-gemini-cli")
+        assert s["logged_in"] is False
+        assert "Re-run OAuth login" in s["error"]
+
+    def test_expired_token_refreshes_before_reporting_logged_in(self, monkeypatch):
+        from agent import google_oauth
+        from agent.google_oauth import GoogleCredentials, save_credentials
+        from hermes_cli.auth import get_auth_status
+
+        save_credentials(GoogleCredentials(
+            access_token="expired-at",
+            refresh_token="rt",
+            expires_ms=int((time.time() - 3600) * 1000),
+            email="tek@nous.ai",
+            project_id="tek-proj",
+        ))
+
+        monkeypatch.setattr(
+            google_oauth,
+            "_post_form",
+            lambda *args, **kwargs: {"access_token": "refreshed-at", "expires_in": 3600},
+        )
+
+        s = get_auth_status("google-gemini-cli")
+        assert s["logged_in"] is True
+        assert s["api_key"] == "refreshed-at"
+
     def test_logged_in_reports_email_and_project(self):
         from agent.google_oauth import GoogleCredentials, save_credentials
         from hermes_cli.auth import get_auth_status
@@ -1195,6 +1234,45 @@ class TestAuthStatus:
         assert s["logged_in"] is True
         assert s["email"] == "tek@nous.ai"
         assert s["project_id"] == "tek-proj"
+
+
+class TestGeminiModelFlow:
+    def test_stale_token_triggers_relogin_before_model_selection(self, monkeypatch, capsys):
+        from agent.google_oauth import GoogleCredentials, save_credentials
+        from hermes_cli.main import _model_flow_google_gemini_cli
+
+        save_credentials(GoogleCredentials(
+            access_token="expired-at",
+            refresh_token="",
+            expires_ms=int((time.time() - 3600) * 1000),
+            email="tek@nous.ai",
+            project_id="old-proj",
+        ))
+
+        relogin = {"called": False}
+
+        def fake_start_oauth_flow(*, force_relogin=False, project_id=""):
+            relogin["called"] = True
+            assert force_relogin is True
+            save_credentials(GoogleCredentials(
+                access_token="fresh-at",
+                refresh_token="fresh-rt",
+                expires_ms=int((time.time() + 3600) * 1000),
+                email="tek@nous.ai",
+                project_id=project_id or "fresh-proj",
+            ))
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        monkeypatch.setattr("agent.google_oauth.resolve_project_id_from_env", lambda: "fresh-proj")
+        monkeypatch.setattr("agent.google_oauth.start_oauth_flow", fake_start_oauth_flow)
+        monkeypatch.setattr("hermes_cli.auth._prompt_model_selection", lambda *args, **kwargs: None)
+
+        _model_flow_google_gemini_cli({}, current_model="gemini-2.5-pro")
+
+        out = capsys.readouterr().out
+        assert relogin["called"] is True
+        assert "Using GCP project: fresh-proj" in out
+        assert "Failed to resolve Gemini credentials" not in out
 
 
 class TestGquotaCommand:

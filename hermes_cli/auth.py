@@ -2182,25 +2182,28 @@ def resolve_gemini_oauth_runtime_credentials(
 def get_gemini_oauth_auth_status() -> Dict[str, Any]:
     """Return a status dict for `hermes auth list` / `hermes status`."""
     try:
-        from agent.google_oauth import _credentials_path, load_credentials
+        from agent.google_oauth import _credentials_path
     except ImportError:
         return {"logged_in": False, "error": "agent.google_oauth unavailable"}
     auth_path = _credentials_path()
-    creds = load_credentials()
-    if creds is None or not creds.access_token:
+    try:
+        # Validate runtime credentials so expired tokens trigger refresh or
+        # surface a re-login requirement instead of looking "logged in".
+        creds = resolve_gemini_oauth_runtime_credentials(force_refresh=False)
+    except AuthError as exc:
         return {
             "logged_in": False,
             "auth_file": str(auth_path),
-            "error": "not logged in",
+            "error": str(exc),
         }
     return {
         "logged_in": True,
         "auth_file": str(auth_path),
-        "source": "google-oauth",
-        "api_key": creds.access_token,
-        "expires_at_ms": creds.expires_ms,
-        "email": creds.email,
-        "project_id": creds.project_id,
+        "source": creds.get("source", "google-oauth"),
+        "api_key": creds.get("api_key"),
+        "expires_at_ms": creds.get("expires_at_ms"),
+        "email": creds.get("email", ""),
+        "project_id": creds.get("project_id", ""),
     }
 # Spotify auth — PKCE tokens stored in ~/.hermes/auth.json
 # =============================================================================
