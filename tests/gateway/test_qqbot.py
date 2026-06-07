@@ -192,6 +192,40 @@ class TestVoiceAttachmentSSRFProtection:
 
 
 # ---------------------------------------------------------------------------
+# WebSocket reconnect loop
+# ---------------------------------------------------------------------------
+
+class TestQQReconnectLoop:
+    @pytest.mark.asyncio
+    async def test_read_loop_return_while_running_keeps_reconnecting(self):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        adapter._running = True
+        read_calls = []
+        reconnect_calls = []
+
+        async def fake_read_events():
+            read_calls.append(1)
+            if len(read_calls) >= 3:
+                adapter._running = False
+            return None
+
+        async def fake_reconnect(backoff_idx):
+            reconnect_calls.append(backoff_idx)
+            if len(reconnect_calls) >= 2:
+                adapter._running = False
+            return False
+
+        adapter._read_events = fake_read_events
+        adapter._reconnect = fake_reconnect
+
+        await asyncio.wait_for(adapter._listen_loop(), timeout=1.0)
+
+        assert reconnect_calls == [0, 1]
+
+
+# ---------------------------------------------------------------------------
 # WebSocket proxy handling
 # ---------------------------------------------------------------------------
 

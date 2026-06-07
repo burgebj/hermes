@@ -494,8 +494,14 @@ class QQAdapter(BasePlatformAdapter):
             try:
                 connect_time = time.monotonic()
                 await self._read_events()
-                backoff_idx = 0
-                quick_disconnect_count = 0
+                if not self._running:
+                    return
+                # _read_events() should only return when the adapter is stopping.
+                # If it returns while still running, the websocket is already gone
+                # (for example after a failed reconnect left self._ws closed). Treat
+                # that as a disconnect so the backoff loop keeps retrying instead of
+                # spinning silently with the platform marked disconnected.
+                raise RuntimeError("WebSocket read loop ended unexpectedly")
             except asyncio.CancelledError:
                 return
             except QQCloseError as exc:
