@@ -1025,6 +1025,24 @@ def _build_snapshot_entry(
 # Skills index
 # =========================================================================
 
+def _get_compact_mode() -> str:
+    """Read compact_mode from config.yaml skills section.
+    
+    Returns: 'full' (default), 'compact' (names only, per-cat limit), or 'auto'.
+    'auto' activates compact mode when total skill count exceeds 500.
+    """
+    try:
+        from hermes_config import get_config
+        cfg = get_config()
+        skills_cfg = cfg.get("skills", {})
+        mode = skills_cfg.get("compact_mode", "auto")
+        if mode not in ("full", "compact", "auto"):
+            return "auto"
+        return mode
+    except Exception:
+        return "auto"
+
+
 def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
     """Read a SKILL.md once and return platform compatibility, frontmatter, and description.
 
@@ -1106,6 +1124,9 @@ def build_skills_system_prompt(
     if not skills_dir.exists() and not external_dirs:
         return ""
 
+    # ── Compact mode: read from config.yaml ───────────────────────────
+    _compact_mode = _get_compact_mode()
+
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
     # Include the resolved platform so per-platform disabled-skill lists
     # produce distinct cache entries (gateway serves multiple platforms).
@@ -1123,6 +1144,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        _compact_mode,  # compact mode affects cache output
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1259,6 +1281,15 @@ def build_skills_system_prompt(
     if not skills_by_category:
         result = ""
     else:
+        # Resolve 'auto' mode: compact when total skills exceed threshold
+        effective_compact = _compact_mode
+        if _compact_mode == "auto":
+            total_skills = sum(len(v) for v in skills_by_category.values())
+            if total_skills > 500:
+                effective_compact = True
+            else:
+                effective_compact = False
+
         index_lines = []
         for category in sorted(skills_by_category.keys()):
             cat_desc = category_descriptions.get(category, "")
@@ -1268,11 +1299,18 @@ def build_skills_system_prompt(
                 index_lines.append(f"  {category}:")
             # Deduplicate and sort skills within each category
             seen = set()
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+            skills_list = sorted(skills_by_category[category], key=lambda x: x[0])
+            # Compact mode: limit per category to 25, strip descriptions
+            if effective_compact:
+                skills_list = skills_list[:25]
+            for name, desc in skills_list:
                 if name in seen:
                     continue
                 seen.add(name)
-                if desc:
+                if effective_compact:
+                    # Compact: name only (no description) — saves ~60% of index tokens
+                    index_lines.append(f"    - {name}")
+                elif desc:
                     index_lines.append(f"    - {name}: {desc}")
                 else:
                     index_lines.append(f"    - {name}")
