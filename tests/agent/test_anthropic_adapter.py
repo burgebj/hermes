@@ -1647,6 +1647,72 @@ class TestThinkingBlockSignatureManagement:
         assert len(thinking) == 1
         assert thinking[0]["signature"] == "sig_valid"
 
+    def test_interleaved_multi_thinking_demoted_on_last_turn(self):
+        """Multiple signed thinking blocks + tool_use on the last turn are demoted.
+
+        Extended thinking interleaves thinking and tool_use blocks; Anthropic
+        signs each thinking block against its original interleaved position.
+        Hermes rebuilds the turn as [all thinking][text][all tool_use], so any
+        turn with 2+ thinking blocks alongside tool_use is reordered and the
+        signatures are dead. They must be demoted to text (reasoning preserved),
+        not replayed verbatim, or Anthropic 400s with "thinking ... cannot be
+        modified".
+        """
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Working on it.",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "First step.", "signature": "sig1"},
+                    {"type": "thinking", "thinking": "Second step.", "signature": "sig2"},
+                ],
+                "tool_calls": [
+                    {"id": "tc_a", "function": {"name": "a", "arguments": "{}"}},
+                    {"id": "tc_b", "function": {"name": "b", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_a", "content": "result A"},
+            {"role": "tool", "tool_call_id": "tc_b", "content": "result B"},
+        ]
+        _, result = convert_messages_to_anthropic(messages)
+        blocks = result[0]["content"]
+        # No thinking blocks survive — all demoted.
+        assert not any(b.get("type") in ("thinking", "redacted_thinking") for b in blocks)
+        # Reasoning preserved as text.
+        text_contents = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+        assert "First step." in text_contents
+        assert "Second step." in text_contents
+        # Both tool_use blocks survive.
+        tool_use = [b for b in blocks if b.get("type") == "tool_use"]
+        assert len(tool_use) == 2
+
+    def test_single_thinking_with_tool_use_kept_signed(self):
+        """A single signed thinking block + tool_use is NOT demoted (no over-fire).
+
+        With only one thinking block its position (leading the turn) is
+        unchanged by Hermes' reconstruction, so the signature is still valid and
+        must be replayed verbatim.
+        """
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Working.",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "Only step.", "signature": "sig_solo"},
+                ],
+                "tool_calls": [
+                    {"id": "tc_one", "function": {"name": "a", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_one", "content": "result"},
+        ]
+        _, result = convert_messages_to_anthropic(messages)
+        blocks = result[0]["content"]
+        thinking = [b for b in blocks if b.get("type") == "thinking"]
+        assert len(thinking) == 1
+        assert thinking[0]["signature"] == "sig_solo"
+
+
     def test_unsigned_thinking_downgraded_to_text_on_last_turn(self):
         """Unsigned thinking blocks on the last turn become text blocks."""
         messages = [
