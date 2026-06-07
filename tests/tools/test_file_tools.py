@@ -117,6 +117,72 @@ class TestWriteFileHandler:
         result = json.loads(_handle_write_file({"content": "hello"}))
         assert "error" in result
 
+    def test_file_content_alias_is_accepted(self, tmp_path):
+        """#39964 — file_content should be accepted as an alias for content."""
+        from tools.file_tools import _handle_write_file
+        target = tmp_path / "alias.txt"
+        target_str = str(target)
+
+        with patch("tools.file_tools._get_file_ops") as mock_get:
+            mock_ops = MagicMock()
+            result_obj = MagicMock()
+            result_obj.to_dict.return_value = {"status": "ok", "path": target_str, "bytes": 5}
+            mock_ops.write_file.return_value = result_obj
+            mock_get.return_value = mock_ops
+
+            result = json.loads(
+                _handle_write_file({"path": target_str, "file_content": "hello"})
+            )
+            assert result["status"] == "ok"
+            mock_ops.write_file.assert_called_once_with(target_str, "hello")
+
+    def test_file_path_alias_is_accepted(self, tmp_path):
+        """#39964 — file_path should be accepted as an alias for path."""
+        from tools.file_tools import _handle_write_file
+        target = tmp_path / "file-path.txt"
+        target_str = str(target)
+
+        with patch("tools.file_tools._get_file_ops") as mock_get:
+            mock_ops = MagicMock()
+            result_obj = MagicMock()
+            result_obj.to_dict.return_value = {"status": "ok", "path": target_str, "bytes": 5}
+            mock_ops.write_file.return_value = result_obj
+            mock_get.return_value = mock_ops
+
+            result = json.loads(
+                _handle_write_file({"file_path": target_str, "content": "hello"})
+            )
+            assert result["status"] == "ok"
+            mock_ops.write_file.assert_called_once_with(target_str, "hello")
+
+    def test_canonical_write_file_keys_win_over_aliases(self, tmp_path):
+        """#39964 — canonical path/content must win when both spellings are present."""
+        from tools.file_tools import _handle_write_file
+        target = tmp_path / "canonical.txt"
+        alias = tmp_path / "alias.txt"
+        target_str = str(target)
+        alias_str = str(alias)
+
+        with patch("tools.file_tools._get_file_ops") as mock_get:
+            mock_ops = MagicMock()
+            result_obj = MagicMock()
+            result_obj.to_dict.return_value = {"status": "ok", "path": target_str, "bytes": 9}
+            mock_ops.write_file.return_value = result_obj
+            mock_get.return_value = mock_ops
+
+            result = json.loads(
+                _handle_write_file(
+                    {
+                        "path": target_str,
+                        "file_path": alias_str,
+                        "content": "canonical",
+                        "file_content": "alias",
+                    }
+                )
+            )
+            assert result["status"] == "ok"
+            mock_ops.write_file.assert_called_once_with(target_str, "canonical")
+
     def test_explicit_empty_content_is_allowed(self):
         """#19096 — explicit empty string content (file truncation) must still work."""
         from tools.file_tools import _handle_write_file
@@ -130,6 +196,25 @@ class TestWriteFileHandler:
 
             result = json.loads(_handle_write_file({"path": "/tmp/empty.txt", "content": ""}))
             assert result["status"] == "ok"
+
+    def test_explicit_empty_file_content_alias_is_allowed(self, tmp_path):
+        """#39964 — explicit empty file_content must still truncate the file."""
+        from tools.file_tools import _handle_write_file
+        target = tmp_path / "empty-alias.txt"
+        target_str = str(target)
+
+        with patch("tools.file_tools._get_file_ops") as mock_get:
+            mock_ops = MagicMock()
+            result_obj = MagicMock()
+            result_obj.to_dict.return_value = {"status": "ok", "path": target_str, "bytes": 0}
+            mock_ops.write_file.return_value = result_obj
+            mock_get.return_value = mock_ops
+
+            result = json.loads(
+                _handle_write_file({"path": target_str, "file_content": ""})
+            )
+            assert result["status"] == "ok"
+            mock_ops.write_file.assert_called_once_with(target_str, "")
 
     def test_non_string_content_returns_error(self):
         """#19096 — content must be a string, not a dict or list."""
