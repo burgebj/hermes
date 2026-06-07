@@ -255,6 +255,7 @@ if _try_termux_ultrafast_version():
 import argparse
 import hashlib
 import json
+import locale
 import shutil
 import stat
 import subprocess
@@ -7968,6 +7969,8 @@ def _kill_stale_dashboard_processes(
                     ["taskkill", "/PID", str(pid), "/F"],
                     capture_output=True,
                     text=True,
+                    encoding=locale.getpreferredencoding(False),
+                    errors="replace",
                     timeout=10,
                 )
                 if result.returncode == 0:

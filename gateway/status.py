@@ -13,6 +13,7 @@ concurrently under distinct configurations).
 
 import hashlib
 import json
+import locale
 import os
 import signal
 import subprocess
@@ -85,6 +86,8 @@ def terminate_pid(pid: int, *, force: bool = False) -> None:
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 text=True,
+                encoding=locale.getpreferredencoding(False),
+                errors="replace",
                 timeout=10,
             )
         except FileNotFoundError:
