@@ -1300,11 +1300,16 @@ class SessionStore:
         state.db is the canonical store. The legacy JSONL fallback was removed
         in spec 002 — pre-DB sessions on existing disks have already been
         migrated (their DB row holds the full message history).
+
+        Sanitizes the loaded history to strip tool calls, tool results,
+        reasoning, and debug metadata that may leak between sessions.
         """
         if not self._db:
             return []
         try:
-            return self._db.get_messages_as_conversation(session_id)
+            messages = self._db.get_messages_as_conversation(session_id)
+            from agent.resume_history import sanitize_resumed_conversation_history
+            return sanitize_resumed_conversation_history(messages)
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
             return []

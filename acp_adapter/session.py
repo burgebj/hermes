@@ -181,6 +181,7 @@ class SessionState:
     runtime_lock: Any = field(default_factory=Lock)
     current_prompt_text: str = ""
     interrupted_prompt_text: str = ""
+    resumed_from_storage: bool = False
 
 
 class SessionManager:
@@ -535,6 +536,7 @@ class SessionManager:
             model=model or getattr(agent, "model", "") or "",
             history=history,
             cancel_event=threading.Event(),
+            resumed_from_storage=True,
         )
         with self._lock:
             self._sessions[session_id] = state

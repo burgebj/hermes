@@ -3331,7 +3331,10 @@ def _(rid, params: dict) -> dict:
     )
     try:
         db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
+        from agent.resume_history import sanitize_resumed_conversation_history
+        history = sanitize_resumed_conversation_history(
+            db.get_messages_as_conversation(target)
+        )
         display_history = db.get_messages_as_conversation(
             target, include_ancestors=True
         )

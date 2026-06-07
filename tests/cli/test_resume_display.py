@@ -571,6 +571,7 @@ class TestPreloadResumedSession:
     def test_loads_session_successfully(self):
         cli = _make_cli(resume="good_session")
         messages = _simple_history()
+        expected_history = [m for m in messages if m.get("role") != "system"]
         mock_db = MagicMock()
         mock_db.get_session.return_value = {"id": "good_session", "title": "Test Session"}
         mock_db.get_messages_as_conversation.return_value = messages
@@ -581,12 +582,62 @@ class TestPreloadResumedSession:
         result = cli._preload_resumed_session()
 
         assert result is True
-        assert cli.conversation_history == messages
+        assert cli.conversation_history == expected_history
         output = buf.getvalue()
         assert "Resumed session" in output
         assert "good_session" in output
         assert "Test Session" in output
         assert "2 user messages" in output
+
+    def test_resume_history_omits_tool_debug_context(self):
+        cli = _make_cli(resume="leaky_session")
+        huge_tool_result = "debug instructions\n" + ("x" * 43691)
+        messages = [
+            {"role": "user", "content": "show skill"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "private chain",
+                "tool_calls": [
+                    {
+                        "id": "call_skill",
+                        "type": "function",
+                        "function": {
+                            "name": "skill_view",
+                            "arguments": '{"name":"secret"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_skill",
+                "tool_name": "skill_view",
+                "content": huge_tool_result,
+            },
+        ]
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = {"id": "leaky_session", "title": None}
+        mock_db.get_messages_as_conversation.return_value = messages
+        mock_db._conn = MagicMock()
+        cli._session_db = mock_db
+
+        buf = StringIO()
+        cli.console.file = buf
+        assert cli._preload_resumed_session() is True
+
+        assert cli.conversation_history == [
+            {"role": "user", "content": "show skill"},
+            {
+                "role": "assistant",
+                "content": "[Prior tool activity omitted from resumed context.]",
+            },
+        ]
+        serialized = repr(cli.conversation_history)
+        assert "skill_view" not in serialized
+        assert "debug instructions" not in serialized
+        assert "tool_calls" not in serialized
+        assert "reasoning" not in serialized
 
     def test_reopens_session_in_db(self):
         cli = _make_cli(resume="reopen_session")

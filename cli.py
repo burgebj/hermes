@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 os.environ["HERMES_QUIET"] = "1"  # Our own modules
 
 import yaml
+from agent.resume_history import sanitize_resumed_conversation_history
 
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -5165,7 +5166,7 @@ class HermesCLI:
                     session_meta = resolved_meta
             restored = self._session_db.get_messages_as_conversation(self.session_id)
             if restored:
-                restored = [m for m in restored if m.get("role") != "session_meta"]
+                restored = sanitize_resumed_conversation_history(restored)
                 self.conversation_history = restored
                 msg_count = len([m for m in restored if m.get("role") == "user"])
                 title_part = ""
@@ -5514,7 +5515,7 @@ class HermesCLI:
 
         restored = self._session_db.get_messages_as_conversation(self.session_id)
         if restored:
-            restored = [m for m in restored if m.get("role") != "session_meta"]
+            restored = sanitize_resumed_conversation_history(restored)
             self.conversation_history = restored
             msg_count = len([m for m in restored if m.get("role") == "user"])
             title_part = ""
@@ -7070,7 +7071,7 @@ class HermesCLI:
 
         # Load conversation history (strip transcript-only metadata entries)
         restored = self._session_db.get_messages_as_conversation(target_id)
-        restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
+        restored = sanitize_resumed_conversation_history(restored)
         self.conversation_history = restored
 
         # Re-open the target session so it's not marked as ended

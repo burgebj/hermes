@@ -1777,7 +1777,10 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 db = self._ensure_session_db()
                 if db is not None:
-                    history = db.get_messages_as_conversation(session_id)
+                    from agent.resume_history import sanitize_resumed_conversation_history
+                    history = sanitize_resumed_conversation_history(
+                        db.get_messages_as_conversation(session_id)
+                    )
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
