@@ -1655,7 +1655,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Reasoning config from config.yaml
         from hermes_constants import parse_reasoning_effort
         effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
-        reasoning_config = parse_reasoning_effort(effort)
+        thinking_mode = str(_cfg.get("agent", {}).get("thinking_mode", "")).strip()
+        reasoning_config = parse_reasoning_effort(effort, thinking_mode=thinking_mode)
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is

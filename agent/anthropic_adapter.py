@@ -2249,7 +2249,15 @@ def build_anthropic_kwargs(
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
             budget = THINKING_BUDGET.get(effort, 8000)
-            if _supports_adaptive_thinking(model):
+            # thinking_mode=fixed opts into deterministic thinking on 4.6
+            # (budget_tokens instead of adaptive). 4.7+ forbids manual
+            # thinking, so the flag is silently ignored there.
+            _use_fixed = (
+                str(reasoning_config.get("thinking_mode", "")).lower() == "fixed"
+                and _supports_adaptive_thinking(model)
+                and not any(v in model for v in ("4-7", "4.7", "4-8", "4.8"))
+            )
+            if _supports_adaptive_thinking(model) and not _use_fixed:
                 kwargs["thinking"] = {
                     "type": "adaptive",
                     "display": "summarized",

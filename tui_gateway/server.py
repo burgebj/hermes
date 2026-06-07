@@ -1244,10 +1244,10 @@ def _display_mouse_tracking(display: dict) -> str:
 def _load_reasoning_config() -> dict | None:
     from hermes_constants import parse_reasoning_effort
 
-    effort = str(
-        (_load_cfg().get("agent") or {}).get("reasoning_effort", "") or ""
-    ).strip()
-    return parse_reasoning_effort(effort)
+    agent_cfg = _load_cfg().get("agent") or {}
+    effort = str(agent_cfg.get("reasoning_effort", "") or "").strip()
+    thinking_mode = str(agent_cfg.get("thinking_mode", "") or "").strip()
+    return parse_reasoning_effort(effort, thinking_mode=thinking_mode)
 
 
 def _load_service_tier() -> str | None:
@@ -5604,7 +5604,12 @@ def _(rid, params: dict) -> dict:
                     session["show_reasoning"] = False
                 return _ok(rid, {"key": key, "value": "hide"})
 
-            parsed = parse_reasoning_effort(arg)
+            existing_tm = ""
+            if session and session.get("agent") is not None:
+                existing_tm = (
+                    getattr(session["agent"], "reasoning_config", None) or {}
+                ).get("thinking_mode", "")
+            parsed = parse_reasoning_effort(arg, thinking_mode=existing_tm)
             if parsed is None:
                 return _err(rid, 4002, f"unknown reasoning value: {value}")
             _write_config_key("agent.reasoning_effort", arg)

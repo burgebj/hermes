@@ -3140,7 +3140,8 @@ class GatewayRunner:
         from hermes_constants import parse_reasoning_effort
         cfg = _load_gateway_runtime_config()
         effort = str(cfg_get(cfg, "agent", "reasoning_effort", default="") or "").strip()
-        result = parse_reasoning_effort(effort)
+        thinking_mode = str(cfg_get(cfg, "agent", "thinking_mode", default="") or "").strip()
+        result = parse_reasoning_effort(effort, thinking_mode=thinking_mode)
         if effort and effort.strip() and result is None:
             logger.warning("Unknown reasoning_effort '%s', using default (medium)", effort)
         return result
@@ -12995,11 +12996,10 @@ class GatewayRunner:
             self._reasoning_config = self._load_reasoning_config()
             self._evict_cached_agent(session_key)
             return t("gateway.reasoning.reset_done")
-        if effort == "none":
-            parsed = {"enabled": False}
-        elif effort in {"minimal", "low", "medium", "high", "xhigh"}:
-            parsed = {"enabled": True, "effort": effort}
-        else:
+        from hermes_constants import parse_reasoning_effort
+        existing_tm = (self._reasoning_config or {}).get("thinking_mode", "")
+        parsed = parse_reasoning_effort(effort, thinking_mode=existing_tm)
+        if parsed is None:
             return t(
                 "gateway.reasoning.unknown_arg",
                 arg=effort or raw_args.lower(),

@@ -332,10 +332,10 @@ def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
     return ""
 
 
-def _parse_reasoning_config(effort: str) -> dict | None:
+def _parse_reasoning_config(effort: str, thinking_mode: str = "") -> dict | None:
     """Parse a reasoning effort level into an OpenRouter reasoning config dict."""
     from hermes_constants import parse_reasoning_effort
-    result = parse_reasoning_effort(effort)
+    result = parse_reasoning_effort(effort, thinking_mode=thinking_mode)
     if effort and effort.strip() and result is None:
         logger.warning("Unknown reasoning_effort '%s', using default (medium)", effort)
     return result
@@ -3308,7 +3308,8 @@ class HermesCLI:
         
         # Reasoning config (OpenRouter reasoning effort level)
         self.reasoning_config = _parse_reasoning_config(
-            CLI_CONFIG["agent"].get("reasoning_effort", "")
+            CLI_CONFIG["agent"].get("reasoning_effort", ""),
+            thinking_mode=CLI_CONFIG["agent"].get("thinking_mode", ""),
         )
         self.service_tier = _parse_service_tier_config(
             CLI_CONFIG["agent"].get("service_tier", "")
@@ -10277,7 +10278,8 @@ class HermesCLI:
             return
 
         # Effort level change
-        parsed = _parse_reasoning_config(arg)
+        existing_tm = (self.reasoning_config or {}).get("thinking_mode", "")
+        parsed = _parse_reasoning_config(arg, thinking_mode=existing_tm)
         if parsed is None:
             _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
             _cprint(f"  {_DIM}Valid levels: none, minimal, low, medium, high, xhigh{_RST}")

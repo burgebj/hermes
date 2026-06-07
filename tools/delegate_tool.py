@@ -1099,7 +1099,10 @@ def _build_child_agent(
         if delegation_effort:
             from hermes_constants import parse_reasoning_effort
 
-            parsed = parse_reasoning_effort(delegation_effort)
+            parent_tm = (parent_reasoning or {}).get("thinking_mode", "")
+            parsed = parse_reasoning_effort(
+                delegation_effort, thinking_mode=parent_tm
+            )
             if parsed is not None:
                 child_reasoning = parsed
             else:

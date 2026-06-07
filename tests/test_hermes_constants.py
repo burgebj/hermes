@@ -209,6 +209,31 @@ class TestParseReasoningEffort:
         assert documented.issubset(set(VALID_REASONING_EFFORTS))
 
 
+    def test_thinking_mode_passed_through(self):
+        """Valid thinking_mode is included in the returned dict."""
+        result = parse_reasoning_effort("high", thinking_mode="fixed")
+        assert result == {"enabled": True, "effort": "high", "thinking_mode": "fixed"}
+
+    def test_thinking_mode_adaptive_passed_through(self):
+        result = parse_reasoning_effort("medium", thinking_mode="adaptive")
+        assert result == {"enabled": True, "effort": "medium", "thinking_mode": "adaptive"}
+
+    def test_thinking_mode_invalid_ignored(self):
+        """Invalid thinking_mode values are silently dropped."""
+        result = parse_reasoning_effort("high", thinking_mode="bogus")
+        assert result == {"enabled": True, "effort": "high"}
+
+    def test_thinking_mode_empty_omitted(self):
+        """Empty thinking_mode does not add the key."""
+        result = parse_reasoning_effort("high", thinking_mode="")
+        assert result == {"enabled": True, "effort": "high"}
+
+    def test_thinking_mode_not_added_to_disabled(self):
+        """thinking_mode is irrelevant when reasoning is disabled."""
+        result = parse_reasoning_effort("none", thinking_mode="fixed")
+        assert result == {"enabled": False}
+
+
 class TestSecureParentDir:
     """Tests for secure_parent_dir() — prevents chmod on / or top-level dirs."""
 

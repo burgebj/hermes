@@ -1172,6 +1172,54 @@ class TestBuildAnthropicKwargs:
         assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert kwargs["output_config"] == {"effort": "max"}
 
+    def test_thinking_mode_fixed_forces_manual_on_4_6(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "think hard"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high", "thinking_mode": "fixed"},
+        )
+        assert kwargs["thinking"]["type"] == "enabled"
+        assert kwargs["thinking"]["budget_tokens"] == 16000
+        assert kwargs["temperature"] == 1
+        assert kwargs["max_tokens"] >= 16000 + 4096
+
+    def test_thinking_mode_fixed_ignored_on_4_7(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-7",
+            messages=[{"role": "user", "content": "think hard"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high", "thinking_mode": "fixed"},
+        )
+        assert kwargs["thinking"]["type"] == "adaptive"
+        assert kwargs["output_config"] == {"effort": "high"}
+
+    def test_thinking_mode_adaptive_default_unchanged(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "think hard"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+        assert kwargs["thinking"]["type"] == "adaptive"
+
+    def test_thinking_mode_fixed_respects_effort_budget_map(self):
+        for effort, expected_budget in [("low", 4000), ("medium", 8000),
+                                         ("high", 16000), ("xhigh", 32000)]:
+            kwargs = build_anthropic_kwargs(
+                model="claude-sonnet-4-6",
+                messages=[{"role": "user", "content": "test"}],
+                tools=None,
+                max_tokens=4096,
+                reasoning_config={"enabled": True, "effort": effort, "thinking_mode": "fixed"},
+            )
+            assert kwargs["thinking"]["budget_tokens"] == expected_budget, (
+                f"effort={effort}: expected budget={expected_budget}"
+            )
+
     def test_opus_4_7_strips_sampling_params(self):
         # Opus 4.7 returns 400 on non-default temperature/top_p/top_k.
         # build_anthropic_kwargs must strip them as a safety net even if an

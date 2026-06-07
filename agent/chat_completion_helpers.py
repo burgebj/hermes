@@ -1348,7 +1348,10 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         )
         if not _is_lmstudio_summary and agent._supports_reasoning_extra_body():
             if agent.reasoning_config is not None:
-                summary_extra_body["reasoning"] = agent.reasoning_config
+                summary_extra_body["reasoning"] = {
+                    k: v for k, v in agent.reasoning_config.items()
+                    if k in ("enabled", "effort")
+                }
             else:
                 summary_extra_body["reasoning"] = {
                     "enabled": True,

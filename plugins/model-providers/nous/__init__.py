@@ -26,10 +26,11 @@ class NousProfile(ProviderProfile):
         extra_body = {}
         if supports_reasoning:
             if reasoning_config is not None:
-                rc = dict(reasoning_config)
-                if rc.get("enabled") is False:
-                    pass  # Nous omits reasoning when disabled
-                else:
+                rc = {
+                    k: v for k, v in reasoning_config.items()
+                    if k in ("enabled", "effort")
+                }
+                if rc.get("enabled") is not False:
                     extra_body["reasoning"] = rc
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
