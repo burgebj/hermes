@@ -1,6 +1,12 @@
 ---
 name: dogfood
 description: "Exploratory QA of web apps: find bugs, evidence, reports."
+triggers:
+  - "dogfood this app"
+  - "QA this website"
+  - "test this web app"
+  - "find bugs in this site"
+  - "exploratory web QA"
 version: 1.0.0
 platforms: [linux, macos, windows]
 metadata:

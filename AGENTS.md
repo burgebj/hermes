@@ -735,6 +735,17 @@ contributor skill PRs.
 
 ---
 
+## Brain operations
+
+Skill resolver rows used by health tooling:
+
+| Trigger | Skill |
+|---|---|
+| Exploratory QA of web apps, dogfood app/site, test website | `skills/dogfood/SKILL.md` |
+| Yuanbao groups, @mention users, query group info/members | `skills/yuanbao/SKILL.md` |
+
+---
+
 ## Toolsets
 
 All toolsets are defined in `toolsets.py` as a single `TOOLSETS` dict.

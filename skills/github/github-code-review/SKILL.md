@@ -97,6 +97,35 @@ git diff main...HEAD | grep -n "<<<<<<\|>>>>>>\|======="
 
 4. **Present structured feedback** to the user.
 
+### Red/Blue documentation workflow review
+
+When the user asks for a Blue Team review of a documentation diff against likely Red Team concerns:
+
+1. First gather the actual diff if available (`gh pr diff`, `git diff`, or changed docs from the remote). If no local checkout or open PR exists, state that limitation and review the provided diff summary plus the current remote/main docs rather than inventing unseen changes.
+2. Evaluate whether the documentation uses the user's requested workflow language, especially ordered process requirements such as `branch -> commit -> scan -> push -> PR`.
+3. Treat omitted explicit steps as a likely Red Team concern even when they are implied by adjacent GitHub workflow prose. Users asking for workflow compliance usually want the sequence auditable in text.
+4. Produce concise bullets with: pass/fail recommendation, Blue Team defense, likely Red Team concerns, mitigations/tests/checks to run, and minimal fixes.
+5. For documentation-only changes, recommended checks include `git diff --check`, markdown/link lint if configured, pre-push leak scanning when GitHub workflow docs or examples are touched, and textual verification that each required workflow token appears in the changed docs.
+
+### Documentation / Policy Diff Red-Team Format
+
+When the user asks for a red-team review of a documentation or policy diff:
+
+1. Inspect the exact diff plus nearby context and any generated templates/scripts that implement the policy.
+2. Check `git status --short --untracked-files=all` and compare it to `git diff --name-only`; untracked files that the prose claims are part of the change are a high-signal next-run failure risk.
+3. If the change adds workflow gates (PR templates, CI workflows, scripts, hooks), inspect whether enforcement artifacts are actually tracked and whether examples invoke/populate them. Treat a checkbox/template-only gate as advisory unless CI/branch protection makes it fail-closed.
+4. For leak-scan workflow claims, challenge scan scope explicitly: staged vs unstaged vs outgoing commits, untracked intended files, scanner command, exit-code behavior, redaction, and remediation when a leak is found. A vague “run a scan” line is not enough evidence for a safe push gate.
+5. Look specifically for concrete failure modes, ambiguities, policy regressions, security/workflow risks, missing preconditions, scanner bypass risk, false confidence, and bypass/misinterpretation paths.
+6. Return concise bullets with severity and evidence. Evidence should include file/line references or exact changed text when available.
+7. Do not propose broad rewrites unless the user asks for fixes. Keep suggestions minimal or omit them entirely when the request is findings-only.
+8. Note verification performed (for example `git diff --check`, leak scan command and scope, frontmatter/metadata parse) and whether any files were modified.
+
+Example bullet:
+
+```
+- **High — Gate can be skipped by generated PRs.** Evidence: docs require the gate, but the PR body generator still emits only the old checklist (`scripts/foo.py:40-48`).
+```
+
 ### Review Output Format
 
 When reviewing local changes, present findings in this structure:

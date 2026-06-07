@@ -1,6 +1,12 @@
 ---
 name: yuanbao
 description: "Yuanbao (元宝) groups: @mention users, query info/members."
+triggers:
+  - "Yuanbao group"
+  - "元宝 group"
+  - "@mention in Yuanbao"
+  - "艾特 someone in 元宝"
+  - "query Yuanbao group members"
 version: 1.0.0
 platforms: [linux, macos, windows]
 metadata:

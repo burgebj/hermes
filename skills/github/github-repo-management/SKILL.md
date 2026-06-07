@@ -54,6 +54,44 @@ REPO=$(echo "$OWNER_REPO" | cut -d/ -f2)
 
 ---
 
+## macOS FileProvider / iCloud Dataless Project Directories
+
+When publishing or inspecting a project under iCloud/FileProvider-backed paths, file reads or git operations may intermittently fail with `Resource deadlock avoided` because files are marked `compressed,dataless`. The durable workaround is to hydrate files before scanning/committing, and if `.git` itself becomes dataless, copy only tracked-worthy source files to a clean staging directory outside iCloud (for example under `/tmp`) and initialize/push from there.
+
+Recommended pattern:
+
+```bash
+# Hydrate project files before tests, scans, git add, or push.
+python3 - <<'PY'
+from pathlib import Path
+import os, subprocess, time
+skip_dirs = {'.git', '.venv', '.pytest_cache', 'state', '__pycache__', 'logs'}
+files = []
+for dirpath, dirnames, filenames in os.walk('.'):
+    dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+    if any(part in skip_dirs for part in Path(dirpath).parts):
+        continue
+    files += [Path(dirpath) / name for name in filenames]
+for p in files:
+    subprocess.run(['/usr/bin/brctl', 'download', str(p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for _ in range(10):
+    bad = []
+    for p in files:
+        try:
+            with p.open('rb') as handle:
+                handle.read(1)
+        except OSError as exc:
+            bad.append((p, exc))
+    if not bad:
+        break
+    time.sleep(1)
+if bad:
+    raise SystemExit(f'unreadable files remain: {bad[:5]}')
+PY
+```
+
+If git metadata is already dataless, avoid repairing it in place during a publish. Create a clean staging copy excluding `.git`, virtualenvs, caches, state, logs, `config.yaml`, and `.env`; then run tests, scans, `git init`, commit, and push from the staging directory.
+
 ## 1. Cloning Repositories
 
 Cloning is pure `git` — works identically either way:

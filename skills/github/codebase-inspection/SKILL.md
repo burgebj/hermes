@@ -24,6 +24,7 @@ Analyze repositories for lines of code, language breakdown, file counts, and cod
 - User asks about codebase size or composition
 - User wants code-vs-comment ratios
 - General "how big is this repo" questions
+- User asks to inventory many GitHub repositories, find repos related to a keyword/model/tool, or distinguish real codebases from lightweight skill/documentation repos
 
 ## Prerequisites
 
@@ -107,6 +108,20 @@ Special pseudo-languages:
 - `__generated__` — auto-generated files (detected heuristically)
 - `__duplicate__` — files with identical content
 - `__unknown__` — unrecognized file types
+
+## 7. Multi-repo GitHub inventory
+
+When the user asks which repositories mention a model/tool/project, or wants a portfolio-wide inventory, use `gh repo list` metadata first, then only clone/inspect likely matches or all repositories if a full audit is requested.
+
+Useful metadata dimensions:
+
+- repository visibility: private/public, archived, fork
+- default branch, primary language, description
+- presence of `SKILL.md`, `README.md`, package manifests, tests, and scripts
+- keyword hits across repository name + description + important top-level docs
+- rough classification: lightweight skill/doc repo vs real application/codebase
+
+For large account inventories, write a machine-readable JSON artifact such as `/tmp/<account>_repo_inventory.json` and summarize counts in the reply. See `references/github-multi-repo-inventory.md` for a compact recipe.
 
 ## Pitfalls
 
