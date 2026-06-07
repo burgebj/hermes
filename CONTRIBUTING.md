@@ -857,10 +857,31 @@ refactor/description   # Code restructuring
 
 ### Before submitting
 
-1. **Run tests**: `scripts/run_tests.sh` (recommended; same as CI) or `pytest tests/ -v` with the project venv activated
-2. **Test manually**: Run `hermes` and exercise the code path you changed
-3. **Check cross-platform impact**: If you touch file I/O, process management, or terminal handling, consider macOS, Linux, and WSL2
-4. **Keep PRs focused**: One logical change per PR. Don't mix a bug fix with a refactor with a new feature.
+**Run the local checks that mirror CI.** Catching a failure here takes seconds;
+finding it in a failed PR run costs a round-trip. These three commands match the
+**blocking** required checks that gate every PR — all ship with the `[dev]`
+install, so no extra setup is needed:
+
+```bash
+# 1. Tests — same hermetic env as CI (see AGENTS.md). Matches the Tests workflow.
+scripts/run_tests.sh
+
+# 2. Lint enforcement — flags bare open()/read_text()/write_text() without an
+#    explicit encoding= (silently corrupts non-ASCII files on Windows).
+#    Matches the "ruff enforcement (blocking)" check.
+ruff check .
+
+# 3. Windows cross-platform footguns in your changes — os.kill(pid, 0),
+#    os.setsid, SIGKILL without a getattr fallback, etc. Matches the
+#    "Windows footguns (blocking)" check. Add --all to scan the whole tree.
+python scripts/check-windows-footguns.py --diff main
+```
+
+Then, before opening the PR:
+
+1. **Test manually**: Run `hermes` and exercise the code path you changed
+2. **Check cross-platform impact**: If you touch file I/O, process management, or terminal handling, consider macOS, Linux, and WSL2
+3. **Keep PRs focused**: One logical change per PR. Don't mix a bug fix with a refactor with a new feature.
 
 ### PR description
 
