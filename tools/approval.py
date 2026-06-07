@@ -894,6 +894,8 @@ def _normalize_approval_mode(mode) -> str:
         return "off" if mode is False else "manual"
     if isinstance(mode, str):
         normalized = mode.strip().lower()
+        if normalized in {"auto", "automatic"}:
+            return "smart"
         return normalized or "manual"
     return "manual"
 
@@ -913,6 +915,18 @@ def _get_approval_mode() -> str:
     """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
     mode = _get_approval_config().get("mode", "manual")
     return _normalize_approval_mode(mode)
+
+
+def _get_gateway_approval_timeout() -> int:
+    """Read the gateway approval timeout. Falls back to approvals.timeout."""
+    config = _get_approval_config()
+    timeout = config.get("gateway_timeout")
+    if timeout is None:
+        timeout = config.get("timeout", 300)
+    try:
+        return int(timeout)
+    except (ValueError, TypeError):
+        return 300
 
 
 def _get_approval_timeout() -> int:
@@ -1174,11 +1188,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # slices so we can fire activity heartbeats every ~10s to the agent's
     # inactivity tracker — otherwise the gateway watchdog kills the agent
     # while the user is still responding. Mirrors _wait_for_process() cadence.
-    timeout = _get_approval_config().get("gateway_timeout", 300)
-    try:
-        timeout = int(timeout)
-    except (ValueError, TypeError):
-        timeout = 300
+    timeout = _get_gateway_approval_timeout()
 
     try:
         from tools.environments.base import touch_activity_if_due

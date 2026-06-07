@@ -266,6 +266,16 @@ def test_guard_smart_mode(gw_session, monkeypatch):
     assert res["approved"] is True
 
 
+def test_guard_auto_mode_uses_smart_approval(gw_session, monkeypatch):
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: A._normalize_approval_mode("auto"))
+    monkeypatch.setattr(A, "_smart_approve", lambda c, d: "approve")
+
+    res = A.check_execute_code_guard("import os", "local")
+
+    assert res["approved"] is True
+    assert res.get("smart_approved") is True
+
+
 def test_guard_session_yolo_bypasses(gw_session):
     A.enable_session_yolo(gw_session)
     try:

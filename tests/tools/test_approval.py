@@ -29,6 +29,35 @@ class TestApprovalModeParsing:
         with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "off"}}):
             assert _get_approval_mode() == "off"
 
+    def test_auto_mode_aliases_to_smart_approval(self):
+        assert approval_module._normalize_approval_mode("auto") == "smart"
+        assert approval_module._normalize_approval_mode(" AUTO ") == "smart"
+
+        with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "auto"}}):
+            assert _get_approval_mode() == "smart"
+
+
+class TestGatewayApprovalTimeoutConfig:
+    def test_gateway_timeout_falls_back_to_shared_timeout(self):
+        with mock_patch.object(approval_module, "_get_approval_config", return_value={"timeout": "60"}):
+            assert approval_module._get_gateway_approval_timeout() == 60
+
+    def test_gateway_timeout_takes_precedence_over_shared_timeout(self):
+        with mock_patch.object(
+            approval_module,
+            "_get_approval_config",
+            return_value={"gateway_timeout": "5", "timeout": "60"},
+        ):
+            assert approval_module._get_gateway_approval_timeout() == 5
+
+    def test_invalid_gateway_timeout_keeps_gateway_default(self):
+        with mock_patch.object(
+            approval_module,
+            "_get_approval_config",
+            return_value={"gateway_timeout": "not-a-number", "timeout": "60"},
+        ):
+            assert approval_module._get_gateway_approval_timeout() == 300
+
 
 class TestSmartApproval:
     def test_smart_approval_uses_call_llm(self):
