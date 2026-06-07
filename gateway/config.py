@@ -1489,8 +1489,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # SMS (Twilio)
+    # Honor DISABLE_SMS=1 to skip auto-enable when the user has stale
+    # Twilio credentials in the shell env but no TWILIO_PHONE_NUMBER set.
     twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    if twilio_sid:
+    if twilio_sid and os.getenv("DISABLE_SMS", "").lower() not in {"1", "true", "yes"}:
         if Platform.SMS not in config.platforms:
             config.platforms[Platform.SMS] = PlatformConfig()
         config.platforms[Platform.SMS].enabled = True
