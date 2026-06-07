@@ -6560,10 +6560,16 @@ def _kanban_worker_skill_available(hermes_home: Optional[str]) -> bool:
     omitting the flag only drops the supplementary pattern library.
     """
     from pathlib import Path as _Path
+    from hermes_constants import get_default_hermes_root
 
-    # An unset HERMES_HOME means the worker falls back to the default root
-    # home (``~/.hermes``), which ships the bundled skill.
-    base = _Path(hermes_home) if hermes_home else (_Path.home() / ".hermes")
+    # An unset HERMES_HOME means the worker falls back to the platform-native
+    # default root home (``~/.hermes`` on POSIX, ``%LOCALAPPDATA%\hermes`` on
+    # native Windows), which ships the bundled skill. Resolve it through the
+    # same helper the rest of this module uses (see ``kanban_home``) rather than
+    # hardcoding ``Path.home() / ".hermes"`` — that POSIX-only path is an empty
+    # husk on native Windows, so the probe would scan the wrong directory and
+    # silently drop ``--skills kanban-worker``.
+    base = _Path(hermes_home) if hermes_home else get_default_hermes_root()
     skills_root = base / "skills"
     if not skills_root.is_dir():
         return False

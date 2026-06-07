@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_constants
 from hermes_cli import kanban_db as kb
 
 
@@ -4287,3 +4288,79 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# Worker skill probe — platform-aware default home resolution
+# ---------------------------------------------------------------------------
+
+
+def _make_kanban_worker_skill(home: Path) -> None:
+    """Create the bundled kanban-worker SKILL.md under ``<home>/skills/devops/``."""
+    skill = home / "skills" / "devops" / "kanban-worker" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("---\nname: kanban-worker\n---\n", encoding="utf-8")
+
+
+def test_worker_skill_probe_resolves_platform_default_on_windows(tmp_path, monkeypatch):
+    """With HERMES_HOME unset on native Windows, the probe resolves the bundled
+    skill under %LOCALAPPDATA%\\hermes — not the POSIX ~/.hermes husk.
+
+    Regression: the None fallback previously hardcoded ``Path.home()/".hermes"``,
+    which on native Windows points at an empty husk, so the probe returned False
+    and the dispatcher silently dropped ``--skills kanban-worker``.
+    """
+    local_appdata = tmp_path / "LocalAppData"
+    user_home = tmp_path / "Home"
+    user_home.mkdir()
+    # Skill ships under the platform-native root only.
+    _make_kanban_worker_skill(local_appdata / "hermes")
+
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+    monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
+
+    assert kb._kanban_worker_skill_available(None) is True
+
+
+def test_worker_skill_probe_ignores_posix_husk_on_windows(tmp_path, monkeypatch):
+    """On native Windows the probe must NOT consult ~/.hermes — a leftover skill
+    in that husk is invisible to a worker that resolves %LOCALAPPDATA%\\hermes."""
+    local_appdata = tmp_path / "LocalAppData"
+    # Platform-native root exists with an (empty) skills dir: the probe scans
+    # here and must find nothing rather than reaching into the husk.
+    (local_appdata / "hermes" / "skills").mkdir(parents=True)
+    user_home = tmp_path / "Home"
+    # Skill present ONLY in the POSIX husk the worker never reads on Windows.
+    _make_kanban_worker_skill(user_home / ".hermes")
+
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+    monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
+
+    assert kb._kanban_worker_skill_available(None) is False
+
+
+def test_worker_skill_probe_resolves_posix_default_when_home_unset(tmp_path, monkeypatch):
+    """On POSIX, the unset-HERMES_HOME fallback still resolves ~/.hermes."""
+    user_home = tmp_path / "Home"
+    _make_kanban_worker_skill(user_home / ".hermes")
+
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+    monkeypatch.setattr(hermes_constants.sys, "platform", "linux")
+
+    assert kb._kanban_worker_skill_available(None) is True
+
+
+def test_worker_skill_probe_honors_explicit_home(tmp_path, monkeypatch):
+    """An explicit hermes_home is scanned directly, independent of platform."""
+    explicit = tmp_path / "profiles" / "coder"
+    _make_kanban_worker_skill(explicit)
+    monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
+
+    assert kb._kanban_worker_skill_available(str(explicit)) is True
+    # A home without the skill resolves False.
+    assert kb._kanban_worker_skill_available(str(tmp_path / "empty")) is False
