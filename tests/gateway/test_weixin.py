@@ -896,6 +896,75 @@ class TestWeixinContentDedup:
         # is_duplicate should only be called for message_id, never for content
         assert all("content:" not in str(call) for call in adapter._dedup.is_duplicate.call_args_list)
 
+    def test_slash_command_uses_time_bucketed_dedup_key(self):
+        adapter = _make_adapter()
+        adapter._poll_session = object()
+        adapter.handle_message = AsyncMock()
+        adapter._dedup.is_duplicate = Mock(return_value=False)
+        adapter._text_batch_delay_seconds = 0.05
+        adapter._text_batch_split_delay_seconds = 0.05
+
+        msg = {
+            "from_user_id": "wxid_user1",
+            "message_id": "msg-cmd-1",
+            "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
+        }
+        asyncio.run(adapter._process_message(msg))
+
+        content_calls = [
+            str(call) for call in adapter._dedup.is_duplicate.call_args_list
+            if "cmd:" in str(call)
+        ]
+        assert len(content_calls) == 1
+        assert "cmd:wxid_user1:" in content_calls[0]
+
+    def test_duplicate_slash_command_within_window_is_dropped(self):
+        adapter = _make_adapter()
+        adapter._poll_session = object()
+        adapter.handle_message = AsyncMock()
+        adapter._text_batch_delay_seconds = 0.05
+        adapter._text_batch_split_delay_seconds = 0.05
+
+        base_msg = {
+            "from_user_id": "wxid_user1",
+            "item_list": [{"type": 1, "text_item": {"text": "/help"}}],
+        }
+
+        async def _drive():
+            await adapter._process_message({**base_msg, "message_id": "cmd-1"})
+            await adapter._process_message({**base_msg, "message_id": "cmd-2"})
+            await asyncio.sleep(0.2)
+
+        asyncio.run(_drive())
+
+        assert adapter.handle_message.await_count == 1
+
+    def test_slash_command_dedup_independent_of_regular_content(self):
+        adapter = _make_adapter()
+        adapter._poll_session = object()
+        adapter.handle_message = AsyncMock()
+        adapter._dedup.is_duplicate = Mock(return_value=False)
+        adapter._text_batch_delay_seconds = 0.05
+        adapter._text_batch_split_delay_seconds = 0.05
+
+        regular_msg = {
+            "from_user_id": "wxid_user1",
+            "message_id": "msg-reg-1",
+            "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+        }
+        cmd_msg = {
+            "from_user_id": "wxid_user1",
+            "message_id": "msg-cmd-1",
+            "item_list": [{"type": 1, "text_item": {"text": "/hello"}}],
+        }
+        asyncio.run(adapter._process_message(regular_msg))
+        asyncio.run(adapter._process_message(cmd_msg))
+
+        calls = [str(call) for call in adapter._dedup.is_duplicate.call_args_list]
+        has_content = any("content:" in c for c in calls)
+        has_cmd = any("cmd:" in c for c in calls)
+        assert has_content and has_cmd
+
 
 class TestWeixinTextDebounce:
     """Text-debounce batching for rapid multi-message bursts (issue #35301).
