@@ -67,7 +67,7 @@ import gateway.platforms.slack as _slack_mod
 
 _slack_mod.SLACK_AVAILABLE = True
 
-from gateway.platforms.slack import SlackAdapter  # noqa: E402
+from gateway.platforms.slack import SlackAdapter, _dedupe_slack_block_text  # noqa: E402
 
 
 async def _pending_for_fake_task():
@@ -120,6 +120,31 @@ def _redirect_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gateway.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
     )
+
+
+# ---------------------------------------------------------------------------
+# TestSlackBlockTextDedupe
+# ---------------------------------------------------------------------------
+
+class TestSlackBlockTextDedupe:
+    def test_empty_blocks_text_returns_empty(self):
+        assert _dedupe_slack_block_text("   ", "hello") == ""
+
+    def test_exact_candidate_match_returns_empty(self):
+        assert _dedupe_slack_block_text("/queue summarize", "/queue summarize") == ""
+
+    def test_prefix_candidate_match_preserves_suffix(self):
+        assert (
+            _dedupe_slack_block_text(
+                "!queue summarize\n> Quoted line",
+                "/queue summarize",
+                "!queue summarize",
+            )
+            == "> Quoted line"
+        )
+
+    def test_no_candidate_match_returns_blocks_text(self):
+        assert _dedupe_slack_block_text("> Quoted line", "hello") == "> Quoted line"
 
 
 # ---------------------------------------------------------------------------
@@ -1155,6 +1180,80 @@ class TestBangPrefixCommands:
         assert msg_event.message_type == MessageType.COMMAND
 
     @pytest.mark.asyncio
+    async def test_bang_command_blocks_plain_text_not_duplicated(self, adapter):
+        """Slack rich_text blocks must not re-append the original !command text."""
+        evt = self._make_event("!reasoning medium")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [{
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": "!reasoning medium"}],
+            }],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/reasoning medium"
+        assert msg_event.get_command_args() == "medium"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_command_blocks_strip_plain_text_and_keep_quote(self, adapter):
+        """When blocks echo the command plus quotes, drop only the echoed command."""
+        evt = self._make_event("!queue summarize")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "!queue summarize"}],
+                },
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "Quoted line"}],
+                    }],
+                },
+            ],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/queue summarize\n> Quoted line"
+        assert "!queue summarize" not in msg_event.text
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_unknown_blocks_plain_text_not_duplicated(self, adapter):
+        """Unknown ! text is not a command, but block echoes still dedupe."""
+        evt = self._make_event("!nice work")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": "!nice work"}],
+                },
+                {
+                    "type": "rich_text_quote",
+                    "elements": [{
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "Quoted line"}],
+                    }],
+                },
+            ],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "!nice work\n> Quoted line"
+        assert msg_event.message_type != MessageType.COMMAND
+
+    @pytest.mark.asyncio
     async def test_bang_works_inside_thread(self, adapter):
         """The whole point: ``!stop`` inside a thread reply dispatches."""
         evt = self._make_event("!stop", thread_ts="1111111111.000001")
@@ -1503,6 +1602,36 @@ class TestIncomingDocumentHandling:
 
         msg_event = adapter.handle_message.call_args[0][0]
         assert msg_event.text == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_rich_text_blocks_strip_plain_text_and_keep_quote(self, adapter):
+        """If blocks echo authored text plus a quote, keep only the quote extra."""
+        event = self._make_event(
+            text="Can you summarize this?",
+            blocks=[
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [{"type": "text", "text": "Can you summarize this?"}],
+                        },
+                        {
+                            "type": "rich_text_quote",
+                            "elements": [{
+                                "type": "rich_text_section",
+                                "elements": [{"type": "text", "text": "Quoted line"}],
+                            }],
+                        },
+                    ],
+                }
+            ],
+        )
+
+        await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "Can you summarize this?\n> Quoted line"
 
     @pytest.mark.asyncio
     async def test_rich_text_quotes_and_lists_are_extracted(self, adapter):

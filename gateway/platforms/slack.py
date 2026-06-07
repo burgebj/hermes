@@ -199,6 +199,24 @@ def _extract_text_from_slack_blocks(blocks: list) -> str:
     return "\n".join(parts)
 
 
+def _dedupe_slack_block_text(blocks_text: str, *plain_text_candidates: str) -> str:
+    """Drop the rich_text echo of the authored message, preserving quoted extras."""
+    text = (blocks_text or "").strip()
+    if not text:
+        return ""
+
+    for candidate in plain_text_candidates:
+        candidate = (candidate or "").strip()
+        if not candidate:
+            continue
+        if text == candidate:
+            return ""
+        prefix = f"{candidate}\n"
+        if text.startswith(prefix):
+            return text[len(prefix):].lstrip("\n").strip()
+    return text
+
+
 def _serialize_slack_blocks_for_agent(blocks: list, max_chars: int = 6000) -> str:
     """Return a compact, redacted JSON view of the current message's Block Kit payload."""
     if not blocks:
@@ -2136,6 +2154,7 @@ class SlackAdapter(BasePlatformAdapter):
             return
 
         original_text = event.get("text", "")
+        raw_original_text = original_text
 
         # Slack blocks native slash commands inside threads ("/queue is not
         # supported in threads. Sorry!").  As a workaround, recognise a
@@ -2172,10 +2191,12 @@ class SlackAdapter(BasePlatformAdapter):
         if blocks:
             blocks_text = _extract_text_from_slack_blocks(blocks)
             if blocks_text:
-                # Only append if the blocks contain text not already present
-                # in the plain text field (avoids duplication).
-                stripped_blocks = blocks_text.strip()
-                if stripped_blocks and stripped_blocks not in text.strip():
+                stripped_blocks = _dedupe_slack_block_text(
+                    blocks_text,
+                    text,
+                    raw_original_text,
+                )
+                if stripped_blocks:
                     logger.debug(
                         "Slack: extracted additional text from blocks "
                         "(likely quoted/forwarded content): %s",
