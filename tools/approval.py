@@ -365,15 +365,24 @@ def _sudo_stdin_block_result(description: str) -> dict:
 # =========================================================================
 
 DANGEROUS_PATTERNS = [
-    (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
-    (r'\brm\s+-[^\s]*r', "recursive delete"),
-    (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
-    (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
-    (r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
-    (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
-    (r'\bchown\s+--recursive\b.*root', "recursive chown to root (long flag)"),
-    (r'\bmkfs\b', "format filesystem"),
-    (r'\bdd\s+.*if=', "disk copy"),
+    # Command-leading destructive operations are anchored to a command-start
+    # position via _CMDPOS (start of line, after ; && || | newline, inside a
+    # subshell, or after a sudo/env/exec wrapper). Without the anchor, the bare
+    # \b<cmd> word boundary matches the command name *anywhere* in the string,
+    # so non-execution mentions like `echo rm -rf /`, `grep "chmod 777" .`, or a
+    # heredoc that quotes the command would false-positive. This mirrors the
+    # protection HARDLINE_PATTERNS already applies to shutdown/reboot (see the
+    # _CMDPOS comment above). Real danger — line start, after a separator/pipe,
+    # in a subshell, or sudo-wrapped — still fires.
+    (_CMDPOS + r'rm\s+(-[^\s]*\s+)*/', "delete in root path"),
+    (_CMDPOS + r'rm\s+-[^\s]*r', "recursive delete"),
+    (_CMDPOS + r'rm\s+--recursive\b', "recursive delete (long flag)"),
+    (_CMDPOS + r'chmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
+    (_CMDPOS + r'chmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
+    (_CMDPOS + r'chown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
+    (_CMDPOS + r'chown\s+--recursive\b.*root', "recursive chown to root (long flag)"),
+    (_CMDPOS + r'mkfs\b', "format filesystem"),
+    (_CMDPOS + r'dd\s+.*if=', "disk copy"),
     (r'>\s*/dev/sd', "write to block device"),
     (r'\bDROP\s+(TABLE|DATABASE)\b', "SQL DROP"),
     # Use [^\n]* instead of .* so DOTALL mode does not cause a WHERE clause on the
