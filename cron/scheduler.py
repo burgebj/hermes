@@ -1341,19 +1341,20 @@ def _scan_assembled_cron_prompt(assembled: str, job: dict, *, has_skills: bool =
     return assembled
 
 
-def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
+def run_job(job: dict) -> tuple[bool, str, str, Optional[str], Optional[str], Optional[str]]:
     """Execute a single cron job, applying any per-job profile override."""
     job_id = job["id"]
     with _job_profile_context(job_id, job.get("profile")):
         return _run_job_impl(job)
 
 
-def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
+def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str], Optional[str], Optional[str]]:
     """
     Execute a single cron job.
     
     Returns:
-        Tuple of (success, full_output_doc, final_response, error_message)
+        Tuple of (success, full_output_doc, final_response, error_message,
+        executed_model, fallback_from)
     """
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
@@ -1381,7 +1382,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         if not script_path:
             err = "no_agent=True but no script is set for this job"
             logger.error("Job '%s': %s", job_id, err)
-            return False, "", "", err
+            return False, "", "", err, None, None
 
         # Apply workdir if configured — lets scripts use predictable relative
         # paths. For no_agent jobs this is just the subprocess cwd (not an
@@ -1423,7 +1424,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Status:** script failed\n\n"
                 f"{output}\n"
             )
-            return False, doc, alert, output
+            return False, doc, alert, output, None, None
 
         # Honour the wakeAgent gate as a silent signal — `wakeAgent: false`
         # means "nothing to report this tick", same as empty stdout.
@@ -1438,7 +1439,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Mode:** no_agent (script)\n"
                 f"**Status:** silent (wakeAgent=false)\n"
             )
-            return True, silent_doc, SILENT_MARKER, None
+            return True, silent_doc, SILENT_MARKER, None, None, None
 
         if not output.strip():
             logger.info("Job '%s' (no_agent): empty stdout — silent run", job_id)
@@ -1449,7 +1450,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Mode:** no_agent (script)\n"
                 f"**Status:** silent (empty output)\n"
             )
-            return True, silent_doc, SILENT_MARKER, None
+            return True, silent_doc, SILENT_MARKER, None, None, None
 
         doc = (
             f"# Cron Job: {job_name}\n\n"
@@ -1459,7 +1460,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             f"---\n\n"
             f"{output}\n"
         )
-        return True, doc, output, None
+        return True, doc, output, None, None, None
 
     # ---------------------------------------------------------------
     # Default (LLM) path — import and construct the agent machinery now
@@ -1498,7 +1499,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 "Script gate returned `wakeAgent=false` — agent skipped.\n"
             )
-            return True, silent_doc, SILENT_MARKER, None
+            return True, silent_doc, SILENT_MARKER, None, None, None
 
     try:
         prompt = _build_job_prompt(job, prerun_script=prerun_script)
@@ -1524,10 +1525,10 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             "and the match is a false positive, rephrase the content to avoid "
             "the threat pattern (`tools/cronjob_tools.py::_CRON_THREAT_PATTERNS`)."
         )
-        return False, blocked_doc, "", str(block_exc)
+        return False, blocked_doc, "", str(block_exc), None, None
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
-        return True, "", SILENT_MARKER, None
+        return True, "", SILENT_MARKER, None, None, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -1935,7 +1936,14 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 """
         
         logger.info("Job '%s' completed successfully", job_name)
-        return True, output, final_response, None
+        executed_model = result.get("model")
+        configured_model = job.get("model")
+        fallback_from = (
+            configured_model
+            if executed_model and configured_model and executed_model != configured_model
+            else None
+        )
+        return True, output, final_response, None, executed_model, fallback_from
         
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -1957,7 +1965,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 {error_msg}
 ```
 """
-        return False, output, "", error_msg
+        return False, output, "", error_msg, None, None
 
     finally:
         # Restore TERMINAL_CWD to whatever it was before this job ran.  We
@@ -2093,7 +2101,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
             try:
-                success, output, final_response, error = run_job(job)
+                success, output, final_response, error, executed_model, fallback_from = run_job(job)
 
                 output_file = save_job_output(job["id"], output)
                 if verbose:
@@ -2126,7 +2134,12 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                mark_job_run(
+                    job["id"], success, error,
+                    delivery_error=delivery_error,
+                    executed_model=executed_model,
+                    fallback_from=fallback_from,
+                )
                 return True
 
             except Exception as e:
