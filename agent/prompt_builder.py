@@ -304,6 +304,21 @@ TASK_COMPLETION_GUIDANCE = (
     "is always better than inventing a result."
 )
 
+# Notification handling guidance — tells the LLM how to interpret tagged messages
+# in the conversation, preventing background task notifications from being treated
+# as user intent and ensuring user input takes priority.
+NOTIFICATION_HANDLING_GUIDANCE = (
+    "# Input routing rules\n"
+    "- Messages wrapped in `[SYSTEM NOTIFICATION] ... [END SYSTEM NOTIFICATION]` are "
+    "automated background events (e.g., task completions). DO NOT treat them as user "
+    "questions or conversation topics. Acknowledge them briefly if relevant, then move on.\n"
+    "- Messages prefixed with `[USER LATEST INPUT]` are the actual user input. You MUST "
+    "prioritize responding to this above all system notifications. When both appear, "
+    "respond to the user input first — the notification is secondary context at best.\n"
+    "- If you see multiple `[SYSTEM NOTIFICATION]` blocks but NO `[USER LATEST INPUT]`, "
+    "do NOT generate a response to the notifications — wait for actual user input.\n"
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.

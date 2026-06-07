@@ -3403,6 +3403,7 @@ class HermesCLI:
         self._agent_running = False
         self._pending_input = queue.Queue()
         self._interrupt_queue = queue.Queue()
+        self._notification_buffer = ""          # Buffered system notifications to prepend to next user message
         # Tracks whether the turn that just finished was interrupted via
         # Ctrl+C. Consumed by _maybe_continue_goal_after_turn so /goal loops
         # don't auto-queue another continuation on top of a user-cancelled
@@ -12796,28 +12797,54 @@ class HermesCLI:
                 self._voice_speak_response_async(response)
 
 
-            # Re-queue the interrupt message (and any that arrived while we were
-            # processing the first) as the next prompt for process_loop.
+            # Re-queue the interrupt message as the next prompt for process_loop.
             # Only reached when busy_input_mode == "interrupt" (the default).
             # In "queue" mode Enter routes directly to _pending_input so this
             # block is never hit.
-            if pending_message and hasattr(self, '_pending_input'):
-                all_parts = [pending_message]
+            try:
+                user_inputs = []
+                if pending_message and isinstance(pending_message, str):
+                    user_inputs.append(pending_message.strip())
                 while not self._interrupt_queue.empty():
                     try:
                         extra = self._interrupt_queue.get_nowait()
-                        if extra:
-                            all_parts.append(extra)
+                        if isinstance(extra, str) and extra.strip():
+                            user_inputs.append(extra.strip())
                     except queue.Empty:
                         break
-                combined = "\n".join(all_parts)
-                n = len(all_parts)
-                preview = combined[:50] + ("..." if len(combined) > 50 else "")
-                if n > 1:
-                    print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
-                else:
-                    print(f"\n⚡ Sending after interrupt: '{preview}'")
-                self._pending_input.put(combined)
+                if user_inputs and hasattr(self, '_pending_input'):
+                    # Sliding window 1500 chars to prevent token explosion
+                    MAX_CHARS = 1500
+                    selected = []
+                    current_len = 0
+                    for inp in reversed(user_inputs):
+                        if current_len + len(inp) + 2 > MAX_CHARS and selected:
+                            break
+                        selected.insert(0, inp)
+                        current_len += len(inp) + 2
+                    combined = "\n\n".join(selected)
+                    n = len(selected)
+                    preview = combined[:50] + ("..." if len(combined) > 50 else "")
+                    if n > 1:
+                        print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
+                    else:
+                        print(f"\n⚡ Sending after interrupt: '{preview}'")
+                    self._pending_input.put(
+                        f"[USER LATEST INPUT - Priority Response Required]\n{combined}"
+                    )
+            except Exception as e:
+                logger.error("Interrupt re-queue logic failed. Falling back to pending_message only.", exc_info=True)
+                if pending_message and isinstance(pending_message, str) and hasattr(self, '_pending_input'):
+                    MAX_CHARS = 1500
+                    if len(pending_message) > MAX_CHARS:
+                        # Head-Tail strategy: preserve context (head) and final intent (tail)
+                        # to avoid truncated context that confuses the LLM
+                        head = pending_message[:700]
+                        tail = pending_message[-700:]
+                        truncated = f"{head}\n\n[...Fallback Truncated due to error...]\n\n{tail}"
+                    else:
+                        truncated = pending_message
+                    self._pending_input.put(truncated)
 
             # If a /steer was left over (agent finished before another tool
             # batch could absorb it), deliver it as the next user turn.
@@ -13298,6 +13325,7 @@ class HermesCLI:
         self._agent_running = False
         self._pending_input = queue.Queue()     # For normal input (commands + new queries)
         self._interrupt_queue = queue.Queue()   # For messages typed while agent is running
+        self._notification_buffer = ""          # Buffered system notifications to prepend to next user message
         # See constructor note. Mirrored here for the run() path that skips
         # the earlier __init__ branch.
         self._last_turn_interrupted = False
@@ -15171,12 +15199,23 @@ class HermesCLI:
                         # Periodic config watcher — auto-reload MCP on mcp_servers change
                         if not self._agent_running:
                             self._check_config_mcp_changes()
-                            # Check for background process notifications (completions
-                            # and watch pattern matches) while agent is idle.
+                            # Buffer background process notifications (completions
+                            # and watch pattern matches) — do NOT put into _pending_input
+                            # as they would trigger independent LLM calls. Instead,
+                            # buffer them to prepend to the next real user message.
                             try:
                                 from tools.process_registry import process_registry
                                 for _evt, _synth in process_registry.drain_notifications():
-                                    self._pending_input.put(_synth)
+                                    if isinstance(_synth, str) and _synth.strip():
+                                        wrapped = (
+                                            "[SYSTEM NOTIFICATION - Background task status]\n"
+                                            f"{_synth}\n"
+                                            "[END SYSTEM NOTIFICATION]\n"
+                                        )
+                                        self._notification_buffer += wrapped + "\n"
+                                        # Cap buffer at 2000 chars to prevent memory growth
+                                        if len(self._notification_buffer) > 2000:
+                                            self._notification_buffer = self._notification_buffer[-1500:]
                             except Exception:
                                 pass
                         continue
@@ -15249,6 +15288,15 @@ class HermesCLI:
                     paste_refs = list(_paste_ref_re.finditer(user_input)) if isinstance(user_input, str) else []
                     if paste_refs:
                         user_input = self._expand_paste_references(user_input)
+
+                    # Inject buffered system notifications as context for this user message.
+                    # Notifications are NOT sent to the LLM independently — they are
+                    # prepended to the next real user message so the agent is informed
+                    # without generating spurious responses to background events.
+                    if self._notification_buffer and isinstance(user_input, str):
+                        user_input = self._notification_buffer + user_input
+                        self._notification_buffer = ""  # Consume buffer
+
                     print()
                     self._print_user_message_preview(user_input)
                     
@@ -15299,12 +15347,22 @@ class HermesCLI:
                                     _cprint(f"{_DIM}Voice auto-restart failed: {e}{_RST}")
                             threading.Thread(target=_restart_recording, daemon=True).start()
 
-                        # Drain process notifications (completions + watch matches)
-                        # that arrived while the agent was running.
+                        # Buffer process notifications (completions + watch matches)
+                        # that arrived while the agent was running — do NOT put into
+                        # _pending_input as they would trigger independent LLM calls.
                         try:
                             from tools.process_registry import process_registry
                             for _evt, _synth in process_registry.drain_notifications():
-                                self._pending_input.put(_synth)
+                                if isinstance(_synth, str) and _synth.strip():
+                                    wrapped = (
+                                        "[SYSTEM NOTIFICATION - Background task status]\n"
+                                        f"{_synth}\n"
+                                        "[END SYSTEM NOTIFICATION]\n"
+                                    )
+                                    self._notification_buffer += wrapped + "\n"
+                                    # Cap buffer at 2000 chars to prevent memory growth
+                                    if len(self._notification_buffer) > 2000:
+                                        self._notification_buffer = self._notification_buffer[-1500:]
                         except Exception:
                             pass  # Non-fatal — don't break the main loop
 
