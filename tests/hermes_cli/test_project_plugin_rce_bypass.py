@@ -266,6 +266,35 @@ class TestMountApiRoutesRefusesUntrusted:
             "_api_file": api_file,
         }
 
+    def _write_user_dashboard_plugin(
+        self,
+        home: Path,
+        name: str = "off",
+        *,
+        dashboard_name: str | None = None,
+        plugin_yaml_name: str | None = None,
+    ) -> Path:
+        dash = _write_plugin_manifest(
+            home / "plugins",
+            name,
+            {
+                "name": dashboard_name or name,
+                "label": (dashboard_name or name).title(),
+                "api": "api.py",
+                "entry": "dist/index.js",
+            },
+        )
+        if plugin_yaml_name:
+            (dash.parent / "plugin.yaml").write_text(
+                f"name: {plugin_yaml_name}\n",
+                encoding="utf-8",
+            )
+        (dash / "api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n",
+            encoding="utf-8",
+        )
+        return dash
+
     def test_project_source_api_is_not_imported(self, tmp_path):
         plugin = self._payload_plugin(tmp_path, source="project")
         web_server._dashboard_plugins_cache = [plugin]
@@ -288,16 +317,130 @@ class TestMountApiRoutesRefusesUntrusted:
         assert called_path.name == "api.py"
         assert called_path.is_absolute()
 
-    def test_traversal_api_caught_at_mount_time(self, tmp_path):
+    def test_traversal_api_caught_at_mount_time(self, tmp_path, monkeypatch):
         """Defence-in-depth: if discovery is bypassed (e.g. cache
         tampering), mount-time validation still refuses to import a
         file outside the dashboard dir."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        (home / "config.yaml").write_text(
+            "plugins:\n  enabled:\n    - synthetic\n",
+            encoding="utf-8",
+        )
         plugin = self._payload_plugin(tmp_path, source="user",
                                        api_file="../../../tmp/evil.py")
         web_server._dashboard_plugins_cache = [plugin]
         with patch("importlib.util.spec_from_file_location") as spec:
             web_server._mount_plugin_api_routes()
         assert spec.call_count == 0
+
+    def test_disabled_user_dashboard_plugin_api_is_not_imported(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        bundled = tmp_path / "bundled"
+        bundled.mkdir()
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+        (home / "config.yaml").write_text(
+            json.dumps({"plugins": {"disabled": ["off"]}}),
+            encoding="utf-8",
+        )
+        self._write_user_dashboard_plugin(home, "off")
+
+        plugins = web_server._get_dashboard_plugins(force_rescan=True)
+        assert {p["name"] for p in plugins} == {"off"}
+        with patch("importlib.util.spec_from_file_location") as spec, patch.object(
+            web_server.app, "include_router"
+        ) as include_router:
+            web_server._mount_plugin_api_routes()
+
+        assert spec.call_count == 0
+        assert include_router.call_count == 0
+
+    def test_enabled_user_dashboard_plugin_api_imports_normally(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        bundled = tmp_path / "bundled"
+        bundled.mkdir()
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+        (home / "config.yaml").write_text(
+            json.dumps({"plugins": {"enabled": ["on"]}}),
+            encoding="utf-8",
+        )
+        self._write_user_dashboard_plugin(home, "on")
+
+        web_server._get_dashboard_plugins(force_rescan=True)
+        with patch("importlib.util.spec_from_file_location") as spec:
+            spec.return_value = None  # loader is None -> early continue, safe
+            web_server._mount_plugin_api_routes()
+
+        assert spec.call_count == 1
+        called_path = Path(spec.call_args.args[1])
+        assert called_path.name == "api.py"
+
+    def test_user_dashboard_plugin_api_uses_plugin_yaml_name_for_gate(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        bundled = tmp_path / "bundled"
+        bundled.mkdir()
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+        (home / "config.yaml").write_text(
+            json.dumps({"plugins": {"enabled": ["plugin-key"]}}),
+            encoding="utf-8",
+        )
+        self._write_user_dashboard_plugin(
+            home,
+            "directory-key",
+            dashboard_name="dashboard-name",
+            plugin_yaml_name="plugin-key",
+        )
+
+        web_server._get_dashboard_plugins(force_rescan=True)
+        with patch("importlib.util.spec_from_file_location") as spec:
+            spec.return_value = None
+            web_server._mount_plugin_api_routes()
+
+        assert spec.call_count == 1
+        called_path = Path(spec.call_args.args[1])
+        assert called_path.name == "api.py"
+
+    def test_user_dashboard_plugin_api_ignores_dashboard_name_for_gate(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        bundled = tmp_path / "bundled"
+        bundled.mkdir()
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+        (home / "config.yaml").write_text(
+            json.dumps({"plugins": {"enabled": ["dashboard-name"]}}),
+            encoding="utf-8",
+        )
+        self._write_user_dashboard_plugin(
+            home,
+            "directory-key",
+            dashboard_name="dashboard-name",
+            plugin_yaml_name="plugin-key",
+        )
+
+        web_server._get_dashboard_plugins(force_rescan=True)
+        with patch("importlib.util.spec_from_file_location") as spec, patch.object(
+            web_server.app, "include_router"
+        ) as include_router:
+            web_server._mount_plugin_api_routes()
+
+        assert spec.call_count == 0
+        assert include_router.call_count == 0
 
 
 # ---------------------------------------------------------------------------

@@ -9132,6 +9132,28 @@ def _safe_plugin_api_relpath(api_field: Any, *, dashboard_dir: Path) -> Optional
     return api_field
 
 
+def _dashboard_plugin_config_identity(plugin_dir: Path, dashboard_name: str) -> tuple[str, str]:
+    """Return the PluginManager-compatible config name/key for a dashboard plugin."""
+    manifest_file = plugin_dir / "plugin.yaml"
+    if not manifest_file.exists():
+        manifest_file = plugin_dir / "plugin.yml"
+    if not manifest_file.exists():
+        return dashboard_name, plugin_dir.name
+
+    try:
+        manifest = yaml.safe_load(manifest_file.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Bad plugin manifest %s: %s", manifest_file, exc)
+        return dashboard_name, plugin_dir.name
+    if not isinstance(manifest, dict):
+        return dashboard_name, plugin_dir.name
+    manifest_name = manifest.get("name")
+    if isinstance(manifest_name, str) and manifest_name.strip():
+        name = manifest_name.strip()
+        return name, name
+    return dashboard_name, plugin_dir.name
+
+
 def _discover_dashboard_plugins() -> list:
     """Scan plugins/*/dashboard/manifest.json for dashboard extensions.
 
@@ -9177,6 +9199,7 @@ def _discover_dashboard_plugins() -> list:
                 if name in seen_names:
                     continue
                 seen_names.add(name)
+                config_name, config_key = _dashboard_plugin_config_identity(child, str(name))
                 # Tab options: ``path`` + ``position`` for a new tab, optional
                 # ``override`` to replace a built-in route, and ``hidden`` to
                 # register the plugin component/slots without adding a tab
@@ -9227,6 +9250,8 @@ def _discover_dashboard_plugins() -> list:
                     "css": data.get("css"),
                     "has_api": bool(safe_api),
                     "source": source,
+                    "_config_name": config_name,
+                    "_key": config_key,
                     "_dir": str(dashboard_dir),
                     "_api_file": safe_api,
                 })
@@ -9630,6 +9655,19 @@ def _mount_plugin_api_routes():
                 plugin["name"], api_file_name,
             )
             continue
+        if plugin.get("source") == "user":
+            from hermes_cli.plugins import is_plugin_enabled_by_config
+
+            if not is_plugin_enabled_by_config(
+                str(plugin.get("_config_name") or plugin["name"]),
+                key=str(plugin.get("_key") or plugin.get("_config_name") or plugin["name"]),
+            ):
+                _log.info(
+                    "Plugin %s: ignoring backend api=%s (plugin is not "
+                    "enabled by plugins.enabled or is disabled)",
+                    plugin["name"], api_file_name,
+                )
+                continue
         dashboard_dir = Path(plugin["_dir"])
         api_path = dashboard_dir / api_file_name
         try:

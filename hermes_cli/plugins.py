@@ -225,6 +225,22 @@ def _get_enabled_plugins() -> Optional[set]:
         return None
 
 
+def is_plugin_enabled_by_config(name: str, key: Optional[str] = None) -> bool:
+    """Return whether an opt-in plugin may load under ``plugins`` config.
+
+    Explicit ``plugins.disabled`` entries always win. Otherwise, standalone
+    user/entry-point plugins must appear in ``plugins.enabled`` by either their
+    path-derived key or legacy bare manifest name.
+    """
+    lookup_key = key or name
+    disabled = _get_disabled_plugins()
+    if lookup_key in disabled or name in disabled:
+        return False
+
+    enabled = _get_enabled_plugins()
+    return enabled is not None and (lookup_key in enabled or name in enabled)
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
