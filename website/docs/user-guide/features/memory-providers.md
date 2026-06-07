@@ -283,7 +283,44 @@ openviking-server
 hermes memory setup    # select "openviking"
 # Or manually:
 hermes config set memory.provider openviking
-echo "OPENVIKING_ENDPOINT=http://localhost:1933" >> ~/.hermes/.env
+```
+
+Add the OpenViking connection settings to the active profile's `.env` file. For the default profile that is `~/.hermes/.env`; for named profiles use `~/.hermes/profiles/<profile>/.env`.
+
+```text
+OPENVIKING_ENDPOINT=http://127.0.0.1:1933
+OPENVIKING_API_KEY=<blank-for-local-dev-or-api-key>
+OPENVIKING_ACCOUNT=default
+OPENVIKING_USER=default
+OPENVIKING_AGENT=hermes
+```
+
+`OPENVIKING_API_KEY` can be blank for local dev servers that do not require authentication. Authenticated or multi-tenant servers should set the key and tenant IDs explicitly.
+
+**Local Ollama embeddings:** OpenViking can use Ollama embeddings without changing Hermes' chat model provider. `nomic-embed-text` returns 768-dimensional vectors; use Ollama's OpenAI-compatible `/v1` base URL in the OpenViking config:
+
+```json
+"embedding": {
+  "dense": {
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "api_base": "http://localhost:11434/v1",
+    "dimension": 768
+  },
+  "max_concurrent": 2,
+  "max_retries": 2,
+  "text_source": "content_only",
+  "max_input_tokens": 2048
+}
+```
+
+Keep concurrency conservative on laptops or WSL instances with limited RAM. Long-term extraction may require a configured OpenViking extraction/chat model; embedding-only setups may verify storage in `viking://session` before extracted memories appear under `viking://user/<user>/memories`.
+
+**Validation:**
+```bash
+curl -fsS http://127.0.0.1:1933/health
+hermes memory status
+hermes --profile openviking-lab memory status
 ```
 
 **Key features:**
