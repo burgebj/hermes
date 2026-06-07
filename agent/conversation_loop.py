@@ -361,6 +361,65 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
         )
 
 
+def _build_runtime_metadata_note(agent: Any) -> str:
+    """Build runtime metadata that should be injected into the API user message."""
+    from hermes_time import now as _hermes_now
+
+    now = _hermes_now()
+    lines = [f"Conversation started: {now.strftime('%A, %B %d, %Y')}"]
+    if getattr(agent, "pass_session_id", False) and getattr(agent, "session_id", None):
+        lines.append(f"Session ID: {agent.session_id}")
+    if agent.model:
+        lines.append(f"Model: {agent.model}")
+    if agent.provider:
+        lines.append(f"Provider: {agent.provider}")
+    return "\n".join(lines)
+
+
+def _resolve_current_turn_user_idx(
+    messages: List[Dict[str, Any]],
+    fallback_idx: Optional[int],
+    current_turn_user_content: Any,
+) -> Optional[int]:
+    """Find the current turn's original user message after message-list rewrites.
+
+    Compression and retry recovery can replace ``messages`` with copied entries,
+    making the originally-recorded numeric index stale. Match by exact content
+    instead so ephemeral API-only injections still land on the user's real turn.
+    """
+    if fallback_idx is not None and 0 <= fallback_idx < len(messages):
+        candidate = messages[fallback_idx]
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("role") == "user"
+            and candidate.get("content") == current_turn_user_content
+        ):
+            return fallback_idx
+
+    for idx in range(len(messages) - 1, -1, -1):
+        candidate = messages[idx]
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("role") == "user"
+            and candidate.get("content") == current_turn_user_content
+        ):
+            return idx
+
+    if isinstance(current_turn_user_content, str) and current_turn_user_content:
+        for idx in range(len(messages) - 1, -1, -1):
+            candidate = messages[idx]
+            candidate_content = candidate.get("content") if isinstance(candidate, dict) else None
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("role") == "user"
+                and isinstance(candidate_content, str)
+                and current_turn_user_content in candidate_content
+            ):
+                return idx
+
+    return None
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -578,6 +637,7 @@ def run_conversation(
     user_msg = {"role": "user", "content": user_message}
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
+    current_turn_user_content = user_msg.get("content")
     agent._persist_user_message_idx = current_turn_user_idx
     
     if not agent.quiet_mode:
@@ -810,6 +870,7 @@ def run_conversation(
     # Use original_user_message (clean input) — user_message may contain
     # injected skill content that bloats / breaks provider queries.
     _ext_prefetch_cache = ""
+    _runtime_metadata_note = _build_runtime_metadata_note(agent)
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
@@ -976,27 +1037,38 @@ def run_conversation(
                 agent.session_id or "-",
             )
 
+        current_turn_user_idx = _resolve_current_turn_user_idx(
+            messages,
+            current_turn_user_idx,
+            current_turn_user_content,
+        )
         api_messages = []
         for idx, msg in enumerate(messages):
             api_msg = msg.copy()
 
             # Inject ephemeral context into the current turn's user message.
-            # Sources: memory manager prefetch + plugin pre_llm_call hooks
-            # with target="user_message" (the default).  Both are
-            # API-call-time only — the original message in `messages` is
-            # never mutated, so nothing leaks into session persistence.
-            if idx == current_turn_user_idx and msg.get("role") == "user":
+            # Sources: memory manager prefetch + runtime metadata + plugin
+            # pre_llm_call hooks with target="user_message" (the default).
+            # All are API-call-time only — the original message in `messages`
+            # is never mutated, so nothing leaks into session persistence.
+            if current_turn_user_idx is not None and idx == current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
                         _injections.append(_fenced)
+                if _runtime_metadata_note:
+                    _injections.append(_runtime_metadata_note)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                    elif isinstance(_base, list):
+                        api_msg["content"] = list(_base) + [
+                            {"type": "text", "text": "\n\n".join(_injections)}
+                        ]
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
