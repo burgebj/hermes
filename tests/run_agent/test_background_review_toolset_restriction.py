@@ -156,3 +156,71 @@ def test_background_review_agent_tools_are_limited():
     assert "delegate_task" not in expected_tools
     assert "web_search" not in expected_tools
     assert "execute_code" not in expected_tools
+
+
+def _capture_init_kwargs(captured):
+    def _init(self, *args, **kwargs):
+        captured["enabled_toolsets"] = kwargs.get("enabled_toolsets", "UNSET")
+        captured["disabled_toolsets"] = kwargs.get("disabled_toolsets", "UNSET")
+        captured["base_url"] = kwargs.get("base_url", "UNSET")
+        raise RuntimeError("stop after capturing init args")
+
+    return _init
+
+
+def test_background_review_narrows_toolset_for_local_endpoint():
+    """Local endpoints have no prefix cache to preserve, so the fork advertises
+    only memory/skills instead of the parent's full schema — a weak local model
+    otherwise imitates the snapshot history and thrashes against the dispatch
+    deny-wall.
+    """
+    import run_agent
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+    agent._current_main_runtime = lambda: {
+        "model": "Qwen3-Coder-Next-4bit",
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8149/v1",
+        "api_key": "k",
+        "api_mode": "",
+    }
+    captured = {}
+
+    with patch.object(run_agent.AIAgent, "__init__", _capture_init_kwargs(captured)), \
+         patch("threading.Thread", _SyncThread):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=True,
+            review_skills=True,
+        )
+
+    assert captured.get("enabled_toolsets") == ["memory", "skills"], captured
+    assert captured.get("disabled_toolsets") is None, captured
+
+
+def test_background_review_keeps_parent_toolset_for_remote_endpoint():
+    """Cache-backed (remote) endpoints still mirror the parent's toolsets so
+    the ``tools[]`` payload stays byte-identical for the prefix cache.
+    """
+    import run_agent
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+    agent._current_main_runtime = lambda: {
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key": "k",
+        "api_mode": "",
+    }
+    captured = {}
+
+    with patch.object(run_agent.AIAgent, "__init__", _capture_init_kwargs(captured)), \
+         patch("threading.Thread", _SyncThread):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=True,
+            review_skills=True,
+        )
+
+    assert captured.get("enabled_toolsets") == agent.enabled_toolsets, captured
+    assert captured.get("disabled_toolsets") == agent.disabled_toolsets, captured

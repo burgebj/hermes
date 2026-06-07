@@ -396,9 +396,27 @@ def _run_review_in_thread(
             # parent below so memory(action="add") writes from
             # the review still land on disk; the review just
             # has zero side effects on external providers.
-            # Match parent's toolset config so ``tools[]`` is byte-identical
-            # in the request body — Anthropic's cache key includes it.
-            # (The runtime whitelist below still restricts dispatch.)
+            # Toolset config for the fork. For cache-backed providers we mirror
+            # the parent's toolsets so ``tools[]`` is byte-identical in the
+            # request body (Anthropic/OpenRouter cache keys include it) and rely
+            # on the runtime whitelist below to restrict dispatch.
+            #
+            # For a LOCAL endpoint there is no prefix cache to preserve, so we
+            # narrow the *advertised* schema to the review's real permissions
+            # (memory + skills). Otherwise a weaker local model imitates the
+            # snapshot history (full of write_file/read_file/terminal calls) and
+            # burns turns hitting the dispatch deny-wall — pure waste, since
+            # advertising the full schema buys nothing without a cache. The
+            # runtime whitelist below still applies as a belt-and-suspenders net.
+            from agent.model_metadata import is_local_endpoint
+
+            _review_base_url = _parent_runtime.get("base_url") or None
+            if _review_base_url and is_local_endpoint(_review_base_url):
+                _review_enabled_toolsets = ["memory", "skills"]
+                _review_disabled_toolsets = None
+            else:
+                _review_enabled_toolsets = getattr(agent, "enabled_toolsets", None)
+                _review_disabled_toolsets = getattr(agent, "disabled_toolsets", None)
             review_agent = AIAgent(
                 model=agent.model,
                 max_iterations=16,
@@ -406,12 +424,12 @@ def _run_review_in_thread(
                 platform=agent.platform,
                 provider=agent.provider,
                 api_mode=_parent_api_mode,
-                base_url=_parent_runtime.get("base_url") or None,
+                base_url=_review_base_url,
                 api_key=_parent_runtime.get("api_key") or None,
                 credential_pool=getattr(agent, "_credential_pool", None),
                 parent_session_id=agent.session_id,
-                enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                enabled_toolsets=_review_enabled_toolsets,
+                disabled_toolsets=_review_disabled_toolsets,
                 skip_memory=True,
             )
             review_agent._memory_write_origin = "background_review"
