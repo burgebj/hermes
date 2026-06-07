@@ -213,6 +213,16 @@ def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
 def main():
     _install_sidecar_publisher()
 
+    # Warm the skill-command cache before the first RPC call.  The TUI gateway
+    # runs in a separate process with its own empty _skill_commands dict; the
+    # lazy scan inside get_skill_commands() can race with platform-scope
+    # resolution when complete.slash is the very first RPC dispatched (#38651).
+    try:
+        from agent.skill_commands import scan_skill_commands
+        scan_skill_commands()
+    except Exception:
+        pass
+
     # MCP tool discovery — runs in a background daemon thread so a slow or
     # unreachable MCP server can't freeze TUI startup.  Previously this ran
     # inline before ``gateway.ready``, which meant any configured-but-down

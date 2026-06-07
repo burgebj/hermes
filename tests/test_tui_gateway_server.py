@@ -1998,6 +1998,44 @@ def test_complete_slash_details_args():
     assert any(item["text"] == "expanded" for item in resp_mode["result"]["items"])
 
 
+def test_complete_slash_returns_skills_on_first_call(monkeypatch, tmp_path):
+    # complete.slash must return skill items even when the _skill_commands cache
+    # starts empty (i.e. has not been pre-warmed by entry.main).  The lazy scan
+    # inside get_skill_commands() must fire on the first RPC call (#38651).
+    import agent.skill_commands as skill_commands
+
+    # Build a minimal skill on disk so the scan has something to find.
+    skills_dir = tmp_path / "skills" / "test-skill"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: A test skill\n---\nDo something.\n"
+    )
+
+    monkeypatch.setattr(skill_commands, "_skill_commands", {})
+    monkeypatch.setattr(skill_commands, "_skill_commands_platform", None)
+
+    with patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"):
+        resp = server.handle_request(
+            {"id": "1", "method": "complete.slash", "params": {"text": "/"}}
+        )
+
+    items = resp["result"]["items"]
+    assert len(items) > 0
+
+
+def test_entry_main_warms_skill_cache():
+    # entry.main() must call scan_skill_commands() early so the cache is
+    # populated before the first complete.slash RPC arrives (#38651).
+    import inspect
+    import tui_gateway.entry as entry_mod
+
+    source = inspect.getsource(entry_mod.main)
+    assert "scan_skill_commands" in source, (
+        "entry.main() must call scan_skill_commands() to warm the skill cache "
+        "before the first RPC is dispatched"
+    )
+
+
 def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_hermes_home", tmp_path)
     agent = types.SimpleNamespace(reasoning_config=None)
