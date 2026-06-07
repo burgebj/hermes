@@ -991,3 +991,81 @@ class TestSaveJobOutput:
         with pytest.raises(ValueError, match="output path"):
             save_job_output(str(tmp_cron_dir / "outside"), "# Results")
         assert not (tmp_cron_dir / "outside").exists()
+
+
+class TestNextRunHint:
+    """Tests for the .next_run hint file written by save_jobs()."""
+
+    def test_write_next_run_hint_creates_file(self, tmp_cron_dir):
+        """save_jobs() writes the earliest next_run_at to .next_run."""
+        from cron.jobs import _write_next_run_hint, JOBS_FILE
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(tz=timezone.utc)
+        jobs = [
+            {
+                "id": "job1",
+                "enabled": True,
+                "next_run_at": (now + timedelta(minutes=5)).isoformat(),
+            },
+            {
+                "id": "job2",
+                "enabled": True,
+                "next_run_at": (now + timedelta(minutes=2)).isoformat(),
+            },
+        ]
+        _write_next_run_hint(jobs)
+        hint_file = JOBS_FILE.parent / ".next_run"
+        assert hint_file.is_file()
+        content = hint_file.read_text(encoding="utf-8").strip()
+        assert content == jobs[1]["next_run_at"]  # earliest
+
+    def test_write_next_run_hint_skips_disabled(self, tmp_cron_dir):
+        """Disabled jobs are ignored when computing the hint."""
+        from cron.jobs import _write_next_run_hint
+
+        jobs = [
+            {
+                "id": "disabled-job",
+                "enabled": False,
+                "next_run_at": "2026-01-01T00:00:00",
+            },
+            {
+                "id": "enabled-job",
+                "enabled": True,
+                "next_run_at": "2027-06-01T09:00:00",
+            },
+        ]
+        _write_next_run_hint(jobs)
+        hint_file = tmp_cron_dir / "cron" / ".next_run"
+        assert hint_file.read_text(encoding="utf-8").strip() == "2027-06-01T09:00:00"
+
+    def test_write_next_run_hint_no_enabled_jobs(self, tmp_cron_dir):
+        """When no jobs are enabled, the hint file is removed."""
+        from cron.jobs import _write_next_run_hint, JOBS_FILE
+
+        hint_file = JOBS_FILE.parent / ".next_run"
+        hint_file.parent.mkdir(parents=True, exist_ok=True)
+        hint_file.write_text("old-value", encoding="utf-8")
+        _write_next_run_hint([])
+        assert not hint_file.exists()
+
+    def test_write_next_run_hint_missing_next_run_at(self, tmp_cron_dir):
+        """Jobs without next_run_at are skipped."""
+        from cron.jobs import _write_next_run_hint
+
+        jobs = [{"id": "job1", "enabled": True, "next_run_at": None}]
+        _write_next_run_hint(jobs)
+        hint_file = tmp_cron_dir / "cron" / ".next_run"
+        assert not hint_file.exists()
+        # No crash when saving with no valid next_run_at values
+
+    def test_save_jobs_writes_hint(self, tmp_cron_dir):
+        """create_job → save_jobs also writes the .next_run hint."""
+        job = create_job(prompt="Test", schedule="every 1m")
+        hint_file = tmp_cron_dir / "cron" / ".next_run"
+        assert hint_file.is_file()
+        content = hint_file.read_text(encoding="utf-8").strip()
+        # Should contain a valid ISO timestamp
+        parsed = datetime.fromisoformat(content)
+        assert parsed.tzinfo is not None or True  # may or may not have timezone

@@ -482,12 +482,44 @@ def save_jobs(jobs: List[Dict[str, Any]]):
             os.fsync(f.fileno())
         atomic_replace(tmp_path, JOBS_FILE)
         _secure_file(JOBS_FILE)
+        # Write the earliest next_run_at so the ticker can wake up in time
+        # for newly created/updated jobs instead of waiting for the next
+        # full interval tick.  See #39215.
+        _write_next_run_hint(jobs)
     except BaseException:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
+
+
+def _write_next_run_hint(jobs: List[Dict[str, Any]]) -> None:
+    """Write the earliest next_run_at among enabled jobs to a hint file.
+
+    The cron ticker reads this file after each tick and adjusts its sleep
+    duration so it wakes up in time for the next due job.  Without this,
+    a job created via ``hermes cron create`` (or the cronjob tool) with a
+    near-future ``next_run_at`` might not fire for up to 60 seconds.
+    """
+    next_run = None
+    for job in jobs:
+        if not job.get("enabled", True):
+            continue
+        nra = job.get("next_run_at")
+        if nra is None:
+            continue
+        if next_run is None or nra < next_run:
+            next_run = nra
+    hint_file = JOBS_FILE.parent / ".next_run"
+    try:
+        if next_run is not None:
+            hint_file.parent.mkdir(parents=True, exist_ok=True)
+            hint_file.write_text(next_run, encoding="utf-8")
+        elif hint_file.exists():
+            hint_file.unlink()
+    except OSError:
+        pass  # best-effort; ticker falls back to normal interval
 
 
 def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:

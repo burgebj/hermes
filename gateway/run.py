@@ -19478,6 +19478,32 @@ def _run_planned_stop_watcher(
         stop_event.wait(poll_interval)
 
 
+def _next_run_sleep_seconds(interval: int) -> int:
+    """Return how long the cron ticker should sleep before the next tick.
+
+    Reads the .next_run hint file written by save_jobs().  If the earliest
+    enabled job's ``next_run_at`` is sooner than ``interval`` seconds from
+    now, sleep only until that time so the job fires close to its scheduled
+    moment.  Falls back to ``interval`` if the hint file is missing or
+    unreadable.
+    """
+    from pathlib import Path
+
+    hint_file = get_hermes_home() / "cron" / ".next_run"
+    try:
+        text = hint_file.read_text(encoding="utf-8").strip()
+        if not text:
+            return interval
+        next_run = datetime.fromisoformat(text)
+        now = datetime.now(tz=next_run.tzinfo) if next_run.tzinfo else datetime.utcnow()
+        delta = (next_run - now).total_seconds()
+        if delta <= 0:
+            return 0  # job is already due; tick immediately
+        return min(int(delta) + 1, interval)  # cap at normal interval
+    except Exception:
+        return interval
+
+
 def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
     """
     Background thread that ticks the cron scheduler at a regular interval.
@@ -19569,7 +19595,12 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             except Exception as e:
                 logger.debug("Curator tick error: %s", e)
 
-        stop_event.wait(timeout=interval)
+        # Sleep until the next tick, but wake up early if a new job was
+        # created with a near-future next_run_at.  The .next_run hint file
+        # is written by save_jobs() and contains the earliest next_run_at
+        # among enabled jobs.  See #39215.
+        sleep = _next_run_sleep_seconds(interval)
+        stop_event.wait(timeout=sleep)
     logger.info("Cron ticker stopped")
 
 
