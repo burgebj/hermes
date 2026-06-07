@@ -2799,6 +2799,43 @@ def test_command_dispatch_exec_nonzero_surfaces_error(monkeypatch):
     assert "failed" in resp["error"]["message"]
 
 
+def test_command_dispatch_routes_skill_bundle_without_slash_worker(monkeypatch):
+    server._sessions["sid"] = _session()
+    try:
+        monkeypatch.setattr("agent.skill_commands.scan_skill_commands", lambda: {})
+        monkeypatch.setattr(
+            "agent.skill_bundles.resolve_bundle_command_key",
+            lambda command: "/review-pack" if command == "review-pack" else None,
+        )
+        monkeypatch.setattr(
+            "agent.skill_bundles.build_bundle_invocation_message",
+            lambda key, arg, task_id=None: (
+                f"bundle={key}; arg={arg}; task={task_id}",
+                ["codebase-inspection"],
+                [],
+            ),
+        )
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "command.dispatch",
+                "params": {
+                    "arg": "check this",
+                    "name": "review-pack",
+                    "session_id": "sid",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["type"] == "skill_bundle"
+    assert resp["result"]["message"] == "bundle=/review-pack; arg=check this; task=session-key"
+    assert resp["result"]["name"] == "review-pack"
+    assert resp["result"]["skills"] == ["codebase-inspection"]
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(

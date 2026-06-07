@@ -6372,6 +6372,32 @@ def _(rid, params: dict) -> dict:
     except Exception:
         pass
 
+    try:
+        from agent.skill_bundles import (
+            resolve_bundle_command_key,
+            build_bundle_invocation_message,
+        )
+
+        bundle_key = resolve_bundle_command_key(name)
+        if bundle_key:
+            built = build_bundle_invocation_message(
+                bundle_key, arg, task_id=session.get("session_key", "") if session else ""
+            )
+            if built:
+                msg, loaded_skills, missing_skills = built
+                return _ok(
+                    rid,
+                    {
+                        "type": "skill_bundle",
+                        "message": msg,
+                        "name": bundle_key.lstrip("/"),
+                        "skills": loaded_skills,
+                        "missing_skills": missing_skills,
+                    },
+                )
+    except Exception:
+        pass
+
     # ── Commands that queue messages onto _pending_input in the CLI ───
     # In the TUI the slash worker subprocess has no reader for that queue,
     # so we handle them here and return a structured payload.
