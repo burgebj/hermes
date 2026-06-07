@@ -260,6 +260,19 @@ _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_GATEWAY_INTERNAL_SYSTEM_NOTE_RE = re.compile(
+    r"\[System note:\s*Your previous turn(?: in this session)? was interrupted(?:"
+    r" by a gateway (?:restart|shutdown|interruption)"
+    r"| before you could process the last tool result\(s\))\.[\s\S]*?"
+    r"address the user's new message below\.\]\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_gateway_internal_system_notes(text: str) -> str:
+    """Remove gateway-only resume scaffolding if a model echoes it."""
+    cleaned = _GATEWAY_INTERNAL_SYSTEM_NOTE_RE.sub("", text)
+    return cleaned.strip() if cleaned != text else text
 
 
 def _looks_like_gateway_provider_error(text: str) -> bool:
@@ -286,18 +299,19 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
 
 
 def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
-    """Sanitize final gateway replies before sending them to high-noise chats.
+    """Sanitize final gateway replies before chat delivery.
 
-    Telegram is Bob's mobile inbox, so it should receive concise, safe provider
-    failure categories instead of raw HTTP bodies, request IDs, or policy text.
-    Other platforms keep the existing behaviour for now.
+    Gateway resume notes are internal scaffolding for the model, never user
+    content. Telegram also receives concise, safe provider failure categories
+    instead of raw HTTP bodies, request IDs, or policy text.
     """
     if not text:
         return text
+    sanitized = _strip_gateway_internal_system_notes(str(text))
     if _gateway_platform_value(platform) != "telegram":
-        return text
+        return sanitized
 
-    redacted = _redact_gateway_user_facing_secrets(str(text))
+    redacted = _redact_gateway_user_facing_secrets(sanitized)
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted

@@ -76,6 +76,24 @@ def test_telegram_final_response_redacts_auth_secrets():
     assert "sk-live" not in sanitized
 
 
+def test_gateway_final_response_strips_restart_system_note_on_whatsapp():
+    """Restart-resume scaffolding should not leak into chat replies."""
+    raw = (
+        "[System note: Your previous turn in this session was interrupted "
+        "by a gateway restart. The conversation history below is intact. "
+        "If it contains unfinished tool result(s), process them first and "
+        "summarize what was accomplished, then address the user's new "
+        "message below.]\n\n"
+        "Done — the fix is applied."
+    )
+
+    sanitized = _sanitize_gateway_final_response(Platform.WHATSAPP, raw)
+
+    assert sanitized == "Done — the fix is applied."
+    assert "System note" not in sanitized
+    assert "gateway restart" not in sanitized
+
+
 def test_telegram_final_response_keeps_normal_answers():
     """Normal assistant content should not be rewritten."""
     answer = "Here is the clean summary you asked for."
