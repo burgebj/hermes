@@ -1667,6 +1667,13 @@ DEFAULT_CONFIG = {
         # extras" without silently stripping MCP tools the parent already has.
         # Set to false for strict intersection.
         "inherit_mcp_toolsets": True,
+        # When True, subagents load the same MEMORY.md / USER.md the parent
+        # uses (i.e. AIAgent is instantiated with skip_memory=False) so the
+        # user's persistent operating preferences are honored inside
+        # delegated tasks too.  Default False preserves the historical narrow
+        # behaviour where the child only sees the parent's explicit
+        # ``context`` argument.  See issue #30269.
+        "inherit_memory": False,
         "max_iterations": 50,  # per-subagent iteration cap (each subagent gets its own budget,
                                # independent of the parent's max_iterations)
         "child_timeout_seconds": 600,  # wall-clock timeout for each child agent (floor 30s,
