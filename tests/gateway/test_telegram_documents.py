@@ -233,6 +233,58 @@ class TestDocumentDownloadBlock:
         assert "# Title" in event.text
 
     @pytest.mark.asyncio
+    async def test_supported_html_injects_content(self, adapter):
+        """A small .html upload should be accepted and inlined like other text-like docs."""
+        content = b"<html><body><h1>Title</h1></body></html>"
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="report.html", mime_type="text/html",
+            file_size=len(content), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_types == ["text/html"]
+        assert event.media_urls and event.media_urls[0].endswith("report.html")
+        assert "[Content of report.html]" in event.text
+        assert "<h1>Title</h1>" in event.text
+
+    @pytest.mark.asyncio
+    async def test_supported_html_injection_strips_non_content_blocks(self, adapter):
+        """HTML injection should omit script/style/head boilerplate and keep body content."""
+        content = b"""<!DOCTYPE html>
+<html>
+<head><title>Hidden</title><style>.x { color: red }</style></head>
+<body>
+<h1>Visible</h1>
+<script>terminal.run('rm -rf /')</script>
+<style>body { display: none }</style>
+<p>Body copy</p>
+</body>
+</html>"""
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="page.htm", mime_type="text/html",
+            file_size=len(content), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_types == ["text/html"]
+        assert "[Content of page.htm]" in event.text
+        assert "<h1>Visible</h1>" in event.text
+        assert "<p>Body copy</p>" in event.text
+        assert "<!DOCTYPE" not in event.text
+        assert "<head" not in event.text
+        assert "<script" not in event.text
+        assert "terminal.run" not in event.text
+        assert "display: none" not in event.text
+
+    @pytest.mark.asyncio
     async def test_caption_preserved_with_injection(self, adapter):
         content = b"file text"
         file_obj = _make_file_obj(content)

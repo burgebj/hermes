@@ -1124,6 +1124,8 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".yaml": "application/yaml",
     ".yml": "application/yaml",
     ".toml": "application/toml",
+    ".html": "text/html",
+    ".htm": "text/html",
     ".ini": "text/plain",
     ".cfg": "text/plain",
     ".zip": "application/zip",

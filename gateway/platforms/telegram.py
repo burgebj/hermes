@@ -89,6 +89,11 @@ from gateway.platforms.telegram_network import (
 from utils import atomic_replace
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_HTML_DROP_BLOCK_RE = re.compile(r"(?is)<(script|style|noscript)\b[^>]*>.*?</\1>")
+_HTML_HEAD_RE = re.compile(r"(?is)<head\b[^>]*>.*?</head>")
+_HTML_BODY_RE = re.compile(r"(?is)<body\b[^>]*>(.*?)</body>")
+_HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+_HTML_DOCTYPE_RE = re.compile(r"(?is)<!doctype\b[^>]*>")
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -191,6 +196,24 @@ def _strip_mdv2(text: str) -> str:
     # Remove MarkdownV2 spoiler markers (||text|| → text)
     cleaned = re.sub(r'\|\|([^|]+)\|\|', r'\1', cleaned)
     return cleaned
+
+
+def _sanitize_html_document_for_injection(html: str) -> str:
+    """Reduce HTML upload noise before injecting it into the agent turn.
+
+    The gateway treats uploaded HTML as inert text, not executable content, but
+    script/style/head/doctype boilerplate wastes context and can confuse the
+    model. Keep the visible body markup/content while removing non-content
+    blocks that are not useful for ordinary document understanding.
+    """
+    text = _HTML_DROP_BLOCK_RE.sub("", html)
+    text = _HTML_HEAD_RE.sub("", text)
+    text = _HTML_COMMENT_RE.sub("", text)
+    text = _HTML_DOCTYPE_RE.sub("", text)
+    body_match = _HTML_BODY_RE.search(text)
+    if body_match:
+        text = body_match.group(1)
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -5624,9 +5647,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 # For text files, inject content into event.text (capped at 100 KB)
                 MAX_TEXT_INJECT_BYTES = 100 * 1024
-                if ext in {".md", ".txt"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                if ext in {".html", ".htm", ".md", ".txt"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                     try:
                         text_content = raw_bytes.decode("utf-8")
+                        if ext in {".html", ".htm"}:
+                            text_content = _sanitize_html_document_for_injection(text_content)
                         display_name = original_filename or f"document{ext}"
                         display_name = re.sub(r'[^\w.\- ]', '_', display_name)
                         injection = f"[Content of {display_name}]:\n{text_content}"
