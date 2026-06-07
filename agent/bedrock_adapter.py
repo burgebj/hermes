@@ -900,11 +900,18 @@ def build_converse_kwargs(
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    if temperature is not None:
-        kwargs["inferenceConfig"]["temperature"] = temperature
+    # Opus 4.7/4.8 reject any non-default sampling parameters (temperature,
+    # top_p, top_k) with a 400 ValidationException.  The Anthropic-native
+    # adapter already guards this via _forbids_sampling_params(); apply the
+    # same guard to the Bedrock Converse path so Bedrock+Opus users don't
+    # get a 400 on every call.
+    from agent.anthropic_adapter import _forbids_sampling_params
+    if not _forbids_sampling_params(model):
+        if temperature is not None:
+            kwargs["inferenceConfig"]["temperature"] = temperature
 
-    if top_p is not None:
-        kwargs["inferenceConfig"]["topP"] = top_p
+        if top_p is not None:
+            kwargs["inferenceConfig"]["topP"] = top_p
 
     if stop_sequences:
         kwargs["inferenceConfig"]["stopSequences"] = stop_sequences
