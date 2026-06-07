@@ -353,6 +353,25 @@ def bedrock_model_ids_or_none() -> Optional[List[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Sampling parameter restrictions
+# ---------------------------------------------------------------------------
+# Opus 4.7+ rejects any non-default temperature/top_p/top_k with a 400
+# ValidationException ("temperature is deprecated"). Must omit these fields
+# entirely from inferenceConfig. Matches anthropic_adapter._forbids_sampling_params().
+
+_NO_SAMPLING_PARAMS_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8")
+
+
+def _forbids_sampling_params(model: str) -> bool:
+    """Return True for Bedrock models that reject temperature/top_p.
+
+    Opus 4.7+ on Bedrock Converse returns ValidationException when any
+    sampling parameter is included in inferenceConfig.
+    """
+    return any(v in model for v in _NO_SAMPLING_PARAMS_SUBSTRINGS)
+
+
+# ---------------------------------------------------------------------------
 # Tool-calling capability detection
 # ---------------------------------------------------------------------------
 # Some Bedrock models don't support tool/function calling. Sending toolConfig
@@ -900,11 +919,15 @@ def build_converse_kwargs(
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    if temperature is not None:
-        kwargs["inferenceConfig"]["temperature"] = temperature
+    # Opus 4.7+ rejects sampling parameters entirely — omit them to avoid 400.
+    if not _forbids_sampling_params(model):
+        if temperature is not None:
+            kwargs["inferenceConfig"]["temperature"] = temperature
 
-    if top_p is not None:
-        kwargs["inferenceConfig"]["topP"] = top_p
+        if top_p is not None:
+            kwargs["inferenceConfig"]["topP"] = top_p
+    else:
+        logger.debug("Skipping temperature/top_p for %s (forbids sampling params)", model)
 
     if stop_sequences:
         kwargs["inferenceConfig"]["stopSequences"] = stop_sequences

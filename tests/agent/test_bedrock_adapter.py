@@ -1471,3 +1471,50 @@ class TestCallConverseInvalidatesOnStaleError:
         )
 
         assert _bedrock_runtime_client_cache.get("us-east-1") is live_client
+
+
+class TestOpusTemperatureSkip:
+    """Opus 4.7+ rejects temperature/top_p — must be omitted from inferenceConfig.
+
+    Ref: #36151.
+    """
+
+    def test_opus_47_skips_temperature(self):
+        from agent.bedrock_adapter import build_converse_kwargs
+        kwargs = build_converse_kwargs(
+            model="us.anthropic.claude-opus-4-7",
+            messages=[{"role": "user", "content": "Hi"}],
+            temperature=0.7,
+            top_p=0.9,
+        )
+        assert "temperature" not in kwargs["inferenceConfig"]
+        assert "topP" not in kwargs["inferenceConfig"]
+
+    def test_opus_48_skips_temperature(self):
+        from agent.bedrock_adapter import build_converse_kwargs
+        kwargs = build_converse_kwargs(
+            model="global.anthropic.claude-opus-4-8",
+            messages=[{"role": "user", "content": "Hi"}],
+            temperature=0.5,
+        )
+        assert "temperature" not in kwargs["inferenceConfig"]
+
+    def test_sonnet_46_keeps_temperature(self):
+        from agent.bedrock_adapter import build_converse_kwargs
+        kwargs = build_converse_kwargs(
+            model="us.anthropic.claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            temperature=0.7,
+        )
+        assert kwargs["inferenceConfig"]["temperature"] == 0.7
+
+    def test_nova_keeps_temperature(self):
+        from agent.bedrock_adapter import build_converse_kwargs
+        kwargs = build_converse_kwargs(
+            model="us.amazon.nova-pro-v1:0",
+            messages=[{"role": "user", "content": "Hi"}],
+            temperature=0.8,
+            top_p=0.95,
+        )
+        assert kwargs["inferenceConfig"]["temperature"] == 0.8
+        assert kwargs["inferenceConfig"]["topP"] == 0.95
