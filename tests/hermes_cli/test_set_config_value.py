@@ -124,6 +124,12 @@ class TestConfigYamlRouting:
             or "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=True" in env_content
         )
 
+    def test_known_gateway_env_key_routes_to_env(self, _isolated_hermes_home):
+        set_config_value("DISCORD_ALLOWED_USERS", "123,456")
+        env_content = _read_env(_isolated_hermes_home)
+        assert "DISCORD_ALLOWED_USERS=123,456" in env_content
+        assert "DISCORD_ALLOWED_USERS" not in _read_config(_isolated_hermes_home)
+
 
 # ---------------------------------------------------------------------------
 # Empty / falsy values — regression tests for #4277

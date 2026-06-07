@@ -5967,22 +5967,16 @@ def set_config_value(key: str, value: str):
     if is_managed():
         managed_error("set configuration values")
         return
-    # Check if it's an API key (goes to .env)
-    api_keys = [
-        'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_TOOLS_OPENAI_KEY',
-        'EXA_API_KEY', 'PARALLEL_API_KEY', 'FIRECRAWL_API_KEY', 'FIRECRAWL_API_URL',
-        'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
-        'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY',
-        'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY',
-        'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
-        'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',
-        'SUDO_PASSWORD', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
-        'GITHUB_TOKEN', 'HONCHO_API_KEY',
-    ]
-    
-    if key.upper() in api_keys or key.upper().endswith(('_API_KEY', '_TOKEN')) or key.upper().startswith('TERMINAL_SSH'):
-        save_env_value(key.upper(), value)
-        print(f"✓ Set {key} in {get_env_path()}")
+    env_key = key.upper()
+    known_env_keys = set(OPTIONAL_ENV_VARS.keys()) | _EXTRA_ENV_KEYS
+
+    if (
+        env_key in known_env_keys
+        or env_key.endswith(('_API_KEY', '_TOKEN'))
+        or env_key.startswith('TERMINAL_SSH')
+    ):
+        save_env_value(env_key, value)
+        print(f"✓ Set {env_key} in {get_env_path()}")
         return
     
     # Otherwise it goes to config.yaml
