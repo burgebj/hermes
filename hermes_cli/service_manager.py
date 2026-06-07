@@ -86,7 +86,8 @@ def detect_service_manager() -> ServiceManagerKind:
     """Detect which service manager is available in this environment.
 
     Returns:
-        "s6" — inside a container when /init is s6-svscan (Phase 2+)
+        "s6" — s6-svscan is PID 1 (s6-overlay image, regardless of how
+               it's run: container runtime, microVM, etc.)
         "windows" — native Windows host
         "launchd" — macOS host
         "systemd" — Linux host with a working user/system bus
@@ -100,14 +101,13 @@ def detect_service_manager() -> ServiceManagerKind:
     # Imports deferred so importing this module doesn't drag in the
     # whole gateway dependency graph for callers that only need the
     # Protocol type or validate_profile_name().
-    from hermes_constants import is_container
     from hermes_cli.gateway import (
         is_macos,
         is_windows,
         supports_systemd_services,
     )
 
-    if is_container() and _s6_running():
+    if _s6_running():
         return "s6"
     if is_windows():
         return "windows"
