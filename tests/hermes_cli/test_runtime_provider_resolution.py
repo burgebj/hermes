@@ -1476,6 +1476,160 @@ def test_custom_provider_no_key_gets_placeholder(monkeypatch):
     assert resolved["base_url"] == "http://localhost:8080/v1"
 
 
+def test_bare_custom_explicit_base_url_recovers_matching_custom_provider(monkeypatch):
+    """ACP restore can recover custom provider credentials from a persisted endpoint."""
+    monkeypatch.setenv("TEAM_GATEWAY_KEY", "team-secret")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "team-gateway",
+                    "base_url": "https://custom.example/v1",
+                    "key_env": "TEAM_GATEWAY_KEY",
+                    "api_mode": "codex_responses",
+                    "model": "gpt-test",
+                }
+            ]
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="custom",
+        explicit_base_url="https://custom.example/v1",
+    )
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "https://custom.example/v1"
+    assert resolved["api_key"] == "team-secret"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["model"] == "gpt-test"
+    assert resolved["source"] == "custom_provider:team-gateway"
+
+
+def test_bare_custom_explicit_base_url_recovers_matching_providers_dict_entry(monkeypatch):
+    """Normalized providers dict entries should also be usable during ACP restore."""
+    monkeypatch.setenv("TEAM_GATEWAY_KEY", "team-secret")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "team-gateway": {
+                    "api": "https://custom.example/v1",
+                    "apiKeyEnv": "TEAM_GATEWAY_KEY",
+                    "transport": "codex_responses",
+                    "defaultModel": "gpt-test",
+                }
+            }
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="custom",
+        explicit_base_url="https://custom.example/v1/",
+    )
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "https://custom.example/v1"
+    assert resolved["api_key"] == "team-secret"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["model"] == "gpt-test"
+    assert resolved["source"] == "custom_provider:team-gateway"
+
+
+def test_bare_custom_explicit_base_url_keeps_extra_body_with_pool(monkeypatch):
+    """ACP restore should keep custom request overrides when pooled creds match."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "team-gateway",
+                    "base_url": "https://custom.example/v1",
+                    "api_mode": "codex_responses",
+                    "model": "gpt-test",
+                    "extra_body": {"enable_thinking": True},
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "_try_resolve_from_custom_pool",
+        lambda *a, **k: {
+            "provider": "custom",
+            "api_mode": "codex_responses",
+            "base_url": "https://custom.example/v1",
+            "api_key": "pool-secret",
+            "source": "pool:custom:team-gateway",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="custom",
+        explicit_base_url="https://custom.example/v1",
+    )
+
+    assert resolved["api_key"] == "pool-secret"
+    assert resolved["model"] == "gpt-test"
+    assert resolved["request_overrides"] == {
+        "extra_body": {"enable_thinking": True}
+    }
+
+
+def test_bare_custom_explicit_base_url_prefers_matching_target_model(monkeypatch):
+    """ACP restore should disambiguate custom providers that share an endpoint."""
+    monkeypatch.setenv("FIRST_KEY", "first-secret")
+    monkeypatch.setenv("SECOND_KEY", "second-secret")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "first-gateway-model",
+                    "base_url": "https://custom.example/v1",
+                    "key_env": "FIRST_KEY",
+                    "api_mode": "chat_completions",
+                    "model": "gpt-first",
+                },
+                {
+                    "name": "second-gateway-model",
+                    "base_url": "https://custom.example/v1",
+                    "key_env": "SECOND_KEY",
+                    "api_mode": "codex_responses",
+                    "model": "gpt-second",
+                },
+            ]
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="custom",
+        explicit_base_url="https://custom.example/v1",
+        target_model="gpt-second",
+    )
+
+    assert resolved["api_key"] == "second-secret"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["model"] == "gpt-second"
+    assert resolved["source"] == "custom_provider:second-gateway-model"
+
+
 def test_auto_detected_nous_auth_failure_falls_through_to_openrouter(monkeypatch):
     """When auto-detect picks Nous but credentials are revoked, fall through to OpenRouter."""
     from hermes_cli.auth import AuthError

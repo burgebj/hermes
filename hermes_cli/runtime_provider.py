@@ -527,7 +527,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # Match exact name or normalized name
             name_norm = _normalize_custom_provider_name(ep_name)
             # Resolve the API key from the env var name stored in key_env
-            key_env = str(entry.get("key_env", "") or "").strip()
+            key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
             resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
             # Fall back to inline api_key when key_env is absent or unresolvable
             if not resolved_api_key:
@@ -641,11 +641,76 @@ def _custom_provider_request_overrides(custom_provider: Dict[str, Any]) -> Dict[
     return {"extra_body": dict(extra_body)}
 
 
+def _get_custom_provider_by_base_url(
+    base_url: str,
+    *,
+    target_model: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find a configured custom provider by endpoint URL.
+
+    ACP restores older persisted sessions with only ``provider=custom`` and a
+    saved ``base_url``.  Matching the endpoint back to config lets restore reuse
+    the provider's key_env/api_mode without persisting secrets in the session DB.
+    """
+    target = (base_url or "").strip().rstrip("/")
+    if not target:
+        return None
+
+    config = load_config()
+
+    target_model_norm = str(target_model or "").strip()
+    custom_providers = get_compatible_custom_providers(config)
+    matches = []
+    for entry in custom_providers or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_base = str(entry.get("base_url") or "").strip().rstrip("/")
+        if entry_base != target:
+            continue
+        matches.append(entry)
+
+    if target_model_norm:
+        for entry in matches:
+            if str(entry.get("model") or "").strip() == target_model_norm:
+                break
+        else:
+            entry = matches[0] if matches else None
+    else:
+        entry = matches[0] if matches else None
+
+    if entry is not None:
+        entry_base = str(entry.get("base_url") or "").strip().rstrip("/")
+        result = {
+            "name": str(entry.get("name") or "").strip(),
+            "base_url": entry_base,
+            "api_key": str(entry.get("api_key", "") or "").strip(),
+        }
+        key_env = str(entry.get("key_env", "") or "").strip()
+        if key_env:
+            result["key_env"] = key_env
+        provider_key = str(entry.get("provider_key", "") or "").strip()
+        if provider_key:
+            result["provider_key"] = provider_key
+        api_mode = _parse_api_mode(entry.get("api_mode"))
+        if api_mode:
+            result["api_mode"] = api_mode
+        model_name = str(entry.get("model", "") or "").strip()
+        if model_name:
+            result["model"] = model_name
+        extra_body = entry.get("extra_body")
+        if isinstance(extra_body, dict):
+            result["extra_body"] = dict(extra_body)
+        return result
+
+    return None
+
+
 def _resolve_named_custom_runtime(
     *,
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     # Bare `provider="custom"` with an explicit base_url (e.g. propagated
     # from a `model_aliases:` direct-alias resolution) — build a runtime
@@ -666,17 +731,40 @@ def _resolve_named_custom_runtime(
             pass
     if requested_norm == "custom" and explicit_base_url:
         base_url = explicit_base_url.strip().rstrip("/")
+        custom_provider = _get_custom_provider_by_base_url(
+            base_url,
+            target_model=target_model,
+        )
         # Check credential pool first — mirrors the named-custom-provider path
         # so bare `provider: custom` with a configured custom_providers entry
         # also gets its api_key from the pool instead of env var fallbacks.
-        pool_result = _try_resolve_from_custom_pool(base_url, "custom", None)
+        provider_name = custom_provider.get("name") if custom_provider else None
+        api_mode = custom_provider.get("api_mode") if custom_provider else None
+        pool_result = _try_resolve_from_custom_pool(
+            base_url,
+            "custom",
+            api_mode,
+            provider_name=provider_name,
+        )
         if pool_result:
             pool_result["source"] = "direct-alias"
+            if custom_provider and custom_provider.get("model"):
+                pool_result["model"] = custom_provider["model"]
+            if custom_provider:
+                request_overrides = _custom_provider_request_overrides(custom_provider)
+                if request_overrides:
+                    pool_result["request_overrides"] = {
+                        **dict(pool_result.get("request_overrides") or {}),
+                        **request_overrides,
+                    }
             return pool_result
         _da_is_openai_url   = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
         _da_is_openrouter   = base_url_host_matches(base_url, "openrouter.ai")
+        key_env = str(custom_provider.get("key_env", "") or "").strip() if custom_provider else ""
         api_key_candidates = [
             (explicit_api_key or "").strip(),
+            str(custom_provider.get("api_key", "") or "").strip() if custom_provider else "",
+            os.getenv(key_env, "").strip() if key_env else "",
             # Gate env key fallbacks on authoritative hosts (#28660)
             (os.getenv("OPENAI_API_KEY", "").strip()     if _da_is_openai_url else ""),
             (os.getenv("OPENROUTER_API_KEY", "").strip() if _da_is_openrouter  else ""),
@@ -689,14 +777,21 @@ def _resolve_named_custom_runtime(
             (c for c in api_key_candidates if has_usable_secret(c)),
             "",
         ) or "no-key-required"
-        return {
+        result = {
             "provider": "custom",
-            "api_mode": _detect_api_mode_for_url(base_url) or "chat_completions",
+            "api_mode": api_mode or _detect_api_mode_for_url(base_url) or "chat_completions",
             "base_url": base_url,
             "api_key": api_key,
-            "source": "direct-alias",
+            "source": f"custom_provider:{provider_name}" if provider_name else "direct-alias",
             "requested_provider": requested_provider,
         }
+        if custom_provider and custom_provider.get("model"):
+            result["model"] = custom_provider["model"]
+        if custom_provider:
+            request_overrides = _custom_provider_request_overrides(custom_provider)
+            if request_overrides:
+                result["request_overrides"] = request_overrides
+        return result
 
     custom_provider = _get_named_custom_provider(requested_provider)
     if not custom_provider:
@@ -1283,6 +1378,7 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        target_model=target_model,
     )
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider

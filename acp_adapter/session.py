@@ -433,7 +433,10 @@ class SessionManager:
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
         session_meta = {"cwd": state.cwd}
-        provider = getattr(state.agent, "provider", None)
+        requested_provider = getattr(state.agent, "requested_provider", None)
+        if isinstance(requested_provider, str) and requested_provider.strip().lower() == "auto":
+            requested_provider = None
+        provider = requested_provider or getattr(state.agent, "provider", None)
         base_url = getattr(state.agent, "base_url", None)
         api_mode = getattr(state.agent, "api_mode", None)
         if isinstance(provider, str) and provider.strip():
@@ -452,7 +455,7 @@ class SessionManager:
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=session_meta,
                 )
             else:
                 # Update model_config (contains cwd) if changed.
@@ -601,7 +604,11 @@ class SessionManager:
         }
 
         try:
-            runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+            runtime = resolve_runtime_provider(
+                requested=requested_provider or config_provider,
+                explicit_base_url=base_url,
+                target_model=model,
+            )
             kwargs.update(
                 {
                     "provider": runtime.get("provider"),
@@ -617,6 +624,9 @@ class SessionManager:
 
         _register_task_cwd(session_id, cwd)
         agent = AIAgent(**kwargs)
+        requested = runtime.get("requested_provider") if "runtime" in locals() else None
+        if isinstance(requested, str) and requested.strip():
+            agent.requested_provider = requested.strip()
         # ACP stdio transport requires stdout to remain protocol-only JSON-RPC.
         # Route any incidental human-readable agent output to stderr instead.
         agent._print_fn = _acp_stderr_print
