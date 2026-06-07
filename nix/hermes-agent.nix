@@ -37,9 +37,14 @@
 }:
 let
   nodejs = nodejs_22;
+  # The sealed Nix runtime lives in the store, so first-use lazy installs
+  # cannot repair missing Python backends there. Ship the managed FAL
+  # backend in the default package so `hermes --tui` image generation works
+  # out of the box on the documented Nix install path.
+  nixRuntimeDependencyGroups = [ "fal" ];
   hermesVenv = callPackage ./python.nix {
     inherit uv2nix pyproject-nix pyproject-build-systems;
-    dependency-groups = [ "all" ] ++ extraDependencyGroups;
+    dependency-groups = [ "all" ] ++ nixRuntimeDependencyGroups ++ extraDependencyGroups;
   };
 
   hermesNpmLib = callPackage ./lib.nix {
