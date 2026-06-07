@@ -561,21 +561,24 @@ def _build_markdown_post_payload(content: str) -> str:
 
 
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
-    """Build Feishu post rows while isolating fenced code blocks.
+    """Build Feishu post rows while isolating fenced code blocks and tables.
 
     Feishu's `md` renderer can swallow trailing content when a fenced code block
-    appears inside one large markdown element. Split the reply at real fence
-    lines so prose before/after the code block remains visible while code stays
-    in a dedicated row.
+    appears inside one large markdown element.  Markdown tables (consecutive
+    ``|``-delimited lines) are similarly isolated into their own ``md`` rows so
+    they render correctly instead of being treated as raw text.
     """
     if not content:
         return [[{"tag": "md", "text": ""}]]
-    if "```" not in content:
+    has_fences = "```" in content
+    has_tables = bool(_MARKDOWN_TABLE_RE.search(content))
+    if not has_fences and not has_tables:
         return [[{"tag": "md", "text": content}]]
 
     rows: List[List[Dict[str, str]]] = []
     current: List[str] = []
     in_code_block = False
+    in_table = False
 
     def _flush_current() -> None:
         nonlocal current
@@ -595,6 +598,9 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
         )
 
         if is_fence:
+            if in_table:
+                in_table = False
+                _flush_current()
             if not in_code_block:
                 _flush_current()
             current.append(raw_line)
@@ -602,6 +608,16 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
             if not in_code_block:
                 _flush_current()
             continue
+
+        # Isolate markdown table blocks into dedicated rows.
+        if not in_code_block:
+            is_table_line = stripped_line.startswith("|") and stripped_line.endswith("|")
+            if is_table_line and not in_table:
+                _flush_current()
+                in_table = True
+            elif not is_table_line and in_table:
+                in_table = False
+                _flush_current()
 
         current.append(raw_line)
 
@@ -4324,13 +4340,10 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
+        # Route markdown-rich content (including tables) through the post
+        # pathway so Feishu renders it with proper formatting instead of
+        # showing raw markdown source.
+        if _MARKDOWN_TABLE_RE.search(content) or _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
