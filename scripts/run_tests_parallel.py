@@ -32,6 +32,10 @@ Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
 
+The runner intentionally neutralizes runtime voice/TTS environment flags in
+pytest subprocesses. Local interactive sessions can toggle those flags on;
+tests must never inherit them and play real audio.
+
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
 
@@ -82,6 +86,23 @@ _DEFAULT_FILE_TIMEOUT_SECONDS = 600.0  # 10 minutes
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
 
+# Runtime-only interactive voice flags must not leak from a developer's live
+# Hermes process into test subprocesses.  If ``HERMES_VOICE_TTS=1`` is inherited,
+# gateway tests that complete fake assistant turns can call the real TTS stack and
+# play audio (for example the fixture string "partial answer complete").
+_PYTEST_CHILD_ENV_OVERRIDES = {
+    "HERMES_VOICE": "0",
+    "HERMES_VOICE_TTS": "0",
+    "HERMES_VOICE_DEBUG": "0",
+}
+
+
+def _pytest_child_env() -> dict[str, str]:
+    """Environment for pytest subprocesses spawned by this runner."""
+    env = os.environ.copy()
+    env.update(_PYTEST_CHILD_ENV_OVERRIDES)
+    return env
+
 
 def _count_tests(
     files: List[Path], repo_root: Path, pytest_passthrough: List[str]
@@ -122,6 +143,7 @@ def _count_tests(
         result = subprocess.run(
             cmd,
             cwd=repo_root,
+            env=_pytest_child_env(),
             capture_output=True,
             text=True,
             timeout=120,
@@ -283,6 +305,7 @@ def _run_one_file(
     proc = subprocess.Popen(
         cmd,
         cwd=repo_root,
+        env=_pytest_child_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

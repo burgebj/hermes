@@ -185,3 +185,117 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
             f"diag={diag!r} test_pid={test_pid} test_pgid={test_pgid}; "
             f"runner output:\n{proc.stdout}"
         )
+
+
+def test_runner_scrubs_inherited_voice_tts_env(tmp_path: Path) -> None:
+    """Runtime voice flags from an interactive parent must not reach pytest.
+
+    The probe is intentionally outside ``tests/`` so the repo-level conftest
+    does not mask the runner behavior.  Without the runner scrub, a parent
+    process with ``HERMES_VOICE_TTS=1`` can make gateway tests invoke real TTS
+    playback while completing fake assistant turns.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    probe = probe_dir / "test_voice_env_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import os
+
+            def test_voice_env_flags_are_neutralized():
+                assert os.environ.get("HERMES_VOICE") == "0"
+                assert os.environ.get("HERMES_VOICE_TTS") == "0"
+                assert os.environ.get("HERMES_VOICE_DEBUG") == "0"
+            """
+        ).strip()
+        + "\n"
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_VOICE": "1",
+            "HERMES_VOICE_TTS": "1",
+            "HERMES_VOICE_DEBUG": "1",
+        }
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "1",
+            "--file-timeout",
+            "30",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_pytest_conftest_keeps_voice_tts_neutralized_after_test_teardown(
+    tmp_path: Path,
+) -> None:
+    """Background gateway work after fixture teardown must still see TTS off.
+
+    This reproduces the subtle failure mode behind audible test output: the test
+    emits completion, returns, pytest tears down monkeypatch, then a still-live
+    worker thread reads ``HERMES_VOICE_TTS`` and calls real TTS.  The probe file
+    lives under ``tests/`` so the repo conftest is active.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    nonce = f"{os.getpid()}-{int(time.time() * 1000)}"
+    probe = repo_root / "tests" / f"_tmp_voice_teardown_probe_{nonce}.py"
+    handoff = tmp_path / "voice-env-after-teardown.txt"
+    try:
+        probe.write_text(
+            textwrap.dedent(
+                f"""
+                import os, threading, time
+                from pathlib import Path
+
+                HANDOFF = Path({str(handoff)!r})
+
+                def test_background_thread_observes_voice_tts_after_return():
+                    def worker():
+                        time.sleep(0.05)
+                        HANDOFF.write_text(os.environ.get("HERMES_VOICE_TTS", "<missing>"))
+
+                    threading.Thread(target=worker, daemon=False).start()
+                """
+            ).strip()
+            + "\n"
+        )
+
+        env = os.environ.copy()
+        env["HERMES_VOICE_TTS"] = "1"
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", str(probe)],
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+        )
+
+        assert proc.returncode == 0, proc.stdout
+        assert handoff.read_text() == "0"
+    finally:
+        try:
+            probe.unlink()
+        except FileNotFoundError:
+            pass

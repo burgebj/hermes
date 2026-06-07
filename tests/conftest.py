@@ -11,8 +11,9 @@ Hermetic-test invariants enforced here (see AGENTS.md for rationale):
    CI. Code using ``Path.home() / ".hermes"`` instead of the canonical
    ``get_hermes_home()`` is a bug to fix at the callsite.)
 3. **Deterministic runtime.** TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0.
-4. **No HERMES_SESSION_* inheritance** — the agent's current gateway
-   session must not leak into tests.
+4. **No runtime Hermes state inheritance** — the agent's current gateway
+   session, voice/TTS toggles, and other live-session flags must not leak into
+   tests.
 
 These invariants make the local test run match CI closely. Gaps that
 remain (CPU count, xdist worker count) are addressed by the canonical
@@ -170,6 +171,12 @@ def _looks_like_credential(name: str) -> bool:
 # unconditionally — individual tests that need them set do so explicitly.
 _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_YOLO_MODE",
+    # Runtime voice toggles are process-wide env flags in the TUI gateway.
+    # A live developer session can leave them enabled; tests must opt in
+    # explicitly or fake assistant completions may invoke real audio playback.
+    "HERMES_VOICE",
+    "HERMES_VOICE_TTS",
+    "HERMES_VOICE_DEBUG",
     "HERMES_INTERACTIVE",
     "HERMES_QUIET",
     "HERMES_TOOL_PROGRESS",
@@ -323,6 +330,18 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "MATRIX_REQUIRE_MENTION",
 })
 
+# Voice flags are special: they are checked by background gateway threads after
+# a test emits ``message.complete``. If monkeypatch merely deletes them during
+# the test, fixture teardown restores an inherited ``HERMES_VOICE_TTS=1`` while
+# that worker can still be running, causing real TTS playback. Keep these
+# neutralized process-wide for the whole pytest subprocess instead of restoring
+# the developer's live interactive value between tests.
+_HERMES_RUNTIME_ZERO_VARS = frozenset({
+    "HERMES_VOICE",
+    "HERMES_VOICE_TTS",
+    "HERMES_VOICE_DEBUG",
+})
+
 
 @pytest.fixture(autouse=True)
 def _hermetic_environment(tmp_path, monkeypatch):
@@ -339,7 +358,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
 
     # 2. Blank behavioral HERMES_* vars that could change test semantics.
     for name in _HERMES_BEHAVIORAL_VARS:
-        monkeypatch.delenv(name, raising=False)
+        if name in _HERMES_RUNTIME_ZERO_VARS:
+            os.environ[name] = "0"
+        else:
+            monkeypatch.delenv(name, raising=False)
 
     # 3. Redirect HERMES_HOME to a per-test tempdir. Code that reads
     #    ``~/.hermes/*`` via ``get_hermes_home()`` now gets the tempdir.
