@@ -112,6 +112,47 @@ def _is_audio_ext(ext: str) -> bool:
     return ext.lower() in {".mp3", ".wav", ".ogg", ".m4a", ".aac"}
 
 
+# Keep aligned with the document-attachment gate in gateway/run.py, which only
+# forwards inbound attachments whose MIME starts with "application/" or "text/".
+_DOC_EXT_MIME = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".zip": "application/zip",
+}
+
+
+def _doc_mime_for(path: str) -> str:
+    """Return an ``application/*`` or ``text/*`` MIME for a non-image / non-audio
+    inbound file, so it classifies as a document attachment.
+
+    Any guess outside ``application/*`` / ``text/*`` (e.g. an image/audio/video
+    extension that isn't in the adapter's image/audio extension allowlist, such
+    as .heic or .flac) collapses to ``application/octet-stream`` rather than
+    re-routing the file into the image/voice pipelines.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _DOC_EXT_MIME:
+        return _DOC_EXT_MIME[ext]
+    import mimetypes
+
+    guessed, _ = mimetypes.guess_type(path)
+    if guessed and (guessed.startswith("application/") or guessed.startswith("text/")):
+        return guessed
+    return "application/octet-stream"
+
+
 # ---------------------------------------------------------------------------
 # SimpleX Adapter
 # ---------------------------------------------------------------------------
@@ -396,7 +437,7 @@ class SimplexAdapter(BasePlatformAdapter):
                         elif _is_audio_ext("." + ext):
                             media_types.append("audio/" + ext)
                         else:
-                            media_types.append("application/octet-stream")
+                            media_types.append(_doc_mime_for(cached))
                         media_urls.append(cached)
                 except Exception:
                     logger.exception("SimpleX: failed to fetch file %s", file_id)
@@ -424,6 +465,10 @@ class SimplexAdapter(BasePlatformAdapter):
                 msg_type = MessageType.VOICE
             elif any(mt.startswith("image/") for mt in media_types):
                 msg_type = MessageType.PHOTO
+            elif any(
+                mt.startswith(("application/", "text/")) for mt in media_types
+            ):
+                msg_type = MessageType.DOCUMENT
 
         event_obj = MessageEvent(
             source=source,

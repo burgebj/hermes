@@ -377,3 +377,95 @@ def test_register_calls_register_platform():
     assert callable(kwargs["setup_fn"])
     # SimpleX uses opaque IDs only — no PII to redact.
     assert kwargs["pii_safe"] is True
+
+
+# ---------------------------------------------------------------------------
+# 9. Inbound: documents (PDF/office/etc.) classified as MessageType.DOCUMENT
+#    so gateway/run.py forwards them as attachments instead of dropping as TEXT.
+# ---------------------------------------------------------------------------
+
+def test_doc_mime_for_maps_known_and_unknown_extensions():
+    f = _simplex._doc_mime_for
+    assert f("/x/report.pdf") == "application/pdf"
+    assert f("/x/notes.txt") == "text/plain"
+    # Unknown extension still yields an application/* MIME, so it routes as DOCUMENT.
+    assert f("/x/archive.unknownext").startswith("application/")
+    # Image/audio/video extensions outside the allowlist must NOT yield image/* or
+    # audio/* (which would re-route to PHOTO/VOICE) — they collapse to application/*.
+    assert f("/x/pic.heic").startswith("application/")
+    assert f("/x/song.flac").startswith("application/")
+    assert f("/x/clip.mp4").startswith("application/")
+
+
+@pytest.mark.asyncio
+async def test_inbound_document_classified_as_document():
+    from gateway.config import PlatformConfig
+
+    MessageType = _simplex.MessageType
+    cfg = PlatformConfig(enabled=True, extra={"ws_url": "ws://localhost:5225"})
+    adapter = SimplexAdapter(cfg)
+
+    async def fake_fetch(file_id, file_name):
+        return "/tmp/simplex-test/report.pdf"
+
+    adapter._fetch_file = fake_fetch  # type: ignore
+
+    captured = {}
+
+    async def capture(event):
+        captured["event"] = event
+
+    adapter.handle_message = capture  # type: ignore
+
+    wrapper = {
+        "chatInfo": {"type": "direct", "contact": {"contactId": 7, "localDisplayName": "tester"}},
+        "chatItem": {
+            "content": {"msgContent": {"type": "file", "text": ""}},
+            "meta": {"itemStatus": {"type": "rcvNew"}, "itemTs": "2026-05-30T00:00:00Z"},
+            "file": {"fileId": 99, "fileName": "report.pdf", "fileStatus": "rcvComplete"},
+        },
+    }
+
+    await adapter._handle_new_chat_item(wrapper)
+
+    event = captured["event"]
+    assert event.message_type == MessageType.DOCUMENT
+    assert "application/pdf" in event.media_types
+
+
+@pytest.mark.asyncio
+async def test_inbound_unallowlisted_media_routes_to_document_not_photo_or_voice():
+    """Files whose extension is outside the image/audio allowlist (heic/svg/flac/
+    mp4) must classify as DOCUMENT, never PHOTO/VOICE — the mimetypes fallback
+    must not re-route them into the vision/STT pipelines."""
+    from gateway.config import PlatformConfig
+
+    MessageType = _simplex.MessageType
+    for fname in ("photo.heic", "icon.svg", "song.flac", "clip.mp4"):
+        cfg = PlatformConfig(enabled=True, extra={"ws_url": "ws://localhost:5225"})
+        adapter = SimplexAdapter(cfg)
+
+        async def fake_fetch(file_id, file_name, _f=fname):
+            return "/tmp/simplex-test/" + _f
+
+        adapter._fetch_file = fake_fetch  # type: ignore
+
+        captured = {}
+
+        async def capture(event):
+            captured["event"] = event
+
+        adapter.handle_message = capture  # type: ignore
+
+        wrapper = {
+            "chatInfo": {"type": "direct", "contact": {"contactId": 7}},
+            "chatItem": {
+                "content": {"msgContent": {"type": "file", "text": ""}},
+                "meta": {"itemStatus": {"type": "rcvNew"}},
+                "file": {"fileId": 1, "fileName": fname, "fileStatus": "rcvComplete"},
+            },
+        }
+
+        await adapter._handle_new_chat_item(wrapper)
+        mt = captured["event"].message_type
+        assert mt == MessageType.DOCUMENT, f"{fname} classified as {mt}, expected DOCUMENT"
