@@ -425,12 +425,26 @@ DANGEROUS_PATTERNS = [
     (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     # Self-termination protection: prevent agent from killing its own process
     (r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
+    # pkill -f matches against full command lines, not just process names.
+    # `pkill -f 'hermes.*gateway'` bypasses the name-based pattern above.
+    (r'\b(pkill|killall)\s+.*-f\b.*\b(hermes|gateway)\b', "kill hermes/gateway by command-line pattern (self-termination)"),
+    (r'\b(pkill|killall)\s+.*-f\b.*hermes', "kill hermes/gateway by command-line pattern (self-termination, variant)"),
     # Self-termination via kill + command substitution (pgrep/pidof).
     # The name-based pattern above catches `pkill hermes` but not
     # `kill -9 $(pgrep -f hermes)` because the substitution is opaque
     # to regex at detection time. Catch the structural pattern instead.
     (r'\bkill\b.*\$\(\s*pgrep\b', "kill process via pgrep expansion (self-termination)"),
     (r'\bkill\b.*`\s*pgrep\b', "kill process via backtick pgrep expansion (self-termination)"),
+    # Self-termination via kill + pidof command substitution.
+    (r'\bkill\b.*\$\(\s*pidof\b.*\b(hermes|gateway)\b', "kill process via pidof expansion (self-termination)"),
+    (r'\bkill\b.*`\s*pidof\b.*\b(hermes|gateway)\b', "kill process via backtick pidof expansion (self-termination)"),
+    (r'\bkill\b.*\$\(\s*pidof\b.*hermes', "kill process via pidof expansion (self-termination, variant)"),
+    (r'\bkill\b.*`\s*pidof\b.*hermes', "kill process via backtick pidof expansion (self-termination, variant)"),
+    # Service manager commands that stop/restart the Hermes gateway.
+    # `systemctl --user stop hermes-gateway` and equivalents bypass
+    # the `hermes gateway stop` pattern but have the same effect.
+    (r'\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|kill)\b.*\bhermes\b', "stop/restart hermes systemd service (kills running agents)"),
+    (r'\blaunchctl\s+(stop|kickstart)\b.*\bhermes\b', "stop/restart hermes launchd service (kills running agents)"),
     # File copy/move/edit into sensitive system paths (/etc/ and macOS
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),

@@ -766,6 +766,52 @@ class TestGatewayProtection:
         dangerous, key, desc = detect_dangerous_command(cmd)
         assert dangerous is False
 
+    def test_pkill_f_hermes_cli_detected(self):
+        """pkill -f hermes_cli (without quotes) must be caught."""
+        cmd = "pkill -f hermes_cli"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "self-termination" in desc
+
+    def test_kill_pidof_hermes_detected(self):
+        """kill $(pidof hermes_cli.main) must be caught."""
+        cmd = "kill -9 $(pidof hermes_cli.main)"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "self-termination" in desc
+
+    def test_kill_pidof_gateway_detected(self):
+        """kill $(pidof gateway) must be caught."""
+        cmd = "kill $(pidof gateway)"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "self-termination" in desc
+
+    def test_launchctl_stop_hermes_detected(self):
+        """launchctl stop ai.hermes.gateway must be caught."""
+        cmd = "launchctl stop ai.hermes.gateway"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "launchd" in desc.lower()
+
+    def test_launchctl_kickstart_hermes_detected(self):
+        """launchctl kickstart with hermes must be caught."""
+        cmd = "launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+
+    def test_systemctl_status_not_flagged(self):
+        """Read-only systemctl status should not be flagged."""
+        cmd = "systemctl --user status hermes-gateway"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is False
+
+    def test_launchctl_print_not_flagged(self):
+        """Read-only launchctl print should not be flagged."""
+        cmd = "launchctl print gui/$(id -u)/ai.hermes.gateway"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is False
+
 
 class TestNormalizationBypass:
     """Obfuscation techniques must not bypass dangerous command detection."""
