@@ -155,7 +155,16 @@ def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optiona
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
 
-    expanded = Path(raw_path).expanduser()
+    try:
+        expanded = Path(raw_path).expanduser()
+    except RuntimeError:
+        # ``Path.expanduser`` raises ``RuntimeError`` when the tilde-prefix
+        # does not resolve to a real user — both for ``~unknown_user`` and
+        # for LLM-shaped tokens like ``~500-700`` (used to mean
+        # "approximately 500-700").  Such a path cannot name a file, so
+        # return ``None`` and let the caller fall back to the no-scope path.
+        return None
+
     if expanded.is_absolute():
         return Path(os.path.abspath(str(expanded)))
 

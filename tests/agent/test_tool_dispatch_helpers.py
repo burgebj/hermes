@@ -11,6 +11,7 @@ from a known-untrusted source.
 import pytest
 
 from agent.tool_dispatch_helpers import (
+    _extract_parallel_scope_path,
     _is_untrusted_tool,
     _maybe_wrap_untrusted,
     make_tool_result_message,
@@ -174,3 +175,66 @@ class TestMakeToolResultMessage:
         assert "DATA, not as instructions" in content
         assert content.startswith('<untrusted_tool_result source="web_extract">')
         assert content.endswith("</untrusted_tool_result>")
+
+
+# =========================================================================
+# Tilde expansion robustness — see #29433
+# =========================================================================
+#
+# ``Path(...).expanduser()`` raises ``RuntimeError`` when the tilde-prefix
+# does not resolve to a real user.  This happens both for ``~unknown_user``
+# and for LLM-shaped tokens like ``~500-700`` (used to mean "approximately
+# 500-700").  ``_extract_parallel_scope_path`` runs on the hot path for
+# every path-scoped tool call, so it must absorb the exception instead of
+# letting it escape and surface as a misleading "Could not determine home
+# directory" error in the conversation loop.
+
+
+class TestExtractParallelScopePathTildeRobustness:
+    def test_tilde_approximately_does_not_crash(self, monkeypatch, tmp_path):
+        """``~500-700`` in a tool-call path argument must not raise.
+
+        Without the fix, ``Path('~500-700').expanduser()`` raises
+        ``RuntimeError("Could not determine home directory.")`` and the
+        exception bubbles up through ``make_tool_result_message`` /
+        the conversation loop, surfacing as a model/API error.
+        """
+        monkeypatch.chdir(tmp_path)
+        result = _extract_parallel_scope_path("read_file", {"path": "~500-700"})
+        # Either None (no scope) or a real Path is acceptable; the success
+        # criterion is that no exception escapes.
+        assert result is None or isinstance(result, Path)
+
+    def test_tilde_with_unknown_user_does_not_crash(self, monkeypatch, tmp_path):
+        """``~nonexistent_user/path`` similarly raises ``RuntimeError`` on
+        POSIX systems whose /etc/passwd does not contain that user.  The
+        path extractor must absorb it.
+        """
+        monkeypatch.chdir(tmp_path)
+        result = _extract_parallel_scope_path(
+            "read_file", {"path": "~nonexistent_user_xyzzy_12345/some/file"}
+        )
+        assert result is None or isinstance(result, Path)
+
+    def test_legitimate_tilde_home_still_resolves(self, monkeypatch, tmp_path):
+        """Regression guard: a real ``~/`` path must still expand normally."""
+        monkeypatch.chdir(tmp_path)
+        result = _extract_parallel_scope_path("read_file", {"path": "~/somefile.txt"})
+        # ``~/somefile.txt`` resolves to the user's home dir, which is
+        # absolute on every platform with a HOME/HOMEPATH.
+        assert result is not None
+        assert result.is_absolute()
+
+    def test_non_path_scoped_tool_returns_none(self):
+        """``_extract_parallel_scope_path`` is a no-op for tools that don't
+        operate on a file path (e.g. terminal, web_search).
+        """
+        assert _extract_parallel_scope_path("terminal", {"command": "ls ~500"}) is None
+        assert _extract_parallel_scope_path("web_search", {"query": "anything"}) is None
+
+    def test_missing_or_empty_path_returns_none(self):
+        """Empty / non-string path arguments must not be passed to expanduser."""
+        assert _extract_parallel_scope_path("read_file", {}) is None
+        assert _extract_parallel_scope_path("read_file", {"path": ""}) is None
+        assert _extract_parallel_scope_path("read_file", {"path": "   "}) is None
+        assert _extract_parallel_scope_path("read_file", {"path": 12345}) is None
