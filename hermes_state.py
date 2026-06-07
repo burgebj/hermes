@@ -25,7 +25,7 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -1351,6 +1351,72 @@ class SessionDB:
                   )
                 """,
                 (now, cutoff),
+            )
+            return result.rowcount
+
+        return self._execute_write(_do) or 0
+
+    def archive_empty_orphaned_compression_usage_sessions(
+        self,
+        *,
+        active_session_ids: "Optional[Iterable[str]]" = None,
+        min_age_seconds: int = 3600,
+    ) -> int:
+        """Archive empty compression-child sessions that only accumulated usage.
+
+        During a long gateway turn, context compression creates a child session
+        before the final transcript flush. That child may legitimately have API
+        usage but zero message rows until the turn exits.  If the process is
+        restarted/interrupted before the flush, the child is left as an active,
+        message-less session with high token counts.  Those rows pollute session
+        search/resume but still contain useful usage accounting, so this method
+        is deliberately non-destructive: it marks only old, unreferenced empty
+        compression children as ended+archived.
+        """
+        cutoff = time.time() - max(0, int(min_age_seconds))
+        active_ids = {sid for sid in (active_session_ids or []) if sid}
+
+        def _do(conn):
+            now = time.time()
+            params: list[Any] = [now, cutoff]
+            active_filter = ""
+            if active_ids:
+                placeholders = ",".join("?" * len(active_ids))
+                active_filter = f" AND id NOT IN ({placeholders})"
+                params.extend(sorted(active_ids))
+
+            result = conn.execute(
+                f"""
+                UPDATE sessions
+                SET ended_at = ?,
+                    end_reason = 'empty_orphaned_compression_usage',
+                    archived = 1
+                WHERE end_reason IS NULL
+                  AND ended_at IS NULL
+                  AND archived = 0
+                  AND started_at < ?
+                  AND parent_session_id IS NOT NULL
+                  AND message_count = 0
+                  AND (
+                      api_call_count > 0
+                      OR input_tokens > 0
+                      OR output_tokens > 0
+                      OR cache_read_tokens > 0
+                      OR cache_write_tokens > 0
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM messages m
+                      WHERE m.session_id = sessions.id
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM sessions p
+                      WHERE p.id = sessions.parent_session_id
+                        AND p.end_reason = 'compression'
+                        AND p.ended_at IS NOT NULL
+                  )
+                  {active_filter}
+                """,
+                params,
             )
             return result.rowcount
 

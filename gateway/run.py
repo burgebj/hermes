@@ -2059,13 +2059,43 @@ class GatewayRunner:
             # hermes_state.get_last_init_error() for slash-command error strings.
             logger.warning("SQLite session store not available: %s", e)
 
-        # Opportunistic state.db maintenance: prune ended sessions older
-        # than sessions.retention_days + optional VACUUM. Tracks last-run
-        # in state_meta so it only actually executes once per
-        # sessions.min_interval_hours.  Gateway is long-lived so blocking
-        # a few seconds once per day is acceptable; failures are logged
-        # but never raised.
+        # Opportunistic state.db maintenance.  Keep the gateway path in sync
+        # with CLI startup: long Telegram turns can be interrupted after a
+        # compression child has accumulated usage but before messages flush.
+        # Archive only old, inactive empty compression children so they stop
+        # polluting resume/session_search while preserving token accounting.
         if self._session_db is not None:
+            try:
+                active_session_ids = set()
+                sessions_json = self.config.sessions_dir / "sessions.json"
+                if sessions_json.exists():
+                    try:
+                        raw_sessions = json.loads(sessions_json.read_text())
+                        if isinstance(raw_sessions, dict):
+                            for entry in raw_sessions.values():
+                                if isinstance(entry, dict) and entry.get("session_id"):
+                                    active_session_ids.add(str(entry["session_id"]))
+                    except Exception as _sessions_exc:
+                        logger.debug(
+                            "Could not read active sessions for empty compression archive: %s",
+                            _sessions_exc,
+                        )
+                archived = self._session_db.archive_empty_orphaned_compression_usage_sessions(
+                    active_session_ids=active_session_ids
+                )
+                if archived:
+                    logger.info(
+                        "Archived %d empty orphaned compression usage sessions",
+                        archived,
+                    )
+            except Exception as exc:
+                logger.debug("Empty compression usage archive skipped: %s", exc)
+
+            # Prune ended sessions older than sessions.retention_days + optional
+            # VACUUM. Tracks last-run in state_meta so it only actually executes
+            # once per sessions.min_interval_hours. Gateway is long-lived so
+            # blocking a few seconds once per day is acceptable; failures are
+            # logged but never raised.
             try:
                 from hermes_cli.config import load_config as _load_full_config
                 _sess_cfg = (_load_full_config().get("sessions") or {})

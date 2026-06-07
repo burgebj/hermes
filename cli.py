@@ -1413,6 +1413,39 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _finalize_exc:
             logger.debug("Orphan compression finalize skipped: %s", _finalize_exc)
 
+        # Archive empty compression children that accumulated token usage but
+        # never flushed messages (usually restart/interruption during a long
+        # gateway turn after compression). Non-destructive: usage rows are
+        # preserved, but archived so they stop polluting resume/session search.
+        # This is intentionally not a one-time migration: candidates may be too
+        # recent at one startup and only become safe to archive later.
+        try:
+            active_session_ids = set()
+            sessions_json = _hermes_home_maint / "sessions" / "sessions.json"
+            if sessions_json.exists():
+                import json as _json
+                try:
+                    raw_sessions = _json.loads(sessions_json.read_text())
+                    if isinstance(raw_sessions, dict):
+                        for entry in raw_sessions.values():
+                            if isinstance(entry, dict) and entry.get("session_id"):
+                                active_session_ids.add(str(entry["session_id"]))
+                except Exception as _sessions_exc:
+                    logger.debug(
+                        "Could not read active sessions for empty compression archive: %s",
+                        _sessions_exc,
+                    )
+            archived = session_db.archive_empty_orphaned_compression_usage_sessions(
+                active_session_ids=active_session_ids
+            )
+            if archived:
+                logger.info(
+                    "Archived %d empty orphaned compression usage sessions",
+                    archived,
+                )
+        except Exception as _archive_exc:
+            logger.debug("Empty compression usage archive skipped: %s", _archive_exc)
+
         cfg = (_load_full_config().get("sessions") or {})
         if not cfg.get("auto_prune", False):
             return

@@ -604,3 +604,108 @@ class TestFinalizeOrphanedCompressionSessions:
 
         session = db.get_session("titled-ghost")
         assert session["end_reason"] == "orphaned_compression"
+
+
+class TestArchiveEmptyOrphanedCompressionUsageSessions:
+    """Empty compression children with only usage are archived, not deleted."""
+
+    def _old_empty_usage_child(self, db, sid="empty-usage"):
+        db.create_session(session_id="parent", source="telegram", model="test")
+        db.end_session("parent", "compression")
+        db.create_session(
+            session_id=sid,
+            source="telegram",
+            model="test",
+            parent_session_id="parent",
+        )
+        db.update_token_counts(
+            sid,
+            input_tokens=1000,
+            cache_read_tokens=900,
+            api_call_count=2,
+        )
+        db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (time.time() - 7200, sid),
+            )
+        )
+        return sid
+
+    def test_archives_empty_usage_child_with_compression_parent(self, tmp_path):
+        db = _make_session_db(tmp_path)
+        sid = self._old_empty_usage_child(db)
+
+        count = db.archive_empty_orphaned_compression_usage_sessions()
+        assert count == 1
+
+        session = db.get_session(sid)
+        assert session is not None
+        assert session["archived"] == 1
+        assert session["ended_at"] is not None
+        assert session["end_reason"] == "empty_orphaned_compression_usage"
+        assert session["input_tokens"] == 1000
+        assert session["cache_read_tokens"] == 900
+
+    def test_skips_active_session_ids(self, tmp_path):
+        db = _make_session_db(tmp_path)
+        sid = self._old_empty_usage_child(db, sid="active-child")
+
+        count = db.archive_empty_orphaned_compression_usage_sessions(
+            active_session_ids={sid}
+        )
+        assert count == 0
+        session = db.get_session(sid)
+        assert session is not None
+        assert session["archived"] == 0
+        assert session["end_reason"] is None
+
+    def test_skips_recent_empty_usage_child(self, tmp_path):
+        db = _make_session_db(tmp_path)
+        sid = self._old_empty_usage_child(db, sid="recent-child")
+        db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (time.time(), sid),
+            )
+        )
+
+        count = db.archive_empty_orphaned_compression_usage_sessions()
+        assert count == 0
+        session = db.get_session(sid)
+        assert session is not None
+        assert session["archived"] == 0
+
+    def test_skips_empty_child_without_usage(self, tmp_path):
+        db = _make_session_db(tmp_path)
+        db.create_session(session_id="parent", source="telegram", model="test")
+        db.end_session("parent", "compression")
+        db.create_session(
+            session_id="empty-no-usage",
+            source="telegram",
+            model="test",
+            parent_session_id="parent",
+        )
+        db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (time.time() - 7200, "empty-no-usage"),
+            )
+        )
+
+        count = db.archive_empty_orphaned_compression_usage_sessions()
+        assert count == 0
+        session = db.get_session("empty-no-usage")
+        assert session is not None
+        assert session["archived"] == 0
+
+    def test_skips_child_with_messages(self, tmp_path):
+        db = _make_session_db(tmp_path)
+        sid = self._old_empty_usage_child(db, sid="has-messages")
+        db.append_message(sid, role="user", content="flushed")
+
+        count = db.archive_empty_orphaned_compression_usage_sessions()
+        assert count == 0
+        session = db.get_session(sid)
+        assert session is not None
+        assert session["archived"] == 0
