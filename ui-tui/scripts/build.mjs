@@ -38,7 +38,18 @@ await build({
   // Skip the prebuilt @hermes/ink bundle — esbuild's __esm helper doesn't
   // await nested async init, which breaks lazy-initialized exports like
   // `render`. Bundling from source sidesteps that.
-  alias: { '@hermes/ink': resolve(root, 'packages/hermes-ink/src/entry-exports.ts') },
+  //
+  // Force signal-exit to the v4 copy nested under @hermes/ink. Because the
+  // alias above points at SOURCE (not node_modules/@hermes/ink), esbuild
+  // resolves bare `signal-exit` from packages/hermes-ink/src and walks up to
+  // the HOISTED top-level copy — which npm dedupes to v3 (pulled in by `ink`
+  // / `restore-cursor`). v3 has no `onExit` named export, so `new Ink()`
+  // throws "(0, import_signal_exit.onExit) is not a function" at construction
+  // and the TUI renders a blank screen. Pin the alias to the v4 package dir.
+  alias: {
+    '@hermes/ink': resolve(root, 'packages/hermes-ink/src/entry-exports.ts'),
+    'signal-exit': resolve(root, 'node_modules/@hermes/ink/node_modules/signal-exit')
+  },
   plugins: [stubDevtools],
   // Some transitive deps use CommonJS `require(...)` at runtime. ESM bundles
   // don't get a `require` binding automatically, so we inject one.
