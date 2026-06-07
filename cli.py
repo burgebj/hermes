@@ -4883,6 +4883,7 @@ class HermesCLI:
         try:
             runtime = resolve_runtime_provider(
                 requested=self.requested_provider,
+                target_model=self.model,
                 explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
             )
@@ -4925,6 +4926,7 @@ class HermesCLI:
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
         resolved_credential_pool = runtime.get("credential_pool")
+        resolved_anthropic_force_bearer_auth = bool(runtime.get("anthropic_force_bearer_auth"))
         # A callable api_key is a bearer-token provider (Azure Foundry
         # Entra ID — ``azure_identity_adapter.build_token_provider``).
         # The OpenAI SDK accepts ``Callable[[], str]`` for ``api_key`` and
@@ -4960,12 +4962,14 @@ class HermesCLI:
             or resolved_api_mode != self.api_mode
             or resolved_acp_command != self.acp_command
             or resolved_acp_args != self.acp_args
+            or resolved_anthropic_force_bearer_auth != getattr(self, "_anthropic_force_bearer_auth", False)
         )
         self.provider = resolved_provider
         self.api_mode = resolved_api_mode
         self.acp_command = resolved_acp_command
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
+        self._anthropic_force_bearer_auth = resolved_anthropic_force_bearer_auth
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
@@ -5032,6 +5036,7 @@ class HermesCLI:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "anthropic_force_bearer_auth": getattr(self, "_anthropic_force_bearer_auth", False),
         }
         route = {
             "model": self.model,
@@ -5043,6 +5048,7 @@ class HermesCLI:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                runtime["anthropic_force_bearer_auth"],
             ),
         }
 
@@ -5215,6 +5221,7 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "anthropic_force_bearer_auth": getattr(self, "_anthropic_force_bearer_auth", False),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -5227,6 +5234,7 @@ class HermesCLI:
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
                 max_tokens=self.max_tokens,
+                anthropic_force_bearer_auth=bool(runtime.get("anthropic_force_bearer_auth")),
                 max_iterations=self.max_turns,
                 enabled_toolsets=self.enabled_toolsets,
                 disabled_toolsets=self.disabled_toolsets,
@@ -9360,6 +9368,7 @@ class HermesCLI:
                     acp_command=turn_route["runtime"].get("command"),
                     acp_args=turn_route["runtime"].get("args"),
                     max_tokens=turn_route["runtime"].get("max_tokens"),
+                    anthropic_force_bearer_auth=bool(turn_route["runtime"].get("anthropic_force_bearer_auth")),
                     max_iterations=self.max_turns,
                     enabled_toolsets=self.enabled_toolsets,
                     quiet_mode=True,

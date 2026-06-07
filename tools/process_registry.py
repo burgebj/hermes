@@ -631,10 +631,11 @@ class ProcessRegistry:
             # descendants spawned via setsid) before re-raising so they do not
             # leak as untracked background processes.
             try:
-                if not _IS_WINDOWS:
+                kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+                killpg = getattr(os, "killpg", None)
+                if not _IS_WINDOWS and killpg is not None:
                     try:
-                        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-                        os.killpg(os.getpgid(proc.pid), kill_signal)  # windows-footgun: ok - guarded by _IS_WINDOWS above
+                        killpg(os.getpgid(proc.pid), kill_signal)  # windows-footgun: ok - guarded by _IS_WINDOWS above
                     except (ProcessLookupError, PermissionError, OSError):
                         proc.kill()
                 else:

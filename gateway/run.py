@@ -1259,6 +1259,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
         "max_tokens": max_tokens,
+        "anthropic_force_bearer_auth": bool(runtime.get("anthropic_force_bearer_auth")),
     }
 
 
@@ -1307,6 +1308,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
                     "model": entry.get("model"),
+                    "anthropic_force_bearer_auth": bool(runtime.get("anthropic_force_bearer_auth")),
                 }
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)

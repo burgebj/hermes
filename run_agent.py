@@ -404,6 +404,7 @@ class AIAgent:
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
+        anthropic_force_bearer_auth: bool = False,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 20,
         checkpoint_max_total_size_mb: int = 500,
@@ -476,6 +477,7 @@ class AIAgent:
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
+            anthropic_force_bearer_auth=anthropic_force_bearer_auth,
             checkpoints_enabled=checkpoints_enabled,
             checkpoint_max_snapshots=checkpoint_max_snapshots,
             checkpoint_max_total_size_mb=checkpoint_max_total_size_mb,
@@ -3755,6 +3757,7 @@ class AIAgent:
                 new_token,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                force_bearer_auth=getattr(self, "_anthropic_force_bearer_auth", False),
             )
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
@@ -3766,7 +3769,10 @@ class AIAgent:
         # the Anthropic protocol must not trip OAuth paths (#1739 & third-party
         # identity-injection guard).
         from agent.anthropic_adapter import _is_oauth_token
-        self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
+        self._is_anthropic_oauth = (
+            getattr(self, "_anthropic_force_bearer_auth", False)
+            or (_is_oauth_token(new_token) if self.provider == "anthropic" else False)
+        )
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
@@ -3902,7 +3908,7 @@ class AIAgent:
         return pool.has_available()
 
     def _anthropic_messages_create(self, api_kwargs: dict):
-        if self.api_mode == "anthropic_messages":
+        if self.api_mode == "anthropic_messages" and not getattr(self, "_anthropic_force_bearer_auth", False):
             self._try_refresh_anthropic_client_credentials()
         return self._anthropic_client.messages.create(**api_kwargs)
 
@@ -3930,6 +3936,7 @@ class AIAgent:
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
                 drop_context_1m_beta=_drop_1m,
+                force_bearer_auth=getattr(self, "_anthropic_force_bearer_auth", False),
             )
 
     def _interruptible_api_call(self, api_kwargs: dict):

@@ -3774,14 +3774,28 @@ def _truncate_token(value: Optional[str], visible: int = 6) -> str:
 
 
 def _anthropic_oauth_status() -> Dict[str, Any]:
-    """Combined status across the three Anthropic credential sources we read.
+    """Combined status across Anthropic auth sources, including WIF."""
+    try:
+        from hermes_cli import auth as hauth
 
-    Hermes resolves Anthropic creds in this order at runtime:
-    1. ``~/.hermes/.anthropic_oauth.json`` — Hermes-managed PKCE flow
-    2. ``~/.claude/.credentials.json`` — Claude Code CLI credentials (auto)
-    3. ``ANTHROPIC_TOKEN`` / ``ANTHROPIC_API_KEY`` env vars
-    The dashboard reports the highest-priority source that's actually present.
-    """
+        unified = hauth.get_auth_status("anthropic")
+    except Exception:
+        unified = {}
+
+    if unified.get("auth_type") == "wif":
+        return {
+            "logged_in": bool(unified.get("logged_in")),
+            "source": "anthropic_wif",
+            "source_label": f"Anthropic WIF ({unified.get('identity_token_file') or 'token file not set'})",
+            "token_preview": None,
+            "expires_at": None,
+            "has_refresh_token": False,
+            "federation_rule_id": unified.get("federation_rule_id"),
+            "organization_id": unified.get("organization_id"),
+            "service_account_id": unified.get("service_account_id"),
+            **({"error": unified.get("error")} if unified.get("error") else {}),
+        }
+
     try:
         from agent.anthropic_adapter import (
             read_hermes_oauth_credentials,

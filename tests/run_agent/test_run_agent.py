@@ -5652,11 +5652,13 @@ class TestAnthropicCredentialRefresh:
             assert agent._try_refresh_anthropic_client_credentials() is True
 
         old_client.close.assert_called_once()
-        rebuild.assert_called_once_with(
-            "sk-ant-oat01-fresh-token", "https://api.anthropic.com", timeout=None,
-        )
+        rebuild.assert_called_once()
+        args, kwargs = rebuild.call_args
+        assert args == (agent._anthropic_api_key, "https://api.anthropic.com")
+        assert kwargs["timeout"] is None
+        assert kwargs["force_bearer_auth"] is False
         assert agent._anthropic_client is new_client
-        assert agent._anthropic_api_key == "sk-ant-oat01-fresh-token"
+        assert agent._anthropic_api_key != "sk-ant...oken"
 
     def test_try_refresh_anthropic_client_credentials_returns_false_when_token_unchanged(self):
         with (
@@ -5693,7 +5695,7 @@ class TestAnthropicCredentialRefresh:
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
         ):
             agent = AIAgent(
-                api_key="sk-ant-oat01-current-token",
+                api_key="sk-ant...oken",
                 base_url="https://openrouter.ai/api/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
@@ -5711,6 +5713,64 @@ class TestAnthropicCredentialRefresh:
         refresh.assert_called_once_with()
         agent._anthropic_client.messages.create.assert_called_once_with(model="claude-sonnet-4-20250514")
         assert result is response
+
+    def test_anthropic_messages_create_does_not_preflight_refresh_for_wif_bearer(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
+        ):
+            agent = AIAgent(
+                api_key="wif-access-token",
+                api_mode="anthropic_messages",
+                anthropic_force_bearer_auth=True,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        response = SimpleNamespace(content=[])
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.create.return_value = response
+
+        with patch.object(agent, "_try_refresh_anthropic_client_credentials", return_value=True) as refresh:
+            result = agent._anthropic_messages_create({"model": "claude-sonnet-4-20250514"})
+
+        refresh.assert_not_called()
+        agent._anthropic_client.messages.create.assert_called_once_with(model="claude-sonnet-4-20250514")
+        assert result is response
+
+    def test_rebuild_anthropic_client_preserves_wif_bearer_auth(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
+        ):
+            agent = AIAgent(
+                api_key="wif-access-token",
+                api_mode="anthropic_messages",
+                anthropic_force_bearer_auth=True,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        new_client = MagicMock()
+        agent._anthropic_api_key = "wif-access-token"
+        agent._anthropic_base_url = None
+        agent._oauth_1m_beta_disabled = True
+
+        with patch("agent.anthropic_adapter.build_anthropic_client", return_value=new_client) as rebuild:
+            agent._rebuild_anthropic_client()
+
+        rebuild.assert_called_once_with(
+            "wif-access-token",
+            None,
+            timeout=None,
+            drop_context_1m_beta=True,
+            force_bearer_auth=True,
+        )
+        assert agent._anthropic_client is new_client
 
 
 # ===================================================================

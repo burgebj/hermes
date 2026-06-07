@@ -1777,6 +1777,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             api_mode=runtime.get("api_mode"),
             acp_command=runtime.get("command"),
             acp_args=runtime.get("args"),
+            anthropic_force_bearer_auth=bool(runtime.get("anthropic_force_bearer_auth")),
             max_iterations=max_iterations,
             reasoning_config=reasoning_config,
             prefill_messages=prefill_messages,

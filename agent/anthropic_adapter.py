@@ -11,6 +11,7 @@ Auth supports:
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +55,10 @@ def _get_anthropic_sdk():
     return _anthropic_sdk
 
 logger = logging.getLogger(__name__)
+
+_WIF_ACCESS_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
+_WIF_CACHE_SKEW_SECONDS = 60
+_WIF_CACHE_FILE_NAME = ".anthropic_wif_token_cache.json"
 
 THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 # Hermes effort → Anthropic adaptive-thinking effort (output_config.effort).
@@ -647,6 +652,7 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    force_bearer_auth: bool = False,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -672,6 +678,11 @@ def build_anthropic_client(
     path in ``run_agent.py`` when a subscription rejects the beta; leave at
     its default on fresh clients so 1M-capable subscriptions keep the
     capability.
+
+    ``force_bearer_auth=True`` routes the token through ``auth_token`` even
+    when its opaque string format is not recognised by ``_is_oauth_token``.
+    Anthropic WIF exchanges return short-lived bearer tokens and must not be
+    sent with the regular ``x-api-key`` header.
 
     Returns an anthropic.Anthropic instance.
     """
@@ -714,7 +725,19 @@ def build_anthropic_client(
         drop_context_1m_beta=drop_context_1m_beta,
     )
 
-    if _is_kimi_coding_endpoint(base_url):
+    if force_bearer_auth:
+        # WIF exchanges produce short-lived bearer tokens. Keep the header set
+        # intentionally close to the direct Anthropic WIF/Claude Code contract:
+        # common API-key betas such as the 1M context beta can make some
+        # workspace-scoped WIF tokens fail before the first message call.
+        all_betas = _OAUTH_ONLY_BETAS
+        kwargs["auth_token"] = api_key
+        kwargs["default_headers"] = {
+            "anthropic-beta": ",".join(all_betas),
+            "user-agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
+            "x-app": "cli",
+        }
+    elif _is_kimi_coding_endpoint(base_url):
         # Kimi's /coding endpoint requires User-Agent: claude-code/0.1.0
         # to be recognized as a valid Coding Agent. Without it, returns 403.
         # Check this BEFORE _requires_bearer_auth since both match api.kimi.com/coding.
@@ -1097,6 +1120,204 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[s
         )
         return resolved
     return None
+
+
+def _read_anthropic_provider_state() -> Optional[Dict[str, Any]]:
+    """Return providers.anthropic from auth.json when present."""
+    auth_file = get_hermes_home() / "auth.json"
+    if not auth_file.exists():
+        return None
+    try:
+        payload = json.loads(auth_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, IOError):
+        return None
+    providers = payload.get("providers")
+    if not isinstance(providers, dict):
+        return None
+    state = providers.get("anthropic")
+    return dict(state) if isinstance(state, dict) else None
+
+
+def _complete_wif_config(config: Dict[str, Any]) -> bool:
+    return all(
+        str(config.get(field) or "").strip()
+        for field in (
+            "federation_rule_id",
+            "organization_id",
+            "service_account_id",
+            "identity_token_file",
+        )
+    )
+
+
+def _anthropic_wif_cache_file() -> Path:
+    return get_hermes_home() / _WIF_CACHE_FILE_NAME
+
+
+def _read_cached_wif_exchange(cache_key: str) -> Optional[Dict[str, Any]]:
+    cache_file = _anthropic_wif_cache_file()
+    if not cache_file.exists():
+        return None
+    try:
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, IOError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("cache_key") or "") != cache_key:
+        return None
+    return payload if isinstance(payload.get("access_token"), str) else None
+
+
+def _write_cached_wif_exchange(cache_key: str, exchanged: Dict[str, Any]) -> None:
+    cache_file = _anthropic_wif_cache_file()
+    payload = dict(exchanged)
+    payload["cache_key"] = cache_key
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_file.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(cache_file)
+        cache_file.chmod(0o600)
+    except (OSError, IOError):
+        logger.debug("Failed to persist Anthropic WIF token cache at %s", cache_file, exc_info=True)
+
+
+def read_anthropic_wif_config() -> Optional[Dict[str, Any]]:
+    """Resolve explicit Anthropic WIF configuration from env or auth.json.
+
+    Environment variables are treated as an atomic source: all four WIF
+    variables must be present before they override auth.json.  This avoids
+    accidentally combining a JWT file from one workload with organization or
+    service-account identifiers from a persisted auth store.
+    """
+    env_config = {
+        "auth_type": "wif",
+        "source": "env:wif",
+        "label": "anthropic-wif",
+        "api_base_url": "https://api.anthropic.com",
+        "federation_rule_id": os.getenv("ANTHROPIC_FEDERATION_RULE_ID", "").strip(),
+        "organization_id": os.getenv("ANTHROPIC_ORGANIZATION_ID", "").strip(),
+        "service_account_id": os.getenv("ANTHROPIC_SERVICE_ACCOUNT_ID", "").strip(),
+        "identity_token_file": os.getenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "").strip(),
+    }
+    env_api_base_url = os.getenv("ANTHROPIC_API_BASE_URL", "").strip()
+    if env_api_base_url:
+        env_config["api_base_url"] = env_api_base_url
+    if _complete_wif_config(env_config):
+        return env_config
+
+    auth_state = _read_anthropic_provider_state() or {}
+    if str(auth_state.get("auth_type") or "").strip().lower() != "wif":
+        return None
+
+    auth_config = {
+        "auth_type": "wif",
+        "source": str(auth_state.get("source") or "auth_store:wif").strip() or "auth_store:wif",
+        "label": str(auth_state.get("label") or "anthropic-wif").strip() or "anthropic-wif",
+        "api_base_url": str(auth_state.get("api_base_url") or "https://api.anthropic.com").strip() or "https://api.anthropic.com",
+        "federation_rule_id": str(auth_state.get("federation_rule_id") or "").strip(),
+        "organization_id": str(auth_state.get("organization_id") or "").strip(),
+        "service_account_id": str(auth_state.get("service_account_id") or "").strip(),
+        "identity_token_file": str(auth_state.get("identity_token_file") or "").strip(),
+    }
+    return auth_config if _complete_wif_config(auth_config) else None
+
+
+def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Exchange a workload identity JWT for a short-lived Anthropic access token."""
+    import time
+    import urllib.request
+
+    resolved = dict(config or read_anthropic_wif_config() or {})
+    required_fields = (
+        "federation_rule_id",
+        "organization_id",
+        "service_account_id",
+        "identity_token_file",
+    )
+    missing = [field for field in required_fields if not str(resolved.get(field) or "").strip()]
+    if missing:
+        raise ValueError(f"Anthropic WIF configuration is incomplete: {', '.join(missing)}")
+
+    identity_token_path = Path(str(resolved["identity_token_file"]).strip()).expanduser()
+    try:
+        assertion = identity_token_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"Anthropic WIF identity token file could not be read: {identity_token_path}") from exc
+    if not assertion:
+        raise ValueError(f"Anthropic WIF identity token file is empty: {identity_token_path}")
+
+    api_base_url = str(resolved.get("api_base_url") or "https://api.anthropic.com").strip().rstrip("/")
+    if not api_base_url.startswith("https://"):
+        raise ValueError("Anthropic WIF api_base_url must use https://")
+
+    cache_key = hashlib.sha256(
+        "\n".join(
+            [
+                api_base_url,
+                str(resolved["organization_id"]),
+                str(resolved["service_account_id"]),
+                str(resolved["federation_rule_id"]),
+                assertion,
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    now_ms = int(time.time() * 1000)
+    cached = _WIF_ACCESS_TOKEN_CACHE.get(cache_key)
+    if cached:
+        cached_token = str(cached.get("access_token") or "").strip()
+        cached_expires_at_ms = int(cached.get("expires_at_ms") or 0)
+        if cached_token and cached_expires_at_ms - now_ms > (_WIF_CACHE_SKEW_SECONDS * 1000):
+            return dict(cached)
+
+    cached = _read_cached_wif_exchange(cache_key)
+    if cached:
+        cached_token = str(cached.get("access_token") or "").strip()
+        cached_expires_at_ms = int(cached.get("expires_at_ms") or 0)
+        if cached_token and cached_expires_at_ms - now_ms > (_WIF_CACHE_SKEW_SECONDS * 1000):
+            _WIF_ACCESS_TOKEN_CACHE[cache_key] = dict(cached)
+            return dict(cached)
+
+    payload = json.dumps({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": assertion,
+        "organization_id": resolved["organization_id"],
+        "service_account_id": resolved["service_account_id"],
+        "federation_rule_id": resolved["federation_rule_id"],
+    }).encode("utf-8")
+
+    endpoint = f"{api_base_url}/v1/oauth/token"
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.debug("Anthropic WIF token exchange failed at %s: %s", endpoint, exc)
+        raise
+
+    access_token = str(result.get("access_token") or "").strip()
+    if not access_token:
+        raise ValueError("Anthropic WIF exchange response was missing access_token")
+    expires_in = int(result.get("expires_in") or 3600)
+    exchanged = {
+        "access_token": access_token,
+        "token_type": result.get("token_type") or "Bearer",
+        "scope": result.get("scope"),
+        "expires_in": expires_in,
+        "expires_at_ms": int(time.time() * 1000) + (expires_in * 1000),
+    }
+    _WIF_ACCESS_TOKEN_CACHE[cache_key] = dict(exchanged)
+    _write_cached_wif_exchange(cache_key, exchanged)
+    return exchanged
 
 
 def resolve_anthropic_token() -> Optional[str]:

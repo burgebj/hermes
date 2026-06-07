@@ -215,6 +215,7 @@ def init_agent(
     iteration_budget: "IterationBudget" = None,
     fallback_model: Dict[str, Any] = None,
     credential_pool=None,
+    anthropic_force_bearer_auth: bool = False,
     checkpoints_enabled: bool = False,
     checkpoint_max_snapshots: int = 20,
     checkpoint_max_total_size_mb: int = 500,
@@ -300,6 +301,7 @@ def init_agent(
     agent.load_soul_identity = load_soul_identity
     agent.pass_session_id = pass_session_id
     agent._credential_pool = credential_pool
+    agent._anthropic_force_bearer_auth = bool(anthropic_force_bearer_auth)
     agent.log_prefix_chars = log_prefix_chars
     agent.log_prefix = f"{log_prefix} " if log_prefix else ""
     # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -673,8 +675,16 @@ def init_agent(
             # that cause 401/403 on their endpoints.  Guards #1739 and
             # the third-party identity-injection bug.
             from agent.anthropic_adapter import _is_oauth_token as _is_oat
-            agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
-            agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+            agent._is_anthropic_oauth = (
+                agent._anthropic_force_bearer_auth
+                or (_is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False)
+            )
+            agent._anthropic_client = build_anthropic_client(
+                effective_key,
+                base_url,
+                timeout=_provider_timeout,
+                force_bearer_auth=agent._anthropic_force_bearer_auth,
+            )
             # No OpenAI client needed for Anthropic mode
             agent.client = None
             agent._client_kwargs = {}
@@ -1732,6 +1742,7 @@ def init_agent(
             "anthropic_api_key": agent._anthropic_api_key,
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
+            "anthropic_force_bearer_auth": agent._anthropic_force_bearer_auth,
         })
 
 

@@ -1060,7 +1060,7 @@ def _build_child_agent(
     # different provider than the parent — each provider has its own API surface
     # (e.g. MiniMax uses anthropic_messages, DeepSeek uses chat_completions).
     # Inheriting the parent's mode causes 404 errors when the child routes to the
-    # wrong endpoint.  Derive the mode from the target provider when it differs.
+    # wrong endpoint. Derive the mode from the target provider when it differs.
     _parent_provider = getattr(parent_agent, "provider", None) or ""
     if override_api_mode is not None:
         effective_api_mode = override_api_mode
@@ -1068,6 +1068,9 @@ def _build_child_agent(
         effective_api_mode = None  # force re-derivation from provider's defaults
     else:
         effective_api_mode = getattr(parent_agent, "api_mode", None)
+    effective_anthropic_force_bearer_auth = (
+        False if override_provider else bool(getattr(parent_agent, "_anthropic_force_bearer_auth", False))
+    )
     effective_acp_command = override_acp_command or getattr(
         parent_agent, "acp_command", None
     )
@@ -1143,6 +1146,7 @@ def _build_child_agent(
         model=effective_model,
         provider=effective_provider,
         api_mode=effective_api_mode,
+        anthropic_force_bearer_auth=effective_anthropic_force_bearer_auth,
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
@@ -2512,6 +2516,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "api_mode": runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
+        "anthropic_force_bearer_auth": bool(runtime.get("anthropic_force_bearer_auth")),
     }
 
 

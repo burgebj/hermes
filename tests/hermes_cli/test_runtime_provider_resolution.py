@@ -95,6 +95,93 @@ def test_resolve_runtime_provider_anthropic_explicit_override_skips_pool(monkeyp
     assert resolved.get("credential_pool") is None
 
 
+def test_resolve_runtime_provider_anthropic_prefers_wif_over_env_api_key(monkeypatch):
+    def _unexpected_resolve_token():
+        raise AssertionError("resolve_anthropic_token should not be called when WIF is configured")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-api-key")
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "base_url": "https://proxy.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.read_anthropic_wif_config",
+        lambda: {
+            "auth_type": "wif",
+            "federation_rule_id": "fdrl_test123",
+            "organization_id": "org_test456",
+            "service_account_id": "svac_test789",
+            "identity_token_file": "/tmp/identity.jwt",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.exchange_anthropic_wif_for_access_token",
+        lambda config=None: {"access_token": "wif-access-token", "expires_at_ms": 1711234567000},
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.resolve_anthropic_token",
+        _unexpected_resolve_token,
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["api_key"] == "wif-access-token"
+    assert resolved["base_url"] == "https://proxy.example.com/anthropic"
+    assert resolved["source"] == "wif"
+    assert resolved["anthropic_force_bearer_auth"] is True
+
+
+def test_resolve_runtime_provider_anthropic_wif_bypasses_stale_pool(monkeypatch):
+    class _Entry:
+        access_token = "stale-pool-token"
+        source = "manual"
+        base_url = "https://api.anthropic.com"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {"provider": "anthropic", "base_url": "https://api.anthropic.com"},
+    )
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.read_anthropic_wif_config",
+        lambda: {
+            "auth_type": "wif",
+            "federation_rule_id": "fdrl_test123",
+            "organization_id": "org_test456",
+            "service_account_id": "svac_test789",
+            "identity_token_file": "/tmp/identity.jwt",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.exchange_anthropic_wif_for_access_token",
+        lambda config=None: {"access_token": "wif-access-token", "expires_at_ms": 1711234567000},
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["api_key"] == "wif-access-token"
+    assert resolved["source"] == "wif"
+    assert resolved["anthropic_force_bearer_auth"] is True
+    assert resolved.get("credential_pool") is None
+
+
 def test_resolve_runtime_provider_falls_back_when_pool_empty(monkeypatch):
     class _Pool:
         def has_credentials(self):
