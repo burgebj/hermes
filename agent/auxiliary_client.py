@@ -107,6 +107,16 @@ from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_
 logger = logging.getLogger(__name__)
 
 
+def _config_drop_1m_beta() -> bool:
+    """Read ``anthropic.drop_context_1m_beta`` from the user config."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return bool(cfg.get("anthropic", {}).get("drop_context_1m_beta", False))
+    except Exception:
+        return False
+
+
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
     """Return False instead of raising when a patched symbol is not a type."""
     try:
@@ -1255,7 +1265,10 @@ def _maybe_wrap_anthropic(
         return client_obj
 
     try:
-        real_client = build_anthropic_client(api_key, base_url)
+        real_client = build_anthropic_client(
+            api_key, base_url,
+            drop_context_1m_beta=_config_drop_1m_beta(),
+        )
     except Exception as exc:
         logger.warning(
             "Failed to build Anthropic client for %s (%s) — falling back to "
@@ -1973,7 +1986,10 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
         # Anthropic OAuth claims only apply to api.anthropic.com.
         try:
             from agent.anthropic_adapter import build_anthropic_client
-            real_client = build_anthropic_client(custom_key, custom_base)
+            real_client = build_anthropic_client(
+                custom_key, custom_base,
+                drop_context_1m_beta=_config_drop_1m_beta(),
+            )
         except ImportError:
             logger.warning(
                 "Custom endpoint declares api_mode=anthropic_messages but the "
@@ -2213,7 +2229,10 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
     try:
-        real_client = build_anthropic_client(token, base_url)
+        real_client = build_anthropic_client(
+            token, base_url,
+            drop_context_1m_beta=_config_drop_1m_beta(),
+        )
     except ImportError:
         # The anthropic_adapter module imports fine but the SDK itself is
         # missing — build_anthropic_client raises ImportError at call time
@@ -3714,7 +3733,10 @@ def resolve_provider_client(
                 if entry_api_mode == "anthropic_messages":
                     try:
                         from agent.anthropic_adapter import build_anthropic_client
-                        real_client = build_anthropic_client(custom_key, custom_base)
+                        real_client = build_anthropic_client(
+                            custom_key, custom_base,
+                            drop_context_1m_beta=_config_drop_1m_beta(),
+                        )
                     except ImportError:
                         logger.warning(
                             "Named custom provider %r declares api_mode="
