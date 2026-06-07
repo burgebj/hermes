@@ -326,6 +326,10 @@ class EmailAdapter(BasePlatformAdapter):
             return False
 
         self._running = True
+        if os.getenv("EMAIL_DISABLE_AUTO_REPLY", "").lower() in ("1", "true", "yes"):
+            logger.info("[Email] Platform PAUSED — IMAP polling disabled by EMAIL_DISABLE_AUTO_REPLY. "
+                        "Cron job triage (email_watch_hourly.py) is unaffected.")
+            return True
         self._poll_task = asyncio.create_task(self._poll_loop())
         print(f"[Email] Connected as {self._address}")
         return True
@@ -524,7 +528,19 @@ class EmailAdapter(BasePlatformAdapter):
         body: str,
         reply_to_msg_id: Optional[str] = None,
     ) -> str:
-        """Send an email via SMTP. Runs in executor thread."""
+        """Send an email via SMTP. Runs in executor thread.
+
+        DISABLED: Auto-reply is turned off to prevent unsolicited email replies.
+        All inbound emails are still received and processed, but no SMTP send occurs.
+        """
+        if os.getenv("EMAIL_DISABLE_AUTO_REPLY", "").lower() in ("1", "true", "yes"):
+            logger.warning(
+                "[Email] AUTO-REPLY DISABLED — would have sent to %s (subject: %s). "
+                "Set EMAIL_DISABLE_AUTO_REPLY=0 to re-enable.",
+                to_addr,
+                self._thread_context.get(to_addr, {}).get("subject", "(unknown)"),
+            )
+            return f"<hermes-disabled-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
@@ -635,7 +651,16 @@ class EmailAdapter(BasePlatformAdapter):
         body: str,
         file_paths: List[str],
     ) -> str:
-        """Send an email with multiple file attachments via SMTP."""
+        """Send an email with multiple file attachments via SMTP.
+
+        DISABLED: See _send_email() — controlled by EMAIL_DISABLE_AUTO_REPLY.
+        """
+        if os.getenv("EMAIL_DISABLE_AUTO_REPLY", "").lower() in ("1", "true", "yes"):
+            logger.warning(
+                "[Email] AUTO-REPLY DISABLED — would have sent attachments to %s.",
+                to_addr,
+            )
+            return f"<hermes-disabled-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
@@ -716,7 +741,16 @@ class EmailAdapter(BasePlatformAdapter):
         file_path: str,
         file_name: Optional[str] = None,
     ) -> str:
-        """Send an email with a file attachment via SMTP."""
+        """Send an email with a file attachment via SMTP.
+
+        DISABLED: See _send_email() — controlled by EMAIL_DISABLE_AUTO_REPLY.
+        """
+        if os.getenv("EMAIL_DISABLE_AUTO_REPLY", "").lower() in ("1", "true", "yes"):
+            logger.warning(
+                "[Email] AUTO-REPLY DISABLED — would have sent attachment to %s.",
+                to_addr,
+            )
+            return f"<hermes-disabled-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
