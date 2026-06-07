@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
-from agent.skill_utils import is_excluded_skill_path
+from agent.skill_utils import is_excluded_skill_path, rglob_follow
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +326,7 @@ def list_agent_created_skill_names() -> List[str]:
 
     names: List[str] = []
     # Top-level SKILL.md files (flat layout) AND nested category/skill/SKILL.md
-    for skill_md in base.rglob("SKILL.md"):
+    for skill_md in rglob_follow(base, "SKILL.md"):
         # Skip Hermes metadata, VCS, virtualenv/dependency, and cache dirs
         if is_excluded_skill_path(skill_md):
             continue
@@ -350,6 +350,9 @@ def list_agent_created_skill_names() -> List[str]:
             continue
         names.append(name)
     return sorted(set(names))
+
+
+# ---------------------------------------------------------------------------
 
 
 def list_archived_skill_names() -> List[str]:
@@ -760,7 +763,7 @@ def _find_skill_dir(skill_name: str) -> Optional[Path]:
     base = _skills_dir()
     if not base.exists():
         return None
-    for skill_md in base.rglob("SKILL.md"):
+    for skill_md in rglob_follow(base, "SKILL.md"):
         if is_excluded_skill_path(skill_md):
             continue
         if _read_skill_name(skill_md, fallback=skill_md.parent.name) == skill_name:
