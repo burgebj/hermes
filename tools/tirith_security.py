@@ -109,6 +109,14 @@ _install_thread: threading.Thread | None = None
 _warned_messages: set[str] = set()
 _warned_lock = threading.Lock()
 
+# Circuit breaker for preventing infinite retry loops when tirith is unavailable.
+# After _CIRCUIT_BREAKER_THRESHOLD consecutive failures, we disable tirith for
+# the session to prevent retry loops that block user responses.
+_CIRCUIT_BREAKER_THRESHOLD = 3  # Fail this many times in a row, then disable
+_consecutive_failures: int = 0
+_circuit_breaker_lock = threading.Lock()
+_circuit_breaker_disabled: bool = False
+
 
 def _warn_once(key: str, message: str, *args) -> None:
     """``logger.warning`` but at-most-once per ``key`` for the process
@@ -714,6 +722,14 @@ def check_command_security(command: str) -> dict:
     if not is_platform_supported():
         return {"action": "allow", "findings": [], "summary": ""}
 
+    # Circuit breaker: if tirith has failed too many times, disable it to prevent
+    # retry loops that block user responses.
+    global _consecutive_failures, _circuit_breaker_disabled
+    with _circuit_breaker_lock:
+        if _circuit_breaker_disabled:
+            logger.warning("tirith circuit breaker is active (too many consecutive failures); scanning disabled for this session")
+            return {"action": "allow", "findings": [], "summary": "tirith disabled by circuit breaker"}
+
     tirith_path = _resolve_tirith_path(cfg["tirith_path"])
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
@@ -744,6 +760,14 @@ def check_command_security(command: str) -> dict:
         # install marked failed for the day).
         spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
         _warn_once(spawn_key, "tirith spawn failed: %s", exc)
+        
+        # Track consecutive failures for circuit breaker
+        with _circuit_breaker_lock:
+            _consecutive_failures += 1
+            if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                _circuit_breaker_disabled = True
+                logger.error("tirith has failed %d times; disabling for this session to prevent retry loops", _CIRCUIT_BREAKER_THRESHOLD)
+        
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
@@ -753,6 +777,14 @@ def check_command_security(command: str) -> dict:
             "tirith timed out after %ds",
             timeout,
         )
+        
+        # Track consecutive failures for circuit breaker
+        with _circuit_breaker_lock:
+            _consecutive_failures += 1
+            if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                _circuit_breaker_disabled = True
+                logger.error("tirith has failed %d times; disabling for this session to prevent retry loops", _CIRCUIT_BREAKER_THRESHOLD)
+        
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
@@ -761,6 +793,9 @@ def check_command_security(command: str) -> dict:
     exit_code = result.returncode
     if exit_code == 0:
         action = "allow"
+        # Reset failure counter on success
+        with _circuit_breaker_lock:
+            _consecutive_failures = 0
     elif exit_code == 1:
         action = "block"
     elif exit_code == 2:
@@ -768,6 +803,14 @@ def check_command_security(command: str) -> dict:
     else:
         # Unknown exit code — respect fail_open
         logger.warning("tirith returned unexpected exit code %d", exit_code)
+        
+        # Track consecutive failures for circuit breaker
+        with _circuit_breaker_lock:
+            _consecutive_failures += 1
+            if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                _circuit_breaker_disabled = True
+                logger.error("tirith has failed %d times; disabling for this session to prevent retry loops", _CIRCUIT_BREAKER_THRESHOLD)
+        
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}

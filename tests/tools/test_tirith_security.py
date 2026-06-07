@@ -24,10 +24,14 @@ def _reset_resolved_path():
     _tirith_mod._resolved_path = "tirith"
     _tirith_mod._install_thread = None
     _tirith_mod._install_failure_reason = ""
+    _tirith_mod._consecutive_failures = 0
+    _tirith_mod._circuit_breaker_disabled = False
     yield
     _tirith_mod._resolved_path = None
     _tirith_mod._install_thread = None
     _tirith_mod._install_failure_reason = ""
+    _tirith_mod._consecutive_failures = 0
+    _tirith_mod._circuit_breaker_disabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -1216,12 +1220,19 @@ class TestSpawnWarningDedup:
         _tirith_mod._reset_spawn_warning_state()
 
         with caplog.at_level("WARNING", logger="tools.tirith_security"):
-            for _ in range(15):
+            # First 3 calls fail and increment the counter
+            for i in range(3):
                 result = check_command_security("echo hi")
-                # Behavior must remain the same on every call —
-                # fail-open allow, with the exception captured in summary.
+                # Must fail-open and show unavailable message
                 assert result["action"] == "allow"
                 assert "unavailable" in result["summary"]
+            
+            # After 3 failures, circuit breaker activates
+            for _ in range(12):
+                result = check_command_security("echo hi")
+                # Still fail-open, but now circuit breaker is active
+                assert result["action"] == "allow"
+                assert "circuit breaker" in result["summary"].lower()
 
         spawn_warnings = [
             rec for rec in caplog.records
@@ -1237,7 +1248,8 @@ class TestSpawnWarningDedup:
     def test_distinct_exception_types_each_log_once(self, mock_cfg, mock_run, caplog):
         """``FileNotFoundError`` and ``PermissionError`` are distinct
         failure modes and each deserves its own first-occurrence log
-        line; the dedupe key includes the exception class."""
+        line; the dedupe key includes the exception class. Circuit breaker
+        is reset between the two exception types for this test."""
         mock_cfg.return_value = {
             "tirith_enabled": True, "tirith_path": "tirith",
             "tirith_timeout": 5, "tirith_fail_open": True,
@@ -1248,6 +1260,11 @@ class TestSpawnWarningDedup:
             mock_run.side_effect = FileNotFoundError("[WinError 2]")
             for _ in range(3):
                 check_command_security("a")
+            
+            # Reset circuit breaker to test PermissionError separately
+            _tirith_mod._consecutive_failures = 0
+            _tirith_mod._circuit_breaker_disabled = False
+            
             mock_run.side_effect = PermissionError("denied")
             for _ in range(3):
                 check_command_security("b")
