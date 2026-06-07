@@ -445,6 +445,26 @@ def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> 
     return False
 
 
+def _is_stepfun_reasoning_model(model: str | None) -> bool:
+    """Return True for StepFun reasoning models that don't speak Anthropic thinking.
+
+    ``step-3.7-flash`` (and future ``step-3.7*`` variants) drive reasoning
+    server-side via StepFun's own ``reasoning_effort`` and do not implement
+    Anthropic's manual ``thinking``/``budget_tokens`` protocol.  On the
+    ``anthropic_messages`` path (the default for the Nous Portal) the generic
+    third-party handling strips the unsigned thinking blocks on replay while
+    still advertising ``thinking.enabled`` and force-setting ``temperature=1``,
+    which degrades output and breaks multi-turn tool calls.  Same failure mode
+    as Kimi (#17455); suppress the thinking kwarg here.  See #39124.
+
+    Anchored on the ``step-3.7`` token (not a bare ``3.7``) so unrelated
+    version strings like ``step-13.7-*`` are not matched; vendor-prefixed
+    ``stepfun/step-3.7-flash:free`` still matches since the token is a
+    substring.
+    """
+    return "step-3.7" in (model or "").strip().lower()
+
+
 def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
     """Return True for DeepSeek's Anthropic-compatible endpoint.
 
@@ -2245,7 +2265,8 @@ def build_anthropic_kwargs(
     # request "summarized" so the reasoning blocks stay populated — matching
     # 4.6 behavior and preserving the activity-feed UX during long tool runs.
     _is_kimi_coding = _is_kimi_family_endpoint(base_url, model)
-    if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
+    _suppress_thinking = _is_kimi_coding or _is_stepfun_reasoning_model(model)
+    if reasoning_config and isinstance(reasoning_config, dict) and not _suppress_thinking:
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
             budget = THINKING_BUDGET.get(effort, 8000)
