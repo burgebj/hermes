@@ -714,6 +714,9 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     class FakeDB:
         def get_session(self, target):
             return {"id": target}
+        def resolve_resume_session_id(self, target):
+            return target
+
 
         def reopen_session(self, target):
             captured["reopened"] = target
@@ -756,6 +759,74 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
         {"role": "assistant", "text": "root answer"},
     ]
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
+
+
+def test_session_resume_redirects_compressed_parent_to_resolved_tip(monkeypatch):
+    captured = {}
+
+    class FakeDB:
+        def get_session(self, target):
+            if target in {"parent", "tip"}:
+                return {"id": target}
+            return None
+
+        def get_session_by_title(self, target):
+            return None
+
+        def resolve_resume_session_id(self, target):
+            captured["resolved_from"] = target
+            return "tip"
+
+        def reopen_session(self, target):
+            captured["reopened"] = target
+
+        def get_messages_as_conversation(self, target, include_ancestors=False):
+            captured.setdefault("history_calls", []).append((target, include_ancestors))
+            return [{"role": "user", "content": f"{target} prompt"}]
+
+    def fake_make_agent(sid, key, session_id=None, session_db=None):
+        captured["agent_key"] = key
+        captured["agent_session_id"] = session_id
+        captured["agent_session_db"] = session_db
+        return types.SimpleNamespace(model="test")
+
+    def fake_init_session(sid, key, agent, history, cols=80):
+        captured["init_key"] = key
+        captured["init_history"] = history
+
+    def fake_set_session_context(target):
+        captured["context"] = target
+        return []
+
+    fake_db = FakeDB()
+    monkeypatch.setattr(server, "_get_db", lambda: fake_db)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", fake_set_session_context)
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(server, "_make_agent", fake_make_agent)
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent, *a: {"model": "test", "tools": {}, "skills": {}},
+    )
+    monkeypatch.setattr(server, "_init_session", fake_init_session)
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.resume", "params": {"session_id": "parent"}}
+    )
+
+    assert captured["resolved_from"] == "parent"
+    assert captured["reopened"] == "tip"
+    assert captured["history_calls"] == [("tip", False), ("tip", True)]
+    assert captured["context"] == "tip"
+    assert captured["agent_key"] == "tip"
+    assert captured["agent_session_id"] == "tip"
+    assert captured["agent_session_db"] is fake_db
+    assert captured["init_key"] == "tip"
+    assert resp["result"]["resumed"] == "tip"
+    assert resp["result"]["session_key"] == "tip"
+    assert resp["result"]["requested_session_id"] == "parent"
+
 
 
 def test_status_callback_emits_kind_and_text():

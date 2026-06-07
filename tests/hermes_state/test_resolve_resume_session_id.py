@@ -1,14 +1,8 @@
-"""Regression guard for #15000: --resume <id> after compression loses messages.
+"""Regression guards for compression-aware resume target resolution.
 
-Context compression ends the current session and forks a new child session
-(linked by ``parent_session_id``). The SQLite flush cursor is reset, so
-only the latest descendant ends up with rows in the ``messages`` table —
-the parent row has ``message_count = 0``. ``hermes --resume <parent_id>``
-used to load zero rows and show a blank chat.
-
-``SessionDB.resolve_resume_session_id()`` walks the parent → child chain
-and redirects to the first descendant that actually has messages. These
-tests pin that behaviour.
+``SessionDB.resolve_resume_session_id()`` preserves the legacy #15000 behaviour
+for empty non-compression heads, while compressed parents that already have
+messages now resolve to the live/latest descendant tip.
 """
 import time
 
@@ -33,6 +27,14 @@ def _make_chain(db: SessionDB, ids_with_parent):
         )
     db._conn.commit()
 
+def _mark_ended(db: SessionDB, sid: str, reason: str, ended_at: float | None = None):
+    db._conn.execute(
+        "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?",
+        (ended_at if ended_at is not None else time.time(), reason, sid),
+    )
+    db._conn.commit()
+
+
 
 def test_redirects_from_empty_head_to_descendant_with_messages(db):
     # Reproducer shape from #15000: 6 sessions, only the 5th holds messages.
@@ -48,6 +50,68 @@ def test_redirects_from_empty_head_to_descendant_with_messages(db):
         db.append_message("bulk", role="user", content=f"msg {i}")
 
     assert db.resolve_resume_session_id("head") == "bulk"
+
+
+def test_compressed_session_with_messages_resolves_to_descendant_tip(db):
+    _make_chain(db, [("parent", None), ("child", "parent"), ("tip", "child")])
+    db.append_message("parent", role="user", content="parent message")
+    _mark_ended(db, "parent", "compression")
+    _mark_ended(db, "child", "compression")
+
+    assert db.resolve_resume_session_id("parent") == "tip"
+
+
+def test_compressed_split_prefers_active_leaf(db):
+    _make_chain(
+        db,
+        [
+            ("parent", None),
+            ("active_older", "parent"),
+            ("ended_newer", "parent"),
+        ],
+    )
+    _mark_ended(db, "parent", "compression")
+    _mark_ended(db, "ended_newer", "tui_shutdown")
+
+    assert db.resolve_resume_session_id("parent") == "active_older"
+
+
+def test_compressed_split_treats_null_end_reason_as_active_leaf(db):
+    _make_chain(
+        db,
+        [
+            ("parent", None),
+            ("open_older", "parent"),
+            ("ended_newer", "parent"),
+        ],
+    )
+    _mark_ended(db, "parent", "compression")
+    db._conn.execute(
+        "UPDATE sessions SET ended_at = ?, end_reason = NULL WHERE id = ?",
+        (time.time(), "open_older"),
+    )
+    db._conn.commit()
+    _mark_ended(db, "ended_newer", "tui_shutdown")
+
+    assert db.resolve_resume_session_id("parent") == "open_older"
+
+
+
+def test_compressed_split_falls_back_to_newest_leaf(db):
+    _make_chain(
+        db,
+        [
+            ("parent", None),
+            ("older_leaf", "parent"),
+            ("newer_leaf", "parent"),
+        ],
+    )
+    _mark_ended(db, "parent", "compression")
+    _mark_ended(db, "older_leaf", "tui_shutdown")
+    _mark_ended(db, "newer_leaf", "tui_shutdown")
+
+    assert db.resolve_resume_session_id("parent") == "newer_leaf"
+
 
 
 def test_returns_self_when_session_has_messages(db):

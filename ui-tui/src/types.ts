@@ -144,6 +144,9 @@ export interface McpServerStatus {
 }
 
 export interface SessionInfo {
+  session_key?: string
+  stored_session_id?: string
+  title?: string
   cwd?: string
   fast?: boolean
   lazy?: boolean

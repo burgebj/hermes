@@ -13,13 +13,14 @@ import { rpcErrorMessage } from '../lib/rpc.js'
 import { topLevelSubagents } from '../lib/subagentTree.js'
 import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.js'
 import { fromSkin } from '../theme.js'
-import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
+import type { Msg, SessionInfo, SubagentProgress, SubagentStatus } from '../types.js'
 
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
+import { writeActiveSessionFile } from './useSessionLifecycle.js'
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
 
@@ -73,6 +74,9 @@ const normalizeSubagentStatus = (status: unknown, fallback: SubagentStatus): Sub
 
   return KNOWN_SUBAGENT_STATUSES.has(normalized) ? normalized : fallback
 }
+
+const storedSessionIdFromInfo = (info?: null | SessionInfo): string =>
+  String(info?.stored_session_id || info?.session_key || '').trim()
 
 export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev: GatewayEvent) => void {
   const { rpc } = ctx.gateway
@@ -417,6 +421,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'session.info': {
         const info = ev.payload
+        const storedSessionId = storedSessionIdFromInfo(info)
+
+        // Compression can move the durable session key while the live gateway
+        // sid stays unchanged. Keep shell/footer integrations pointed at the
+        // stored key the backend now owns, not the stale resume parent.
+        if (storedSessionId) {
+          writeActiveSessionFile(storedSessionId)
+        }
 
         patchUiState(state => ({
           ...state,

@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
@@ -57,6 +60,49 @@ describe('createGatewayEventHandler', () => {
     resetTurnState()
     turnController.fullReset()
     patchUiState({ showReasoning: true })
+  })
+
+  it('updates session info title and stored session file from session.info', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hermes-tui-session-info-'))
+    const activeFile = join(dir, 'active-session.json')
+    const prevActiveFile = process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+    process.env.HERMES_TUI_ACTIVE_SESSION_FILE = activeFile
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const onEvent = createGatewayEventHandler(ctx)
+
+    try {
+      patchUiState({
+        info: { model: 'old-model', session_key: 'old-parent', skills: {}, tools: {} },
+        sid: 'live-sid',
+        status: 'starting agent…'
+      })
+
+      onEvent({
+        payload: {
+          model: 'new-model',
+          session_key: 'tip-session',
+          skills: {},
+          stored_session_id: 'tip-session',
+          title: 'Actual tip title',
+          tools: {}
+        },
+        session_id: 'live-sid',
+        type: 'session.info'
+      } as any)
+
+      expect(getUiState().info?.stored_session_id).toBe('tip-session')
+      expect(getUiState().info?.title).toBe('Actual tip title')
+      expect(getUiState().status).toBe('ready')
+      expect(JSON.parse(readFileSync(activeFile, 'utf8'))).toEqual({ session_id: 'tip-session' })
+    } finally {
+      if (prevActiveFile === undefined) {
+        delete process.env.HERMES_TUI_ACTIVE_SESSION_FILE
+      } else {
+        process.env.HERMES_TUI_ACTIVE_SESSION_FILE = prevActiveFile
+      }
+      rmSync(dir, { force: true, recursive: true })
+    }
   })
 
   it('archives incomplete todos into transcript flow at end of turn so they scroll up', () => {
@@ -183,9 +229,7 @@ describe('createGatewayEventHandler', () => {
       type: 'review.summary'
     } as any)
 
-    expect(ctx.system.sys).toHaveBeenCalledWith(
-      "💾 Self-improvement review: Skill 'hermes-release' patched"
-    )
+    expect(ctx.system.sys).toHaveBeenCalledWith("💾 Self-improvement review: Skill 'hermes-release' patched")
   })
 
   it('ignores review.summary events with empty or missing text', () => {

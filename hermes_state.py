@@ -2343,40 +2343,111 @@ class SessionDB:
         }
 
     def resolve_resume_session_id(self, session_id: str) -> str:
-        """Redirect a resume target to the descendant session that holds the messages.
+        """Redirect a resume target to the live/latest continuation.
 
-        Context compression ends the current session and forks a new child session
-        (linked via ``parent_session_id``). The flush cursor is reset, so the
-        child is where new messages actually land — the parent ends up with
-        ``message_count = 0`` rows unless messages had already been flushed to
-        it before compression. See #15000.
+        Context compression ends the current session and forks continuation
+        sessions linked via ``parent_session_id``. Older callers may resume a
+        compressed parent after it already has descendants. In that case the
+        stored parent can have messages, but new turns belong on the descendant
+        tip, not on a stale branch from the parent.
 
-        This helper walks ``parent_session_id`` forward from ``session_id`` and
-        returns the first descendant in the chain that has at least one message
-        row. If the original session already has messages, or no descendant
-        has any, the original ``session_id`` is returned unchanged.
+        Behaviour:
+        * compressed sessions with descendants resolve to a deterministic leaf:
+          active leaves first, otherwise newest leaf by ``started_at`` then id;
+        * normal sessions that already have messages still resolve to self;
+        * empty legacy heads retain the #15000 behaviour of walking to the
+          newest descendant in the chain that actually has messages.
 
-        The chain is always walked via the child whose ``started_at`` is
-        latest; that matches the single-chain shape that compression creates.
-        A depth cap (32) guards against accidental loops in malformed data.
+        A bounded walk and ``seen`` set guard against malformed loops.
         """
         if not session_id:
             return session_id
 
+        def _value(row, key: str, index: int = 0):
+            if row is None:
+                return None
+            if hasattr(row, "keys"):
+                return row[key]
+            return row[index]
+
         with self._lock:
-            # If this session already has messages, nothing to redirect.
             try:
-                row = self._conn.execute(
+                session_row = self._conn.execute(
+                    "SELECT id, started_at, ended_at, end_reason FROM sessions WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
+            except Exception:
+                return session_id
+            if session_row is None:
+                return session_id
+
+            try:
+                msg_row = self._conn.execute(
                     "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
                     (session_id,),
                 ).fetchone()
             except Exception:
                 return session_id
-            if row is not None:
+            has_messages = msg_row is not None
+            end_reason = _value(session_row, "end_reason", 3)
+
+            if end_reason == "compression":
+                descendants: list[Dict[str, Any]] = []
+                parent_ids: set[str] = set()
+                frontier = [session_id]
+                seen = {session_id}
+
+                for _ in range(32):
+                    if not frontier:
+                        break
+                    next_frontier: list[str] = []
+                    for current in frontier:
+                        try:
+                            child_rows = self._conn.execute(
+                                "SELECT id, started_at, ended_at, end_reason "
+                                "FROM sessions WHERE parent_session_id = ? "
+                                "ORDER BY started_at DESC, id DESC",
+                                (current,),
+                            ).fetchall()
+                        except Exception:
+                            return session_id
+                        if child_rows:
+                            parent_ids.add(current)
+                        for child in child_rows:
+                            child_id = _value(child, "id", 0)
+                            if not child_id or child_id in seen:
+                                continue
+                            seen.add(child_id)
+                            descendants.append(
+                                {
+                                    "id": child_id,
+                                    "started_at": _value(child, "started_at", 1) or 0,
+                                    "ended_at": _value(child, "ended_at", 2),
+                                    "end_reason": _value(child, "end_reason", 3),
+                                }
+                            )
+                            next_frontier.append(child_id)
+                    frontier = next_frontier
+
+                if descendants:
+                    leaves = [d for d in descendants if d["id"] not in parent_ids]
+                    if not leaves:
+                        leaves = descendants
+                    active_leaves = [
+                        d
+                        for d in leaves
+                        if d.get("ended_at") is None or d.get("end_reason") is None
+                    ]
+                    candidates = active_leaves or leaves
+                    candidates.sort(key=lambda d: (d.get("started_at") or 0, d["id"]), reverse=True)
+                    return str(candidates[0]["id"])
+
+            # If this ordinary session already has messages, nothing to redirect.
+            if has_messages:
                 return session_id
 
-            # Walk descendants: at each step, pick the most-recently-started
-                # child session; stop once we find one with messages.
+            # Legacy #15000 path: walk the newest-child chain and stop once the
+            # target that actually owns message rows is found.
             current = session_id
             seen = {current}
             for _ in range(32):
@@ -2391,18 +2462,18 @@ class SessionDB:
                     return session_id
                 if child_row is None:
                     return session_id
-                child_id = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
+                child_id = _value(child_row, "id", 0)
                 if not child_id or child_id in seen:
                     return session_id
                 seen.add(child_id)
                 try:
-                    msg_row = self._conn.execute(
+                    child_msg_row = self._conn.execute(
                         "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
                         (child_id,),
                     ).fetchone()
                 except Exception:
                     return session_id
-                if msg_row is not None:
+                if child_msg_row is not None:
                     return child_id
                 current = child_id
         return session_id

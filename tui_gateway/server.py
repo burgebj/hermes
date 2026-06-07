@@ -1821,6 +1821,17 @@ def _session_info(agent, session: dict | None = None) -> dict:
         yolo = bool(_YOLO_MODE_FROZEN) or session_yolo or _get_approval_mode() == "off"
     except Exception:
         yolo = False
+    stored_session_id = str(
+        (session or {}).get("session_key") or getattr(agent, "session_id", "") or ""
+    )
+    title = str((session or {}).get("pending_title") or "").strip()
+    if stored_session_id:
+        db = _get_db()
+        if db is not None:
+            try:
+                title = str(db.get_session_title(stored_session_id) or title or "").strip()
+            except Exception:
+                pass
     info: dict = {
         "model": getattr(agent, "model", ""),
         "reasoning_effort": reasoning_effort,
@@ -1830,6 +1841,9 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "tools": {},
         "skills": {},
         "cwd": cwd,
+        "session_key": stored_session_id,
+        "stored_session_id": stored_session_id,
+        "title": title,
         "branch": _git_branch_for_cwd(cwd),
         "personality": str(personality or ""),
         "running": bool((session or {}).get("running")),
@@ -3258,6 +3272,16 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    requested_session_id = target
+    try:
+        resolved_target = db.resolve_resume_session_id(target)
+    except Exception:
+        resolved_target = target
+    if resolved_target and resolved_target != target:
+        resolved_found = db.get_session(resolved_target)
+        if resolved_found:
+            target = resolved_target
+            found = resolved_found
     # Fast path: if the session is already live, reuse it under the lock.
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
@@ -3271,6 +3295,7 @@ def _(rid, params: dict) -> dict:
                 transport=current_transport() or _stdio_transport,
             )
             payload["resumed"] = target
+            payload["requested_session_id"] = requested_session_id
             return _ok(rid, payload)
 
     # Build the agent OUTSIDE the lock — _make_agent can block for seconds
@@ -3326,6 +3351,7 @@ def _(rid, params: dict) -> dict:
                 transport=current_transport() or _stdio_transport,
             )
             payload["resumed"] = target
+            payload["requested_session_id"] = requested_session_id
             return _ok(rid, payload)
         try:
             _init_session(sid, target, agent, history, cols=cols)
@@ -3344,6 +3370,7 @@ def _(rid, params: dict) -> dict:
         {
             "session_id": sid,
             "resumed": target,
+            "requested_session_id": requested_session_id,
             "message_count": len(messages),
             "messages": messages,
             "info": _session_info(agent, session),

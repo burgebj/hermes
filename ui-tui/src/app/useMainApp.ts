@@ -547,12 +547,17 @@ export function useMainApp(gw: GatewayClient) {
 
   // Tab title: `⚠` waiting on approval/sudo/secret/clarify, `⏳` busy, `✓` idle.
   const model = ui.info?.model?.replace(/^.*\//, '') ?? ''
+  const sessionTitle = ui.info?.title?.trim() ?? ''
 
   const marker = overlay.approval || overlay.sudo || overlay.secret || overlay.clarify ? '⚠' : ui.busy ? '⏳' : '✓'
 
   const tabCwd = ui.info?.cwd
 
-  useTerminalTitle(model ? `${marker} ${model}${tabCwd ? ` · ${shortCwd(tabCwd, 24)}` : ''}` : 'Hermes')
+  useTerminalTitle(
+    model
+      ? `${marker} ${model}${sessionTitle ? ` · ${sessionTitle}` : ''}${tabCwd ? ` · ${shortCwd(tabCwd, 24)}` : ''}`
+      : 'Hermes'
+  )
 
   useEffect(() => {
     if (!ui.sid || !stdout) {
@@ -1070,12 +1075,15 @@ export function useMainApp(gw: GatewayClient) {
   const cwd = ui.info?.cwd || process.env.HERMES_CWD || process.cwd()
   const gitBranch = useGitBranch(cwd)
 
-  const appStatus = useMemo(
-    () => ({
+  const appStatus = useMemo(() => {
+    const cwdLabel = fmtCwdBranch(cwd, gitBranch, 28)
+    const titlePrefix = ui.info?.title?.trim()
+
+    return {
       // Cap the status-bar cwd/branch label tighter than the shared default so
       // it doesn't dominate the bar; the status rule reserves the left-side
       // essentials and truncates this further on narrow terminals.
-      cwdLabel: fmtCwdBranch(cwd, gitBranch, 28),
+      cwdLabel: titlePrefix ? `${titlePrefix} · ${cwdLabel}` : cwdLabel,
       goodVibesTick,
       sessionStartedAt: ui.sid ? sessionStartedAt : null,
       showStickyPrompt: !!stickyPrompt,
@@ -1084,22 +1092,25 @@ export function useMainApp(gw: GatewayClient) {
       turnStartedAt: ui.sid ? turnStartedAt : null,
       // CLI parity: the classic prompt_toolkit status bar shows a red dot
       // on REC (cli.py:_get_voice_status_fragments line 2344).
-      voiceLabel: voiceRecording ? '● REC' : voiceProcessing ? '◉ STT' : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
-    }),
-    [
-      cwd,
-      gitBranch,
-      goodVibesTick,
-      sessionStartedAt,
-      stickyPrompt,
-      turnStartedAt,
-      ui,
-      voiceEnabled,
-      voiceProcessing,
-      voiceRecording,
-      voiceTts
-    ]
-  )
+      voiceLabel: voiceRecording
+        ? '● REC'
+        : voiceProcessing
+          ? '◉ STT'
+          : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
+    }
+  }, [
+    cwd,
+    gitBranch,
+    goodVibesTick,
+    sessionStartedAt,
+    stickyPrompt,
+    turnStartedAt,
+    ui,
+    voiceEnabled,
+    voiceProcessing,
+    voiceRecording,
+    voiceTts
+  ])
 
   const appTranscript = useMemo(
     () => ({ historyItems, scrollRef, virtualHistory, virtualRows }),
