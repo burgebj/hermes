@@ -4475,13 +4475,6 @@ class BasePlatformAdapter(ABC):
                 )
             else:
                 _post_cb = getattr(self, "_post_delivery_callbacks", {}).pop(session_key, None)
-            if callable(_post_cb):
-                try:
-                    _post_result = _post_cb()
-                    if inspect.isawaitable(_post_result):
-                        await _post_result
-                except Exception:
-                    pass
             # Stop typing indicator
             await _stop_typing_task()
             # Also cancel any platform-level persistent typing tasks (e.g. Discord)
@@ -4491,6 +4484,14 @@ class BasePlatformAdapter(ABC):
                     await self.stop_typing(event.source.chat_id)
             except Exception:
                 pass
+
+            if callable(_post_cb):
+                try:
+                    _post_result = _post_cb()
+                    if inspect.isawaitable(_post_result):
+                        await _post_result
+                except Exception:
+                    pass
             # Final drain/release boundary: force-flush any timer that missed
             # the in-band drain before deciding whether the guard can clear.
             await self._flush_text_debounce_now(session_key)
