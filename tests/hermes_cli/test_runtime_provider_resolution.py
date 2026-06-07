@@ -2705,3 +2705,144 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# ------------------------------------------------------------------
+# fix #11059 — named custom providers with anthropic_messages must
+# strip trailing /vN from base_url so the Anthropic SDK doesn't
+# construct double-versioned paths like .../v4/v1/messages.
+# ------------------------------------------------------------------
+
+
+def test_named_custom_provider_anthropic_strips_v1(monkeypatch):
+    """base_url ending in /v1 must be stripped for anthropic_messages."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-gateway")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-gateway",
+            "base_url": "https://gateway.example.com/v1",
+            "api_key": "test-key",
+            "api_mode": "anthropic_messages",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-gateway")
+
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "https://gateway.example.com"
+
+
+def test_named_custom_provider_anthropic_strips_v4(monkeypatch):
+    """base_url ending in /v4 (OpenAI-wire path) must be stripped for anthropic_messages."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-gateway")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-gateway",
+            "base_url": "https://gateway.example.com/v4",
+            "api_key": "test-key",
+            "api_mode": "anthropic_messages",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-gateway")
+
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "https://gateway.example.com"
+
+
+def test_named_custom_provider_anthropic_no_strip_when_no_version_suffix(monkeypatch):
+    """base_url without /vN suffix should not be altered for anthropic_messages."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-proxy")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-proxy",
+            "base_url": "https://proxy.example.com/anthropic",
+            "api_key": "test-key",
+            "api_mode": "anthropic_messages",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-proxy")
+
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "https://proxy.example.com/anthropic"
+
+
+def test_named_custom_provider_chat_completions_keeps_v1(monkeypatch):
+    """base_url ending in /v1 should NOT be stripped for chat_completions."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-server")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-server",
+            "base_url": "http://localhost:8000/v1",
+            "api_key": "sk-test",
+            "api_mode": "chat_completions",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-server")
+
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "http://localhost:8000/v1"
+
+
+def test_named_custom_provider_anthropic_pool_strips_v1(monkeypatch):
+    """Pool path: base_url ending in /v1 must also be stripped for anthropic_messages."""
+    pool_base = "https://gateway.example.com/v1"
+
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        runtime_api_key = "pool-key"
+        base_url = pool_base
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-gateway")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-gateway",
+            "base_url": pool_base,
+            "api_key": "",
+            "api_mode": "anthropic_messages",
+        },
+    )
+    monkeypatch.setattr(
+        rp, "get_custom_provider_pool_key",
+        lambda base_url, **kw: "custom:my-gateway",
+    )
+    monkeypatch.setattr(rp, "load_pool", lambda key: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="my-gateway")
+
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "https://gateway.example.com"
+
+
+def test_named_custom_provider_anthropic_strips_v1_trailing_slash(monkeypatch):
+    """base_url ending in /v1/ (trailing slash) must also be stripped."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-gateway")
+    monkeypatch.setattr(
+        rp, "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-gateway",
+            "base_url": "https://gateway.example.com/v1/",
+            "api_key": "test-key",
+            "api_mode": "anthropic_messages",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-gateway")
+
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["base_url"] == "https://gateway.example.com"
