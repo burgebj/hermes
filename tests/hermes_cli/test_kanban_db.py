@@ -4287,3 +4287,81 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# Connection pooling tests (#33580)
+# ---------------------------------------------------------------------------
+
+def test_connect_reuses_pooled_connections(tmp_path):
+    """Multiple connect() calls return the same connection from pool."""
+    db_path = tmp_path / "kanban.db"
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    kb.close_all_connections()
+    
+    conn1 = kb.connect(db_path=db_path)
+    conn1_id = id(conn1)
+    
+    conn2 = kb.connect(db_path=db_path)
+    conn2_id = id(conn2)
+    
+    assert conn1_id == conn2_id, "Should return same connection from pool"
+    
+    kb.close_all_connections()
+
+
+def test_connection_pool_size_limit(tmp_path):
+    """Pool evicts oldest connection when reaching max size."""
+    kb.close_all_connections()
+    
+    paths = []
+    
+    for i in range(kb._POOL_MAX_SIZE):
+        db_path = tmp_path / f"kanban_{i}.db"
+        kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+        paths.append(db_path)
+        kb.connect(db_path=db_path)
+    
+    assert len(kb._CONNECTION_POOL) == kb._POOL_MAX_SIZE
+    
+    first_conn = kb._CONNECTION_POOL.get(str(paths[0].resolve()))
+    first_conn_id = id(first_conn) if first_conn else None
+    
+    extra_path = tmp_path / f"kanban_extra.db"
+    kb._INITIALIZED_PATHS.discard(str(extra_path.resolve()))
+    kb.connect(db_path=extra_path)
+    
+    assert len(kb._CONNECTION_POOL) == kb._POOL_MAX_SIZE
+    assert str(paths[0].resolve()) not in kb._CONNECTION_POOL, "Oldest path should be evicted"
+    
+    kb.close_all_connections()
+
+
+def test_connection_pool_handles_closed_connections(tmp_path):
+    """Pool detects and replaces closed connections."""
+    db_path = tmp_path / "kanban.db"
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    kb.close_all_connections()
+    
+    conn1 = kb.connect(db_path=db_path)
+    conn1_id = id(conn1)
+    conn1.close()
+    
+    conn2 = kb.connect(db_path=db_path)
+    conn2_id = id(conn2)
+    
+    assert conn1_id != conn2_id, "Should create new connection when pooled one is closed"
+    
+    kb.close_all_connections()
+
+
+def test_close_all_connections_clears_pool(tmp_path):
+    """close_all_connections() empties the pool."""
+    db_path = tmp_path / "kanban.db"
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    
+    kb.connect(db_path=db_path)
+    assert len(kb._CONNECTION_POOL) == 1
+    
+    kb.close_all_connections()
+    assert len(kb._CONNECTION_POOL) == 0

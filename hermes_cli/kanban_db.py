@@ -1145,6 +1145,8 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
+_CONNECTION_POOL: dict[str, sqlite3.Connection] = {}
+_POOL_MAX_SIZE = 4
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
 
 
@@ -1439,6 +1441,17 @@ def connect(
         path = db_path
     else:
         path = kanban_db_path(board=board)
+    
+    resolved_str = str(path.resolve())
+    with _INIT_LOCK:
+        if resolved_str in _CONNECTION_POOL:
+            conn = _CONNECTION_POOL[resolved_str]
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except sqlite3.DatabaseError:
+                del _CONNECTION_POOL[resolved_str]
+    
     path.parent.mkdir(parents=True, exist_ok=True)
     with _cross_process_init_lock(path):
         # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
@@ -1486,7 +1499,29 @@ def connect(
         except Exception:
             conn.close()
             raise
+    
+    with _INIT_LOCK:
+        if len(_CONNECTION_POOL) >= _POOL_MAX_SIZE:
+            oldest_path = next(iter(_CONNECTION_POOL))
+            old_conn = _CONNECTION_POOL.pop(oldest_path)
+            try:
+                old_conn.close()
+            except Exception:
+                pass
+        _CONNECTION_POOL[resolved] = conn
+    
     return conn
+
+
+def close_all_connections():
+    """Close all connections in the pool. Called on shutdown."""
+    with _INIT_LOCK:
+        for conn in _CONNECTION_POOL.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _CONNECTION_POOL.clear()
 
 
 @contextlib.contextmanager
