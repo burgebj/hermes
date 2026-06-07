@@ -305,3 +305,57 @@ class TestFallbackChainDedup:
 
         assert ok is False
         mock_resolve.assert_not_called()
+
+
+# ── Fallback notice visibility (#35419) ─────────────────────────────────
+
+
+class TestFallbackNoticeEmittedImmediately:
+    """Regression: fallback activation notice must be emitted immediately
+    via _emit_status, not buffered. Buffered notices are cleared on
+    successful recovery, making fallback invisible to users. See #35419."""
+
+    def test_fallback_emits_status_immediately(self):
+        """The fallback notice must reach _emit_status (not _buffer_status)."""
+        fbs = [{"provider": "zai", "model": "glm-4.7"}]
+        agent = _make_agent(fallback_model=fbs)
+
+        emitted = []
+        agent._emit_status = lambda message: emitted.append(message)
+
+        with (
+            patch("agent.auxiliary_client.resolve_provider_client",
+                  return_value=(_mock_client(), "glm-4.7")),
+            patch("hermes_cli.model_normalize.normalize_model_for_provider",
+                  side_effect=lambda m, p: m),
+        ):
+            ok = agent._try_activate_fallback()
+
+        assert ok is True
+        # The notice was emitted immediately, not buffered.
+        assert any("switching to fallback" in m and "glm-4.7" in m for m in emitted), (
+            f"Expected fallback notice in emitted messages, got: {emitted}"
+        )
+
+    def test_fallback_notice_not_lost_on_clear(self):
+        """Even if _clear_status_buffer is called later, the notice was
+        already emitted and is not lost."""
+        fbs = [{"provider": "zai", "model": "glm-4.7"}]
+        agent = _make_agent(fallback_model=fbs)
+
+        emitted = []
+        agent._emit_status = lambda message: emitted.append(message)
+
+        with (
+            patch("agent.auxiliary_client.resolve_provider_client",
+                  return_value=(_mock_client(), "glm-4.7")),
+            patch("hermes_cli.model_normalize.normalize_model_for_provider",
+                  side_effect=lambda m, p: m),
+        ):
+            agent._try_activate_fallback()
+
+        # Simulate success path — clear the buffer.
+        agent._clear_status_buffer()
+
+        # The notice was already emitted before the clear.
+        assert any("switching to fallback" in m for m in emitted)
