@@ -3495,3 +3495,77 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             data = await resp.json()
             assert data["features"]["session_key_header"] == "X-Hermes-Session-Key"
+
+
+# ---------------------------------------------------------------------------
+# connect() — fatal-error signalling on missing / placeholder API_SERVER_KEY
+# ---------------------------------------------------------------------------
+
+
+class TestConnectFatalErrors:
+    """Verify that APIServerAdapter.connect() marks non-retryable fatal errors
+    when API_SERVER_KEY is missing or a placeholder, instead of returning
+    False silently (which causes infinite reconnect loops — #37011).
+    """
+
+    @pytest.fixture
+    def config_no_key(self, tmp_path, monkeypatch):
+        """PlatformConfig with no API_SERVER_KEY set."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("API_SERVER_KEY", raising=False)
+        return PlatformConfig(enabled=True)
+
+    @pytest.fixture
+    def config_placeholder_key(self, tmp_path, monkeypatch):
+        """PlatformConfig with a placeholder API_SERVER_KEY.
+
+        The placeholder check only fires when the bind host is
+        network-accessible, so bind 0.0.0.0 (loopback would skip the
+        branch entirely).  "test" is 4 chars < min_length=8, so
+        has_usable_secret() rejects it as a placeholder.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("API_SERVER_KEY", "test")
+        return PlatformConfig(
+            enabled=True,
+            extra={"key": "test", "host": "0.0.0.0"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_connect_missing_key_sets_fatal_error(self, config_no_key):
+        adapter = APIServerAdapter(config_no_key)
+        result = await adapter.connect()
+        assert result is False
+        assert adapter.has_fatal_error
+        assert not adapter.fatal_error_retryable
+        assert "api_server_missing_key" in adapter.fatal_error_code
+
+    @pytest.mark.asyncio
+    async def test_connect_placeholder_key_sets_fatal_error(self, config_placeholder_key):
+        adapter = APIServerAdapter(config_placeholder_key)
+        result = await adapter.connect()
+        assert result is False
+        assert adapter.has_fatal_error
+        assert not adapter.fatal_error_retryable
+        assert "api_server_placeholder_key" in adapter.fatal_error_code
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_response_store(self, config_no_key):
+        """A failed connect() leaves the adapter in a disposable, fatal state
+        and disconnect() must close the ResponseStore SQLite connection so the
+        gateway's _dispose_unused_adapter cleanup reclaims the FD (#37011)."""
+        adapter = APIServerAdapter(config_no_key)
+        store = adapter._response_store
+        # The store is open before connect().
+        assert store._conn is not None
+        await adapter.connect()
+        # The fatal-error state is what signals the gateway to dispose this
+        # adapter (instead of retrying and leaking another connection).
+        assert adapter.has_fatal_error
+        # disconnect() — invoked by _dispose_unused_adapter in production —
+        # must close the SQLite connection.
+        await adapter.disconnect()
+        # After disconnect the connection is closed; using it raises.
+        import sqlite3
+        with pytest.raises(sqlite3.ProgrammingError):
+            store._conn.execute("SELECT 1")

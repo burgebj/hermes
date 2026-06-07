@@ -4156,11 +4156,12 @@ class APIServerAdapter(BasePlatformAdapter):
             # dispatch terminal-capable agent work, so every deployment needs
             # an explicit API_SERVER_KEY regardless of bind address.
             if not self._api_key:
-                logger.error(
-                    "[%s] Refusing to start: API_SERVER_KEY is required for the API server, "
-                    "including loopback-only binds on %s.",
-                    self.name, self._host,
+                message = (
+                    f"API_SERVER_KEY is required for the API server, "
+                    f"including loopback-only binds on {self._host}"
                 )
+                logger.error("[%s] Refusing to start: %s", self.name, message)
+                self._set_fatal_error("api_server_missing_key", message, retryable=False)
                 return False
 
             # Refuse to start network-accessible with a placeholder key.
@@ -4169,13 +4170,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 try:
                     from hermes_cli.auth import has_usable_secret
                     if not has_usable_secret(self._api_key, min_length=8):
-                        logger.error(
-                            "[%s] Refusing to start: API_SERVER_KEY is set to a "
-                            "placeholder value. Generate a real secret "
-                            "(e.g. `openssl rand -hex 32`) and set API_SERVER_KEY "
-                            "before exposing the API server on %s.",
-                            self.name, self._host,
+                        message = (
+                            f"API_SERVER_KEY is set to a placeholder value. "
+                            f"Generate a real secret (e.g. `openssl rand -hex 32`) "
+                            f"and set API_SERVER_KEY before exposing the API server on {self._host}"
                         )
+                        logger.error("[%s] Refusing to start: %s", self.name, message)
+                        self._set_fatal_error("api_server_placeholder_key", message, retryable=False)
                         return False
                 except ImportError:
                     pass
