@@ -93,13 +93,39 @@ TEAMS_ALLOWED_USERS=<your-aad-object-id>
 
 ---
 
-## Step 5: Start the Gateway
+## Step 5: Install the Teams Python Dependencies
+
+Hermes does not bundle the Teams SDK in the default install. If you are running Hermes from a local checkout or virtualenv instead of the Nous Docker image, install the Teams dependencies into that same environment first:
+
+```bash
+python3 -m pip install "microsoft-teams-apps>=2.0.0,<3" "aiohttp>=3.13.3,<4"
+```
+
+If you are using the published Docker gateway image, you can skip this step because the image already includes the required packages.
+
+---
+
+## Step 6: Start the Gateway
+
+If you run Hermes locally without Docker:
+
+```bash
+hermes gateway
+```
+
+Then confirm the webhook server came up:
+
+```bash
+curl http://localhost:3978/health   # should return: ok
+```
+
+If you run the gateway with Docker:
 
 ```bash
 HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d gateway
 ```
 
-This starts the gateway. The default webhook port is `3978` (override with `TEAMS_PORT`). Check that it's running:
+The default webhook port is `3978` (override with `TEAMS_PORT`). Check that it's running:
 
 ```bash
 curl http://localhost:3978/health   # should return: ok
@@ -113,7 +139,7 @@ Look for:
 
 ---
 
-## Step 6: Install the App in Teams
+## Step 7: Install the App in Teams
 
 ```bash
 teams app get <teamsAppId> --install-link

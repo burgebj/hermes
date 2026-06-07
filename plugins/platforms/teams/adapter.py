@@ -6,7 +6,7 @@ Runs an aiohttp webhook server to receive messages from Teams.
 Proactive messaging (send, typing) uses the SDK's App.send() method.
 
 Requires:
-    pip install microsoft-teams-apps aiohttp
+    pip install "microsoft-teams-apps>=2.0.0,<3" "aiohttp>=3.13.3,<4"
     TEAMS_CLIENT_ID, TEAMS_CLIENT_SECRET, and TEAMS_TENANT_ID env vars
 
 Configuration in config.yaml:
@@ -1102,7 +1102,11 @@ def interactive_setup() -> None:
         if not prompt_yes_no("Reconfigure Teams?", False):
             return
 
-    print_info("You'll need the Teams CLI. If you haven't already:")
+    print_info("Teams support is not bundled in Hermes core installs.")
+    print_info('Install the Python deps in your Hermes venv first:')
+    print_info('  pip install "microsoft-teams-apps>=2.0.0,<3" "aiohttp>=3.13.3,<4"')
+    print()
+    print_info("You'll also need the Teams CLI. If you haven't already:")
     print_info("  npm install -g @microsoft/teams.cli@preview")
     print_info("  teams login")
     print()
@@ -1165,7 +1169,7 @@ def register(ctx) -> None:
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
-        install_hint="pip install microsoft-teams-apps aiohttp",
+        install_hint='pip install "microsoft-teams-apps>=2.0.0,<3" "aiohttp>=3.13.3,<4"',
         setup_fn=interactive_setup,
         # Env-driven auto-configuration — seeds PlatformConfig.extra with
         # client_id/secret/tenant + port + home_channel so env-only setups

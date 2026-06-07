@@ -338,6 +338,13 @@ class TestTeamsPluginRegistration:
         kwargs = ctx.register_platform.call_args[1]
         assert kwargs.get("platform_hint")
 
+    def test_register_install_hint_mentions_local_dependencies(self):
+        ctx = MagicMock()
+        register(ctx)
+        kwargs = ctx.register_platform.call_args[1]
+        assert "microsoft-teams-apps>=2.0.0,<3" in kwargs["install_hint"]
+        assert "aiohttp>=3.13.3,<4" in kwargs["install_hint"]
+
 
 # ---------------------------------------------------------------------------
 # Tests: Interactive setup (import fix regression — #18325 / #19173)
@@ -366,6 +373,25 @@ class TestTeamsInteractiveSetup:
         env_text = (hermes_home / ".env").read_text(encoding="utf-8")
         assert "TEAMS_CLIENT_ID=client-id" in env_text
         assert "TEAMS_TENANT_ID=tenant-id" in env_text
+
+    def test_interactive_setup_prints_local_install_hint(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        import hermes_cli.cli_output as cli_output_mod
+
+        answers = iter(["client-id", "client-secret", "tenant-id", "aad-1"])
+        info_lines = []
+        monkeypatch.setattr(cli_output_mod, "prompt", lambda *_a, **_kw: next(answers))
+        monkeypatch.setattr(cli_output_mod, "prompt_yes_no", lambda *_a, **_kw: True)
+        monkeypatch.setattr(cli_output_mod, "print_info", lambda msg="", *_a, **_kw: info_lines.append(msg))
+        monkeypatch.setattr(cli_output_mod, "print_success", lambda *_a, **_kw: None)
+        monkeypatch.setattr(cli_output_mod, "print_warning", lambda *_a, **_kw: None)
+
+        _teams_mod.interactive_setup()
+
+        assert any("not bundled in Hermes core installs" in line for line in info_lines)
+        assert any("microsoft-teams-apps>=2.0.0,<3" in line for line in info_lines)
 
 class TestTeamsConnect:
     @pytest.mark.anyio
