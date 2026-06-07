@@ -6726,6 +6726,10 @@ def _default_spawn(
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    # Set TERMINAL_CWD so the file tool resolves relative paths against the
+    # task workspace instead of inheriting the gateway's TERMINAL_CWD (which
+    # points to the gateway user's home directory).  See #41312.
+    env["TERMINAL_CWD"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:
