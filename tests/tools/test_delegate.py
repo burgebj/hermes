@@ -28,6 +28,7 @@ from tools.delegate_tool import (
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
+    _delegation_codex_stall_warning,
     _extract_output_tail,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
@@ -157,6 +158,71 @@ class TestStripBlockedTools(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class TestDelegationCodexStallWarning(unittest.TestCase):
+    def test_warns_when_subagents_inherit_parent_codex_gpt_5_5(self):
+        parent = _make_mock_parent()
+        parent.provider = "openai-codex"
+        parent.base_url = "https://chatgpt.com/backend-api/codex"
+        parent.api_mode = "codex_responses"
+        parent.model = "gpt-5.5"
+
+        warning = _delegation_codex_stall_warning(
+            {},
+            {"model": None, "provider": None, "base_url": None, "api_mode": None},
+            parent,
+        )
+
+        if warning is None:
+            self.fail("expected Codex gpt-5.5 inheritance warning")
+        self.assertIn("inherited from the parent", warning)
+        self.assertIn("delegation.model to `gpt-5.4`", warning)
+        self.assertIn("official Codex CLI may still work", warning)
+
+    def test_warns_when_delegation_explicitly_selects_codex_gpt_5_5(self):
+        parent = _make_mock_parent()
+        warning = _delegation_codex_stall_warning(
+            {"provider": "openai-codex", "model": "gpt-5.5"},
+            {
+                "model": "gpt-5.5",
+                "provider": "openai-codex",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_mode": "codex_responses",
+            },
+            parent,
+        )
+
+        if warning is None:
+            self.fail("expected explicit Codex gpt-5.5 warning")
+        self.assertIn("selected by delegation configuration", warning)
+
+    def test_no_warning_for_stable_delegation_model(self):
+        parent = _make_mock_parent()
+        parent.provider = "openai-codex"
+        parent.base_url = "https://chatgpt.com/backend-api/codex"
+        parent.api_mode = "codex_responses"
+        parent.model = "gpt-5.5"
+
+        warning = _delegation_codex_stall_warning(
+            {"model": "gpt-5.4"},
+            {"model": "gpt-5.4", "provider": None, "base_url": None, "api_mode": None},
+            parent,
+        )
+
+        self.assertIsNone(warning)
+
+    def test_no_warning_for_non_codex_parent(self):
+        parent = _make_mock_parent()
+        parent.model = "openai/gpt-5.5"
+
+        warning = _delegation_codex_stall_warning(
+            {},
+            {"model": None, "provider": None, "base_url": None, "api_mode": None},
+            parent,
+        )
+
+        self.assertIsNone(warning)
+
+
 class TestDelegateTask(unittest.TestCase):
     def test_no_parent_agent(self):
         result = json.loads(delegate_task(goal="test"))
@@ -183,6 +249,40 @@ class TestDelegateTask(unittest.TestCase):
         parent = _make_mock_parent()
         result = json.loads(delegate_task(tasks=[{"context": "no goal here"}], parent_agent=parent))
         self.assertIn("error", result)
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_inherited_codex_gpt55_warning_emitted_before_run(
+        self,
+        mock_run,
+        mock_build_child,
+        _mock_load_config,
+    ):
+        mock_child = MagicMock()
+        mock_build_child.return_value = mock_child
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "Done!",
+            "api_calls": 1,
+            "duration_seconds": 1.0,
+        }
+        parent = _make_mock_parent()
+        parent.provider = "openai-codex"
+        parent.base_url = "https://chatgpt.com/backend-api/codex"
+        parent.api_mode = "codex_responses"
+        parent.model = "gpt-5.5"
+        parent._emit_warning = MagicMock()
+
+        result = json.loads(delegate_task(goal="Fix tests", parent_agent=parent))
+
+        self.assertEqual(result["results"][0]["status"], "completed")
+        parent._emit_warning.assert_called_once()
+        warning = parent._emit_warning.call_args.args[0]
+        self.assertIn("inherited from the parent", warning)
+        self.assertIn("official Codex CLI may still work", warning)
+        mock_run.assert_called_once()
 
     @patch("tools.delegate_tool._run_single_child")
     def test_single_task_mode(self, mock_run):

@@ -48,6 +48,9 @@ def test_hint_fires_for_bare_gpt_5_5_on_codex(tmp_path):
     assert "gpt-5.3-codex" in hint
     assert "gpt-5.4-codex" in hint
     assert "fallback chain" in hint
+    assert "Hermes' Codex transport" in hint
+    assert "not proof that the official Codex CLI is broken" in hint
+    assert "appears to be silently rejecting" not in hint
 
 
 def test_hint_fires_for_vendor_prefixed_gpt_5_5(tmp_path):

@@ -19,6 +19,7 @@ never the child's intermediate tool calls or reasoning.
 import enum
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 import os
@@ -134,6 +135,72 @@ MAX_DEPTH = 1  # flat by default: parent (0) -> child (1); grandchild rejected u
 # Configurable depth cap consulted by _get_max_spawn_depth; MAX_DEPTH
 # stays as the default fallback and is still the symbol tests import.
 _MIN_SPAWN_DEPTH = 1
+_GPT55_FAMILY_RE = re.compile(r"(?:^|[/\-_])gpt-5\.5(?:$|[\-_])")
+
+
+def _is_codex_backend_route(
+    *,
+    provider: Optional[str],
+    base_url: Optional[str],
+    api_mode: Optional[str],
+) -> bool:
+    """Return True for Hermes' ChatGPT Codex Responses route."""
+    if api_mode != "codex_responses":
+        return False
+    if provider == "openai-codex":
+        return True
+    base = (base_url or "").lower()
+    return base_url_hostname(base) == "chatgpt.com" and "/backend-api/codex" in base
+
+
+def _is_gpt55_family(model: Optional[str]) -> bool:
+    """Match gpt-5.5, vendor-prefixed gpt-5.5, and gpt-5.5-* SKUs."""
+    return bool(model and _GPT55_FAMILY_RE.search(str(model).lower()))
+
+
+def _delegation_codex_stall_warning(cfg: dict, creds: dict, parent_agent) -> Optional[str]:
+    """Warn when subagents are about to use the fragile Codex/gpt-5.5 route.
+
+    This is intentionally diagnostic-only.  Some accounts can use the route
+    successfully, and silently rewriting a user's delegation model would be a
+    surprising behavior change.  The warning makes inherited gpt-5.5 delegation
+    visible before a fan-out run spends minutes in TTFB/no-event retries.
+    """
+    effective_model = creds.get("model") or getattr(parent_agent, "model", None)
+    effective_provider = creds.get("provider") or getattr(parent_agent, "provider", None)
+    effective_base_url = creds.get("base_url") or getattr(parent_agent, "base_url", None)
+    effective_api_mode = creds.get("api_mode") or getattr(parent_agent, "api_mode", None)
+    if not (
+        _is_gpt55_family(effective_model)
+        and _is_codex_backend_route(
+            provider=effective_provider,
+            base_url=effective_base_url,
+            api_mode=effective_api_mode,
+        )
+    ):
+        return None
+
+    configured_model = str(cfg.get("model") or "").strip()
+    configured_provider = str(cfg.get("provider") or "").strip()
+    configured_base_url = str(cfg.get("base_url") or "").strip()
+    if not (configured_model or configured_provider or configured_base_url):
+        source = "inherited from the parent because delegation.provider/model/base_url are unset"
+    elif not configured_model:
+        source = "selected by delegation provider/default resolution because delegation.model is unset"
+    else:
+        source = "selected by delegation configuration"
+
+    return (
+        "⚠️ delegate_task subagents will use "
+        f"openai-codex/{effective_model} on chatgpt.com/backend-api/codex ({source}). "
+        "This Hermes Codex route has recurring no-stream-event/TTFB stalls for "
+        "gpt-5.5 on some ChatGPT OAuth accounts, especially under concurrent "
+        "subagents. The official Codex CLI may still work on the same account; "
+        "this warning is specific to Hermes' request path. To reduce stalls, pin "
+        "delegation.model to `gpt-5.4` or `gpt-5.3-codex`, or route delegation to "
+        "another provider/fallback chain."
+    )
+
 # No upper ceiling on spawn depth — like max_concurrent_children, depth has a
 # floor of 1 and no ceiling. Deeper trees multiply API cost, so the default
 # stays flat (MAX_DEPTH = 1); raising the config knob is an explicit opt-in.
@@ -2047,6 +2114,19 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+
+    stall_warning = _delegation_codex_stall_warning(cfg, creds, parent_agent)
+    if stall_warning:
+        logger.warning(stall_warning)
+        emit_warning = getattr(parent_agent, "_emit_warning", None)
+        emit_status = getattr(parent_agent, "_emit_status", None)
+        try:
+            if callable(emit_warning):
+                emit_warning(stall_warning)
+            elif callable(emit_status):
+                emit_status(stall_warning)
+        except Exception:
+            logger.debug("Could not emit delegation Codex stall warning", exc_info=True)
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()

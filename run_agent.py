@@ -1183,10 +1183,11 @@ class AIAgent:
         if not re.search(r"(?:^|[/\-_])gpt-5\.5(?:$|[\-_])", model_lower):
             return None
         return (
-            f"Codex backend appears to be silently rejecting {eff_model!r} "
-            "on chatgpt.com/backend-api/codex (no stream events, no error). "
-            "This is a known backend-side pattern that has affected ChatGPT "
-            "Plus accounts intermittently. "
+            f"Codex request for {eff_model!r} on chatgpt.com/backend-api/codex "
+            "received no stream events before the watchdog fired. This matches "
+            "a known intermittent ChatGPT Codex OAuth stall/silent-reject "
+            "pattern seen in Hermes' Codex transport; it is not proof that "
+            "the official Codex CLI is broken for the same account. "
             "Workaround: try `gpt-5.4` on the same OAuth profile, or `gpt-5.3-codex`, "
             "or switch to a different model/provider in your fallback chain. "
             "Some ChatGPT Codex accounts do not support `gpt-5.4-codex`. "
