@@ -1496,6 +1496,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
         # Bot-level admins
         raw_admins = extra.get("admins", [])
+        if isinstance(raw_admins, str):
+            import json
+            try:
+                parsed = json.loads(raw_admins)
+                raw_admins = parsed if isinstance(parsed, list) else [raw_admins]
+            except (json.JSONDecodeError, TypeError):
+                raw_admins = [raw_admins]
         admins = frozenset(str(u).strip() for u in raw_admins if str(u).strip())
 
         # Default group policy (for groups not in group_rules)
