@@ -1,0 +1,5 @@
+name: icarus
+version: 1.0.0
+description: "Icarus fabric memory — cross-session memory with Qdrant vector store, Fabric structured memory, and Together AI model training"
+hooks:
+  - on_session_end

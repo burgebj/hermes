@@ -232,6 +232,8 @@ def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
         # read. UnicodeDecodeError: file holds non-UTF-8 / binary garbage
         # (a truncated or clobbered status file). Either way it's unusable.
         return None
+    except UnicodeDecodeError:
+        return None
     if not raw:
         return None
     try:
