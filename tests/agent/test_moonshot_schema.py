@@ -101,6 +101,50 @@ class TestMissingTypeFilled:
         out = sanitize_moonshot_tool_parameters(params)
         assert out["properties"]["tags"]["items"]["type"] == "string"
 
+    def test_union_type_array_normalised_to_first_concrete(self):
+        """JSON Schema union types (``type: ["number", "string"]``) used to
+        crash ``_fill_missing_type`` with ``TypeError: unhashable type: 'list'``
+        because lists are not hashable for set-membership testing.  Moonshot
+        rejects union arrays anyway, so we normalise to the first concrete
+        (non-null) type. Regression test for #30095.
+        """
+        params = {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": ["number", "string"],
+                    "description": "Max results",
+                },
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["limit"]["type"] == "number"
+        assert out["properties"]["limit"]["description"] == "Max results"
+
+    def test_union_type_array_skips_null_entry(self):
+        """``["null", "string"]`` collapses to ``string`` — null entries
+        are dropped during normalisation (Moonshot rejects null types)."""
+        params = {
+            "type": "object",
+            "properties": {
+                "name": {"type": ["null", "string"]},
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["name"]["type"] == "string"
+
+    def test_union_type_array_all_null_falls_back_to_string(self):
+        """A degenerate ``["null"]`` falls back to ``string`` rather than
+        crashing or leaving the list in place."""
+        params = {
+            "type": "object",
+            "properties": {
+                "x": {"type": ["null"]},
+            },
+        }
+        out = sanitize_moonshot_tool_parameters(params)
+        assert out["properties"]["x"]["type"] == "string"
+
     def test_ref_node_is_not_given_synthetic_type(self):
         """$ref nodes should NOT get a synthetic type — the referenced
         definition supplies it, and Moonshot would reject the conflict."""
@@ -178,7 +222,6 @@ class TestAnyOfParentType:
         assert "anyOf" not in db_type
         assert db_type["type"] == "string"
         assert db_type["enum"] == ["mysql", "postgresql"]  # "" stripped by enum cleanup
-
 
 class TestTopLevelGuarantees:
     """The returned top-level schema is always a well-formed object."""
@@ -372,6 +415,26 @@ class TestEnumNullStripping:
         out = sanitize_moonshot_tool_parameters(params)
         # object-typed enum should pass through unchanged
         assert "enum" in out["properties"]["config"]
+
+    def test_enum_on_ref_with_union_type_does_not_crash(self):
+        """$ref nodes skip type inference, so their list type reaches enum cleanup."""
+        params = {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/Payload",
+                    "type": ["string", "integer"],
+                    "enum": ["a", None, ""],
+                },
+            },
+            "$defs": {"Payload": {"type": "object", "properties": {}}},
+        }
+
+        out = sanitize_moonshot_tool_parameters(params)
+        payload = out["properties"]["payload"]
+        assert payload["$ref"] == "#/$defs/Payload"
+        assert payload["type"] == ["string", "integer"]
+        assert payload["enum"] == ["a", None, ""]
 
     def test_anyof_collapse_still_runs_nullable_and_enum_cleanup(self):
         """After anyOf collapses to a single non-null branch, the merged
