@@ -17367,7 +17367,36 @@ class GatewayRunner:
         #   progress uses the triggering event message as the reply target
         # - Other platforms should use explicit source.thread_id only
         if source.platform == Platform.SLACK:
-            _progress_thread_id = source.thread_id or event_message_id
+            # The Slack adapter falls back to event_message_id so progress
+            # messages can be edited inside a thread. Honour
+            # platforms.slack.extra.reply_in_thread=false: if the user has
+            # opted out of threaded replies, don't synthesise a thread for
+            # progress messages either — the very first progress message
+            # would otherwise create a thread that all subsequent replies
+            # (including the final answer) would inherit.
+            slack_adapter = (self.adapters or {}).get(Platform.SLACK)
+            slack_reply_in_thread = True
+            if slack_adapter is not None:
+                slack_reply_in_thread = slack_adapter.config.extra.get(
+                    "reply_in_thread", True
+                )
+            if slack_reply_in_thread:
+                _progress_thread_id = source.thread_id or event_message_id
+            else:
+                # The Slack adapter sets source.thread_id to the user's own
+                # message ts for top-level DMs (synthetic thread used for
+                # session keying). When reply_in_thread is false, treat that
+                # synthetic thread_id as "no thread" so progress messages
+                # stay at the channel/DM top level instead of starting a
+                # thread that subsequent messages would inherit.
+                if (
+                    source.thread_id
+                    and event_message_id
+                    and source.thread_id == event_message_id
+                ):
+                    _progress_thread_id = None
+                else:
+                    _progress_thread_id = source.thread_id
         else:
             _progress_thread_id = source.thread_id
         _progress_metadata = (
