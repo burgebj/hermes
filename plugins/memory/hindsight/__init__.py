@@ -1522,14 +1522,33 @@ class HindsightMemoryProvider(MemoryProvider):
                 return tool_error("Missing required parameter: content")
             context = args.get("context")
             try:
-                retain_kwargs = self._build_retain_kwargs(
+                item = self._build_retain_kwargs(
                     content,
                     context=context,
                     tags=args.get("tags"),
                 )
-                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                             self._bank_id, len(content), context)
-                self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
+                # bank_id and retain_async are top-level aretain_batch params,
+                # not per-item fields — strip them from the item dict.
+                item.pop("bank_id", None)
+                item.pop("retain_async", None)
+
+                # Resolve document_id and update_mode based on API capability
+                document_id, update_mode = self._resolve_retain_target(self._document_id)
+                if update_mode is not None:
+                    item["update_mode"] = update_mode
+
+                logger.debug(
+                    "Tool hindsight_retain: bank=%s, doc=%s, mode=%s, async=%s, content_len=%d",
+                    self._bank_id, document_id, update_mode, self._retain_async, len(content),
+                )
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(
+                        bank_id=self._bank_id,
+                        items=[item],
+                        document_id=document_id,
+                        retain_async=self._retain_async,
+                    )
+                )
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
             except Exception as e:
