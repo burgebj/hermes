@@ -1958,6 +1958,52 @@ class SessionDB:
     _CONTENT_JSON_PREFIX = "\x00json:"
 
     @classmethod
+    def _strip_image_blobs(cls, content: Any) -> Any:
+        """Replace base64 data-URL blobs in multimodal content with a short placeholder.
+
+        When a user sends an image (especially an uncompressed photo-as-file),
+        the native-vision path encodes it as a ``data:image/...;base64,...`` URL
+        and stores the whole blob in the ``image_url`` part of the content list.
+        Re-loading that blob on every subsequent turn can push the outgoing
+        API request far past provider body-size or context-window limits
+        ("session overflow").
+
+        The local file path is already annotated in the companion ``text`` part
+        (``[Image attached at: /path/to/cached.jpg]``), so the model and any
+        tools that need the image can re-read it from disk via ``vision_analyze``
+        or similar.  The blob itself adds no value once the turn is persisted.
+
+        Only ``data:`` URLs are stripped; plain ``https://`` URLs (Telegram CDN
+        etc.) are left intact because they are tiny strings.
+        """
+        if not isinstance(content, list):
+            return content
+        if not any(
+            isinstance(p, dict)
+            and p.get("type") == "image_url"
+            and isinstance(p.get("image_url"), dict)
+            and str(p["image_url"].get("url", "")).startswith("data:")
+            for p in content
+        ):
+            return content  # fast path — nothing to strip
+
+        new_parts: list = []
+        for p in content:
+            if (
+                isinstance(p, dict)
+                and p.get("type") == "image_url"
+                and isinstance(p.get("image_url"), dict)
+                and str(p["image_url"].get("url", "")).startswith("data:")
+            ):
+                new_parts.append({
+                    "type": "text",
+                    "text": "[Attached image — base64 stripped for storage; re-read from the path above if needed]",
+                })
+            else:
+                new_parts.append(p)
+        return new_parts
+
+    @classmethod
     def _encode_content(cls, content: Any) -> Any:
         """Serialize structured (list/dict) message content for sqlite.
 
@@ -1967,12 +2013,20 @@ class SessionDB:
         raises ``ProgrammingError: Error binding parameter N: type 'list' is
         not supported`` when bound directly.
 
+        Base64 image blobs are stripped before serialisation via
+        :meth:`_strip_image_blobs` so that large uncompressed images (e.g.
+        photos sent as files) cannot accumulate in the session DB and overflow
+        subsequent API requests.  The local cache path is already present in the
+        companion ``text`` part, so the model can re-access the image on demand.
+
         Returns the value unchanged when it's already a safe scalar, or a
         sentinel-prefixed JSON string for lists/dicts. Paired with
         :meth:`_decode_content` on read.
         """
         if content is None or isinstance(content, (str, bytes, int, float)):
             return content
+        if isinstance(content, list):
+            content = cls._strip_image_blobs(content)
         try:
             return cls._CONTENT_JSON_PREFIX + json.dumps(content)
         except (TypeError, ValueError):
