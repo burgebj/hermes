@@ -2,7 +2,7 @@
 """
 Transcription Tools Module
 
-Provides speech-to-text transcription with six providers:
+Provides speech-to-text transcription with seven providers:
 
   - **local** (default, free) — faster-whisper running locally, no API key needed.
     Auto-downloads the model (~150 MB for ``base``) on first use.
@@ -12,6 +12,11 @@ Provides speech-to-text transcription with six providers:
   - **xai** — xAI Grok STT API, requires ``XAI_API_KEY``. High accuracy,
     Inverse Text Normalization, diarization, 21 languages.
   - **elevenlabs** — ElevenLabs Scribe API, requires ``ELEVENLABS_API_KEY``.
+  - **moonshine** (free) — Moonshine on-device multilingual STT
+    (8 languages: en/es/ja/ko/zh/ar/vi/uk), requires the ``moonshine_voice``
+    package (``pip install moonshine-voice``). Sub-100ms latency on Apple
+    Silicon. English models are MIT; non-English models are
+    Moonshine Community License (non-commercial).
 
 Used by the messaging gateway to automatically transcribe voice messages
 sent by users on Telegram, Discord, WhatsApp, Slack, and Signal.
@@ -78,6 +83,7 @@ def _safe_find_spec(module_name: str) -> bool:
 _HAS_FASTER_WHISPER = _safe_find_spec("faster_whisper")
 _HAS_OPENAI = _safe_find_spec("openai")
 _HAS_MISTRAL = _safe_find_spec("mistralai")
+_HAS_MOONSHINE = _safe_find_spec("moonshine_voice")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -90,6 +96,14 @@ DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
 DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
 DEFAULT_ELEVENLABS_STT_MODEL = os.getenv("STT_ELEVENLABS_MODEL", "scribe_v2")
+DEFAULT_MOONSHINE_STT_MODEL = os.getenv("STT_MOONSHINE_MODEL", "tiny")
+DEFAULT_MOONSHINE_STT_LANGUAGE = os.getenv("STT_MOONSHINE_LANGUAGE", "auto")
+# Languages supported by moonshine_voice. English models are MIT-licensed;
+# non-English models ship under the Moonshine Community License (non-commercial).
+# See https://www.moonshine.ai/license
+MOONSHINE_SUPPORTED_LANGUAGES = frozenset({
+    "ar", "es", "en", "ja", "ko", "vi", "uk", "zh", "auto",
+})
 LOCAL_STT_COMMAND_ENV = "HERMES_LOCAL_STT_COMMAND"
 LOCAL_STT_LANGUAGE_ENV = "HERMES_LOCAL_STT_LANGUAGE"
 COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
@@ -822,6 +836,15 @@ def _get_provider(stt_config: dict) -> str:
                 return "elevenlabs"
             logger.warning(
                 "STT provider 'elevenlabs' configured but ELEVENLABS_API_KEY not set"
+            )
+            return "none"
+
+        if provider == "moonshine":
+            if _HAS_MOONSHINE:
+                return "moonshine"
+            logger.warning(
+                "STT provider 'moonshine' configured but the 'moonshine_voice' "
+                "package is not installed (pip install moonshine-voice)"
             )
             return "none"
 
@@ -1612,6 +1635,262 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: Moonshine (local, on-device multilingual STT)
+# ---------------------------------------------------------------------------
+
+
+# Singleton for the local Moonshine model — loaded once per language/size,
+# reused across calls. Mirrors the ``_local_model`` pattern used by the
+# faster-whisper path. Keyed by ``(model_name, language)``.
+_moonshine_transcriber: Optional[object] = None
+_moonshine_transcriber_key: Optional[tuple] = None
+
+
+def _normalize_moonshine_language(language: Optional[str]) -> str:
+    """Return a supported Moonshine language tag, falling back to ``"auto"``.
+
+    Accepts the same 2-letter codes ``moonshine_voice.supported_languages()``
+    exposes (``ar``, ``es``, ``en``, ``ja``, ``ko``, ``vi``, ``uk``, ``zh``)
+    plus the special value ``"auto"`` (let Moonshine auto-detect).
+    """
+    if not language:
+        return "auto"
+    lang = str(language).strip().lower()
+    if not lang:
+        return "auto"
+    if lang in MOONSHINE_SUPPORTED_LANGUAGES:
+        return lang
+    logger.warning(
+        "Moonshine language '%s' is not supported; falling back to 'auto'. "
+        "Supported: %s",
+        language,
+        sorted(MOONSHINE_SUPPORTED_LANGUAGES - {"auto"}),
+    )
+    return "auto"
+
+
+def _get_moonshine_transcriber(model_name: str, language: str) -> object:
+    """Return a cached :class:`moonshine_voice.Transcriber` for (model, lang).
+
+    Moonshine's per-language models are downloaded on first use (~26MB for
+    tiny, ~245MB for medium). We resolve ``model_name`` to a real on-disk
+    path via :func:`moonshine_voice.get_model_for_language` — Moonshine does
+    not have user-named "tiny"/"small"/"medium" abstractions, it has one
+    model file per (language, architecture) pair. We treat ``model_name`` as
+    an *architecture* hint and pair it with the requested ``language``.
+    """
+    global _moonshine_transcriber, _moonshine_transcriber_key
+
+    import moonshine_voice
+
+    if (
+        _moonshine_transcriber is not None
+        and _moonshine_transcriber_key == (model_name, language)
+    ):
+        return _moonshine_transcriber
+
+    # For language-specific models (e.g. tiny-ko), Moonshine picks the
+    # per-language checkpoint when we pass the language tag. For "auto" we
+    # fall back to English — Moonshine's multilingual detector is internal
+    # and the per-language checkpoints are tuned, so we let users pin the
+    # language in config for best accuracy.
+    lang_for_model = language if language != "auto" else "en"
+    try:
+        model_path, model_arch = moonshine_voice.get_model_for_language(lang_for_model)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to resolve Moonshine model for language '{lang_for_model}': {exc}. "
+            "Run `python -c \"import moonshine_voice; moonshine_voice.get_model_for_language('"
+            f"{lang_for_model}'))\"` to inspect the error."
+        ) from exc
+
+    logger.info(
+        "Loading Moonshine model (size=%s, lang=%s) from %s",
+        model_name, language, model_path,
+    )
+    transcriber = moonshine_voice.Transcriber(model_path, model_arch)
+    _moonshine_transcriber = transcriber
+    _moonshine_transcriber_key = (model_name, language)
+    return transcriber
+
+
+def _transcribe_moonshine(
+    file_path: str,
+    model_name: str,
+    moonshine_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Transcribe using Moonshine (on-device, multilingual).
+
+    Loads the audio file, runs :func:`moonshine_voice.load_wav_file` to
+    normalize to a 16kHz mono float32 PCM list, then calls
+    :meth:`Transcriber.transcribe_without_streaming` for a single
+    full-audio transcript. This matches the request shape that the
+    Discord/Telegram gateway uses (single .ogg/.m4a blob per voice note).
+
+    Models are downloaded on first use and cached in
+    ``~/Library/Caches/moonshine_voice/`` (macOS) or
+    ``~/.cache/moonshine_voice/`` (Linux). Subsequent calls reuse the
+    cached :class:`Transcriber` instance.
+
+    Config (all optional, all under ``stt.moonshine.``)::
+
+        moonshine:
+          model: tiny          # architecture hint — paired with `language`
+          language: ko         # one of: ar, es, en, ja, ko, vi, uk, zh, auto
+          timeout: 120         # seconds; default 120
+
+    Requires the optional dependency ``moonshine_voice``::
+
+        pip install moonshine-voice
+
+    Note: only English-language Moonshine models are MIT-licensed. Models
+    for other languages (ko, ja, zh, es, ar, vi, uk) ship under the
+    **Moonshine Community License** (non-commercial). See
+    https://www.moonshine.ai/license for full terms.
+    """
+    if not _HAS_MOONSHINE:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": (
+                "moonshine_voice is not installed. Run: pip install moonshine-voice"
+            ),
+        }
+
+    cfg = moonshine_cfg or {}
+    language = _normalize_moonshine_language(
+        cfg.get("language") or get_env_value(LOCAL_STT_LANGUAGE_ENV) or "auto"
+    )
+    try:
+        timeout = float(cfg.get("timeout", 120))
+    except (TypeError, ValueError):
+        timeout = 120.0
+
+    audio_path = Path(file_path)
+    if not audio_path.exists():
+        return {
+            "success": False,
+            "transcript": "",
+            "error": f"Audio file not found: {file_path}",
+        }
+
+    try:
+        import moonshine_voice
+
+        # Moonshine's load_wav_file handles .wav natively. For .ogg/.m4a/.webm
+        # we shell out to ffmpeg (already a hard dependency of every other
+        # STT provider in this module). 16kHz mono PCM is what Moonshine's
+        # frontend expects.
+        suffix = audio_path.suffix.lower()
+        if suffix in LOCAL_NATIVE_AUDIO_FORMATS:
+            audio_data, sample_rate = moonshine_voice.load_wav_file(audio_path)
+        else:
+            ffmpeg_bin = _find_ffmpeg_binary()
+            if not ffmpeg_bin:
+                return {
+                    "success": False,
+                    "transcript": "",
+                    "error": (
+                        f"ffmpeg is required to decode {suffix or 'unknown'} audio "
+                        "for Moonshine STT, but no ffmpeg binary was found on PATH "
+                        "(or in /opt/homebrew/bin, /usr/local/bin)"
+                    ),
+                }
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav", delete=False, dir=tempfile.gettempdir()
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                subprocess.run(
+                    [
+                        ffmpeg_bin, "-y", "-i", str(audio_path),
+                        "-ar", "16000", "-ac", "1", "-f", "wav", str(tmp_path),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=max(10, timeout / 2),
+                    check=True,
+                )
+                audio_data, sample_rate = moonshine_voice.load_wav_file(tmp_path)
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        if sample_rate != 16000:
+            # load_wav_file is documented to return 16kHz; this is a safety net.
+            return {
+                "success": False,
+                "transcript": "",
+                "error": (
+                    f"Moonshine requires 16kHz audio, got {sample_rate}Hz after "
+                    "ffmpeg conversion"
+                ),
+            }
+
+        transcriber = _get_moonshine_transcriber(model_name, language)
+        result = transcriber.transcribe_without_streaming(
+            audio_data, sample_rate=sample_rate
+        )
+
+        transcript = " ".join(
+            (line.text or "").strip()
+            for line in (result.lines or [])
+            if (line.text or "").strip()
+        ).strip()
+
+        if not transcript:
+            return {
+                "success": False,
+                "transcript": "",
+                "provider": "moonshine",
+                "error": "Moonshine returned an empty transcript",
+            }
+
+        logger.info(
+            "Transcribed %s via Moonshine (lang=%s, size=%s, %d chars, %d lines)",
+            audio_path.name, language, model_name,
+            len(transcript), len(result.lines or []),
+        )
+        return {
+            "success": True,
+            "transcript": transcript,
+            "provider": "moonshine",
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "transcript": "",
+            "provider": "moonshine",
+            "error": f"ffmpeg timed out while decoding {audio_path.name} for Moonshine",
+        }
+    except subprocess.CalledProcessError as exc:
+        return {
+            "success": False,
+            "transcript": "",
+            "provider": "moonshine",
+            "error": f"ffmpeg failed to decode {audio_path.name} for Moonshine (rc={exc.returncode})",
+        }
+    except PermissionError:
+        return {
+            "success": False,
+            "transcript": "",
+            "provider": "moonshine",
+            "error": f"Permission denied: {file_path}",
+        }
+    except Exception as e:
+        logger.error("Moonshine STT transcription failed: %s", e, exc_info=True)
+        return {
+            "success": False,
+            "transcript": "",
+            "provider": "moonshine",
+            "error": f"Moonshine STT transcription failed: {e}",
+        }
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1689,6 +1968,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
         return _transcribe_elevenlabs(file_path, model_name)
 
+    if provider == "moonshine":
+        moonshine_cfg = stt_config.get("moonshine", {})
+        model_name = model or moonshine_cfg.get("model", DEFAULT_MOONSHINE_STT_MODEL)
+        return _transcribe_moonshine(file_path, model_name, moonshine_cfg)
+
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
     # elif chain — built-in names short-circuit upstream so a user's
@@ -1737,7 +2021,8 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         "transcript": "",
         "error": (
             "No STT provider available. Install faster-whisper for free local "
-            f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
+            f"transcription, install moonshine-voice for free local multilingual STT, "
+            f"configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
             "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
             "Voxtral Transcribe, configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, "
             "set ELEVENLABS_API_KEY for ElevenLabs Scribe, or set VOICE_TOOLS_OPENAI_KEY "
