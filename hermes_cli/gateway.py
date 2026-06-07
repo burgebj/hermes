@@ -6482,15 +6482,40 @@ def _gateway_command_inner(args):
                 print(f"✓ Stopped {get_service_name()} service")
 
     elif subcmd == "restart":
-        # Defense: refuse self-targeting gateway restart from inside the gateway.
-        # Prevents agent-initiated kill loops when combined with supervisor KeepAlive.
+        # Defense: when called from inside the gateway, route through the
+        # transactional coordinator instead of refusing or killing ourselves.
+        # The coordinator spawns a detached worker that does NOT inherit
+        # _HERMES_GATEWAY=1, so it can safely stop the old gateway and
+        # start a new one.
         if os.getenv("_HERMES_GATEWAY") == "1":
-            print_error(
-                "Refusing to restart the gateway from inside the gateway process.\n"
-                "This command was blocked to prevent restart loops.\n"
-                "Use `hermes gateway restart` from a shell outside the running gateway."
-            )
-            sys.exit(1)
+            if is_windows():
+                from hermes_cli.gateway_windows_restart import schedule_restart_handoff
+
+                no_wait = getattr(args, "no_wait", False)
+                result = schedule_restart_handoff(
+                    origin="agent-terminal",
+                    wait=not no_wait,
+                )
+                if result.get("scheduled"):
+                    print(f"✓ Gateway restart scheduled (request_id: {result['request_id']})")
+                    if result.get("completed"):
+                        print(f"✓ Gateway restarted (new PID: {result.get('new_pid', '?')})")
+                    elif result.get("scheduled") and not no_wait:
+                        print(f"⚠ {result.get('detail', 'Restart did not complete')}")
+                else:
+                    print_error(f"Gateway restart failed: {result.get('detail', 'unknown')}")
+                    sys.exit(1)
+                return
+            else:
+                # Non-Windows: keep the original refusal.  systemd/launchd
+                # paths handle restarts differently and the guard is still
+                # needed there to prevent kill loops.
+                print_error(
+                    "Refusing to restart the gateway from inside the gateway process.\n"
+                    "This command was blocked to prevent restart loops.\n"
+                    "Use `hermes gateway restart` from a shell outside the running gateway."
+                )
+                sys.exit(1)
 
         # Try service first, fall back to killing and restarting
         service_available = False
@@ -6582,15 +6607,38 @@ def _gateway_command_inner(args):
             except subprocess.CalledProcessError:
                 pass
         elif is_windows():
-            from hermes_cli import gateway_windows
+            # Use the transactional restart coordinator on Windows.
+            # This handles the full lifecycle: intent → worker spawn →
+            # drain → stop → port release → start → verify.
+            # Falls back to the legacy path if the coordinator fails.
+            try:
+                from hermes_cli.gateway_windows_restart import schedule_restart_handoff
 
-            # Prefer the Windows-specific restart path: it supports both
-            # registered Scheduled Task / Startup installs and no-service
-            # detached restarts.  In the normal successful Telegram-triggered
-            # restart flow, this avoids the generic foreground run_gateway()
-            # path that can be reaped with the old gateway process.  If the
-            # Windows backend raises, intentionally preserve the existing
-            # generic failure fallback below.
+                no_wait = getattr(args, "no_wait", False)
+                result = schedule_restart_handoff(
+                    origin="external-cli",
+                    wait=not no_wait,
+                )
+                if result.get("scheduled"):
+                    if result.get("completed"):
+                        print(f"✓ Gateway restarted (request_id: {result['request_id']}, "
+                              f"new PID: {result.get('new_pid', '?')})")
+                        return
+                    elif no_wait:
+                        print(f"✓ Gateway restart scheduled (request_id: {result['request_id']})")
+                        return
+                    else:
+                        print(f"⚠ {result.get('detail', 'Restart did not complete')}")
+                        # Fall through to legacy path
+                else:
+                    print(f"⚠ Coordinator failed: {result.get('detail', 'unknown')}")
+                    # Fall through to legacy path
+            except Exception as e:
+                print(f"⚠ Coordinator unavailable: {e}")
+                # Fall through to legacy path
+
+            # Legacy path: gateway_windows.restart() (stop → sleep → start)
+            from hermes_cli import gateway_windows
             service_configured = gateway_windows.is_installed()
             try:
                 gateway_windows.restart()

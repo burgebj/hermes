@@ -485,6 +485,26 @@ DANGEROUS_PATTERNS = [
     # into a single -X token. Catches the same threat class.
     (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
      "sudo with combined-flag privilege escalation"),
+
+    # --- Gateway lifecycle protection (effect-based) ---
+    # These patterns detect commands that would stop, restart, or kill the
+    # Hermes Gateway process.  The agent should not silently kill its own
+    # host — approval is required.  On Windows, `hermes gateway restart`
+    # is routed through the transactional coordinator after approval.
+    (r'\bhermes\b[^;|&\n]*\bgateway\s+stop\b',
+     "stop Hermes gateway (kills agent host)"),
+    (r'\bhermes\b[^;|&\n]*\bgateway\s+restart\b',
+     "restart Hermes gateway (agent host restart)"),
+    (r'\btaskkill\b[^;|&\n]*/F\b[^;|&\n]*/T\b',
+     "force-kill process tree (taskkill /F /T)"),
+    (r'\bschtasks\b[^;|&\n]*/End\b[^;|&\n]*hermes',
+     "end Hermes scheduled task"),
+    (r'\bschtasks\b[^;|&\n]*/Delete\b[^;|&\n]*hermes',
+     "delete Hermes scheduled task"),
+    (r'\bsystemctl\b[^;|&\n]*restart\b[^;|&\n]*hermes',
+     "restart Hermes systemd service"),
+    (r'\blaunchctl\b[^;|&\n]*kickstart\b[^;|&\n]*hermes',
+     "kickstart Hermes launchd service"),
 ]
 
 

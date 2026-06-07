@@ -1303,8 +1303,25 @@ def stop() -> None:
 
 
 def restart() -> None:
-    """Stop the gateway then start it again."""
+    """Stop the gateway then start it again.
+
+    Uses the transactional restart coordinator for a safer restart that
+    verifies PID exit, port release, and new gateway launch evidence.
+    Falls back to the legacy stop→sleep→start path if the coordinator fails.
+    """
     _assert_windows()
+    try:
+        from hermes_cli.gateway_windows_restart import schedule_restart_handoff
+        result = schedule_restart_handoff(origin="gateway_windows_restart", wait=True)
+        if result.get("completed"):
+            return
+        if result.get("scheduled") and not result.get("completed"):
+            # Coordinator scheduled but didn't complete in time — fall through
+            pass
+    except Exception:
+        pass
+
+    # Legacy path
     stop()
     # Give Windows a moment to release the listening port.
     time.sleep(1.0)

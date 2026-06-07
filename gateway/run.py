@@ -10918,18 +10918,49 @@ class GatewayRunner:
             logger.debug("Failed to write restart dedup marker: %s", e)
 
         active_agents = self._running_agent_count()
-        # When running under a service manager (systemd/launchd) or inside a
-        # Docker/Podman container, use the service restart path: exit with
-        # code 75 so the service manager / container restart policy restarts
-        # us.  The detached subprocess approach (setsid + bash) doesn't work
-        # under systemd (KillMode=mixed kills the cgroup) or Docker (tini
-        # exits when the gateway dies, taking the detached helper with it).
-        _under_service = bool(os.environ.get("INVOCATION_ID"))  # systemd sets this
-        _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-        if _under_service or _in_container:
-            self.request_restart(detached=False, via_service=True)
+        # On Windows, use the transactional restart coordinator instead of
+        # the legacy detached watcher.  The coordinator writes an intent,
+        # spawns a detached worker (without _HERMES_GATEWAY=1), and the
+        # worker handles drain → stop → port release → start → verify.
+        if sys.platform == "win32":
+            try:
+                from hermes_cli.gateway_windows_restart import schedule_restart_handoff
+                result = schedule_restart_handoff(
+                    origin="slash-command",
+                    wait=False,  # Don't block the chat response
+                )
+                if result.get("scheduled"):
+                    logger.info("Gateway restart scheduled via coordinator (request_id=%s)", result["request_id"])
+                else:
+                    logger.warning("Coordinator failed: %s", result.get("detail"))
+                    # Fall through to legacy path
+                    _under_service = bool(os.environ.get("INVOCATION_ID"))
+                    _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+                    if _under_service or _in_container:
+                        self.request_restart(detached=False, via_service=True)
+                    else:
+                        self.request_restart(detached=True, via_service=False)
+            except Exception as e:
+                logger.warning("Coordinator unavailable, using legacy restart: %s", e)
+                _under_service = bool(os.environ.get("INVOCATION_ID"))
+                _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+                if _under_service or _in_container:
+                    self.request_restart(detached=False, via_service=True)
+                else:
+                    self.request_restart(detached=True, via_service=False)
         else:
-            self.request_restart(detached=True, via_service=False)
+            # When running under a service manager (systemd/launchd) or inside a
+            # Docker/Podman container, use the service restart path: exit with
+            # code 75 so the service manager / container restart policy restarts
+            # us.  The detached subprocess approach (setsid + bash) doesn't work
+            # under systemd (KillMode=mixed kills the cgroup) or Docker (tini
+            # exits when the gateway dies, taking the detached helper with it).
+            _under_service = bool(os.environ.get("INVOCATION_ID"))  # systemd sets this
+            _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+            if _under_service or _in_container:
+                self.request_restart(detached=False, via_service=True)
+            else:
+                self.request_restart(detached=True, via_service=False)
         if active_agents:
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))
