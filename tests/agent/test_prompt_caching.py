@@ -4,6 +4,7 @@
 from agent.prompt_caching import (
     _apply_cache_marker,
     apply_anthropic_cache_control,
+    apply_tool_cache_control,
 )
 
 
@@ -139,3 +140,113 @@ class TestApplyAnthropicCacheControl:
             elif "cache_control" in msg:
                 count += 1
         assert count <= 4
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Tool schema caching (apply_tool_cache_control)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestApplyToolCacheControl:
+    def test_empty_tools_returns_unchanged(self):
+        assert apply_tool_cache_control([]) == []
+
+    def test_last_tool_gets_cache_marker(self):
+        tools = [
+            {"type": "function", "function": {"name": "a"}},
+            {"type": "function", "function": {"name": "b"}},
+        ]
+        result = apply_tool_cache_control(tools)
+        assert "cache_control" not in result[0]
+        assert result[1]["cache_control"] == {"type": "ephemeral"}
+
+    def test_single_tool_gets_marker(self):
+        tools = [{"type": "function", "function": {"name": "only"}}]
+        result = apply_tool_cache_control(tools)
+        assert result[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_returns_new_list(self):
+        tools = [{"type": "function", "function": {"name": "a"}}]
+        result = apply_tool_cache_control(tools)
+        assert result is not tools
+
+    def test_does_not_mutate_input(self):
+        tools = [{"type": "function", "function": {"name": "a"}}]
+        apply_tool_cache_control(tools)
+        assert "cache_control" not in tools[0]
+
+    def test_earlier_tools_are_shared_references(self):
+        tools = [
+            {"type": "function", "function": {"name": "a"}},
+            {"type": "function", "function": {"name": "b"}},
+        ]
+        result = apply_tool_cache_control(tools)
+        assert result[0] is tools[0]
+
+    def test_1h_ttl(self):
+        tools = [{"type": "function", "function": {"name": "a"}}]
+        result = apply_tool_cache_control(tools, cache_ttl="1h")
+        assert result[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# reserved_breakpoints parameter
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _count_cached_messages(messages):
+    """Count messages that have a cache_control marker."""
+    count = 0
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and "cache_control" in item:
+                    count += 1
+                    break
+        elif "cache_control" in msg:
+            count += 1
+    return count
+
+
+class TestReservedBreakpoints:
+    def test_reserved_reduces_message_breakpoints(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+        ]
+        full = apply_anthropic_cache_control(msgs, reserved_breakpoints=0)
+        reserved = apply_anthropic_cache_control(msgs, reserved_breakpoints=1)
+        assert _count_cached_messages(reserved) == _count_cached_messages(full) - 1
+
+    def test_zero_reserved_is_default_behavior(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+        default = apply_anthropic_cache_control(msgs)
+        explicit = apply_anthropic_cache_control(msgs, reserved_breakpoints=0)
+        assert _count_cached_messages(default) == _count_cached_messages(explicit)
+
+    def test_reserved_all_slots_marks_no_messages(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+        ]
+        result = apply_anthropic_cache_control(msgs, reserved_breakpoints=3)
+        assert _count_cached_messages(result) == 1  # system only
+
+    def test_reserved_exceeding_budget_marks_system_only(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+        result = apply_anthropic_cache_control(msgs, reserved_breakpoints=10)
+        assert _count_cached_messages(result) == 1  # system only, no crash

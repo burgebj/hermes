@@ -50,11 +50,14 @@ def apply_anthropic_cache_control(
     api_messages: List[Dict[str, Any]],
     cache_ttl: str = "5m",
     native_anthropic: bool = False,
+    reserved_breakpoints: int = 0,
 ) -> List[Dict[str, Any]]:
     """Apply system_and_3 caching strategy to messages for Anthropic models.
 
-    Places up to 4 cache_control breakpoints: system prompt + last 3 non-system
-    messages, all at the same TTL.
+    Places up to 4 cache_control breakpoints: system prompt + last N non-system
+    messages, all at the same TTL.  When *reserved_breakpoints* > 0, that many
+    slots are held back for other cacheable sections (e.g. tools), reducing the
+    number of message breakpoints accordingly.
 
     Returns:
         Deep copy of messages with cache_control breakpoints injected.
@@ -71,9 +74,33 @@ def apply_anthropic_cache_control(
         _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
         breakpoints_used += 1
 
-    remaining = 4 - breakpoints_used
-    non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
-    for idx in non_sys[-remaining:]:
-        _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
+    remaining = max(0, 4 - breakpoints_used - reserved_breakpoints)
+    if remaining:
+        non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
+        for idx in non_sys[-remaining:]:
+            _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
     return messages
+
+
+def apply_tool_cache_control(
+    tools: List[Dict[str, Any]],
+    cache_ttl: str = "5m",
+) -> List[Dict[str, Any]]:
+    """Add cache_control to the last tool definition for Anthropic caching.
+
+    Anthropic caches everything up to and including the marked tool.  Marking
+    the last tool in the array caches the entire tools schema.  Uses one of
+    the 4 available cache breakpoints.
+
+    Returns a shallow copy of the list with the last tool dict deep-copied
+    and marked; other tools are shared references (schemas are read-only).
+    """
+    if not tools:
+        return tools
+
+    result = list(tools)
+    last = copy.deepcopy(result[-1])
+    last["cache_control"] = _build_marker(cache_ttl)
+    result[-1] = last
+    return result

@@ -52,7 +52,7 @@ from agent.model_metadata import (
     save_context_length,
 )
 from agent.process_bootstrap import _install_safe_stdio
-from agent.prompt_caching import apply_anthropic_cache_control
+from agent.prompt_caching import apply_anthropic_cache_control, apply_tool_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
@@ -1052,15 +1052,23 @@ def run_conversation(
         # Apply Anthropic prompt caching for Claude models on native
         # Anthropic, OpenRouter, and third-party Anthropic-compatible
         # gateways. Auto-detected: if ``_use_prompt_caching`` is set,
-        # inject cache_control breakpoints (system + last 3 messages)
-        # to reduce input token costs by ~75% on multi-turn
+        # inject cache_control breakpoints (system + tools + last N
+        # messages) to reduce input token costs by ~75% on multi-turn
         # conversations.
+        agent._tools_for_api = None
         if agent._use_prompt_caching:
+            has_tools = bool(agent.tools)
             api_messages = apply_anthropic_cache_control(
                 api_messages,
                 cache_ttl=agent._cache_ttl,
                 native_anthropic=agent._use_native_cache_layout,
+                reserved_breakpoints=1 if has_tools else 0,
             )
+            if has_tools:
+                agent._tools_for_api = apply_tool_cache_control(
+                    agent.tools,
+                    cache_ttl=agent._cache_ttl,
+                )
 
         # Safety net: strip orphaned tool results / add stubs for missing
         # results before sending to the API.  Runs unconditionally — not
