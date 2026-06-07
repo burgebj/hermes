@@ -687,10 +687,6 @@ export function useMessageStream({
                 }
               }
 
-              if (state.awaitingResponse && !state.sawAssistantPayload) {
-                return state
-              }
-
               return {
                 ...state,
                 awaitingResponse: false,
