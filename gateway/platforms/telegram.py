@@ -9,10 +9,12 @@ Uses python-telegram-bot library for:
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import os
 import tempfile
+import time
 import html as _html
 import re
 from datetime import datetime, timezone
@@ -414,6 +416,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self._media_batch_delay_seconds = float(os.getenv("HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS", "0.8"))
         self._pending_photo_batches: Dict[str, MessageEvent] = {}
         self._pending_photo_batch_tasks: Dict[str, asyncio.Task] = {}
+        # Track recently downloaded photo content hashes to detect stale downloads
+        # from Telegram Bot API (see #35242). Maps content_md5 -> (cached_path, ts).
+        self._recent_photo_content: Dict[str, tuple] = {}
         self._media_group_events: Dict[str, MessageEvent] = {}
         self._media_group_tasks: Dict[str, asyncio.Task] = {}
         # Buffer rapid text messages so Telegram client-side splits of long
@@ -5443,8 +5448,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 # msg.photo is a list of PhotoSize sorted by size; take the largest
                 photo = msg.photo[-1]
                 file_obj = await photo.get_file()
-                # Download the image bytes directly into memory
-                image_bytes = await file_obj.download_as_bytearray()
                 # Determine extension from the file path if available
                 ext = ".jpg"
                 if file_obj.file_path:
@@ -5452,10 +5455,59 @@ class TelegramAdapter(BasePlatformAdapter):
                         if file_obj.file_path.lower().endswith(candidate):
                             ext = candidate
                             break
+                # Download the image bytes directly into memory
+                image_bytes = await file_obj.download_as_bytearray()
+                # Detect stale content: if the downloaded bytes match a very
+                # recently cached photo, the Telegram Bot API may have returned
+                # stale data (see #35242).  Retry once after a short delay.
+                content_md5 = hashlib.md5(image_bytes).hexdigest()
+                stale_entry = self._recent_photo_content.get(content_md5)
+                if stale_entry:
+                    existing_path, cached_ts = stale_entry
+                    age = time.monotonic() - cached_ts
+                    if age < 60:
+                        logger.warning(
+                            "[Telegram] Photo content MD5 %s matches recently cached "
+                            "%s (%.1fs ago); retrying download (file_id=%s, size=%d)...",
+                            content_md5, existing_path, age,
+                            photo.file_id, len(image_bytes),
+                        )
+                        await asyncio.sleep(0.5)
+                        image_bytes = await file_obj.download_as_bytearray()
+                        retry_md5 = hashlib.md5(image_bytes).hexdigest()
+                        if retry_md5 == content_md5:
+                            logger.error(
+                                "[Telegram] Retry returned identical content (MD5 %s). "
+                                "Telegram Bot API may be serving stale data for file_id=%s. "
+                                "Using existing cached file instead.",
+                                content_md5, photo.file_id,
+                            )
+                            event.media_urls = [existing_path]
+                            event.media_types = [f"image/{ext.lstrip('.')}"]
+                            media_group_id = getattr(msg, "media_group_id", None)
+                            if media_group_id:
+                                await self._queue_media_group_event(str(media_group_id), event)
+                            else:
+                                batch_key = self._photo_batch_key(event, msg)
+                                self._enqueue_photo_event(batch_key, event)
+                            return
+                        else:
+                            logger.info(
+                                "[Telegram] Retry succeeded: new MD5 %s (was %s)",
+                                retry_md5, content_md5,
+                            )
+                            content_md5 = retry_md5
                 # Save to local cache (for vision tool access)
                 cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
+                # Record content hash for stale detection (prune old entries)
+                now_mono = time.monotonic()
+                self._recent_photo_content[content_md5] = (cached_path, now_mono)
+                self._recent_photo_content = {
+                    k: v for k, v in self._recent_photo_content.items()
+                    if now_mono - v[1] < 120
+                }
                 event.media_urls = [cached_path]
-                event.media_types = [f"image/{ext.lstrip('.')}" ]
+                event.media_types = [f"image/{ext.lstrip('.')}"]
                 logger.info("[Telegram] Cached user photo at %s", cached_path)
                 media_group_id = getattr(msg, "media_group_id", None)
                 if media_group_id:
