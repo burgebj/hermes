@@ -546,6 +546,7 @@ Inbound messages are deduplicated using message IDs with a 24-hour TTL. The dedu
 | `FEISHU_CONNECTION_MODE` | — | `websocket` | `websocket` or `webhook` |
 | `FEISHU_ALLOWED_USERS` | — | _(empty)_ | Comma-separated open_id list for user allowlist |
 | `FEISHU_ALLOW_BOTS` | — | `none` | Accept messages from other bots: `none`, `mentions`, or `all` |
+| `FEISHU_FORCE_POST` | — | `false` | Always send as `post` (rich text) type — needed for multi-bot @mention |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | Whether group messages must @mention the bot |
 | `FEISHU_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
 | `FEISHU_ENCRYPT_KEY` | — | _(empty)_ | Encrypt key for webhook signature verification |

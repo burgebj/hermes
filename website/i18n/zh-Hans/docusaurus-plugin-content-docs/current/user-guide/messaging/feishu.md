@@ -489,6 +489,7 @@ platforms:
 | `FEISHU_CONNECTION_MODE` | — | `websocket` | `websocket` 或 `webhook` |
 | `FEISHU_ALLOWED_USERS` | — | _（空）_ | 用户白名单的逗号分隔 open_id 列表 |
 | `FEISHU_ALLOW_BOTS` | — | `none` | 接受其他机器人消息：`none`、`mentions` 或 `all` |
+| `FEISHU_FORCE_POST` | — | `false` | 强制所有消息使用 `post`（富文本）类型 — 多 Bot 互 @ 协作必需 |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | 群消息是否必须 @提及 机器人 |
 | `FEISHU_HOME_CHANNEL` | — | — | cron/通知输出的聊天 ID |
 | `FEISHU_ENCRYPT_KEY` | — | _（空）_ | webhook 签名验证的加密密钥 |

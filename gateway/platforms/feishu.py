@@ -395,6 +395,8 @@ class FeishuAdapterSettings:
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    force_post: bool = False  # Always send messages as post (rich text) type
+    bot_open_ids: Dict[str, str] = field(default_factory=dict)  # bot_name -> open_id
 
 
 @dataclass
@@ -548,8 +550,64 @@ def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _build_markdown_post_payload(content: str) -> str:
+_AT_MENTION_RE = re.compile(r"@(\w[\w-]*)")
+
+
+def _expand_mentions_in_rows(
+    rows: List[List[Dict[str, str]]],
+    bot_open_ids: Dict[str, str],
+) -> List[List[Dict[str, str]]]:
+    """Expand @bot_name patterns in post rows to feishu <at> tags."""
+    result: List[List[Dict[str, str]]] = []
+    for row in rows:
+        new_row: List[Dict[str, str]] = []
+        for seg in row:
+            if seg["tag"] != "md":
+                new_row.append(seg)
+                continue
+            text = seg["text"]
+            parts = _AT_MENTION_RE.split(text)
+            if len(parts) == 1:
+                new_row.append(seg)
+                continue
+            for i, part in enumerate(parts):
+                if not part:
+                    continue
+                if i % 2 == 1:  # odd indices are the matched bot names
+                    if part in bot_open_ids:
+                        new_row.append({"tag": "at", "user_id": bot_open_ids[part]})
+                    else:
+                        new_row.append({"tag": "text", "text": f"@{part}"})
+                else:
+                    new_row.append({"tag": "text", "text": part})
+        result.append(new_row)
+    return result
+
+
+def _compile_bot_open_ids(raw: str) -> Dict[str, str]:
+    """Parse FEISHU_BOT_OPEN_IDS env var.
+
+    Format: ``name1=ou_xxx,name2=ou_yyy``
+    """
+    result: Dict[str, str] = {}
+    if not raw:
+        return result
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        name, oid = pair.split("=", 1)
+        name = name.strip()
+        oid = oid.strip()
+        if name and oid:
+            result[name] = oid
+    return result
+
+
+def _build_markdown_post_payload(content: str, bot_open_ids: Dict[str, str] | None = None) -> str:
     rows = _build_markdown_post_rows(content)
+    if bot_open_ids:
+        rows = _expand_mentions_in_rows(rows, bot_open_ids)
     return json.dumps(
         {
             "zh_cn": {
@@ -1573,6 +1631,10 @@ class FeishuAdapter(BasePlatformAdapter):
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
             ),
+            force_post=_to_boolean(
+                extra.get("force_post", os.getenv("FEISHU_FORCE_POST", "false"))
+            ),
+            bot_open_ids=_compile_bot_open_ids(os.getenv("FEISHU_BOT_OPEN_IDS", "")),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -1605,6 +1667,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_ping_timeout = settings.ws_ping_timeout
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
+        self._force_post = settings.force_post
+        self._bot_open_ids = settings.bot_open_ids
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -4324,6 +4388,12 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
+        # When force_post is enabled, always send as post (rich text) so that
+        # @mentions are rendered properly and other bots in the group can
+        # receive the message.  This is needed for multi-bot collaboration
+        # where bots @-mention one another in a shared group chat.
+        if self._force_post:
+            return "post", _build_markdown_post_payload(content, self._bot_open_ids)
         # Feishu post-type 'md' elements do not render markdown tables; sending
         # table content as post causes the message to appear blank on the client.
         # Force plain text for anything that looks like a markdown table.
@@ -4331,7 +4401,7 @@ class FeishuAdapter(BasePlatformAdapter):
             text_payload = {"text": content}
             return "text", json.dumps(text_payload, ensure_ascii=False)
         if _MARKDOWN_HINT_RE.search(content):
-            return "post", _build_markdown_post_payload(content)
+            return "post", _build_markdown_post_payload(content, self._bot_open_ids)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
 

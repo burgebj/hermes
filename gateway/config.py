@@ -1182,6 +1182,10 @@ def load_gateway_config() -> GatewayConfig:
             if isinstance(feishu_cfg, dict):
                 if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
                     os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
+                if "force_post" in feishu_cfg and not os.getenv("FEISHU_FORCE_POST"):
+                    os.environ["FEISHU_FORCE_POST"] = str(feishu_cfg["force_post"]).lower()
+                if "bot_open_ids" in feishu_cfg and not os.getenv("FEISHU_BOT_OPEN_IDS"):
+                    os.environ["FEISHU_BOT_OPEN_IDS"] = str(feishu_cfg["bot_open_ids"])
 
     except Exception as e:
         logger.warning(
