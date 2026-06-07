@@ -5497,6 +5497,26 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
+_ENV_VALUE_SAFE_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,\-]*$")
+
+
+def _format_env_assignment_value(value: str) -> str:
+    """Return a .env-safe representation for ``value``.
+
+    Keep the historical unquoted format for simple values so existing config
+    files and tests stay stable. Quote only when a value contains characters
+    that .env parsers can treat specially (notably ``#`` comments or
+    whitespace). Prefer single quotes because python-dotenv preserves ``${...}``
+    literally inside them.
+    """
+    if _ENV_VALUE_SAFE_RE.match(value):
+        return value
+    if "'" not in value:
+        return f"'{value}'"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hermes/.env."""
     if is_managed():
@@ -5523,11 +5543,15 @@ def save_env_value(key: str, value: str):
         # Sanitize on every read: split concatenated keys, drop stale placeholders
         lines = _sanitize_env_lines(lines)
 
+    # Quote only when needed so special characters such as # are preserved by
+    # python-dotenv while simple historical KEY=value output remains stable.
+    _line = f"{key}={_format_env_assignment_value(value)}\n"
+
     # Find and update or append
     found = False
     for i, line in enumerate(lines):
         if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
+            lines[i] = _line
             found = True
             break
 
@@ -5535,7 +5559,7 @@ def save_env_value(key: str, value: str):
         # Ensure there's a newline at the end of the file before appending
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
-        lines.append(f"{key}={value}\n")
+        lines.append(_line)
     
     fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
     # Preserve original permissions so Docker volume mounts aren't clobbered.
