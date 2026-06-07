@@ -1,8 +1,9 @@
 """Tests for plugins/memory/openviking/__init__.py — URI normalization and payload handling."""
 
 import json
+import re
 
-from plugins.memory.openviking import OpenVikingMemoryProvider
+from plugins.memory.openviking import OpenVikingMemoryProvider, _CATEGORY_SUBDIR_MAP
 
 
 class FakeVikingClient:
@@ -24,6 +25,40 @@ class TestOpenVikingSummaryUriNormalization:
         assert OpenVikingMemoryProvider._normalize_summary_uri("viking://resources/.abstract.md") == "viking://resources"
         assert OpenVikingMemoryProvider._normalize_summary_uri("viking://") == "viking://"
         assert OpenVikingMemoryProvider._normalize_summary_uri("viking://user/hermes/memories/profile.md") == "viking://user/hermes/memories/profile.md"
+
+
+class TestOpenVikingMemoryUriBuilder:
+    def _provider(self, *, user="alice", agent="coder"):
+        provider = OpenVikingMemoryProvider.__new__(OpenVikingMemoryProvider)
+        provider._user = user
+        provider._agent = agent
+        return provider
+
+    def test_uri_layout_includes_agent_segment(self):
+        uri = self._provider()._build_memory_uri("preferences")
+        assert uri.startswith("viking://user/alice/agent/coder/memories/preferences/")
+        assert uri.endswith(".md")
+
+    def test_uri_uses_configured_agent_not_default(self):
+        uri = self._provider(agent="research-bot")._build_memory_uri("patterns")
+        assert "/agent/research-bot/memories/patterns/" in uri
+        assert "/agent/hermes/" not in uri
+
+    def test_uri_slug_is_twelve_hex_chars_and_unique(self):
+        first = self._provider()._build_memory_uri("events")
+        second = self._provider()._build_memory_uri("events")
+        first_slug = first.rsplit("mem_", 1)[1][:-3]
+        second_slug = second.rsplit("mem_", 1)[1][:-3]
+
+        assert re.fullmatch(r"[0-9a-f]{12}", first_slug)
+        assert re.fullmatch(r"[0-9a-f]{12}", second_slug)
+        assert first_slug != second_slug
+
+    def test_uri_places_all_known_subdirs_under_agent_namespace(self):
+        provider = self._provider()
+        for subdir in _CATEGORY_SUBDIR_MAP.values():
+            uri = provider._build_memory_uri(subdir)
+            assert f"/agent/coder/memories/{subdir}/mem_" in uri
 
 
 class TestOpenVikingRead:
