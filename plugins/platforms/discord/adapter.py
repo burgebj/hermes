@@ -5041,7 +5041,7 @@ class DiscordAdapter(BasePlatformAdapter):
             _has_mention_gap = require_mention and not is_free_channel and not in_bot_thread
             if (_has_mention_gap or is_thread) and auto_threaded_channel is None:
                 _backfill_text = await self._fetch_channel_context(
-                    message.channel, before=message,
+                    effective_channel, before=message,
                 )
                 if _backfill_text:
                     _channel_context = _backfill_text
