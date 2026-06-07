@@ -2470,11 +2470,82 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return True
         except Exception as e:
+            wait = self._retry_after_seconds(e)
+            if wait is not None:
+                self._schedule_delete_message_retry(chat_id, message_id, wait)
+                logger.warning(
+                    "[%s] Telegram delete flood-controlled for message %s; "
+                    "retrying cleanup in %.1fs",
+                    self.name, message_id, wait,
+                )
+                return False
             logger.debug(
                 "[%s] Failed to delete Telegram message %s: %s",
                 self.name, message_id, e,
             )
             return False
+
+    @staticmethod
+    def _retry_after_seconds(error: Exception) -> Optional[float]:
+        retry_after = getattr(error, "retry_after", None)
+        if retry_after is None:
+            match = re.search(r"retry\s+after\s+([0-9]+(?:\.[0-9]+)?)", str(error), re.I)
+            if match:
+                retry_after = match.group(1)
+        if retry_after is None:
+            return None
+        try:
+            wait = float(retry_after)
+        except (TypeError, ValueError):
+            wait = 1.0
+        return max(wait, 0.0)
+
+    def _schedule_delete_message_retry(
+        self,
+        chat_id: str,
+        message_id: str,
+        wait_seconds: float,
+        *,
+        attempt: int = 1,
+    ) -> None:
+        async def _retry_delete() -> None:
+            try:
+                await asyncio.sleep(wait_seconds)
+                if not self._bot:
+                    return
+                await self._bot.delete_message(
+                    chat_id=int(chat_id),
+                    message_id=int(message_id),
+                )
+                logger.info(
+                    "[%s] Deferred Telegram cleanup deleted message %s",
+                    self.name, message_id,
+                )
+            except Exception as retry_err:
+                next_wait = self._retry_after_seconds(retry_err)
+                if next_wait is not None and attempt < 3:
+                    logger.warning(
+                        "[%s] Deferred Telegram cleanup still flood-controlled "
+                        "for message %s; retrying in %.1fs",
+                        self.name, message_id, next_wait,
+                    )
+                    self._schedule_delete_message_retry(
+                        chat_id,
+                        message_id,
+                        next_wait,
+                        attempt=attempt + 1,
+                    )
+                    return
+                logger.debug(
+                    "[%s] Deferred Telegram cleanup failed for message %s: %s",
+                    self.name, message_id, retry_err,
+                )
+
+        task = asyncio.create_task(_retry_delete())
+        background_tasks = getattr(self, "_background_tasks", None)
+        if isinstance(background_tasks, set):
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
 
     def supports_draft_streaming(
         self,

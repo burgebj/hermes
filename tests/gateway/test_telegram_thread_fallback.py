@@ -10,6 +10,7 @@ avoid retrying with a partial topic route that can render outside the lane.
 
 import sys
 import types
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -1412,3 +1413,37 @@ async def test_send_retries_retry_after_errors():
     assert result.success is True
     assert result.message_id == "300"
     assert attempt[0] == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_message_retries_retry_after_as_background_cleanup(monkeypatch):
+    """Stale preview cleanup must survive Telegram delete flood-control."""
+    adapter = _make_adapter()
+    adapter._background_tasks = set()
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("gateway.platforms.telegram.asyncio.sleep", fake_sleep)
+
+    attempts = []
+
+    async def mock_delete_message(**kwargs):
+        attempts.append(kwargs["message_id"])
+        if len(attempts) == 1:
+            raise FakeRetryAfter(0.25)
+        return True
+
+    adapter._bot = SimpleNamespace(delete_message=mock_delete_message)
+
+    deleted_now = await adapter.delete_message("123", "456")
+
+    assert deleted_now is False
+    assert len(adapter._background_tasks) == 1
+
+    await asyncio.gather(*list(adapter._background_tasks))
+
+    assert sleeps == [0.25]
+    assert attempts == [456, 456]

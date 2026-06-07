@@ -143,6 +143,16 @@ class GatewayStreamConsumer:
         # timestamps would be stale by completion time.  Ported from
         # openclaw/openclaw#72038.
         self._message_created_ts: Optional[float] = None
+        # Message ids that currently make up the visible streaming preview.
+        # Usually this is a single id, but Telegram can split an oversized
+        # edit into the original message plus continuation messages.  Fallback
+        # cleanup must delete the whole stale preview, not just the latest id.
+        self._preview_message_ids: list[str] = []
+        self._preview_message_text = ""
+        self._pending_preview_cleanup_candidates: list[tuple[list[str], str]] = []
+        # Back-compat mirrors used by older tests/debug probes.
+        self._pending_preview_cleanup_ids: list[str] = []
+        self._pending_preview_cleanup_text = ""
         self._already_sent = False
         self._edit_supported = True  # Disabled when progressive edits are no longer usable
         self._last_edit_time = 0.0
@@ -204,6 +214,31 @@ class GatewayStreamConsumer:
         the subsequent cosmetic edit (cursor removal) failed."""
         return self._final_content_delivered
 
+    def preview_cleanup_ids_for_final(
+        self,
+        final_text: str,
+        *,
+        include_current: bool = True,
+    ) -> tuple[str, ...]:
+        """Stale preview ids safe to delete after an external final send."""
+        final_text = self._preview_text_for_cleanup(final_text)
+        if not final_text:
+            return ()
+
+        cleanup_ids: list[str] = []
+        candidates = list(self._pending_preview_cleanup_candidates)
+        if include_current:
+            candidates.append((self._preview_message_ids, self._preview_message_text))
+        for ids, preview_text in candidates:
+            if not ids or not preview_text:
+                continue
+            if not final_text.startswith(preview_text):
+                continue
+            for message_id in ids:
+                if message_id not in cleanup_ids:
+                    cleanup_ids.append(message_id)
+        return tuple(cleanup_ids)
+
     async def _edit_message(
         self,
         *,
@@ -255,8 +290,11 @@ class GatewayStreamConsumer:
     def _reset_segment_state(self, *, preserve_no_edit: bool = False) -> None:
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
+        self._stage_current_preview_for_replay_cleanup()
         self._message_id = None
         self._message_created_ts = None
+        self._preview_message_ids = []
+        self._preview_message_text = ""
         self._accumulated = ""
         self._last_sent_text = ""
         self._fallback_final_send = False
@@ -477,7 +515,10 @@ class GatewayStreamConsumer:
                     )
 
                 current_update_visible = False
+                replay_cleanup_text = None
                 if should_edit and self._accumulated:
+                    if got_done:
+                        replay_cleanup_text = self._accumulated
                     # Split overflow: if accumulated text exceeds the platform
                     # limit, split into properly sized chunks.
                     if (
@@ -489,19 +530,37 @@ class GatewayStreamConsumer:
                         # helper the non-streaming path uses — to split with
                         # proper word/code-fence boundaries and chunk
                         # indicators like "(1/2)".
+                        preview_text = self._accumulated
                         chunks = self.adapter.truncate_message(
                             self._accumulated, _safe_limit, len_fn=_len_fn,
                         )
                         chunks_delivered = False
+                        delivered_chunk_ids: list[str] = []
+                        expected_chunks = [
+                            chunk for chunk in chunks
+                            if self._clean_for_display(chunk).strip()
+                        ]
                         reply_to = self._message_id or self._initial_reply_to_id
                         for chunk in chunks:
                             new_id = await self._send_new_chunk(chunk, reply_to)
                             if new_id is not None and new_id != reply_to:
                                 chunks_delivered = True
+                                delivered_chunk_ids.append(str(new_id))
                         self._accumulated = ""
                         self._last_sent_text = ""
                         self._last_edit_time = time.monotonic()
+                        if chunks_delivered:
+                            self._remember_preview_text_for_cleanup(preview_text)
                         if got_done:
+                            final_chunks_delivered = (
+                                chunks_delivered
+                                and len(delivered_chunk_ids) == len(expected_chunks)
+                            )
+                            if final_chunks_delivered:
+                                await self._cleanup_pending_preview_after_replay(
+                                    preview_text,
+                                    current_message_id=delivered_chunk_ids[-1],
+                                )
                             # Only claim final delivery if THESE chunks actually
                             # landed.  ``_already_sent`` may be True from prior
                             # tool-progress edits or fallback-mode promotion (#10748)
@@ -511,18 +570,18 @@ class GatewayStreamConsumer:
                                 self._final_content_delivered = True
                             return
                         if got_segment_break:
-                            self._message_id = None
-                            self._fallback_final_send = False
-                            self._fallback_prefix = ""
+                            self._reset_segment_state()
                         continue
 
                     # Existing message: edit it with the first chunk, then
                     # start a new message for the overflow remainder.
+                    split_preview_text = ""
                     while (
                         _len_fn(self._accumulated) > _safe_limit
                         and self._message_id is not None
                         and self._edit_supported
                     ):
+                        preview_text = self._accumulated
                         _cp_budget = _custom_unit_to_cp(
                             self._accumulated, _safe_limit, _len_fn,
                         )
@@ -550,6 +609,7 @@ class GatewayStreamConsumer:
                             # fallback final-send path can deliver the remaining
                             # continuation without dropping content.
                             break
+                        split_preview_text = preview_text
                         self._accumulated = self._accumulated[split_at:].lstrip("\n")
                         self._message_id = None
                         self._last_sent_text = ""
@@ -572,6 +632,12 @@ class GatewayStreamConsumer:
                         is_turn_final=got_done,
                     )
                     self._last_edit_time = time.monotonic()
+                    if (
+                        split_preview_text
+                        and current_update_visible
+                        and len(self._preview_message_ids) > 1
+                    ):
+                        self._remember_preview_text_for_cleanup(split_preview_text)
 
                 if got_done:
                     # Final edit without cursor. If progressive editing failed
@@ -579,6 +645,7 @@ class GatewayStreamConsumer:
                     # here instead of letting the base gateway path send the
                     # full response again.
                     if self._accumulated:
+                        cleanup_pending_preview = False
                         if self._fallback_final_send:
                             await self._send_fallback_final(self._accumulated)
                         elif (
@@ -591,6 +658,7 @@ class GatewayStreamConsumer:
                             # need an explicit finalize signal.
                             self._final_response_sent = True
                             self._final_content_delivered = True
+                            cleanup_pending_preview = True
                         elif self._message_id:
                             # Either the mid-stream edit didn't run (no
                             # visible update this tick) OR the adapter needs
@@ -600,10 +668,17 @@ class GatewayStreamConsumer:
                             )
                             if self._final_response_sent:
                                 self._final_content_delivered = True
+                                cleanup_pending_preview = True
                         elif not self._already_sent:
                             self._final_response_sent = await self._send_or_edit(self._accumulated)
                             if self._final_response_sent:
                                 self._final_content_delivered = True
+                                cleanup_pending_preview = True
+                        if cleanup_pending_preview:
+                            await self._cleanup_pending_preview_after_replay(
+                                replay_cleanup_text or self._accumulated,
+                                current_message_id=self._message_id,
+                            )
                     return
 
                 if commentary_text is not None:
@@ -695,6 +770,19 @@ class GatewayStreamConsumer:
         # Strip trailing whitespace/newlines but preserve leading content
         return cleaned.rstrip()
 
+    def _preview_text_for_cleanup(self, text: str) -> str:
+        text = self._clean_for_display(text)
+        if self.cfg.cursor and text.endswith(self.cfg.cursor):
+            text = text[:-len(self.cfg.cursor)]
+        return text.rstrip()
+
+    def _remember_preview_text_for_cleanup(self, text: str) -> None:
+        text = self._preview_text_for_cleanup(text)
+        if not text:
+            return
+        if not self._preview_message_text or len(text) > len(self._preview_message_text):
+            self._preview_message_text = text
+
     async def _send_new_chunk(self, text: str, reply_to_id: Optional[str]) -> Optional[str]:
         """Send a new message chunk, optionally threaded to a previous message.
 
@@ -713,6 +801,8 @@ class GatewayStreamConsumer:
             )
             if result.success and result.message_id:
                 self._message_id = str(result.message_id)
+                self._remember_preview_message_ids(result.message_id)
+                self._remember_preview_text_for_cleanup(text)
                 self._already_sent = True
                 self._last_sent_text = text
                 # Fresh content bubble — close off any stale tool bubble
@@ -760,6 +850,109 @@ class GatewayStreamConsumer:
         if remaining:
             chunks.append(remaining)
         return chunks
+
+    def _remember_preview_message_ids(self, *message_ids: Optional[str]) -> None:
+        """Track platform messages that belong to the current stream preview."""
+        for message_id in message_ids:
+            if not message_id:
+                continue
+            message_id = str(message_id)
+            if message_id == "__no_edit__" or message_id in self._preview_message_ids:
+                continue
+            self._preview_message_ids.append(message_id)
+
+    def _sync_pending_preview_cleanup_mirror(self) -> None:
+        """Keep legacy pending-cleanup fields aligned with all candidates."""
+        ids: list[str] = []
+        text = ""
+        for candidate_ids, candidate_text in self._pending_preview_cleanup_candidates:
+            if not text and candidate_text:
+                text = candidate_text
+            for message_id in candidate_ids:
+                if message_id not in ids:
+                    ids.append(message_id)
+        self._pending_preview_cleanup_ids = ids
+        self._pending_preview_cleanup_text = text
+
+    def _add_pending_preview_cleanup_candidate(
+        self,
+        message_ids: list[str],
+        preview_text: str,
+    ) -> None:
+        ids: list[str] = []
+        for message_id in message_ids:
+            if not message_id:
+                continue
+            message_id = str(message_id)
+            if message_id == "__no_edit__" or message_id in ids:
+                continue
+            ids.append(message_id)
+        preview_text = self._preview_text_for_cleanup(preview_text)
+        if not ids or not preview_text:
+            return
+
+        for index, (existing_ids, existing_text) in enumerate(
+            self._pending_preview_cleanup_candidates
+        ):
+            if existing_ids == ids:
+                if len(preview_text) > len(existing_text):
+                    self._pending_preview_cleanup_candidates[index] = (
+                        ids, preview_text,
+                    )
+                    self._sync_pending_preview_cleanup_mirror()
+                return
+
+        self._pending_preview_cleanup_candidates.append((ids, preview_text))
+        self._sync_pending_preview_cleanup_mirror()
+
+    def _stage_current_preview_for_replay_cleanup(self) -> None:
+        """Preserve the visible preview group across a tool-boundary reset."""
+        self._add_pending_preview_cleanup_candidate(
+            list(self._preview_message_ids),
+            self._preview_message_text,
+        )
+
+    def _stale_preview_cleanup_ids(self, current_message_id: Optional[str]) -> list[str]:
+        """Return stale preview ids to delete after a replacement final send."""
+        ids = list(self._preview_message_ids)
+        if current_message_id and current_message_id != "__no_edit__":
+            current_message_id = str(current_message_id)
+            if current_message_id not in ids:
+                ids.append(current_message_id)
+        return ids
+
+    async def _cleanup_pending_preview_after_replay(
+        self,
+        final_text: str,
+        *,
+        current_message_id: Optional[str],
+    ) -> None:
+        """Delete a prior overflow preview only after a matching replay lands."""
+        final_text = self._preview_text_for_cleanup(final_text)
+        ids: list[str] = []
+        remaining_candidates: list[tuple[list[str], str]] = []
+        for candidate_ids, preview_text in self._pending_preview_cleanup_candidates:
+            if preview_text and final_text.startswith(preview_text):
+                for message_id in candidate_ids:
+                    if message_id not in ids:
+                        ids.append(message_id)
+            else:
+                remaining_candidates.append((candidate_ids, preview_text))
+        if not ids:
+            return
+        self._pending_preview_cleanup_candidates = remaining_candidates
+        self._sync_pending_preview_cleanup_mirror()
+        delete_fn = getattr(self.adapter, "delete_message", None)
+        if delete_fn is None:
+            return
+        current_id = str(current_message_id) if current_message_id else None
+        for message_id in ids:
+            if message_id == current_id:
+                continue
+            try:
+                await delete_fn(self.chat_id, message_id)
+            except Exception:
+                pass
 
     async def _send_fallback_final(self, text: str) -> None:
         """Send the final continuation after streaming edits stop working.
@@ -816,7 +1009,8 @@ class GatewayStreamConsumer:
         safe_limit = max(500, raw_limit - 100)
         chunks = self._split_text_chunks(continuation, safe_limit, len_fn=_len_fn)
 
-        stale_message_id = self._message_id  # partial message to clean up
+        stale_message_id = self._message_id  # partial message(s) to clean up
+        stale_message_ids = self._stale_preview_cleanup_ids(stale_message_id)
         last_message_id: Optional[str] = None
         last_successful_chunk = ""
         sent_any_chunk = False
@@ -871,18 +1065,26 @@ class GatewayStreamConsumer:
         # implement ``delete_message``, the delete fails (flood control still
         # active, bot lacks permission, message too old to delete), the
         # partial remains but at least the full answer was delivered.
-        if stale_message_id and stale_message_id != last_message_id:
+        if stale_message_ids:
             delete_fn = getattr(self.adapter, "delete_message", None)
             if delete_fn is not None:
-                try:
-                    await delete_fn(self.chat_id, stale_message_id)
-                except Exception as e:
-                    logger.debug(
-                        "Fallback partial cleanup failed (%s): %s",
-                        stale_message_id, e,
-                    )
+                for stale_id in stale_message_ids:
+                    if stale_id == last_message_id:
+                        continue
+                    try:
+                        await delete_fn(self.chat_id, stale_id)
+                    except Exception as e:
+                        logger.debug(
+                            "Fallback partial cleanup failed (%s): %s",
+                            stale_id, e,
+                        )
 
+        await self._cleanup_pending_preview_after_replay(
+            final_text,
+            current_message_id=last_message_id,
+        )
         self._message_id = last_message_id
+        self._preview_message_ids = []
         self._already_sent = True
         self._final_response_sent = True
         self._final_content_delivered = True
@@ -1001,13 +1203,21 @@ class GatewayStreamConsumer:
         if not tail.strip():
             return
         try:
-            result = await self.adapter.send(
-                chat_id=self.chat_id,
-                content=tail,
-                metadata=self.metadata,
+            raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
+            _len_fn: "Callable[[str], int]" = (
+                self.adapter.message_len_fn
+                if isinstance(self.adapter, _BasePlatformAdapter)
+                else len
             )
-            if result.success:
-                self._already_sent = True
+            safe_limit = max(500, raw_limit - 100)
+            for chunk in self._split_text_chunks(tail, safe_limit, len_fn=_len_fn):
+                new_id = await self._send_new_chunk(chunk, None)
+                if not new_id:
+                    break
+                # If a later tail chunk hits flood-control and the stream task is
+                # cancelled, the ids already sent must still be eligible for the
+                # base final replay cleanup.
+                self._remember_preview_text_for_cleanup(self._accumulated)
         except Exception as e:
             logger.error("Segment-break tail flush error: %s", e)
 
@@ -1093,6 +1303,7 @@ class GatewayStreamConsumer:
         Ported from openclaw/openclaw#72038.
         """
         old_message_id = self._message_id
+        old_message_ids = self._stale_preview_cleanup_ids(old_message_id)
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
@@ -1109,16 +1320,17 @@ class GatewayStreamConsumer:
         # is best-effort; platforms that don't implement ``delete_message``
         # just leave the preview behind (still an acceptable outcome —
         # the visible final timestamp is the important part).
-        if old_message_id and old_message_id != "__no_edit__":
+        if old_message_ids:
             delete_fn = getattr(self.adapter, "delete_message", None)
             if delete_fn is not None:
-                try:
-                    await delete_fn(self.chat_id, old_message_id)
-                except Exception as e:
-                    logger.debug(
-                        "Fresh-final preview cleanup failed (%s): %s",
-                        old_message_id, e,
-                    )
+                for old_id in old_message_ids:
+                    try:
+                        await delete_fn(self.chat_id, old_id)
+                    except Exception as e:
+                        logger.debug(
+                            "Fresh-final preview cleanup failed (%s): %s",
+                            old_id, e,
+                        )
         # Adopt the new message id as the current message so subsequent
         # callers (e.g. overflow split loops, finalize retries) see a
         # consistent state.
@@ -1132,6 +1344,11 @@ class GatewayStreamConsumer:
             # don't try to edit something we can't address.
             self._message_id = "__no_edit__"
             self._message_created_ts = None
+        await self._cleanup_pending_preview_after_replay(
+            text,
+            current_message_id=self._message_id,
+        )
+        self._preview_message_ids = []
         self._already_sent = True
         self._last_sent_text = text
         if is_turn_final:
@@ -1264,12 +1481,17 @@ class GatewayStreamConsumer:
                             and result.message_id
                             and result.message_id != self._message_id
                         ):
+                            self._remember_preview_message_ids(
+                                self._message_id,
+                                *[str(mid) for mid in _continuation_ids],
+                            )
                             self._message_id = str(result.message_id)
                             self._message_created_ts = time.monotonic()
                             self._last_sent_text = ""
                             self._notify_new_message()
                         else:
                             self._last_sent_text = text
+                        self._remember_preview_text_for_cleanup(text)
                         # Successful edit — reset flood strike counter
                         self._flood_strikes = 0
                         return True
@@ -1328,6 +1550,8 @@ class GatewayStreamConsumer:
                 if result.success:
                     if result.message_id:
                         self._message_id = result.message_id
+                        self._remember_preview_message_ids(result.message_id)
+                        self._remember_preview_text_for_cleanup(text)
                         # Track when the preview first became visible to
                         # the user so fresh-final logic can detect stale
                         # preview timestamps on long-running responses.
