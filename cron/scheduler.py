@@ -15,6 +15,7 @@ import contextvars
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -985,7 +986,13 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
 
-    raw = Path(script_path).expanduser()
+    # Split script path from arguments (e.g. "task_wrapper.py post_afternoon"
+    # → script_file="task_wrapper.py", script_args=["post_afternoon"])
+    _parts = shlex.split(script_path)
+    script_file = _parts[0]
+    script_args = _parts[1:]
+
+    raw = Path(script_file).expanduser()
     if raw.is_absolute():
         path = raw.resolve()
     else:
@@ -1028,9 +1035,9 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
                 "On Windows, install Git for Windows (which ships Git Bash) "
                 "or rewrite the script as Python (.py)."
             )
-        argv = [_bash, str(path)]
+        argv = [_bash, str(path)] + script_args
     else:
-        argv = [sys.executable, str(path)]
+        argv = [sys.executable, str(path)] + script_args
 
     run_env = os.environ.copy()
     run_env["HERMES_HOME"] = str(_get_hermes_home())
