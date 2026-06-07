@@ -165,12 +165,16 @@ def show_status(args):
             continue
         value = _resolve_env(env_ref)
         has_key = bool(value)
-        display = redact_key(value) if not show_all else value
+        # ``--all`` widens component coverage; it must never widen secret
+        # exposure.  Status output is routinely captured in terminal
+        # transcripts, cron logs, and agent sessions, so credentials stay
+        # masked even when the caller asks for the full status view.
+        display = redact_key(value)
         print(f"  {name:<12}  {check_mark(has_key)} {display}")
 
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    anthropic_display = redact_key(anthropic_value) if not show_all else anthropic_value
+    anthropic_display = redact_key(anthropic_value)
     print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
 
     # =========================================================================

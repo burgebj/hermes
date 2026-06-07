@@ -5741,6 +5741,35 @@ def redact_key(key: str) -> str:
     return mask_secret(key, empty=color("(not set)", Colors.DIM))
 
 
+_DISPLAY_SECRET_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "auth",
+    "private_key",
+)
+
+
+def _display_key_is_sensitive(key: object) -> bool:
+    normalized = str(key or "").lower().replace("-", "_")
+    return any(part in normalized for part in _DISPLAY_SECRET_KEY_PARTS)
+
+
+def _redact_config_value_for_display(value, *, key: object = ""):
+    """Return config data safe to render in human-facing CLI output."""
+    if _display_key_is_sensitive(key):
+        return redact_key(str(value) if value is not None else "")
+    if isinstance(value, dict):
+        return {k: _redact_config_value_for_display(v, key=k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_config_value_for_display(item) for item in value]
+    return value
+
+
 def show_config():
     """Display current configuration."""
     config = load_config()
@@ -5783,7 +5812,8 @@ def show_config():
     # Model settings
     print()
     print(color("◆ Model", Colors.CYAN, Colors.BOLD))
-    print(f"  Model:        {config.get('model', 'not set')}")
+    model_display = _redact_config_value_for_display(config.get('model', 'not set'), key="model")
+    print(f"  Model:        {model_display}")
     _cfg_max_turns = config.get('agent', {}).get('max_turns', DEFAULT_CONFIG['agent']['max_turns'])
     print(f"  Max turns:    {_cfg_max_turns}")
     # Warn on stale HERMES_MAX_ITERATIONS ghost in .env that disagrees with
@@ -5909,7 +5939,10 @@ def show_config():
                 key = var["key"]
                 value = resolved.get(key, "")
                 skill_name = var.get("skill", "")
-                display_val = str(value) if value else color("(not set)", Colors.DIM)
+                if _display_key_is_sensitive(key):
+                    display_val = redact_key(str(value) if value else "")
+                else:
+                    display_val = str(value) if value else color("(not set)", Colors.DIM)
                 print(f"  {key:<20s} {display_val}  {color(f'[{skill_name}]', Colors.DIM)}")
     except Exception:
         pass

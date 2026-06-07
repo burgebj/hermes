@@ -25,6 +25,27 @@ from hermes_cli.config import (
 )
 
 
+
+def test_show_config_masks_nested_secret_values(monkeypatch, capsys, tmp_path):
+    from hermes_cli.config import show_config
+
+    sentinel = "config-secret-should-not-leak-1234567890"
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "model:\n"
+        "  provider: custom\n"
+        "  default: custom/model\n"
+        f"  api_key: {sentinel}\n",
+        encoding="utf-8",
+    )
+
+    show_config()
+
+    output = capsys.readouterr().out
+    assert sentinel not in output
+    assert "conf...7890" in output
+
+
 class TestGetHermesHome:
     def test_default_path(self):
         with patch.dict(os.environ, {}, clear=False):

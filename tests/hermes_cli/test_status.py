@@ -14,6 +14,25 @@ def test_show_status_includes_tavily_key(monkeypatch, capsys, tmp_path):
     assert "tvly...cdef" in output
 
 
+def test_show_status_all_masks_api_key_values(monkeypatch, capsys, tmp_path):
+    """--all must not downgrade credential masking in status output."""
+    sentinel_values = {
+        "NVIDIA_API_KEY": "nim-secret-should-not-leak-1234567890",
+        "KIMI_API_KEY": "kimi-secret-should-not-leak-0987654321",
+    }
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for env_key, sentinel in sentinel_values.items():
+        monkeypatch.setenv(env_key, sentinel)
+
+    show_status(SimpleNamespace(all=True, deep=False))
+
+    output = capsys.readouterr().out
+    for sentinel in sentinel_values.values():
+        assert sentinel not in output
+    assert "nim-...7890" in output
+    assert "kimi...4321" in output
+
+
 def test_show_status_termux_gateway_section_skips_systemctl(monkeypatch, capsys, tmp_path):
     from hermes_cli import status as status_mod
     import hermes_cli.auth as auth_mod
