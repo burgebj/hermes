@@ -2201,3 +2201,133 @@ class TestInstallPathSafety:
 
         assert not (skills_dir / "bad-skill" / "leak.txt").exists()
         assert secret.read_text() == "data exfiltration payload\n"
+
+
+# ---------------------------------------------------------------------------
+# _github_get_with_retry — transient rate-limit retry
+# ---------------------------------------------------------------------------
+
+
+def _resp(status_code, headers=None):
+    return MagicMock(status_code=status_code, headers=headers or {})
+
+
+class TestGitHubGetWithRetry:
+    def test_returns_200_without_retry(self):
+        from tools.skills_hub import _github_get_with_retry
+
+        sleeps = []
+        ok = _resp(200)
+        with patch("tools.skills_hub.httpx.get", return_value=ok) as mock_get:
+            out = _github_get_with_retry(
+                "https://api.github.com/x", sleep=sleeps.append,
+            )
+        assert out is ok
+        assert mock_get.call_count == 1
+        assert sleeps == []
+
+    def test_retries_secondary_rate_limit_then_succeeds(self):
+        from tools.skills_hub import _github_get_with_retry
+
+        # 403 with remaining > 0 is the secondary/abuse limit -> retryable.
+        rate_limited = _resp(403, {"X-RateLimit-Remaining": "57"})
+        ok = _resp(200)
+        sleeps = []
+        with patch(
+            "tools.skills_hub.httpx.get",
+            side_effect=[rate_limited, ok],
+        ) as mock_get:
+            out = _github_get_with_retry(
+                "https://api.github.com/x", sleep=sleeps.append,
+            )
+        assert out is ok
+        assert mock_get.call_count == 2
+        assert len(sleeps) == 1
+
+    def test_does_not_retry_primary_quota_exhaustion(self):
+        from tools.skills_hub import _github_get_with_retry
+
+        # 403 with remaining == 0 is the primary quota -> NOT retryable
+        # (a short backoff cannot fix an exhausted hourly quota).
+        exhausted = _resp(403, {"X-RateLimit-Remaining": "0"})
+        sleeps = []
+        with patch(
+            "tools.skills_hub.httpx.get", return_value=exhausted,
+        ) as mock_get:
+            out = _github_get_with_retry(
+                "https://api.github.com/x", sleep=sleeps.append,
+            )
+        assert out is exhausted
+        assert mock_get.call_count == 1
+        assert sleeps == []
+
+    def test_retries_5xx_then_gives_up_returning_last_response(self):
+        from tools.skills_hub import _github_get_with_retry
+
+        server_err = _resp(503)
+        sleeps = []
+        with patch(
+            "tools.skills_hub.httpx.get", return_value=server_err,
+        ) as mock_get:
+            out = _github_get_with_retry(
+                "https://api.github.com/x", max_retries=2, sleep=sleeps.append,
+            )
+        assert out is server_err
+        assert mock_get.call_count == 3  # initial + 2 retries
+        assert len(sleeps) == 2
+
+    def test_honours_retry_after_header_seconds(self):
+        from tools.skills_hub import _github_get_with_retry
+
+        rl = _resp(429, {"Retry-After": "7"})
+        ok = _resp(200)
+        sleeps = []
+        with patch(
+            "tools.skills_hub.httpx.get", side_effect=[rl, ok],
+        ):
+            _github_get_with_retry(
+                "https://api.github.com/x", sleep=sleeps.append,
+            )
+        assert sleeps == [7.0]
+
+    def test_transport_error_retried_then_none(self):
+        from tools.skills_hub import _github_get_with_retry
+
+        sleeps = []
+        with patch(
+            "tools.skills_hub.httpx.get",
+            side_effect=httpx.ConnectError("boom"),
+        ) as mock_get:
+            out = _github_get_with_retry(
+                "https://api.github.com/x", max_retries=2, sleep=sleeps.append,
+            )
+        assert out is None
+        assert mock_get.call_count == 3
+        assert len(sleeps) == 2
+
+
+class TestListSkillsRetriesOnTransient:
+    @patch("tools.skills_hub.GitHubSource._write_cache")
+    @patch("tools.skills_hub.GitHubSource._read_cache", return_value=None)
+    def test_list_skills_in_repo_recovers_after_transient_403(
+        self, _mock_read, _mock_write,
+    ):
+        """A single secondary-rate-limit blip must not zero out the source."""
+        auth = MagicMock(spec=GitHubAuth)
+        auth.get_headers.return_value = {}
+        source = GitHubSource(auth=auth)
+
+        transient = _resp(403, {"X-RateLimit-Remaining": "59"})
+        contents = MagicMock(status_code=200, headers={})
+        contents.json.return_value = []  # empty dir, but a real 200 response
+
+        with patch(
+            "tools.skills_hub.httpx.get",
+            side_effect=[transient, contents],
+        ), patch("tools.skills_hub.time.sleep"):
+            out = source._list_skills_in_repo("owner/repo", "skills/")
+
+        assert out == []
+        # Crucially, the transient 403 did NOT flag the instance as
+        # rate-limited (remaining > 0) and the call recovered on retry.
+        assert source.is_rate_limited is False

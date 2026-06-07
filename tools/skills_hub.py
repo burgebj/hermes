@@ -231,6 +231,105 @@ def _validate_bundle_rel_path(rel_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# GitHub transient-rate-limit retry
+# ---------------------------------------------------------------------------
+
+# Transient GitHub responses worth retrying. A 403 with a non-zero remaining
+# quota (or a 429) is GitHub's *secondary* / abuse rate limit, which clears on
+# its own in a few seconds; 5xx are transient server errors. A 403 with
+# ``X-RateLimit-Remaining: 0`` is the *primary* quota being exhausted, which a
+# short backoff cannot fix, so we do NOT retry that case (callers flag it via
+# ``_check_rate_limit_response`` and degrade gracefully instead).
+_GITHUB_RETRY_STATUS = (429, 500, 502, 503, 504)
+_GITHUB_MAX_RETRIES = 3
+_GITHUB_BACKOFF_BASE_S = 2.0
+_GITHUB_BACKOFF_CAP_S = 30.0
+
+
+def _github_retry_after_seconds(resp: "httpx.Response", attempt: int) -> float:
+    """Compute how long to wait before retrying a transient GitHub response.
+
+    Honours ``Retry-After`` (seconds) and ``X-RateLimit-Reset`` (epoch) when
+    present, otherwise falls back to capped exponential backoff. The result is
+    always clamped to ``_GITHUB_BACKOFF_CAP_S`` so a misbehaving header cannot
+    stall the whole index build.
+    """
+    # Retry-After: integer seconds.
+    retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), _GITHUB_BACKOFF_CAP_S)
+        except ValueError:
+            pass
+    # X-RateLimit-Reset: epoch seconds at which the quota resets.
+    reset = resp.headers.get("X-RateLimit-Reset") or resp.headers.get("x-ratelimit-reset")
+    if reset:
+        try:
+            delta = float(reset) - time.time()
+            if delta > 0:
+                return min(delta, _GITHUB_BACKOFF_CAP_S)
+        except ValueError:
+            pass
+    # Exponential backoff: 2s, 4s, 8s, ... capped.
+    return min(_GITHUB_BACKOFF_BASE_S * (2 ** attempt), _GITHUB_BACKOFF_CAP_S)
+
+
+def _is_retryable_github_response(resp: "httpx.Response") -> bool:
+    """Whether a non-200 GitHub response is a transient error worth retrying."""
+    if resp.status_code in _GITHUB_RETRY_STATUS:
+        return True
+    # Secondary/abuse rate limit: 403 but quota NOT exhausted. Clears quickly.
+    if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining", "") != "0":
+        return True
+    return False
+
+
+def _github_get_with_retry(
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, str]] = None,
+    timeout: float = 15,
+    max_retries: int = _GITHUB_MAX_RETRIES,
+    sleep=time.sleep,
+) -> Optional["httpx.Response"]:
+    """GET a GitHub URL, retrying transient rate-limit / server errors.
+
+    Returns the final ``httpx.Response`` (which may still be non-200 for a
+    primary-quota 403 or a persistent error), or ``None`` if every attempt
+    raised a transport-level ``httpx.HTTPError``. Retries are bounded and use
+    ``_github_retry_after_seconds`` for the delay so a single transient blip no
+    longer collapses an entire source to zero results.
+    """
+    last_resp: Optional["httpx.Response"] = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = httpx.get(
+                url, headers=headers, params=params,
+                timeout=timeout, follow_redirects=True,
+            )
+        except httpx.HTTPError as exc:
+            if attempt >= max_retries:
+                logger.debug("GitHub GET %s failed after %d attempts: %s",
+                             url, attempt + 1, exc)
+                return None
+            sleep(min(_GITHUB_BACKOFF_BASE_S * (2 ** attempt), _GITHUB_BACKOFF_CAP_S))
+            continue
+        last_resp = resp
+        if resp.status_code == 200 or not _is_retryable_github_response(resp):
+            return resp
+        if attempt >= max_retries:
+            return resp
+        wait = _github_retry_after_seconds(resp, attempt)
+        logger.warning(
+            "GitHub GET %s returned %d (transient); retry %d/%d in %.1fs",
+            url, resp.status_code, attempt + 1, max_retries, wait,
+        )
+        sleep(wait)
+    return last_resp
+
+
+# ---------------------------------------------------------------------------
 # GitHub Authentication
 # ---------------------------------------------------------------------------
 
@@ -550,11 +649,11 @@ class GitHubSource(SkillSource):
             return [SkillMeta(**s) for s in cached]
 
         url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
-        try:
-            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15, follow_redirects=True)
-            if resp.status_code != 200:
-                return []
-        except httpx.HTTPError:
+        resp = _github_get_with_retry(url, headers=self.auth.get_headers(), timeout=15)
+        if resp is None:
+            return []
+        if resp.status_code != 200:
+            self._check_rate_limit_response(resp)
             return []
 
         entries = resp.json()
@@ -604,28 +703,32 @@ class GitHubSource(SkillSource):
         headers = self.auth.get_headers()
 
         # Resolve default branch
+        resp = _github_get_with_retry(
+            f"https://api.github.com/repos/{repo}",
+            headers=headers, timeout=15,
+        )
+        if resp is None:
+            return None
+        if resp.status_code != 200:
+            self._check_rate_limit_response(resp)
+            return None
         try:
-            resp = httpx.get(
-                f"https://api.github.com/repos/{repo}",
-                headers=headers, timeout=15, follow_redirects=True,
-            )
-            if resp.status_code != 200:
-                self._check_rate_limit_response(resp)
-                return None
             default_branch = resp.json().get("default_branch", "main")
-        except (httpx.HTTPError, ValueError):
+        except ValueError:
             return None
 
         # Fetch recursive tree
+        resp = _github_get_with_retry(
+            f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
+            params={"recursive": "1"},
+            headers=headers, timeout=30,
+        )
+        if resp is None:
+            return None
+        if resp.status_code != 200:
+            self._check_rate_limit_response(resp)
+            return None
         try:
-            resp = httpx.get(
-                f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
-                params={"recursive": "1"},
-                headers=headers, timeout=30, follow_redirects=True,
-            )
-            if resp.status_code != 200:
-                self._check_rate_limit_response(resp)
-                return None
             tree_data = resp.json()
             if tree_data.get("truncated"):
                 logger.debug("Git tree truncated for %s, cannot cache", repo)
