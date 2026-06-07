@@ -3724,6 +3724,30 @@ class TestRegisterMcpServers:
         finally:
             _servers.pop("existing", None)
 
+    def test_reconnects_disconnected_servers(self):
+        from tools.mcp_tool import register_mcp_servers, _servers, _ensure_mcp_loop
+
+        stale_server = _make_mock_server("existing", session=None)
+        stale_server._registered_tool_names = ["mcp_existing_tool"]
+        _servers["existing"] = stale_server
+
+        async def fake_register(name, cfg):
+            server = _make_mock_server(name)
+            server._registered_tool_names = ["mcp_existing_tool"]
+            _servers[name] = server
+            return ["mcp_existing_tool"]
+
+        try:
+            with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+                 patch("tools.mcp_tool._discover_and_register_server", side_effect=fake_register) as mock_register, \
+                 patch("tools.mcp_tool._existing_tool_names", return_value=["mcp_existing_tool"]):
+                _ensure_mcp_loop()
+                result = register_mcp_servers({"existing": {"command": "test"}})
+            assert result == ["mcp_existing_tool"]
+            mock_register.assert_called_once_with("existing", {"command": "test"})
+        finally:
+            _servers.pop("existing", None)
+
     def test_skips_disabled_servers(self):
         from tools.mcp_tool import register_mcp_servers, _servers
 
