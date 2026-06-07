@@ -17974,11 +17974,52 @@ class GatewayRunner:
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
+
+            _action_journal = None
+            try:
+                from gateway.action_journal import ActionJournal
+                _action_journal = ActionJournal()
+            except Exception:
+                logger.debug("action journal initialization failed", exc_info=True)
+
+            def _gateway_tool_start_callback(call_id, tool_name, args):
+                if _action_journal is not None:
+                    try:
+                        _action_journal.record_tool_started(
+                            session_id=session_id,
+                            session_key=session_key,
+                            tool_call_id=call_id,
+                            tool_name=tool_name,
+                            args=args,
+                        )
+                    except Exception:
+                        logger.debug("action journal tool start failed", exc_info=True)
+                if _voice_ack_guild[0] is not None:
+                    voice_ack_callback(call_id, tool_name, args)
+
+            def _gateway_tool_complete_callback(call_id, tool_name, args, result):
+                if _action_journal is None:
+                    return
+                try:
+                    _status = "completed"
+                    _result_text = str(result or "")
+                    if _result_text.startswith("Error executing tool") or '"error"' in _result_text[:200].lower():
+                        _status = "error"
+                    _action_journal.record_tool_finished(
+                        session_id=session_id,
+                        session_key=session_key,
+                        tool_call_id=call_id,
+                        tool_name=tool_name,
+                        status=_status,
+                        result=result,
+                    )
+                except Exception:
+                    logger.debug("action journal tool complete failed", exc_info=True)
+
+            setattr(agent, "tool_start_callback", _gateway_tool_start_callback)
+            setattr(agent, "tool_complete_callback", _gateway_tool_complete_callback)
             # Discord voice verbal-ack hook (fires once per turn on first tool
             # call; armed only when in a voice channel with the mixer running).
-            agent.tool_start_callback = (
-                voice_ack_callback if _voice_ack_guild[0] is not None else None
-            )
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
@@ -18337,12 +18378,26 @@ class GatewayRunner:
                     if _reason == "shutdown_timeout"
                     else "a gateway interruption"
                 )
-                message = (
+                _journal_context = ""
+                try:
+                    from gateway.action_journal import format_recovery_context
+                    _journal_context = format_recovery_context(
+                        session_id=session_id,
+                        session_key=session_key,
+                    )
+                except Exception:
+                    logger.debug("restart recovery action-journal context failed", exc_info=True)
+                _base_note = (
                     f"[System note: Your previous turn in this session was interrupted "
                     f"by {_reason_phrase}. The conversation history below is intact. "
                     f"If it contains unfinished tool result(s), process them first and "
                     f"summarize what was accomplished, then address the user's new "
-                    f"message below.]\n\n"
+                    f"message below.]"
+                )
+                message = (
+                    _base_note
+                    + ("\n" + _journal_context if _journal_context else "")
+                    + "\n\n"
                     + message
                 )
             elif _has_fresh_tool_tail:
@@ -18411,7 +18466,34 @@ class GatewayRunner:
                 }
                 if observed_group_context:
                     _conversation_kwargs["persist_user_message"] = message
+                if _action_journal is not None:
+                    try:
+                        _action_journal.record_turn_started(
+                            session_id=session_id,
+                            session_key=session_key,
+                            platform=getattr(source.platform, "value", str(source.platform)) if source.platform else "",
+                            chat_id=source.chat_id or "",
+                            thread_id=source.thread_id or "",
+                            user_text=message,
+                        )
+                    except Exception:
+                        logger.debug("action journal turn start failed", exc_info=True)
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+                if _action_journal is not None:
+                    try:
+                        _turn_status = "completed"
+                        if result.get("interrupted"):
+                            _turn_status = "interrupted"
+                        elif result.get("failed") or result.get("partial") or result.get("error"):
+                            _turn_status = "failed"
+                        _action_journal.record_turn_finished(
+                            session_id=session_id,
+                            session_key=session_key,
+                            status=_turn_status,
+                            error=result.get("error"),
+                        )
+                    except Exception:
+                        logger.debug("action journal turn finish failed", exc_info=True)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent
