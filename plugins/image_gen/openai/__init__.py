@@ -19,6 +19,13 @@ Selection precedence (first hit wins):
 2. ``image_gen.openai.model`` in ``config.yaml``
 3. ``image_gen.model`` in ``config.yaml`` (when it's one of our tier IDs)
 4. :data:`DEFAULT_MODEL` — ``gpt-image-2-medium``
+
+Endpoint override:
+
+- ``image_gen.openai.base_url`` in ``config.yaml`` is passed explicitly to
+  ``openai.OpenAI(base_url=...)`` when set, so image generation can target a
+  provider-specific OpenAI-compatible endpoint without relying on the global
+  ``OPENAI_BASE_URL`` environment variable.
 """
 
 from __future__ import annotations
@@ -115,6 +122,21 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
         return candidate, _MODELS[candidate]
 
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
+
+
+def _resolve_base_url() -> Optional[str]:
+    """Return a normalized explicit base URL for the OpenAI image client."""
+    cfg = _load_openai_config()
+    openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
+    if not isinstance(openai_cfg, dict):
+        return None
+
+    value = openai_cfg.get("base_url")
+    if not isinstance(value, str):
+        return None
+
+    cleaned = value.strip().rstrip("/")
+    return cleaned or None
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +246,11 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
         try:
-            client = openai.OpenAI()
+            base_url = _resolve_base_url()
+            if base_url is not None:
+                client = openai.OpenAI(base_url=base_url)
+            else:
+                client = openai.OpenAI()
             response = client.images.generate(**payload)
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
