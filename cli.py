@@ -12668,6 +12668,12 @@ class HermesCLI:
                     _title_failure_cb = getattr(
                         self.agent, "_emit_auxiliary_failure", None
                     ) if self.agent else None
+                    # Prefer the *effective* runtime the agent actually used
+                    # (e.g. when --provider names a custom provider whose
+                    # model/base_url differ from the CLI defaults) so title
+                    # generation targets the same backend as the main reply
+                    # rather than the global default (issue #36748).
+                    _agent = self.agent
                     maybe_auto_title(
                         self._session_db,
                         self.session_id,
@@ -12676,11 +12682,11 @@ class HermesCLI:
                         self.conversation_history,
                         failure_callback=_title_failure_cb,
                         main_runtime={
-                            "model": self.model,
-                            "provider": self.provider,
-                            "base_url": self.base_url,
-                            "api_key": self.api_key,
-                            "api_mode": self.api_mode,
+                            "model": getattr(_agent, "model", None) or self.model,
+                            "provider": getattr(_agent, "provider", None) or self.provider,
+                            "base_url": getattr(_agent, "base_url", None) or self.base_url,
+                            "api_key": getattr(_agent, "api_key", None) or self.api_key,
+                            "api_mode": getattr(_agent, "api_mode", None) or self.api_mode,
                         },
                     )
                 except Exception:
