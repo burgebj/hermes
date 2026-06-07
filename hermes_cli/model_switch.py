@@ -1985,7 +1985,7 @@ def list_picker_providers(
     The typed ``/model <name>`` path is unaffected -- only the interactive
     picker payload is narrowed.
     """
-    from hermes_cli.models import fetch_openrouter_models
+    from hermes_cli.models import fetch_openrouter_models, fetch_github_model_catalog
 
     providers = list_authenticated_providers(
         current_provider=current_provider,
@@ -2008,6 +2008,32 @@ def list_picker_providers(
             p = dict(p)
             p["models"] = live_ids[:max_models]
             p["total_models"] = len(live_ids)
+        elif slug == "copilot":
+            # Live-fetch the GitHub Copilot catalog so newly-released models
+            # (e.g. Claude Opus 4.8, GPT-5.5) show up in the picker without
+            # waiting for the hardcoded fallback in setup.py to be updated.
+            # Filter embeddings + ancient legacy models that aren't useful
+            # in a chat picker.
+            try:
+                catalog = fetch_github_model_catalog() or []
+                live_ids = []
+                for item in catalog:
+                    mid = str(item.get("id") or "").strip()
+                    if not mid:
+                        continue
+                    # Drop embedding models and pre-4o legacy chat models
+                    if "embedding" in mid or mid.startswith(("gpt-3.5", "gpt-4-")):
+                        continue
+                    if mid in {"gpt-4", "gpt-4-0613"}:
+                        continue
+                    live_ids.append(mid)
+                if live_ids:
+                    p = dict(p)
+                    p["models"] = live_ids[:max_models]
+                    p["total_models"] = len(live_ids)
+            except Exception:
+                # Fall through to hardcoded list from _PROVIDER_MODELS
+                pass
 
         has_models = bool(p.get("models"))
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
