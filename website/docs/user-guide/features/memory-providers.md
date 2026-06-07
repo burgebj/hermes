@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory, Memori, MongoDB"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent supports 10 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, memori, mongodb
 ```
 
 ## How It Works
@@ -543,6 +543,60 @@ hermes memory setup
 
 ---
 
+### MongoDB
+
+Hybrid search (vector + BM25 fused via `$rankFusion`), TTL-driven automatic forgetting, time-decay relevance, and entity graph traversal — all from a single MongoDB cluster (self-hosted or Atlas free tier). Optional embedding via OpenAI or Voyage; runs as a tuned BM25 + entity-graph store without an embedding provider.
+
+| | |
+|---|---|
+| **Best for** | Single-backend deployments wanting hybrid search, TTL forgetting, and graph queries without separate vector/graph stores |
+| **Requires** | `pip install hermes-mongodb-memory` + MongoDB 7+ ([Atlas free tier](https://www.mongodb.com/cloud/atlas) or self-hosted) |
+| **Data storage** | MongoDB / Atlas |
+| **Cost** | Free (Atlas free tier or self-hosted) |
+
+**Tools (6):** `mongo_remember` (store with category/entities/TTL), `mongo_search` (hybrid vector + BM25 + time-decay), `mongo_recall` (entity-graph `$graphLookup` traversal), `mongo_forget` (delete or schedule TTL), `mongo_profile` (preferences + projects + decisions summary), `mongo_reflect` (cross-category clustering by entity)
+
+**Setup:**
+```bash
+pip install hermes-mongodb-memory
+hermes config set memory.provider mongodb
+hermes memory setup
+hermes mongodb init-indexes   # create collection + TTL indexes
+```
+
+For optional vector search, add `[openai]` or `[voyage]` to the install:
+```bash
+pip install "hermes-mongodb-memory[openai]"   # or [voyage], or [all]
+```
+
+**Config:** `$HERMES_HOME/mongodb.json` (env vars override file values)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `connection_uri` | — | MongoDB URI (env: `HERMES_MONGODB_URI`) |
+| `database` | `hermes_memory` | Database name |
+| `embedding_provider` | `none` | `none` / `openai` / `voyage` |
+| `embedding_model` | `text-embedding-3-small` | Embedding model name |
+| `embedding_dim` | `1536` | Vector dimension; must match Atlas Vector Search index |
+| `tenant_scope` | `per-workspace` | `global` / `per-workspace` / `per-profile` |
+| `auto_extract` | `false` | Run regex extractor at session end |
+| `time_decay_half_life_days` | `30` | Half-life for relevance decay (0 disables) |
+| `default_ttl_days` | `0` | Default TTL for new memories (0 = never) |
+| `hybrid_vector_weight` | `0.6` | Vector vs BM25 weight when both active |
+| `prefetch_limit` | `5` | Memories injected into each turn |
+
+**Key features:**
+- **Native hybrid search** via Atlas `$rankFusion` (8.1+); transparent fallback to `$text` + in-process cosine on self-hosted clusters
+- **TTL forgetting** via MongoDB TTL indexes — set `ttl_days` per memory or `default_ttl_days` globally
+- **Entity graph traversal** via `$graphLookup` for "memories related to X"
+- **Time-decay scoring** built into the aggregation pipeline (`$exp` over `created_at`)
+- **`hermes mongodb` subcommand** with `init-indexes`, `status`, and `doctor` health checks
+- **Server-side telemetry attribution** — connections appear as `Hermes-MongoDB-Memory/<version>` in MongoDB's handshake metrics
+
+**Source:** [github.com/alexbevi/mongodb_hermes_memory](https://github.com/alexbevi/mongodb_hermes_memory) · [PyPI](https://pypi.org/project/hermes-mongodb-memory/)
+
+---
+
 ## Provider Comparison
 
 | Provider | Storage | Cost | Tools | Dependencies | Unique Feature |
@@ -556,6 +610,7 @@ hermes memory setup
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
 | **Memori** | Cloud | Free/Paid | 5 | `hermes-memori` | Tool-aware memory + structured recall |
+| **MongoDB** | Local/Cloud | Free | 6 | `hermes-mongodb-memory` | Hybrid `$rankFusion` + TTL forgetting + entity `$graphLookup` |
 
 ## Profile Isolation
 
@@ -564,6 +619,7 @@ Each provider's data is isolated per [profile](/user-guide/profiles):
 - **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
 - **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
+- **Tenant-scoped providers** (MongoDB) namespace records by `tenant_scope` (`global` / `per-workspace` / `per-profile`) inside a shared cluster
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
 
 ## Building a Memory Provider
