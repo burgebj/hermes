@@ -1,0 +1,9 @@
+name: fallback-alert
+version: "1.0.0"
+description: "Optional plugin — sends a Telegram notification when Hermes activates a provider fallback. Detects mid-session that the provider/model in the post_api_request hook differs from the configured primary (model.provider + model.default in config.yaml). No-op when its required env vars are missing."
+author: hermes-community
+requires_env:
+  - FALLBACK_ALERT_TELEGRAM_BOT_TOKEN
+  - FALLBACK_ALERT_TELEGRAM_CHAT_ID
+hooks:
+  - post_api_request
