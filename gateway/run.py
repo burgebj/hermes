@@ -1605,6 +1605,126 @@ def _load_gateway_runtime_config() -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
+def _coerce_post_turn_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < minimum:
+        return minimum
+    if parsed > maximum:
+        return maximum
+    return parsed
+
+
+def _coerce_post_turn_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < minimum:
+        return minimum
+    if parsed > maximum:
+        return maximum
+    return parsed
+
+
+def _load_post_turn_compression_config(config: dict | None = None) -> dict:
+    """Parse opt-in idle compaction settings from config.yaml.
+
+    The feature is intentionally default-off: it spends provider tokens in the
+    background and can surprise users if enabled implicitly.  ``compression`` is
+    the natural home, but the old-style top-level key is accepted so early
+    testers can keep their local config while the option settles.
+    """
+    cfg = config if isinstance(config, dict) else _load_gateway_config()
+    compression_cfg = cfg.get("compression", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(compression_cfg, dict):
+        compression_cfg = {}
+
+    raw_post = {}
+    legacy_post = cfg.get("post_turn_compression", {}) if isinstance(cfg, dict) else {}
+    if isinstance(legacy_post, dict):
+        raw_post.update(legacy_post)
+    nested_post = compression_cfg.get("post_turn", {})
+    if isinstance(nested_post, dict):
+        raw_post.update(nested_post)
+
+    platforms_raw = raw_post.get("platforms", [])
+    if isinstance(platforms_raw, str):
+        platforms = [p.strip().lower() for p in platforms_raw.split(",") if p.strip()]
+    elif isinstance(platforms_raw, (list, tuple, set)):
+        platforms = [str(p).strip().lower() for p in platforms_raw if str(p).strip()]
+    else:
+        platforms = []
+
+    threshold_raw = compression_cfg.get("threshold", 0.50)
+    compression_threshold = _coerce_post_turn_float(
+        threshold_raw,
+        0.50,
+        minimum=0.05,
+        maximum=0.95,
+    )
+    compression_enabled = is_truthy_value(
+        compression_cfg.get("enabled"),
+        default=True,
+    )
+
+    return {
+        "enabled": compression_enabled
+        and is_truthy_value(raw_post.get("enabled"), default=False),
+        "delay_seconds": _coerce_post_turn_float(
+            raw_post.get("delay_seconds", raw_post.get("delay", 60.0)),
+            60.0,
+            minimum=0.0,
+            maximum=3600.0,
+        ),
+        "threshold_ratio": _coerce_post_turn_float(
+            raw_post.get("threshold_ratio", raw_post.get("trigger_ratio", 0.75)),
+            0.75,
+            minimum=0.05,
+            maximum=1.0,
+        ),
+        "min_message_count": _coerce_post_turn_int(
+            raw_post.get("min_message_count", 80),
+            80,
+            minimum=4,
+            maximum=10000,
+        ),
+        "platforms": platforms,
+        "compression_threshold": compression_threshold,
+    }
+
+
+def _post_turn_compression_due(
+    config: dict,
+    *,
+    last_prompt_tokens: int,
+    context_length: int,
+    message_count: int,
+) -> bool:
+    """Return True when a just-finished turn is worth compacting while idle."""
+    if not config.get("enabled"):
+        return False
+
+    min_message_count = int(config.get("min_message_count") or 0)
+    if min_message_count > 0 and message_count >= min_message_count:
+        return True
+
+    if last_prompt_tokens <= 0 or context_length <= 0:
+        return False
+
+    try:
+        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+    except Exception:
+        MINIMUM_CONTEXT_LENGTH = 8192
+
+    compression_threshold = float(config.get("compression_threshold") or 0.50)
+    threshold_tokens = max(int(context_length * compression_threshold), MINIMUM_CONTEXT_LENGTH)
+    trigger_tokens = int(threshold_tokens * float(config.get("threshold_ratio") or 0.75))
+    return last_prompt_tokens >= trigger_tokens
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -2113,6 +2233,8 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        self._post_turn_compression_tasks: Dict[str, asyncio.Task] = {}
+        self._post_turn_compression_started: set[str] = set()
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
@@ -7562,6 +7684,7 @@ class GatewayRunner:
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        self._cancel_pending_post_turn_compression(_quick_key)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -9905,6 +10028,26 @@ class GatewayRunner:
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
             )
+
+            if not agent_failed_early and not is_context_overflow_failure:
+                try:
+                    _post_turn_history = self.session_store.load_transcript(
+                        session_entry.session_id
+                    )
+                    self._schedule_post_turn_compression_if_needed(
+                        source=source,
+                        session_key=session_entry.session_key,
+                        session_id=session_entry.session_id,
+                        last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                        context_length=agent_result.get("context_length", 0),
+                        message_count=len(_post_turn_history),
+                    )
+                except Exception as _ptc_exc:
+                    logger.debug(
+                        "post-turn compression scheduling failed for %s: %s",
+                        session_entry.session_key,
+                        _ptc_exc,
+                    )
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
@@ -16490,6 +16633,313 @@ class GatewayRunner:
         if hasattr(self, "_busy_ack_ts"):
             self._busy_ack_ts.pop(session_key, None)
         return True
+
+    def _get_session_entry_for_key(self, session_key: str):
+        """Return the current SessionEntry without updating its activity time."""
+        if not session_key:
+            return None
+        store = getattr(self, "session_store", None)
+        if store is None:
+            return None
+        try:
+            if hasattr(store, "_ensure_loaded"):
+                store._ensure_loaded()
+            entries = getattr(store, "_entries", {}) or {}
+            return entries.get(session_key)
+        except Exception as exc:
+            logger.debug("post-turn compression: session lookup failed for %s: %s", session_key, exc)
+            return None
+
+    def _post_turn_compression_platform_allowed(self, cfg: dict, source: SessionSource) -> bool:
+        platforms = cfg.get("platforms") or []
+        if not platforms:
+            return True
+        try:
+            platform_key = _platform_config_key(source.platform).lower()
+            platform_value = source.platform.value.lower()
+        except Exception:
+            return False
+        return platform_key in platforms or platform_value in platforms
+
+    def _cancel_pending_post_turn_compression(self, session_key: str) -> None:
+        """Cancel an idle-delay compaction that has not started yet."""
+        if not session_key:
+            return
+        tasks = getattr(self, "_post_turn_compression_tasks", None)
+        if not isinstance(tasks, dict):
+            return
+        task = tasks.get(session_key)
+        if task is None or task.done():
+            return
+        started = getattr(self, "_post_turn_compression_started", set())
+        if session_key in started:
+            # Once compression has started it may already be inside the
+            # session-splitting code path, so let the guarded task finish.
+            return
+        task.cancel()
+
+    def _schedule_post_turn_compression_if_needed(
+        self,
+        *,
+        source: SessionSource,
+        session_key: str,
+        session_id: str,
+        last_prompt_tokens: int,
+        context_length: int,
+        message_count: int,
+    ) -> None:
+        """Schedule an opt-in idle compression task after a completed turn."""
+        cfg = _load_post_turn_compression_config()
+        if not self._post_turn_compression_platform_allowed(cfg, source):
+            return
+        if not _post_turn_compression_due(
+            cfg,
+            last_prompt_tokens=int(last_prompt_tokens or 0),
+            context_length=int(context_length or 0),
+            message_count=int(message_count or 0),
+        ):
+            return
+
+        tasks = getattr(self, "_post_turn_compression_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._post_turn_compression_tasks = tasks
+
+        existing = tasks.get(session_key)
+        if existing is not None and not existing.done():
+            self._cancel_pending_post_turn_compression(session_key)
+            if session_key in getattr(self, "_post_turn_compression_started", set()):
+                return
+
+        task = asyncio.create_task(
+            self._run_post_turn_compression(
+                source=source,
+                session_key=session_key,
+                expected_session_id=session_id,
+                expected_message_count=message_count,
+                cfg=cfg,
+            )
+        )
+        tasks[session_key] = task
+
+        background_tasks = getattr(self, "_background_tasks", None)
+        if isinstance(background_tasks, set):
+            background_tasks.add(task)
+
+        def _discard(done_task: asyncio.Task) -> None:
+            current = tasks.get(session_key)
+            if current is done_task:
+                tasks.pop(session_key, None)
+            started = getattr(self, "_post_turn_compression_started", None)
+            if isinstance(started, set):
+                started.discard(session_key)
+            if isinstance(background_tasks, set):
+                background_tasks.discard(done_task)
+
+        task.add_done_callback(_discard)
+        logger.info(
+            "Scheduled post-turn idle compression for %s in %.1fs "
+            "(messages=%s, prompt_tokens=%s, context=%s)",
+            session_key,
+            float(cfg.get("delay_seconds") or 0.0),
+            message_count,
+            last_prompt_tokens,
+            context_length,
+        )
+
+    async def _run_post_turn_compression(
+        self,
+        *,
+        source: SessionSource,
+        session_key: str,
+        expected_session_id: str,
+        expected_message_count: int,
+        cfg: dict,
+    ) -> None:
+        """Compact a completed session after it has stayed idle briefly."""
+        delay = float(cfg.get("delay_seconds") or 0.0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        started = getattr(self, "_post_turn_compression_started", None)
+        if not isinstance(started, set):
+            started = set()
+            self._post_turn_compression_started = started
+        started.add(session_key)
+
+        if self._running_agents.get(session_key):
+            logger.debug("post-turn compression skipped; session is active: %s", session_key)
+            return
+
+        entry = self._get_session_entry_for_key(session_key)
+        if entry is None or getattr(entry, "session_id", None) != expected_session_id:
+            logger.debug("post-turn compression skipped; session changed: %s", session_key)
+            return
+
+        history = self.session_store.load_transcript(expected_session_id)
+        if expected_message_count and len(history) != int(expected_message_count):
+            logger.debug(
+                "post-turn compression skipped; transcript changed for %s (%s != %s)",
+                session_key,
+                len(history),
+                expected_message_count,
+            )
+            return
+
+        msgs = [
+            {"role": m.get("role"), "content": m.get("content")}
+            for m in history
+            if m.get("role") in {"user", "assistant"} and m.get("content")
+        ]
+        if len(msgs) < 4:
+            return
+
+        run_generation = self._begin_session_run_generation(session_key)
+        self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
+        self._running_agents_ts[session_key] = time.time()
+
+        tmp_agent = None
+        try:
+            from agent.model_metadata import estimate_request_tokens_rough
+            from run_agent import AIAgent
+
+            user_config = _load_gateway_config()
+            model, runtime_kwargs = self._resolve_session_agent_runtime(
+                source=source,
+                session_key=session_key,
+                user_config=user_config if isinstance(user_config, dict) else None,
+            )
+            if not runtime_kwargs.get("api_key"):
+                logger.debug("post-turn compression skipped; no provider configured for %s", session_key)
+                return
+
+            # Re-check after claiming the idle slot. Commands like /new can
+            # bypass active sessions, so every destructive write below gets
+            # another session-id guard before it commits.
+            entry = self._get_session_entry_for_key(session_key)
+            if entry is None or getattr(entry, "session_id", None) != expected_session_id:
+                return
+
+            tmp_agent = AIAgent(
+                **runtime_kwargs,
+                model=model,
+                max_iterations=4,
+                quiet_mode=True,
+                skip_memory=True,
+                enabled_toolsets=["memory"],
+                session_id=expected_session_id,
+            )
+            tmp_agent._print_fn = lambda *a, **kw: None
+
+            sys_prompt = getattr(tmp_agent, "_cached_system_prompt", "") or ""
+            tools = getattr(tmp_agent, "tools", None) or None
+            approx_tokens = estimate_request_tokens_rough(
+                msgs,
+                system_prompt=sys_prompt,
+                tools=tools,
+            )
+
+            compressor = getattr(tmp_agent, "context_compressor", None)
+            if compressor is None or not compressor.has_content_to_compress(msgs):
+                return
+
+            trigger_tokens = int(
+                getattr(compressor, "threshold_tokens", 0)
+                * float(cfg.get("threshold_ratio") or 0.75)
+            )
+            min_messages = int(cfg.get("min_message_count") or 0)
+            if approx_tokens < trigger_tokens and len(history) < min_messages:
+                logger.debug(
+                    "post-turn compression skipped; session below trigger: %s (~%s < %s)",
+                    session_key,
+                    approx_tokens,
+                    trigger_tokens,
+                )
+                return
+
+            logger.info(
+                "post-turn compression starting: session=%s messages=%s tokens=~%s",
+                session_key,
+                len(history),
+                f"{approx_tokens:,}",
+            )
+
+            loop = asyncio.get_running_loop()
+            compress_future = loop.run_in_executor(
+                None,
+                lambda: tmp_agent._compress_context(
+                    msgs,
+                    "",
+                    approx_tokens=approx_tokens,
+                    force=True,
+                ),
+            )
+            try:
+                compressed, _ = await asyncio.shield(compress_future)
+            except asyncio.CancelledError:
+                logger.info(
+                    "post-turn compression cancellation deferred until safe point: %s",
+                    session_key,
+                )
+                compressed, _ = await compress_future
+
+            comp = getattr(tmp_agent, "context_compressor", None)
+            if comp is not None and getattr(comp, "_last_compress_aborted", False):
+                logger.warning(
+                    "post-turn compression aborted for %s: %s",
+                    session_key,
+                    getattr(comp, "_last_summary_error", None) or "unknown error",
+                )
+                return
+
+            entry = self._get_session_entry_for_key(session_key)
+            if entry is None or getattr(entry, "session_id", None) != expected_session_id:
+                logger.info(
+                    "post-turn compression result discarded; session changed: %s",
+                    session_key,
+                )
+                return
+            if not self._is_session_run_current(session_key, run_generation):
+                logger.info(
+                    "post-turn compression result discarded; run generation changed: %s",
+                    session_key,
+                )
+                return
+
+            new_session_id = tmp_agent.session_id
+            if new_session_id != entry.session_id:
+                entry.session_id = new_session_id
+                self.session_store._save()
+
+            self.session_store.rewrite_transcript(new_session_id, compressed)
+            self.session_store.update_session(session_key, last_prompt_tokens=0)
+            self._evict_cached_agent(session_key)
+
+            new_tokens = estimate_request_tokens_rough(
+                compressed,
+                system_prompt=sys_prompt,
+                tools=tools,
+            )
+            logger.info(
+                "post-turn compression complete: session=%s %s→%s messages, ~%s→~%s tokens",
+                session_key,
+                len(msgs),
+                len(compressed),
+                f"{approx_tokens:,}",
+                f"{new_tokens:,}",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("post-turn compression failed for %s: %s", session_key, exc)
+        finally:
+            if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
+                self._release_running_agent_state(
+                    session_key,
+                    run_generation=run_generation,
+                )
+            if tmp_agent is not None:
+                self._cleanup_agent_resources(tmp_agent)
 
     def _clear_session_boundary_security_state(self, session_key: str) -> None:
         """Clear per-session control state that must not survive a boundary switch."""
