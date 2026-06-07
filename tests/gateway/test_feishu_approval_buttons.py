@@ -638,6 +638,32 @@ class TestCardActionCallbackResponse:
         assert response.card is None
         mock_submit.assert_not_called()
 
+    def test_approves_in_dm_when_no_allowed_users_configured(self, _patch_callback_card_types):
+        """Regression test for #40225 — DM approval must succeed when no
+        allowed-users allowlist is configured (empty → allow everyone)."""
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        # No _allowed_group_users or _admins configured → DM context
+        adapter._approval_state[7] = {
+            "session_key": "sess-7",
+            "message_id": "msg-7",
+            "chat_id": "oc_dm_123",
+        }
+        adapter._sender_name_cache["ou_user7"] = ("Alice", 9999999999)
+        data = _make_card_action_data(
+            {"hermes_action": "approve_once", "approval_id": 7},
+            open_id="ou_user7",
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is not None
+        card = response.card.data
+        assert "Alice" in card["elements"][0]["content"]
+
     def test_returns_card_for_update_prompt_yes(self, _patch_callback_card_types):
         adapter = _make_adapter()
         adapter._loop = MagicMock()
