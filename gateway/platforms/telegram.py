@@ -4842,6 +4842,22 @@ class TelegramAdapter(BasePlatformAdapter):
         if not text or not self._bot or not getattr(self._bot, "username", None):
             return text
         username = re.escape(self._bot.username)
+
+        # Telegram group command menus send addressed commands as
+        # ``/cmd@botname args``.  The generic mention cleaner below is for
+        # prose mentions; applying it here would remove ``@botname `` and
+        # collapse the argument onto the command (``/reasoningxhigh``), making
+        # valid commands look unknown.  Only strip the bot suffix from the
+        # first command token and preserve the argument separator.
+        if text.startswith("/"):
+            parts = text.split(maxsplit=1)
+            command_token = parts[0]
+            cleaned_command = re.sub(rf"(?i)@{username}\b[,:\-]*$", "", command_token)
+            if cleaned_command != command_token:
+                if len(parts) > 1 and parts[1].strip():
+                    return f"{cleaned_command} {parts[1].strip()}"
+                return cleaned_command or text
+
         cleaned = re.sub(rf"(?i)@{username}\b[,:\-]*\s*", "", text).strip()
         return cleaned or text
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from gateway.config import Platform, PlatformConfig, load_gateway_config
-from gateway.platforms.base import MessageType
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 
@@ -311,6 +311,17 @@ def test_observed_group_context_replays_normally_without_telegram_prompt():
 
     assert observed_context is None
     assert agent_history == [{"role": "user", "content": "[Alice|111]\nside chatter"}]
+
+
+def test_clean_bot_trigger_text_preserves_command_args_for_addressed_slash_commands():
+    adapter = _make_adapter(bot_username="Oliver_32gi7_bot")
+
+    cleaned = adapter._clean_bot_trigger_text("/reasoning@Oliver_32gi7_bot xhigh")
+
+    assert cleaned == "/reasoning xhigh"
+    event = MessageEvent(text=cleaned, message_type=MessageType.COMMAND)
+    assert event.get_command() == "reasoning"
+    assert event.get_command_args() == "xhigh"
 
 
 def test_observed_group_context_preserves_slash_command_text_for_dispatch():
