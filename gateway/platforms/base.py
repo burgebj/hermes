@@ -24,6 +24,12 @@ from utils import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
 
+# Sentinel: when the agent's response is exactly this marker, delivery is
+# suppressed. The agent can use this to opt out of replying (e.g. in group
+# channels when there's nothing meaningful to add). Output is still persisted
+# in the transcript for continuity.
+SILENT_MARKER = "[SILENT]"
+
 # Audio file extensions Hermes recognizes for native audio delivery.
 # Kept in sync with tools/send_message_tool.py and cron/scheduler.py via
 # should_send_media_as_audio() below.
@@ -4086,6 +4092,15 @@ class BasePlatformAdapter(ABC):
             # string, and remember the TTL + platform capability so the
             # post-send block can schedule the deletion.
             response, _ephemeral_ttl = self._unwrap_ephemeral(response)
+
+            # [SILENT] marker: agent opted out of replying. Suppress delivery
+            # but keep the transcript entry for continuity.
+            if response and response.strip() == SILENT_MARKER:
+                logger.info(
+                    "[%s] Agent returned %s — suppressing delivery for %s",
+                    self.name, SILENT_MARKER, event.source.chat_id,
+                )
+                response = None
 
             # Send response if any.  A None/empty response is normal when
             # streaming already delivered the text (already_sent=True) or
