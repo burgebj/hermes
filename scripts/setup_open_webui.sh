@@ -62,6 +62,36 @@ choose_python() {
   fi
 }
 
+run_command_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  python3 - "$timeout_seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout_seconds = float(sys.argv[1])
+command = sys.argv[2:]
+
+try:
+    completed = subprocess.run(command, timeout=timeout_seconds, check=False)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+
+raise SystemExit(completed.returncode)
+PY
+}
+
 upsert_env() {
   local key="$1"
   local value="$2"
@@ -308,7 +338,9 @@ main() {
   ensure_env_permissions
 
   log 'Restarting Hermes gateway so API server settings take effect...'
-  hermes gateway restart >/dev/null 2>&1 || true
+  if ! run_command_with_timeout 60 hermes gateway restart >/dev/null 2>&1; then
+    log 'Hermes gateway restart did not finish within 60s; continuing with direct health checks.'
+  fi
   sleep 4
   if ! curl -fsS "http://${HERMES_API_CONNECT_HOST}:${HERMES_API_PORT}/health" >/dev/null; then
     log 'Hermes API server did not answer on the first check. Trying to start gateway in the background...'
