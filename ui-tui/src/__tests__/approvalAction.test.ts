@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { approvalAction } from '../components/prompts.js'
+import { approvalAction } from '../components/promptActions.js'
 
 describe('approvalAction — pure key dispatch for ApprovalPrompt', () => {
   it('maps Esc to deny — parity with global Ctrl+C cancellation', () => {

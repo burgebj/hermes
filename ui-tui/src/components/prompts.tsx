@@ -5,23 +5,11 @@ import { isMac } from '../lib/platform.js'
 import type { Theme } from '../theme.js'
 import type { ApprovalReq, ClarifyReq, ConfirmReq } from '../types.js'
 
+import { approvalAction, clarifyAction, OPTS } from './promptActions.js'
 import { TextInput } from './textInput.js'
 
-const OPTS = ['once', 'session', 'always', 'deny'] as const
 const LABELS = { always: 'Always allow', deny: 'Deny', once: 'Allow once', session: 'Allow this session' } as const
 const CMD_PREVIEW_LINES = 10
-
-type ApprovalKey = {
-  downArrow?: boolean
-  escape?: boolean
-  return?: boolean
-  upArrow?: boolean
-}
-
-type ApprovalAction =
-  | { kind: 'choose'; choice: (typeof OPTS)[number] }
-  | { kind: 'move'; delta: -1 | 1 }
-  | { kind: 'noop' }
 
 /**
  * Pure key-dispatch for the approval prompt — exported so the regression
@@ -34,32 +22,6 @@ type ApprovalAction =
  * for approvals).  Numbers 1..OPTS.length pick the labelled choice.  Enter
  * confirms the current selection.  ↑/↓ moves the selection within bounds.
  */
-export function approvalAction(ch: string, key: ApprovalKey, sel: number): ApprovalAction {
-  if (key.escape) {
-    return { kind: 'choose', choice: 'deny' }
-  }
-
-  const n = parseInt(ch, 10)
-
-  if (n >= 1 && n <= OPTS.length) {
-    return { kind: 'choose', choice: OPTS[n - 1]! }
-  }
-
-  if (key.return) {
-    return { kind: 'choose', choice: OPTS[sel]! }
-  }
-
-  if (key.upArrow && sel > 0) {
-    return { kind: 'move', delta: -1 }
-  }
-
-  if (key.downArrow && sel < OPTS.length - 1) {
-    return { kind: 'move', delta: 1 }
-  }
-
-  return { kind: 'noop' }
-}
-
 export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
   const [sel, setSel] = useState(0)
 
@@ -127,32 +89,18 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
   )
 
   useInput((ch, key) => {
-    if (key.escape) {
-      typing && choices.length ? setTyping(false) : onCancel()
+    const action = clarifyAction(ch, key, { choices, custom, sel, typing })
 
-      return
-    }
-
-    if (typing || !choices.length) {
-      return
-    }
-
-    if (key.upArrow && sel > 0) {
-      setSel(s => s - 1)
-    }
-
-    if (key.downArrow && sel < choices.length) {
-      setSel(s => s + 1)
-    }
-
-    if (key.return) {
-      sel === choices.length ? setTyping(true) : choices[sel] && onAnswer(choices[sel]!)
-    }
-
-    const n = parseInt(ch)
-
-    if (n >= 1 && n <= choices.length) {
-      onAnswer(choices[n - 1]!)
+    if (action.kind === 'cancel') {
+      onCancel()
+    } else if (action.kind === 'back') {
+      setTyping(false)
+    } else if (action.kind === 'move') {
+      setSel(s => s + action.delta)
+    } else if (action.kind === 'startTyping') {
+      setTyping(true)
+    } else if (action.kind === 'choose') {
+      onAnswer(action.answer)
     }
   })
 
@@ -163,7 +111,7 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, req, t }: Clarify
 
         <Box>
           <Text color={t.color.label}>{'> '}</Text>
-          <TextInput columns={Math.max(20, cols - 6)} onChange={setCustom} onSubmit={onAnswer} value={custom} />
+          <TextInput columns={Math.max(20, cols - 6)} onChange={setCustom} value={custom} />
         </Box>
 
         <Text color={t.color.muted}>
