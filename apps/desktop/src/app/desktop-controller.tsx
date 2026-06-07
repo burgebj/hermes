@@ -82,6 +82,7 @@ import { usePromptActions } from './session/hooks/use-prompt-actions'
 import { useRouteResume } from './session/hooks/use-route-resume'
 import { useSessionActions } from './session/hooks/use-session-actions'
 import { useSessionStateCache } from './session/hooks/use-session-state-cache'
+import { useStoredSessionRefresh } from './session/hooks/use-stored-session-refresh'
 import { AppShell } from './shell/app-shell'
 import { useOverlayRouting } from './shell/hooks/use-overlay-routing'
 import { useStatusSnapshot } from './shell/hooks/use-status-snapshot'
@@ -404,6 +405,17 @@ export function DesktopController() {
     requestGateway,
     routedSessionId,
     selectedStoredSessionId
+  })
+
+  useStoredSessionRefresh({
+    activeSessionIdRef,
+    busyRef,
+    gatewayState,
+    getStoredSessionProfile: storedSessionId => $sessions.get().find(session => session.id === storedSessionId)?.profile,
+    refreshSessions,
+    selectedStoredSessionId,
+    sessionStateByRuntimeIdRef,
+    updateSessionState
   })
 
   const {
