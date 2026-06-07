@@ -66,13 +66,19 @@ MAX_MESSAGE_LENGTH = 50_000
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 def _send_imap_id(imap: "imaplib.IMAP4") -> None:
-    """Send RFC 2971 IMAP ID command identifying this client.
+    """Send RFC 2971 IMAP ID command identifying this client when supported.
 
     Required by 163/NetEase mailbox after LOGIN: without it, every UID
-    SEARCH/FETCH returns ``BYE Unsafe Login`` and disconnects.  Other
-    IMAP servers either honor it silently or reject the unknown command;
-    we swallow failures so non-supporting servers keep working.
+    SEARCH/FETCH returns ``BYE Unsafe Login`` and disconnects. Some IMAP
+    servers, including Purelymail, do not advertise RFC 2971 ID and can leave
+    the connection in a bad state after receiving the unknown command. Only
+    send ID when the server advertises the capability.
     """
+    capabilities = {cap.upper() for cap in getattr(imap, "capabilities", ()) or ()}
+    if b"ID" not in capabilities and "ID" not in capabilities:
+        logger.debug("[Email] IMAP server does not advertise ID capability; skipping ID command")
+        return
+
     try:
         try:
             from hermes_cli import __version__ as _hermes_version
