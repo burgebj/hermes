@@ -16,6 +16,7 @@ import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from gateway.config import PlatformConfig
@@ -336,6 +337,59 @@ class TestSlackMultiImage:
         _run(adapter.send_multiple_images("C12345", []))
         client = adapter._get_client("C12345")
         client.files_upload_v2.assert_not_called()
+
+    def test_blocks_private_redirect_target(self, adapter):
+        requested_urls = []
+        checked_urls = []
+        client_kwargs = {}
+
+        async def handler(request):
+            requested_urls.append(str(request.url))
+            if str(request.url) == "https://public.example/image.png":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "http://169.254.169.254/latest/meta-data"},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                content=b"\x89PNG\r\n\x1a\n",
+                headers={"content-type": "image/png"},
+                request=request,
+            )
+
+        def fake_is_safe_url(url):
+            checked_urls.append(url)
+            return url == "https://public.example/image.png"
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+
+        def fake_async_client(*args, **kwargs):
+            client_kwargs.update(kwargs)
+            kwargs["transport"] = transport
+            return real_async_client(*args, **kwargs)
+
+        with (
+            patch("tools.url_safety.is_safe_url", side_effect=fake_is_safe_url),
+            patch("httpx.AsyncClient", side_effect=fake_async_client),
+        ):
+            _run(
+                adapter.send_multiple_images(
+                    "C12345",
+                    [("https://public.example/image.png", "caption")],
+                )
+            )
+
+        assert client_kwargs["follow_redirects"] is True
+        assert client_kwargs["event_hooks"]["response"]
+        assert checked_urls == [
+            "https://public.example/image.png",
+            "http://169.254.169.254/latest/meta-data",
+        ]
+        assert requested_urls == ["https://public.example/image.png"]
+        client = adapter._get_client("C12345")
+        client.files_upload_v2.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
