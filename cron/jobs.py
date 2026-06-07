@@ -1101,7 +1101,10 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             rj["next_run_at"] = new_next
                             needs_save = True
                             break
-                    continue  # Skip this run
+                    # Don't skip execution — the job didn't miss because the
+                    # gateway was down, it missed because it was still running.
+                    # Fast-forward prevents burst-catchup, but the job should
+                    # still run once now. See #33315.
 
             due.append(job)
 
