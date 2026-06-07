@@ -2288,13 +2288,16 @@ class GatewayRunner:
         try:
             from hermes_cli.config import load_config as _load_full_config
             _full_cfg = _load_full_config()
-            _auto_tts_default = bool(
-                (_full_cfg.get("voice") or {}).get("auto_tts", False)
-            )
+            _voice_cfg = _full_cfg.get("voice") or {}
+            _auto_tts_default = bool(_voice_cfg.get("auto_tts", False))
+            _auto_tts_always = bool(_voice_cfg.get("auto_tts_always", False))
         except Exception:
             _auto_tts_default = False
+            _auto_tts_always = False
         if hasattr(adapter, "_auto_tts_default"):
             adapter._auto_tts_default = _auto_tts_default
+        if hasattr(adapter, "_auto_tts_always"):
+            adapter._auto_tts_always = _auto_tts_always
 
         prefix = f"{platform.value}:"
         if isinstance(disabled_chats, set):

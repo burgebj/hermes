@@ -36,7 +36,7 @@ needs to replace the import + call site:
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
 """
 
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import Any
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
@@ -136,6 +136,19 @@ def set_session_vars(
     except Exception:
         pass
     return tokens
+
+
+def set_session_platform(platform: str) -> Token:
+    """Set *only* the session platform contextvar and return its reset token.
+
+    Use this instead of ``set_session_vars`` when only the platform name
+    needs to be injected (e.g. the auto-TTS path in the gateway send
+    pipeline).  Call ``_SESSION_PLATFORM.reset(token)`` in a ``finally``
+    block to restore the previous value when the scope exits.
+
+    Returns the ``Token`` object returned by ``ContextVar.set()``.
+    """
+    return _SESSION_PLATFORM.set(platform)
 
 
 def clear_session_vars(tokens: list) -> None:
