@@ -90,7 +90,7 @@ def _launch_cwd_for_session(source: str) -> Optional[str]:
 
 # OpenAI lazy proxy + safe stdio + proxy URL helpers — see agent/process_bootstrap.py.
 # `OpenAI` is re-exported here so `patch("run_agent.OpenAI", ...)` in tests works.
-# The other `# noqa: F401` re-exports below cover names accessed via
+# The other noqa-style re-exports below cover names accessed via
 # `mock.patch("run_agent.<X>")`, `from run_agent import <X>` in production
 # siblings, or the `_ra().<X>` indirection in agent/system_prompt.py — none
 # of which ruff's in-module usage scan can see.
@@ -100,6 +100,14 @@ from agent.process_bootstrap import (
     _get_proxy_for_base_url,
 )
 from agent.iteration_budget import IterationBudget
+
+
+def _session_source_for_platform(platform: Optional[str]) -> str:
+    requested_source = (os.environ.get("HERMES_SESSION_SOURCE") or "").strip()
+    platform_source = (platform or "").strip()
+    if requested_source and platform_source in ("", "cli"):
+        return requested_source
+    return platform_source or requested_source or "cli"
 
 
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -505,7 +513,7 @@ class AIAgent:
         """Create session DB row on first use. Disables _session_db on failure."""
         if self._session_db_created or not self._session_db:
             return
-        source = self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli")
+        source = _session_source_for_platform(self.platform)
         try:
             self._session_db.create_session(
                 session_id=self.session_id,
@@ -571,7 +579,7 @@ class AIAgent:
             start_context = {
                 "old_session_id": old_session_id,
                 "carry_over_context": carry_over_context,
-                "platform": getattr(self, "platform", None) or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                "platform": _session_source_for_platform(getattr(self, "platform", None)),
                 "model": getattr(self, "model", ""),
                 "context_length": getattr(engine, "context_length", None),
                 "conversation_id": getattr(self, "_gateway_session_key", None),
