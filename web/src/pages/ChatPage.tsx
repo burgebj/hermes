@@ -431,7 +431,23 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         return false;
       }
 
-      const step = Math.max(1, Math.round(Math.abs(delta) / 50));
+      // Respect deltaMode so trackpad (pixel), mouse wheel (line on some
+      // platforms), and page-scroll gestures all advance the transcript
+      // by a sensible amount.  Previously the handler divided pixel
+      // deltas by 50, which at a typical 100-pixel click yields only
+      // 2 lines per tick — a 5000-line scrollback then takes ~2500
+      // wheel ticks to traverse, so resumed sessions appear truncated
+      // (#32561).  /16 ≈ one xterm cell row at the default font, which
+      // matches the browser's native ~3-6 lines-per-click feel.
+      const absDelta = Math.abs(delta);
+      let step: number;
+      if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) {
+        step = Math.max(1, Math.round(absDelta));
+      } else if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) {
+        step = Math.max(1, Math.round(absDelta * term.rows));
+      } else {
+        step = Math.max(1, Math.round(absDelta / 16));
+      }
       term.scrollLines(delta > 0 ? step : -step);
 
       ev.preventDefault();
