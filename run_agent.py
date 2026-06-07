@@ -3429,6 +3429,21 @@ class AIAgent:
             )
 
     def _replace_primary_openai_client(self, *, reason: str) -> bool:
+        # Skip the rebuild entirely for anthropic_messages api_mode (e.g.
+        # bedrock + Claude). On that path agent.client is intentionally None
+        # — real requests flow through agent._anthropic_client — so there is
+        # no shared OpenAI client to rebuild. Without this guard, every
+        # rebuild trigger (stale_stream_pool_cleanup, *_credential_refresh,
+        # credential_rotation, dead_connection_cleanup, fallback_timeout_apply,
+        # recreate_closed:*) falls through to OpenAI(**{}) and emits a
+        # misleading "OPENAI_API_KEY missing" warning. See issue #36693.
+        if getattr(self, "api_mode", "") == "anthropic_messages":
+            logger.info(
+                "Rebuild skipped for anthropic_messages api_mode (%s) %s",
+                reason,
+                self._client_log_context(),
+            )
+            return True
         with self._openai_client_lock():
             old_client = getattr(self, "client", None)
             try:
