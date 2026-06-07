@@ -46,6 +46,17 @@ def build_write_denied_paths(home: str) -> set[str]:
             # Top-level Anthropic PKCE credential store remains sensitive even
             # when a profile is active; default/non-profile sessions still read it.
             str(hermes_root / ".anthropic_oauth.json"),
+            # Active profile Gemini (google-gemini-cli) OAuth credential store.
+            # The read side has been guarded since #17656, but the write side
+            # was left open, so a prompt-injected write_file/patch could
+            # overwrite the refresh/access tokens that get_valid_access_token()
+            # reads back (agent/google_oauth.py) — silently hijacking or
+            # bricking the Gemini session. Closes that read/write parity gap.
+            str(hermes_home / "auth" / "google_oauth.json"),
+            # Top-level Gemini OAuth store stays sensitive under a profile too;
+            # default/non-profile sessions still read it (same root-widening as
+            # .env and .anthropic_oauth.json above, #15981).
+            str(hermes_root / "auth" / "google_oauth.json"),
             os.path.join(home, ".bashrc"),
             os.path.join(home, ".zshrc"),
             os.path.join(home, ".profile"),
