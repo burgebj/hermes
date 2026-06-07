@@ -5132,9 +5132,12 @@ def _model_flow_copilot(config, current_model=""):
 
         if choice == "1":
             try:
-                from hermes_cli.copilot_auth import copilot_device_code_login
+                from hermes_cli.copilot_auth import (
+                    copilot_device_code_login,
+                    resolve_copilot_github_host,
+                )
 
-                token = copilot_device_code_login()
+                token = copilot_device_code_login(host=resolve_copilot_github_host())
                 if token:
                     save_env_value("COPILOT_GITHUB_TOKEN", token)
                     print("  Copilot token saved.")

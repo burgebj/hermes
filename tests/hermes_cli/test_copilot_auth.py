@@ -183,6 +183,50 @@ class TestApiModeSelection:
         assert _should_use_copilot_responses_api("grok-code-fast-1") is False
 
 
+class TestCopilotHostResolution:
+    def test_resolve_host_from_env(self, monkeypatch):
+        from hermes_cli.copilot_auth import resolve_copilot_github_host
+
+        monkeypatch.setenv("COPILOT_GH_HOST", "https://ghe.example.com/")
+        assert resolve_copilot_github_host() == "ghe.example.com"
+
+    def test_resolve_host_from_config(self, monkeypatch):
+        from hermes_cli.copilot_auth import resolve_copilot_github_host
+
+        monkeypatch.delenv("COPILOT_GH_HOST", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"copilot": {"github_host": "ghe.internal.example"}},
+        )
+        assert resolve_copilot_github_host() == "ghe.internal.example"
+
+    def test_gh_cli_token_uses_host_flag_for_ghe(self, monkeypatch):
+        from hermes_cli.copilot_auth import _try_gh_cli_token
+
+        monkeypatch.setenv("COPILOT_GH_HOST", "ghe.example.com")
+        monkeypatch.setattr(
+            "hermes_cli.copilot_auth._gh_cli_candidates",
+            lambda: ["/usr/bin/gh"],
+        )
+
+        calls = []
+
+        class _Result:
+            returncode = 0
+            stdout = "gho_token\n"
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return _Result()
+
+        monkeypatch.setattr("hermes_cli.copilot_auth.subprocess.run", _fake_run)
+
+        assert _try_gh_cli_token() == "gho_token"
+        assert calls == [[
+            "/usr/bin/gh", "auth", "token", "--hostname", "ghe.example.com"
+        ]]
+
+
 class TestEnvVarOrder:
     """PROVIDER_REGISTRY has correct env var order."""
 

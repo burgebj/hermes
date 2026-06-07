@@ -147,6 +147,26 @@ LMSTUDIO_NOAUTH_PLACEHOLDER = "dummy-lm-api-key"
 # Provider Registry
 # =============================================================================
 
+def _resolve_copilot_base_url(default_base_url: str, env_url: str = "") -> str:
+    """Resolve Copilot base URL, including GitHub Enterprise hosts.
+
+    If COPILOT_API_BASE_URL is set, it always wins. Otherwise when a non-default
+    GitHub host is configured for Copilot auth (COPILOT_GH_HOST or
+    config.yaml->copilot.github_host), derive the GHES API path.
+    """
+    if env_url:
+        return env_url.rstrip("/")
+    try:
+        from hermes_cli.copilot_auth import resolve_copilot_github_host
+
+        host = resolve_copilot_github_host()
+    except Exception:
+        host = "github.com"
+    if host and host != "github.com":
+        return f"https://{host}/api/v3/copilot_internal"
+    return default_base_url
+
+
 @dataclass
 class ProviderConfig:
     """Describes a known inference provider."""
@@ -5885,6 +5905,8 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
     elif provider_id == "zai":
         base_url = _resolve_zai_base_url(api_key, pconfig.inference_base_url, env_url)
+    elif provider_id == "copilot":
+        base_url = _resolve_copilot_base_url(pconfig.inference_base_url, env_url)
     elif env_url:
         base_url = env_url.rstrip("/")
     else:

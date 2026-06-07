@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional
 
@@ -124,7 +125,7 @@ def _try_gh_cli_token() -> Optional[str]:
     subprocess environment so ``gh`` reads from its own credential store
     (hosts.yml) instead of just echoing the env var back.
     """
-    hostname = os.getenv("COPILOT_GH_HOST", "").strip()
+    hostname = resolve_copilot_github_host()
 
     # Build a clean env so gh doesn't short-circuit on GITHUB_TOKEN / GH_TOKEN
     clean_env = {k: v for k, v in os.environ.items()
@@ -132,7 +133,7 @@ def _try_gh_cli_token() -> Optional[str]:
 
     for gh_path in _gh_cli_candidates():
         cmd = [gh_path, "auth", "token"]
-        if hostname:
+        if hostname and hostname != "github.com":
             cmd += ["--hostname", hostname]
         try:
             result = subprocess.run(
@@ -148,6 +149,49 @@ def _try_gh_cli_token() -> Optional[str]:
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     return None
+
+
+def _normalize_github_host(raw: str) -> str:
+    """Normalize GitHub host inputs from env/config values."""
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if "://" in value:
+        parsed = urlparse(value)
+        value = parsed.netloc or parsed.path
+    value = value.strip().strip("/")
+    if "/" in value:
+        value = value.split("/", 1)[0]
+    return value.lower()
+
+
+def resolve_copilot_github_host(default: str = "github.com") -> str:
+    """Resolve target GitHub host for Copilot auth/device flow.
+
+    Priority:
+      1. COPILOT_GH_HOST environment variable
+      2. config.yaml -> copilot.github_host
+      3. default ("github.com")
+    """
+    env_host = _normalize_github_host(os.getenv("COPILOT_GH_HOST", ""))
+    if env_host:
+        return env_host
+
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+        if isinstance(cfg, dict):
+            copilot_cfg = cfg.get("copilot", {})
+            if isinstance(copilot_cfg, dict):
+                cfg_host = _normalize_github_host(copilot_cfg.get("github_host", ""))
+                if cfg_host:
+                    return cfg_host
+    except Exception:
+        # Config parsing errors should not break auth flows.
+        pass
+
+    return _normalize_github_host(default) or "github.com"
 
 
 # ─── OAuth Device Code Flow ────────────────────────────────────────────────

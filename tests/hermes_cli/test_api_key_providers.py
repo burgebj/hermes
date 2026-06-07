@@ -417,6 +417,24 @@ class TestResolveApiKeyProviderCredentials:
         assert creds["base_url"] == "https://api.githubcopilot.com"
         assert creds["source"] == "gh auth token"
 
+    def test_resolve_copilot_base_url_from_ghe_host(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "gho_env_secret")
+        monkeypatch.setenv("COPILOT_GH_HOST", "ghe.example.com")
+        monkeypatch.delenv("COPILOT_API_BASE_URL", raising=False)
+
+        creds = resolve_api_key_provider_credentials("copilot")
+
+        assert creds["base_url"] == "https://ghe.example.com/api/v3/copilot_internal"
+
+    def test_resolve_copilot_base_url_prefers_env_override(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "gho_env_secret")
+        monkeypatch.setenv("COPILOT_GH_HOST", "ghe.example.com")
+        monkeypatch.setenv("COPILOT_API_BASE_URL", "https://proxy.example/copilot")
+
+        creds = resolve_api_key_provider_credentials("copilot")
+
+        assert creds["base_url"] == "https://proxy.example/copilot"
+
     def test_resolve_lmstudio_uses_token_and_base_url_from_env(self, monkeypatch):
         monkeypatch.setenv("LM_API_KEY", "lm-token")
         monkeypatch.setenv("LM_BASE_URL", "http://lmstudio.remote:4321/v1")
