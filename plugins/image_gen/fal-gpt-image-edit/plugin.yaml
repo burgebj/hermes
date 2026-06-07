@@ -1,0 +1,9 @@
+name: fal-gpt-image-edit
+version: 0.1.0
+description: "FAL GPT Image 2 reference image editing backend for compositing and poster-style image edits."
+author: NousResearch
+kind: backend
+requires_env:
+  - FAL_KEY
+provides_tools:
+  - image_edit
