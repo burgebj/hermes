@@ -10,7 +10,10 @@ reasoning configuration, temperature handling, and extra_body assembly.
 """
 
 import copy
-from typing import Any, Dict
+import json
+import re
+import uuid
+from typing import Any, Dict, cast
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
@@ -19,7 +22,72 @@ from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
 
-def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
+def _extract_tool_list_payload(content: object) -> tuple[str | None, list[ToolCall] | None]:
+    """Parse non-standard local-model JSON content with tool-like lists.
+
+    Some local models emit a plain assistant JSON object instead of OpenAI
+    ``tool_calls``.  Treat that as a compatibility fallback only when the
+    content is valid JSON and has entries shaped like either
+    ``tools_used: [{"name": ..., "arguments": {...}}]`` or
+    ``commands: [{"name": ..., ...args...}]``.
+    """
+    if not isinstance(content, str) or (
+        "tools_used" not in content and "commands" not in content
+    ):
+        return None, None
+
+    raw = content.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        payload_obj, _ = json.JSONDecoder().raw_decode(raw)
+    except Exception:
+        return None, None
+    if not isinstance(payload_obj, dict):
+        return None, None
+    payload = cast(dict[str, object], payload_obj)
+
+    entries: list[object] = []
+    for key in ("commands", "tools_used"):
+        entries_obj = payload.get(key)
+        if isinstance(entries_obj, list):
+            entries.extend(entries_obj)
+    if not entries:
+        return None, None
+
+    tool_calls: list[ToolCall] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None, None
+        entry_map = cast(dict[str, object], entry)
+        name = entry_map.get("name")
+        args_obj = entry_map.get("arguments")
+        if isinstance(args_obj, dict):
+            args = args_obj
+        else:
+            args = {k: v for k, v in entry_map.items() if k != "name"}
+        if not isinstance(name, str) or not name.strip() or not isinstance(args, dict):
+            return None, None
+        tool_calls.append(
+            ToolCall(
+                id=f"call_{uuid.uuid4().hex[:24]}",
+                name=name.strip(),
+                arguments=json.dumps(args, ensure_ascii=False),
+            )
+        )
+
+    # Do not display the raw JSON block to the user once it has been consumed
+    # as tool calls; the tool result will become the visible next step.
+    return "", tool_calls
+
+
+
+def _build_gemini_thinking_config(
+    model: str,
+    reasoning_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Translate Hermes/OpenRouter-style reasoning config to Gemini thinkingConfig."""
     if reasoning_config is None or not isinstance(reasoning_config, dict):
         return None
@@ -75,7 +143,9 @@ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> 
     return thinking_config
 
 
-def _snake_case_gemini_thinking_config(config: dict | None) -> dict | None:
+def _snake_case_gemini_thinking_config(
+    config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Convert Gemini thinking config keys to the OpenAI-compat field names."""
     if not isinstance(config, dict) or not config:
         return None
@@ -637,6 +707,13 @@ class ChatCompletionsTransport(ProviderTransport):
                     )
                 )
 
+        content = msg.content
+        if not tool_calls:
+            parsed_content, parsed_tool_calls = _extract_tool_list_payload(content)
+            if parsed_tool_calls:
+                content = parsed_content
+                tool_calls = parsed_tool_calls
+
         usage = None
         if hasattr(response, "usage") and response.usage:
             u = response.usage
@@ -665,7 +742,7 @@ class ChatCompletionsTransport(ProviderTransport):
             provider_data["reasoning_details"] = rd
 
         return NormalizedResponse(
-            content=msg.content,
+            content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning=reasoning,

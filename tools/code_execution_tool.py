@@ -1814,6 +1814,39 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
 EXECUTE_CODE_SCHEMA = build_execute_code_schema()
 
 
+def _execute_code_arg(args: dict[str, object]) -> str:
+    code = args.get("code", "")
+    if isinstance(code, str) and code.strip():
+        return code
+
+    command = args.get("command", "")
+    if not isinstance(command, str) or not command.strip():
+        return code if isinstance(code, str) else ""
+
+    timeout_obj = args.get("timeout", 400)
+    try:
+        timeout = int(timeout_obj) if isinstance(timeout_obj, (int, float, str)) else 400
+    except ValueError:
+        timeout = 400
+
+    return (
+        "import subprocess\n"
+        f"command = {command!r}\n"
+        "result = subprocess.run(\n"
+        "    command,\n"
+        "    shell=True,\n"
+        "    text=True,\n"
+        "    capture_output=True,\n"
+        f"    timeout={timeout!r},\n"
+        ")\n"
+        "if result.stdout:\n"
+        "    print(result.stdout, end='')\n"
+        "if result.stderr:\n"
+        "    print(result.stderr, end='')\n"
+        "print(f'\\n[exit_code={result.returncode}]')\n"
+    )
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
 
@@ -1822,7 +1855,7 @@ registry.register(
     toolset="code_execution",
     schema=EXECUTE_CODE_SCHEMA,
     handler=lambda args, **kw: execute_code(
-        code=args.get("code", ""),
+        code=_execute_code_arg(args),
         task_id=kw.get("task_id"),
         enabled_tools=kw.get("enabled_tools")),
     check_fn=check_sandbox_requirements,

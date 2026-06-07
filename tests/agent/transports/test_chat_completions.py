@@ -1,5 +1,7 @@
 """Tests for the ChatCompletionsTransport."""
 
+import json
+
 import pytest
 from types import SimpleNamespace
 
@@ -766,6 +768,129 @@ class TestChatCompletionsNormalize:
         assert len(nr.tool_calls) == 1
         assert nr.tool_calls[0].name == "terminal"
         assert nr.tool_calls[0].id == "call_123"
+
+    def test_tools_used_json_content_becomes_tool_calls(self, transport):
+        content = json.dumps({
+            "analysis": "The tool rejected the command.",
+            "plan": "Try a shell command.",
+            "tools_used": [{
+                "name": "execute_code",
+                "arguments": {
+                    "command": "python3 -c 'print(123)'",
+                    "timeout": 400,
+                },
+            }],
+        })
+        r = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None, reasoning_content=None),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.content == ""
+        assert len(nr.tool_calls) == 1
+        assert nr.tool_calls[0].name == "execute_code"
+        args = json.loads(nr.tool_calls[0].arguments)
+        assert args == {
+            "command": "python3 -c 'print(123)'",
+            "timeout": 400,
+        }
+
+    def test_commands_json_content_becomes_tool_calls(self, transport):
+        content = json.dumps({
+            "analysis": "I found the reference files.",
+            "plan": "Read the files.",
+            "commands": [
+                {
+                    "name": "read_file",
+                    "path": "/workspace/project/scripts/diversify_v2.py",
+                },
+                {
+                    "name": "read_file",
+                    "path": "/workspace/project/references/diversify_hermes.py",
+                    "offset": 10,
+                    "limit": 20,
+                },
+            ],
+        })
+        r = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None, reasoning_content=None),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.content == ""
+        assert len(nr.tool_calls) == 2
+        assert [tc.name for tc in nr.tool_calls] == ["read_file", "read_file"]
+        assert json.loads(nr.tool_calls[0].arguments) == {
+            "path": "/workspace/project/scripts/diversify_v2.py",
+        }
+        assert json.loads(nr.tool_calls[1].arguments) == {
+            "path": "/workspace/project/references/diversify_hermes.py",
+            "offset": 10,
+            "limit": 20,
+        }
+
+    def test_mixed_commands_and_tools_used_json_content_becomes_tool_calls(self, transport):
+        content = json.dumps({
+            "analysis": "Search and replace the model identifier.",
+            "commands": [
+                {
+                    "name": "execute_code",
+                    "command": "grep -r old-model /workspace/project --include='*.py'\n",
+                    "timeout": 10,
+                },
+                {
+                    "name": "execute_code",
+                    "command": "grep -r new-model /workspace/project --include='*.py'\n",
+                    "timeout": 10,
+                },
+            ],
+            "tools_used": [
+                {
+                    "name": "execute_code",
+                    "command": "cd /workspace/project && sed -i 's/old-model/new-model/g' .\n",
+                    "timeout": 5,
+                },
+            ],
+        })
+        r = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None, reasoning_content=None),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.content == ""
+        assert len(nr.tool_calls) == 3
+        assert [tc.name for tc in nr.tool_calls] == [
+            "execute_code",
+            "execute_code",
+            "execute_code",
+        ]
+        assert json.loads(nr.tool_calls[0].arguments) == {
+            "command": "grep -r old-model /workspace/project --include='*.py'\n",
+            "timeout": 10,
+        }
+        assert json.loads(nr.tool_calls[1].arguments) == {
+            "command": "grep -r new-model /workspace/project --include='*.py'\n",
+            "timeout": 10,
+        }
+        assert json.loads(nr.tool_calls[2].arguments) == {
+            "command": "cd /workspace/project && sed -i 's/old-model/new-model/g' .\n",
+            "timeout": 5,
+        }
 
     def test_tool_call_extra_content_preserved(self, transport):
         """Gemini 3 thinking models attach extra_content with thought_signature

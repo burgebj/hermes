@@ -43,6 +43,7 @@ from tools.code_execution_tool import (
     build_execute_code_schema,
     EXECUTE_CODE_SCHEMA,
     _TOOL_DOC_LINES,
+    _execute_code_arg,
     _execute_remote,
 )
 
@@ -71,6 +72,26 @@ class TestSandboxRequirements(unittest.TestCase):
     def test_available_on_posix(self):
         if sys.platform != "win32":
             self.assertTrue(check_sandbox_requirements())
+
+
+class TestExecuteCodeArgumentCompatibility(unittest.TestCase):
+    def test_command_argument_is_wrapped_as_python_subprocess_code(self):
+        code = _execute_code_arg({
+            "command": "python3 -c 'print(123)'",
+            "timeout": 7,
+        })
+
+        self.assertIn("subprocess.run", code)
+        self.assertIn("python3 -c", code)
+        self.assertIn("timeout=7", code)
+
+    def test_code_argument_takes_precedence_over_command(self):
+        code = _execute_code_arg({
+            "code": "print('ok')",
+            "command": "python3 -c 'print(123)'",
+        })
+
+        self.assertEqual(code, "print('ok')")
 
     def test_schema_is_valid(self):
         self.assertEqual(EXECUTE_CODE_SCHEMA["name"], "execute_code")
