@@ -59,9 +59,9 @@ def _refresh_bindings_against_live_module():
     yield
 
 
-def _ps_line(pid: int, cmd: str) -> str:
-    """Format a line as it would appear in ``ps -A -o pid=,command=`` output."""
-    return f"{pid:>7} {cmd}"
+def _ps_line(pid: int, cmd: str, *, uid: int | None = None) -> str:
+    """Format a line as it appears in ``ps -A -o uid=,pid=,command=`` output."""
+    return f"{os.getuid() if uid is None else uid:>7} {pid:>7} {cmd}"
 
 
 def _ps_runner(stdout: str):
@@ -116,6 +116,35 @@ class TestFindStaleDashboardPids:
                 stderr="",
             )
             assert sorted(_find_stale_dashboard_pids()) == [12345, 12346, 12347]
+
+    def test_other_user_dashboard_processes_ignored(self):
+        """A user-scoped update must not stop dashboards owned by other users."""
+        current_uid = os.getuid()
+        other_uid = current_uid + 1
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="\n".join([
+                    _ps_line(
+                        12345,
+                        "/home/john/.hermes/hermes-agent/venv/bin/hermes dashboard --port 9119",
+                        uid=current_uid,
+                    ),
+                    _ps_line(
+                        12346,
+                        "/home/marc/.hermes/hermes-agent/venv/bin/hermes dashboard --port 9120",
+                        uid=other_uid,
+                    ),
+                    _ps_line(
+                        12347,
+                        "/home/tammy/.hermes/hermes-agent/venv/bin/hermes dashboard --port 9121",
+                        uid=other_uid + 1,
+                    ),
+                ]) + "\n",
+                stderr="",
+            )
+
+            assert _find_stale_dashboard_pids() == [12345]
 
     def test_self_pid_excluded(self):
         with patch("subprocess.run") as mock_run:
