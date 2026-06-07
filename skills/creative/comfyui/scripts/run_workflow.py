@@ -274,8 +274,8 @@ class ComfyRunner:
         ws = websocket.create_connection(ws_url, timeout=timeout)
         try:
             ws.settimeout(timeout)
-            deadline = time.time() + timeout
-            while time.time() < deadline:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
                 msg = ws.recv()
                 if isinstance(msg, bytes):
                     # Binary preview frame — ignore for now; ws_monitor.py prints them
