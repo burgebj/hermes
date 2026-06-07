@@ -195,6 +195,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const skillEntries = Object.entries(info.skills).sort()
   const skillsTotal = flat(info.skills).length
   const skillsCatCount = skillEntries.length
+  const mcpConnectedCount = info.mcp_servers?.filter(s => s.connected).length ?? 0
 
   const skillsBody = () => {
     if (info.lazy && skillEntries.length === 0) {
@@ -254,6 +255,10 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
             <Text color={t.color.text}>
               {s.tools} tool{s.tools === 1 ? '' : 's'}
             </Text>
+          ) : s.disabled || s.status === 'disabled' ? (
+            <Text color={t.color.muted}>disabled</Text>
+          ) : s.status === 'connecting' || s.status === 'pending' ? (
+            <Text color={t.color.warn}>connecting</Text>
           ) : (
             <Text color={t.color.error}>failed</Text>
           )}
@@ -376,7 +381,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
               count={info.mcp_servers.length}
               onToggle={() => setMcpOpen(v => !v)}
               open={mcpOpen}
-              suffix="connected"
+              suffix={`${mcpConnectedCount} connected`}
               t={t}
               title="MCP Servers"
             />

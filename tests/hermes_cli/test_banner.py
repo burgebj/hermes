@@ -167,3 +167,32 @@ def test_build_welcome_banner_disabled_mcp_shows_disabled_not_failed():
     assert "broken" in output
     assert "failed" in output
 
+
+def test_build_welcome_banner_pending_mcp_shows_connecting_not_failed():
+    """A pending MCP server renders as connecting while background startup runs."""
+    with (
+        patch.object(model_tools, "check_tool_availability", return_value=(["web"], [])),
+        patch.object(banner, "get_available_skills", return_value={}),
+        patch.object(banner, "get_update_result", return_value=None),
+        patch.object(
+            tools.mcp_tool,
+            "get_mcp_status",
+            return_value=[
+                {"name": "slow", "transport": "stdio", "tools": 0,
+                 "connected": False, "disabled": False, "status": "pending"},
+            ],
+        ),
+    ):
+        console = Console(record=True, force_terminal=False, color_system=None, width=160)
+        banner.build_welcome_banner(
+            console=console, model="anthropic/test-model", cwd="/tmp/project",
+            tools=[{"function": {"name": "read_file"}}],
+            get_toolset_for_tool=lambda n: "file",
+        )
+
+    slow_line = next(
+        line for line in console.export_text().splitlines()
+        if "slow" in line
+    )
+    assert "connecting" in slow_line
+    assert "failed" not in slow_line
