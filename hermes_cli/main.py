@@ -7546,6 +7546,13 @@ def cmd_gui(args: argparse.Namespace):
     if getattr(args, "cwd", None):
         env["HERMES_DESKTOP_CWD"] = str(Path(args.cwd).expanduser().resolve())
 
+    # Force ad-hoc signing for local builds unless the user has opted into
+    # real signing. electron-builder auto-discovers keychain identities and
+    # attempts real signing, which breaks local builds on dev machines with
+    # Apple Developer certs. See #41499.
+    if not any(os.environ.get(k) for k in ("CSC_LINK", "CSC_NAME", "APPLE_API_KEY")):
+        env.setdefault("CSC_IDENTITY_AUTO_DISCOVERY", "false")
+
     source_mode = getattr(args, "source", False)
     skip_build = getattr(args, "skip_build", False)
     force_build = getattr(args, "force_build", False)
