@@ -341,7 +341,7 @@ def _recoverable_oneshot_run_at(
     return None
 
 
-def _compute_grace_seconds(schedule: dict) -> int:
+def _compute_grace_seconds(schedule: dict, job: Optional[Dict[str, Any]] = None) -> int:
     """Compute how late a job can be and still catch up instead of fast-forwarding.
 
     Uses half the schedule period, clamped between 120 seconds and 2 hours.
@@ -350,6 +350,21 @@ def _compute_grace_seconds(schedule: dict) -> int:
     """
     MIN_GRACE = 120
     MAX_GRACE = 7200  # 2 hours
+    MAX_OVERRIDE_GRACE = 86400  # 24 hours
+
+    if job:
+        override = job.get("misfire_grace_seconds")
+        if override is not None:
+            try:
+                override_seconds = int(override)
+                if override_seconds > 0:
+                    return min(override_seconds, MAX_OVERRIDE_GRACE)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Ignoring invalid misfire_grace_seconds for job '%s': %r",
+                    job.get("name", job.get("id", "<unknown>")),
+                    override,
+                )
 
     kind = schedule.get("kind")
 
@@ -1081,7 +1096,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             # For recurring jobs, check if the scheduled time is stale
             # (gateway was down and missed the window). Fast-forward to
             # the next future occurrence instead of firing a stale run.
-            grace = _compute_grace_seconds(schedule)
+            grace = _compute_grace_seconds(schedule, job)
             if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
                 # Job is past its catch-up grace window — this is a stale missed run.
                 # Grace scales with schedule period: daily=2h, hourly=30m, 10min=5m.

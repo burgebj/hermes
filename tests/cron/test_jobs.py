@@ -704,6 +704,34 @@ class TestGetDueJobs:
         next_dt = _ensure_aware(datetime.fromisoformat(updated["next_run_at"]))
         assert next_dt > _hermes_now()
 
+    def test_job_misfire_grace_override_keeps_late_recurring_job_due(self, tmp_cron_dir):
+        """Operators can widen grace for long-running recurring jobs."""
+        job = create_job(prompt="Long validation", schedule="every 10m")
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now() - timedelta(minutes=8)).isoformat()
+        jobs[0]["misfire_grace_seconds"] = 900
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+
+        assert len(due) == 1
+        assert due[0]["id"] == job["id"]
+
+    def test_job_misfire_grace_override_still_fast_forwards_after_limit(self, tmp_cron_dir):
+        job = create_job(prompt="Too late", schedule="every 10m")
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now() - timedelta(minutes=20)).isoformat()
+        jobs[0]["misfire_grace_seconds"] = 900
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+
+        assert len(due) == 0
+        updated = get_job(job["id"])
+        from cron.jobs import _ensure_aware, _hermes_now
+        next_dt = _ensure_aware(datetime.fromisoformat(updated["next_run_at"]))
+        assert next_dt > _hermes_now()
+
     def test_future_not_returned(self, tmp_cron_dir):
         create_job(prompt="Not yet", schedule="every 1h")
         due = get_due_jobs()
