@@ -1077,6 +1077,27 @@ def _resolve_claude_code_token_from_credentials(creds: Optional[Dict[str, Any]] 
     return None
 
 
+def _env_prefers_static_anthropic_token() -> bool:
+    """Opt-in: keep an explicit env ANTHROPIC_TOKEN (e.g. a long-lived
+    `claude setup-token`) authoritative over any refreshable Claude Code
+    credential found in the macOS Keychain or ~/.claude/.credentials.json.
+
+    Set HERMES_PREFER_ENV_ANTHROPIC_TOKEN=1 (or true/yes/on) in ~/.hermes/.env
+    so Hermes and the interactive Claude Code CLI can coexist: the user may log
+    in / out of `claude` freely (which rewrites the keychain) without Hermes
+    silently falling back to that volatile 8h-expiry session token and
+    deauthing overnight.
+    """
+    raw = os.getenv("HERMES_PREFER_ENV_ANTHROPIC_TOKEN", "")
+    if not raw:
+        try:
+            from hermes_cli.config import get_env_value
+            raw = get_env_value("HERMES_PREFER_ENV_ANTHROPIC_TOKEN") or ""
+        except Exception:
+            raw = ""
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[str, Any]]) -> Optional[str]:
     """Prefer Claude Code creds when a persisted env OAuth token would shadow refresh.
 
@@ -1084,7 +1105,12 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[s
     later refresh impossible because the static env token wins before we ever
     inspect Claude Code's refreshable credential file. If we have a refreshable
     Claude Code credential record, prefer it over the static env OAuth token.
+
+    Opt-out: when HERMES_PREFER_ENV_ANTHROPIC_TOKEN is set, the explicit env
+    token is kept authoritative and the refreshable credential is ignored.
     """
+    if _env_prefers_static_anthropic_token():
+        return None
     if not env_token or not _is_oauth_token(env_token) or not isinstance(creds, dict):
         return None
     if not creds.get("refreshToken"):

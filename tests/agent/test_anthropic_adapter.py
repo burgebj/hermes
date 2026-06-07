@@ -349,6 +349,62 @@ class TestResolveAnthropicToken:
 
         assert resolve_anthropic_token() == "sk-ant-oat01-static-token"
 
+    def test_env_token_overrides_refreshable_creds_when_prefer_flag_set(self, monkeypatch, tmp_path):
+        """With HERMES_PREFER_ENV_ANTHROPIC_TOKEN set, an explicit env token wins
+        over a refreshable Claude Code credential (the inverse of the default
+        shadowing behavior in
+        test_prefers_refreshable_claude_code_credentials_over_static_anthropic_token).
+        """
+        monkeypatch.setenv("HERMES_PREFER_ENV_ANTHROPIC_TOKEN", "1")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-static-token")
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        # Mock the macOS Keychain off so the file is the only refreshable source.
+        monkeypatch.setattr(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            lambda: None,
+        )
+        cred_file = tmp_path / ".claude" / ".credentials.json"
+        cred_file.parent.mkdir(parents=True)
+        cred_file.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "cc-auto-token",
+                "refreshToken": "refresh-token",
+                "expiresAt": int(time.time() * 1000) + 3600_000,
+            }
+        }))
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+
+        assert resolve_anthropic_token() == "sk-ant-oat01-static-token"
+
+    def test_prefer_flag_off_preserves_default_shadowing(self, monkeypatch, tmp_path):
+        """Sanity: with the flag unset, default behavior is unchanged — the
+        refreshable Claude Code credential still shadows the static env token.
+        """
+        # Force the flag off explicitly. delenv alone is insufficient because the
+        # resolver falls back to reading ~/.hermes/.env, which may set the flag on
+        # the host running the tests. A non-empty "0" short-circuits that fallback.
+        monkeypatch.setenv("HERMES_PREFER_ENV_ANTHROPIC_TOKEN", "0")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-static-token")
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            lambda: None,
+        )
+        cred_file = tmp_path / ".claude" / ".credentials.json"
+        cred_file.parent.mkdir(parents=True)
+        cred_file.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "cc-auto-token",
+                "refreshToken": "refresh-token",
+                "expiresAt": int(time.time() * 1000) + 3600_000,
+            }
+        }))
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+
+        assert resolve_anthropic_token() == "cc-auto-token"
+
 
 class TestRefreshOauthToken:
     def test_returns_none_without_refresh_token(self):
