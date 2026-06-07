@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react'
 import { Button } from '../components/button'
 import {
   cancelInstall,
+  $mode,
   $progress,
   type BootstrapStateModel,
   type StageState
@@ -21,6 +22,7 @@ interface ProgressProps {
  */
 export default function ProgressScreen({ bootstrap }: ProgressProps) {
   const progress = useStore($progress)
+  const mode = useStore($mode)
   const [showLogs, setShowLogs] = useState(false)
   const logEndRef = useRef<HTMLDivElement>(null)
 
@@ -50,7 +52,9 @@ export default function ProgressScreen({ bootstrap }: ProgressProps) {
                   : 'Preparing\u2026'
                 : bootstrap.status === 'completed'
                   ? 'Done'
-                  : 'Installing'}
+                  : mode === 'update'
+                    ? 'Updating'
+                    : 'Installing'}
             </span>
           </div>
           <div className="text-muted-foreground">
@@ -144,13 +148,13 @@ export default function ProgressScreen({ bootstrap }: ProgressProps) {
           />
         </button>
 
-        {bootstrap.status === 'running' && (
+        {bootstrap.status === 'running' && mode !== 'update' && (
           <Button
             variant="outline"
             size="sm"
             onClick={() => void cancelInstall()}
           >
-            Cancel
+            Cancel install
           </Button>
         )}
       </div>

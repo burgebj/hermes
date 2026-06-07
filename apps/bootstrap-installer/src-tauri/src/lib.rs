@@ -11,8 +11,8 @@
 mod bootstrap;
 mod events;
 mod install_script;
-mod powershell;
 mod paths;
+mod powershell;
 mod update;
 
 use std::sync::Arc;
@@ -64,6 +64,14 @@ where
         .any(|a| a.as_ref() == "--reinstall" || a.as_ref() == "--repair")
 }
 
+/// A bare installer launch should behave like a launcher once a complete
+/// desktop install exists. This keeps accidental install-mode starts from
+/// re-running the destructive repository stage. `--update` keeps its dedicated
+/// update flow, and `--repair` / `--reinstall` still force setup.
+fn should_launch_existing_desktop(mode: AppMode, force_setup: bool, installed: bool) -> bool {
+    mode == AppMode::Install && !force_setup && installed
+}
+
 /// Process-wide install state, shared across Tauri commands.
 ///
 /// The bootstrap is a one-shot, single-tenant process — we only need one
@@ -113,42 +121,36 @@ pub fn run() {
         .manage(Arc::new(AppState::new(mode)))
         .setup(move |app| {
             use tauri::Manager;
-            // Launcher fast path (macOS only): a bare ("Install") launch when
-            // Hermes is already installed should NOT show the installer or
-            // rebuild — it should just open the app, so the /Applications
-            // "Hermes" doubles as a normal launcher (first run installs, every
-            // later run launches instantly). The window is kept hidden until
-            // here via `"visible": false` so this path never flashes a window.
-            //
-            // Gated to macOS deliberately: on Windows/Linux the installer keeps
-            // its existing behavior (Windows users relaunch via the Start
-            // Menu/Desktop "Hermes" shortcuts that install.ps1 creates, and a
-            // reliable detached relaunch there needs the DETACHED_PROCESS +
-            // startup-grace handling used by launch_hermes_desktop — out of
-            // scope here). So this is a pure no-op on non-macOS.
+            // Launcher fast path: a bare ("Install") launch when Hermes is
+            // already installed should NOT show the installer or rebuild — it
+            // should just open the app. This also prevents an accidentally
+            // bare updater hand-off from re-entering install mode and
+            // mutating the checkout via scripts/install.*.
             //
             // `--reinstall`/`--repair` opts out so a broken install can be
             // repaired by re-running setup instead of launching the bad app.
-            if cfg!(target_os = "macos") && mode == AppMode::Install && !force_setup {
-                let install_root = paths::hermes_home().join("hermes-agent");
-                if bootstrap::hermes_is_installed(&install_root) {
-                    match bootstrap::spawn_installed_desktop(&install_root) {
-                        Ok(()) => {
-                            // Brief grace so the spawned app is registered
-                            // before we exit (mirrors launch_hermes_desktop).
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            tracing::info!(
-                                "hermes already installed — relaunched desktop; exiting installer"
-                            );
-                            app.handle().exit(0);
-                            return Ok(());
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                ?err,
-                                "relaunch of installed desktop failed; showing installer UI"
-                            );
-                        }
+            let install_root = paths::hermes_home().join("hermes-agent");
+            if should_launch_existing_desktop(
+                mode,
+                force_setup,
+                bootstrap::hermes_is_installed(&install_root),
+            ) {
+                match bootstrap::spawn_installed_desktop(&install_root) {
+                    Ok(()) => {
+                        // Brief grace so the spawned app is registered
+                        // before we exit (mirrors launch_hermes_desktop).
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        tracing::info!(
+                            "hermes already installed — relaunched desktop; exiting installer"
+                        );
+                        app.handle().exit(0);
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            "relaunch of installed desktop failed; showing installer UI"
+                        );
                     }
                 }
             }
@@ -160,7 +162,9 @@ pub fn run() {
                     }
                 }
                 None => {
-                    tracing::error!("main installer window not found; installer UI will not appear");
+                    tracing::error!(
+                        "main installer window not found; installer UI will not appear"
+                    );
                 }
             }
             Ok(())
@@ -187,7 +191,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{force_setup_from_args, AppMode};
+    use super::{force_setup_from_args, should_launch_existing_desktop, AppMode};
 
     #[test]
     fn bare_args_are_install() {
@@ -228,5 +232,33 @@ mod tests {
             AppMode::from_args(["--update", "--reinstall"]),
             AppMode::Update
         );
+    }
+
+    #[test]
+    fn bare_installer_launch_reopens_existing_desktop() {
+        assert!(should_launch_existing_desktop(
+            AppMode::Install,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn update_and_repair_never_take_launcher_fast_path() {
+        assert!(!should_launch_existing_desktop(
+            AppMode::Update,
+            false,
+            true
+        ));
+        assert!(!should_launch_existing_desktop(
+            AppMode::Install,
+            true,
+            true
+        ));
+        assert!(!should_launch_existing_desktop(
+            AppMode::Install,
+            false,
+            false
+        ));
     }
 }
