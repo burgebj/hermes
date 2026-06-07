@@ -1918,6 +1918,8 @@ def test_dir_workspace_honors_given_path(kanban_home, tmp_path):
 
 
 def test_worktree_workspace_returns_intended_path(kanban_home, tmp_path):
+    """With NO branch set, worktree resolution returns the path verbatim
+    (legacy contract — worker-side skill cuts the worktree)."""
     target = str(tmp_path / ".worktrees" / "my-task")
     with kb.connect() as conn:
         t = kb.create_task(
@@ -1925,8 +1927,151 @@ def test_worktree_workspace_returns_intended_path(kanban_home, tmp_path):
         )
         task = kb.get_task(conn, t)
         ws = kb.resolve_workspace(task)
-    # We do NOT auto-create worktrees; the worker's skill handles that.
+    # No branch_name → we do NOT auto-create; the worker's skill handles it.
     assert str(ws) == target
+
+
+def _git_init_repo(path: Path) -> None:
+    """Create a minimal git repo with one commit at ``path``."""
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    for args in (
+        ["init", "-q"],
+        ["checkout", "-q", "-b", "main"],
+    ):
+        subprocess.run(["git", *args], cwd=path, env=env, check=True,
+                       capture_output=True)
+    (path / "seed.txt").write_text("seed\n")
+    (path / "_bmad").mkdir(exist_ok=True)
+    (path / "_bmad" / "config.yaml").write_text("user: test\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, env=env, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=path, env=env,
+                   check=True, capture_output=True)
+
+
+def test_worktree_provisions_branch_when_path_is_repo_root(kanban_home, tmp_path):
+    """The classic bug: workspace_path points AT the repo checkout itself.
+
+    With a branch set, resolution must NOT hand the worker the shared checkout
+    (which would leave it on ``main``). It cuts a sibling worktree under
+    ``<repo>/.worktrees/<branch>`` on the requested branch, with committed
+    files (the BMad tree) present.
+    """
+    repo = tmp_path / "project"
+    _git_init_repo(repo)
+    branch = "story/1-1-scaffold"
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="scaffold", workspace_kind="worktree",
+            workspace_path=str(repo), branch_name=branch,
+        )
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+
+    import subprocess
+    # Resolved to a sibling worktree, NOT the repo root.
+    assert ws != repo
+    assert ws == repo / ".worktrees" / "story-1-1-scaffold"
+    assert (ws / ".git").exists()
+    head = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ws,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == branch
+    # Committed BMad tree is present in the worktree.
+    assert (ws / "_bmad" / "config.yaml").exists()
+    # The repo root itself is untouched / still on main.
+    main_head = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert main_head == "main"
+
+
+def test_worktree_provisions_at_explicit_sibling_path(kanban_home, tmp_path):
+    """When workspace_path is a not-yet-existing dir beside a repo, the
+    worktree is provisioned at that exact path on the branch."""
+    repo = tmp_path / "project"
+    _git_init_repo(repo)
+    target = repo / ".worktrees" / "mytask"
+    branch = "story/2-2-thing"
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="thing", workspace_kind="worktree",
+            workspace_path=str(target), branch_name=branch,
+        )
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+
+    import subprocess
+    assert ws == target
+    assert (ws / ".git").exists()
+    head = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ws,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == branch
+
+
+def test_worktree_provision_is_idempotent(kanban_home, tmp_path):
+    """Resolving twice (e.g. a respawn after block) reuses the worktree
+    rather than failing on 'already exists'."""
+    repo = tmp_path / "project"
+    _git_init_repo(repo)
+    branch = "story/3-3-retry"
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="retry", workspace_kind="worktree",
+            workspace_path=str(repo), branch_name=branch,
+        )
+        task = kb.get_task(conn, t)
+        ws1 = kb.resolve_workspace(task)
+        ws2 = kb.resolve_workspace(task)
+    assert ws1 == ws2
+    assert (ws1 / ".git").exists()
+
+
+def test_worktree_respawn_with_persisted_path_does_not_nest(kanban_home, tmp_path):
+    """Regression: after the dispatcher persists the RESOLVED worktree path
+    back to the task (set_workspace_path), a respawn must reuse that worktree —
+    NOT cut a nested <wt>/.worktrees/<branch> inside it.
+
+    Without the linked-worktree guard, the second dispatch dies with
+    'git worktree add failed' on a doubly-nested path.
+    """
+    repo = tmp_path / "project"
+    _git_init_repo(repo)
+    branch = "story/1-1-scaffold"
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="scaffold", workspace_kind="worktree",
+            workspace_path=str(repo), branch_name=branch,
+        )
+        # First dispatch: resolves to the sibling worktree; dispatcher persists
+        # that path back to the row.
+        task = kb.get_task(conn, t)
+        ws1 = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, str(ws1))
+        # Second dispatch (respawn): workspace_path is now the worktree itself.
+        task2 = kb.get_task(conn, t)
+        ws2 = kb.resolve_workspace(task2)
+
+    assert ws2 == ws1, f"respawn nested the worktree: {ws2} != {ws1}"
+    # Path must be exactly one .worktrees level deep, never nested.
+    assert str(ws2.relative_to(repo)) == ".worktrees/story-1-1-scaffold"
+    import subprocess
+    head = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ws2,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert head == branch
 
 
 # ---------------------------------------------------------------------------

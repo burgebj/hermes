@@ -4619,6 +4619,108 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 # Workspace resolution
 # ---------------------------------------------------------------------------
 
+def _git(args: list[str], *, cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+    """Run a git command, capturing output. Never raises on non-zero exit."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd) if cwd is not None else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _git_toplevel(path: Path) -> Optional[Path]:
+    """Return the work-tree root of the repo containing ``path``, or None.
+
+    Walks up to the first existing ancestor before asking git, so a
+    not-yet-created worktree dir (e.g. ``<repo>/.worktrees/<task>``) still
+    resolves to its containing repo.
+    """
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists():
+        return None
+    res = _git(["rev-parse", "--show-toplevel"], cwd=probe)
+    if res.returncode == 0 and res.stdout.strip():
+        return Path(res.stdout.strip()).resolve()
+    return None
+
+
+def _git_branch_exists(repo: Path, branch: str) -> bool:
+    res = _git(
+        ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo
+    )
+    return res.returncode == 0
+
+
+def _provision_worktree(repo: Path, worktree_path: Path, branch: str) -> Path:
+    """Ensure a git worktree exists at ``worktree_path`` checked out on ``branch``.
+
+    Idempotent and dispatch-safe:
+
+    - If ``worktree_path`` is already a worktree on ``branch``, returns it as-is.
+    - If the branch exists, ``git worktree add <path> <branch>``; otherwise
+      ``git worktree add -b <branch> <path>`` (cut from the repo's current HEAD).
+    - Concurrent dispatchers may race on the same repo's ``.git/worktrees`` lock;
+      we retry a few times on a lock failure.
+
+    Raises ``RuntimeError`` if the worktree cannot be provisioned, so the
+    dispatcher records a spawn failure instead of silently landing the worker
+    on the wrong branch (the bug this guards against: a worker booting on
+    ``main`` because no worktree was ever cut).
+    """
+    # Already a worktree? Verify the branch and return.
+    if (worktree_path / ".git").exists():
+        head = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree_path)
+        cur = head.stdout.strip() if head.returncode == 0 else None
+        if cur == branch:
+            return worktree_path
+        # Path has a .git but is on the wrong branch. If it's a checked-out
+        # worktree we can try to switch it; if that fails, surface the error.
+        sw = _git(["checkout", branch], cwd=worktree_path)
+        if sw.returncode == 0:
+            return worktree_path
+        raise RuntimeError(
+            f"worktree at {worktree_path} is on {cur!r}, not {branch!r}, "
+            f"and could not switch: {(sw.stderr or sw.stdout).strip()}"
+        )
+
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+
+    last_err = ""
+    for attempt in range(4):
+        if _git_branch_exists(repo, branch):
+            add = _git(
+                ["worktree", "add", str(worktree_path), branch], cwd=repo
+            )
+        else:
+            add = _git(
+                ["worktree", "add", "-b", branch, str(worktree_path)], cwd=repo
+            )
+        if add.returncode == 0:
+            return worktree_path
+        last_err = (add.stderr or add.stdout).strip()
+        # Another dispatcher may already have created the worktree between our
+        # existence check and the add (branch now checked out elsewhere, or the
+        # path now exists). Treat an existing, correct worktree as success.
+        if (worktree_path / ".git").exists():
+            head = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree_path)
+            if head.returncode == 0 and head.stdout.strip() == branch:
+                return worktree_path
+        # Lock contention on .git/worktrees — back off and retry.
+        if "lock" in last_err.lower() or "already" in last_err.lower():
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        break
+
+    raise RuntimeError(
+        f"git worktree add failed for branch {branch!r} at "
+        f"{worktree_path} (repo {repo}): {last_err}"
+    )
+
+
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
@@ -4632,9 +4734,16 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
       resolves against the dispatcher's CWD instead of a meaningful
       root.  Users who want a kanban-root-relative workspace should
       compute the absolute path themselves.
-    - ``worktree``: a git worktree at ``workspace_path``.  Not created
-      automatically in v1 -- the kanban-worker skill documents
-      ``git worktree add`` as a worker-side step.  Returns the intended path.
+    - ``worktree``: a git worktree at ``workspace_path``.
+      * With ``branch_name`` set, Hermes **provisions the worktree itself**
+        (``git worktree add`` on that branch) so the spawned worker boots on
+        the requested branch. If ``workspace_path`` points at an existing repo
+        checkout (e.g. the repo root), a sibling worktree is cut under
+        ``<repo>/.worktrees/<branch>`` rather than handing the worker the
+        shared checkout (which would leave it on ``main``).
+      * With no ``branch_name``, the legacy contract is preserved: the path is
+        returned verbatim and the kanban-worker skill documents
+        ``git worktree add`` as a worker-side step.
 
     Persist the resolved path back to the task row via ``set_workspace_path``
     so subsequent runs reuse the same directory.
@@ -4679,7 +4788,76 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
                 f"task {task.id} has non-absolute worktree path "
                 f"{task.workspace_path!r}; use an absolute path"
             )
-        return p
+        # When a branch is requested, Hermes provisions the worktree itself so
+        # the worker boots *on that branch*. Historically resolution returned
+        # the path verbatim and left `git worktree add` to a worker-side skill
+        # step; that silently failed when ``workspace_path`` pointed at an
+        # existing repo checkout (e.g. the repo root), because the path already
+        # had ``.git`` and the worker just landed in the shared checkout on its
+        # current branch (usually ``main``). See #worktree-branch-bug.
+        #
+        # Resolution strategy:
+        # - If ``p`` is itself an existing repo checkout (has ``.git`` and its
+        #   toplevel == p) AND a branch is set, we must NOT hand the worker the
+        #   shared checkout. Cut a sibling worktree under ``<repo>/.worktrees/
+        #   <branch-or-id>`` instead and return that.
+        # - If ``p`` does not yet exist (or is an empty dir) and we can locate a
+        #   parent repo, provision the worktree at ``p`` on the branch.
+        # - With no branch set, preserve the legacy verbatim contract (a worker
+        #   skill or a non-git ``dir``-style worktree handles creation).
+        branch = (task.branch_name or "").strip()
+        if not branch:
+            return p
+
+        # Find the repo this worktree should branch from.
+        repo: Optional[Path] = None
+        top = _git_toplevel(p)
+        if top is not None and top == p.resolve():
+            # p IS a checkout root. Two sub-cases:
+            #   (a) p is ALREADY the provisioned worktree on the target branch
+            #       (e.g. a respawn after set_workspace_path persisted the
+            #       resolved worktree path). Return it as-is — do NOT nest a
+            #       <p>/.worktrees/<branch> inside it. This is the idempotent
+            #       respawn path; without it the second dispatch fails with
+            #       "git worktree add failed" on a doubly-nested path.
+            #   (b) p is the shared main checkout (the classic bug:
+            #       workspace_path == repo root). We must NOT hand the worker
+            #       the shared checkout; cut a sibling worktree under
+            #       <repo>/.worktrees/<branch> instead.
+            head = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=p)
+            cur_branch = head.stdout.strip() if head.returncode == 0 else None
+            # A linked worktree's top-level .git is a FILE (gitdir pointer);
+            # the primary checkout's is a DIRECTORY. If p is already a linked
+            # worktree on the right branch, it's case (a).
+            is_linked_worktree = (p / ".git").is_file()
+            if cur_branch == branch and is_linked_worktree:
+                return p
+            repo = top
+            safe = re.sub(r"[^A-Za-z0-9._-]", "-", branch) or task.id
+            worktree_path = repo / ".worktrees" / safe
+        elif top is not None:
+            # p lives inside a repo but isn't its root — treat p as the intended
+            # worktree dir and branch from the containing repo.
+            repo = top
+            worktree_path = p
+        else:
+            # p isn't (yet) inside a git repo. Look at its parent chain for one.
+            parent_repo = _git_toplevel(p.parent)
+            if parent_repo is None:
+                # No repo to branch from — fall back to the legacy verbatim
+                # behaviour (worker-side creation / non-git worktree).
+                return p
+            repo = parent_repo
+            worktree_path = p
+
+        try:
+            return _provision_worktree(repo, worktree_path, branch)
+        except RuntimeError as exc:
+            # Surface as a workspace-resolution error so the dispatcher records
+            # a spawn failure instead of booting the worker on the wrong branch.
+            raise ValueError(
+                f"task {task.id} worktree provisioning failed: {exc}"
+            ) from exc
     raise ValueError(f"unknown workspace_kind: {kind}")
 
 
