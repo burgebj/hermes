@@ -131,6 +131,56 @@ class TestWriteFileHandler:
             result = json.loads(_handle_write_file({"path": "/tmp/empty.txt", "content": ""}))
             assert result["status"] == "ok"
 
+    def test_file_content_alias_is_accepted(self):
+        """#39964 - accept skill_manage-style content alias for write_file."""
+        from tools.file_tools import _handle_write_file
+
+        with patch("tools.file_tools.write_file_tool", return_value=json.dumps({"status": "ok"})) as mock_write:
+            result = json.loads(_handle_write_file({"path": "/tmp/out.txt", "file_content": "hello"}))
+
+            assert result["status"] == "ok"
+            mock_write.assert_called_once_with(
+                path="/tmp/out.txt",
+                content="hello",
+                task_id="default",
+                cross_profile=False,
+            )
+
+    def test_file_path_alias_is_accepted(self):
+        """#39964 - accept skill_manage-style path alias for write_file."""
+        from tools.file_tools import _handle_write_file
+
+        with patch("tools.file_tools.write_file_tool", return_value=json.dumps({"status": "ok"})) as mock_write:
+            result = json.loads(_handle_write_file({"file_path": "/tmp/out.txt", "content": "hello"}))
+
+            assert result["status"] == "ok"
+            mock_write.assert_called_once_with(
+                path="/tmp/out.txt",
+                content="hello",
+                task_id="default",
+                cross_profile=False,
+            )
+
+    def test_canonical_write_file_args_win_over_aliases(self):
+        """#39964 - preserve canonical path/content when aliases are also present."""
+        from tools.file_tools import _handle_write_file
+
+        with patch("tools.file_tools.write_file_tool", return_value=json.dumps({"status": "ok"})) as mock_write:
+            result = json.loads(_handle_write_file({
+                "path": "/tmp/canonical.txt",
+                "file_path": "/tmp/alias.txt",
+                "content": "",
+                "file_content": "alias content",
+            }))
+
+            assert result["status"] == "ok"
+            mock_write.assert_called_once_with(
+                path="/tmp/canonical.txt",
+                content="",
+                task_id="default",
+                cross_profile=False,
+            )
+
     def test_non_string_content_returns_error(self):
         """#19096 — content must be a string, not a dict or list."""
         from tools.file_tools import _handle_write_file
