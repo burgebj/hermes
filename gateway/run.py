@@ -7163,6 +7163,11 @@ class GatewayRunner:
         platform_allow_bots_map = {
             Platform.DISCORD: "DISCORD_ALLOW_BOTS",
             Platform.FEISHU: "FEISHU_ALLOW_BOTS",
+            # #32188: two Hermes profiles sharing an account cross-receive each
+            # other's outbound bot messages via Telegram. Default policy
+            # ("none") silently drops them; operators that intentionally bridge
+            # bots can opt in with "mentions" or "all".
+            Platform.TELEGRAM: "TELEGRAM_ALLOW_BOTS",
         }
 
         # Plugin platforms: check the registry for auth env var names

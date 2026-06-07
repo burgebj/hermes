@@ -5953,6 +5953,11 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=thread_id_str,
             chat_topic=chat_topic,
             message_id=str(message.message_id),
+            # Propagate PTB's user.is_bot so _is_user_authorized can apply the
+            # TELEGRAM_ALLOW_BOTS policy. Without this, messages cross-delivered
+            # by another bot on the same account always satisfied the human
+            # auth path and triggered an echo agent loop (#32188).
+            is_bot=bool(getattr(user, "is_bot", False)) if user else False,
         )
         
         # Extract reply context if this message is a reply.
