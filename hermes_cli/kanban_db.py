@@ -1181,6 +1181,13 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+# Maximum seconds to wait for the cross-process init lock before giving up.
+# The lock is only held during first-connect schema/WAL setup (typically <1s),
+# so 30s is generous.  Prevents indefinite hangs when a stale process holds
+# the lock (see #kanban-timeout fix).
+_LOCK_TIMEOUT_SECONDS = 30
+
+
 @contextlib.contextmanager
 def _cross_process_init_lock(path: Path):
     """Serialize first-connect WAL/schema/integrity setup across processes.
@@ -1191,6 +1198,10 @@ def _cross_process_init_lock(path: Path):
     lock keeps header validation, integrity probing, WAL activation, and
     additive migrations single-file/single-writer across the whole host while
     leaving normal post-init DB usage concurrent under SQLite WAL.
+
+    Uses a non-blocking retry loop with a timeout (``_LOCK_TIMEOUT_SECONDS``)
+    instead of an indefinite blocking flock, so a stale lock holder cannot
+    hang new processes forever.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".init.lock")
@@ -1206,12 +1217,39 @@ def _cross_process_init_lock(path: Path):
             # primitive; no payload needs to be written.
             handle.seek(0)
             locking = getattr(msvcrt, "locking")
-            lock_mode = getattr(msvcrt, "LK_LOCK")
-            locking(handle.fileno(), lock_mode, 1)
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+            acquired = False
+            while time.monotonic() < deadline:
+                try:
+                    locking(handle.fileno(), getattr(msvcrt, "LK_NBLCK"), 1)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            if not acquired:
+                raise TimeoutError(
+                    f"Timed out after {_LOCK_TIMEOUT_SECONDS}s waiting for "
+                    f"kanban init lock on {lock_path}. Another process may be "
+                    f"holding it (check for stale gateway/worker processes)."
+                )
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+            acquired = False
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except (OSError, BlockingIOError):
+                    time.sleep(0.05)
+            if not acquired:
+                raise TimeoutError(
+                    f"Timed out after {_LOCK_TIMEOUT_SECONDS}s waiting for "
+                    f"kanban init lock on {lock_path}. Another process may be "
+                    f"holding it (check for stale gateway/worker processes)."
+                )
         yield
     finally:
         try:
