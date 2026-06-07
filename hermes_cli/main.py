@@ -8157,7 +8157,8 @@ def _update_via_zip(args):
     if not uv_bin:
         uv_bin = _ensure_uv_for_termux(pip_cmd)
     if uv_bin:
-        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+        venv_dir = _resolve_venv_dir()
+        uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_dir)} if venv_dir else {**os.environ}
         if _is_termux_env(uv_env):
             uv_env.pop("PYTHONPATH", None)
             uv_env.pop("PYTHONHOME", None)
@@ -8792,10 +8793,39 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _resolve_venv_dir() -> Path | None:
+    """Resolve the active virtualenv directory.
+
+    Prefers the running interpreter's venv (sys.prefix), then VIRTUAL_ENV env var,
+    then falls back to common directory names under PROJECT_ROOT (.venv before venv).
+    Returns None when no virtualenv can be found.
+    """
+    # If we're running inside a virtualenv, sys.prefix points to it.
+    if sys.prefix != sys.base_prefix:
+        venv = Path(sys.prefix)
+        if venv.is_dir():
+            return venv
+
+    # uv and some other tools set VIRTUAL_ENV without changing sys.prefix.
+    _virtual_env = os.environ.get("VIRTUAL_ENV")
+    if _virtual_env:
+        venv = Path(_virtual_env)
+        if venv.is_dir():
+            return venv
+
+    # Fallback: check common virtualenv directory names under the project root.
+    for candidate in (".venv", "venv"):
+        venv = PROJECT_ROOT / candidate
+        if venv.is_dir():
+            return venv
+
+    return None
+
+
 def _venv_scripts_dir() -> Path | None:
     """Return the venv Scripts directory if we're running inside the project venv."""
-    venv_dir = PROJECT_ROOT / "venv"
-    if not venv_dir.is_dir():
+    venv_dir = _resolve_venv_dir()
+    if venv_dir is None:
         return None
     scripts = venv_dir / ("Scripts" if _is_windows() else "bin")
     return scripts if scripts.is_dir() else None
@@ -10686,7 +10716,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
         install_group = "all"
 
         if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+            venv_dir = _resolve_venv_dir()
+            uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_dir)} if venv_dir else {**os.environ}
             if _is_termux_env(uv_env):
                 uv_env.pop("PYTHONPATH", None)
                 uv_env.pop("PYTHONHOME", None)
