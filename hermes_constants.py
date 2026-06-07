@@ -283,28 +283,77 @@ def secure_parent_dir(path: Path) -> None:
 
 
 def get_subprocess_home() -> str | None:
-    """Return a per-profile HOME directory for subprocesses, or None.
+    """Return a subprocess HOME override, if one should be applied.
 
-    When ``{HERMES_HOME}/home/`` exists on disk, subprocesses should use it
-    as ``HOME`` so system tools (git, ssh, gh, npm …) write their configs
-    inside the Hermes data directory instead of the OS-level ``/root`` or
-    ``~/``.  This provides:
+    On normal host installs, tool subprocesses should use the user's real home
+    so CLIs find ``~/.gitconfig``, ``~/.ssh``, ``~/.azure``, npm state, etc.
+    If the parent process already has that HOME, no override is needed.
 
-    * **Docker persistence** — tool configs land inside the persistent volume.
-    * **Profile isolation** — each profile gets its own git identity, SSH
-      keys, gh tokens, etc.
-
-    The Python process's own ``os.environ["HOME"]`` and ``Path.home()`` are
-    **never** modified — only subprocess environments should inject this value.
-    Activation is directory-based: if the ``home/`` subdirectory doesn't
-    exist, returns ``None`` and behavior is unchanged.
+    Docker/Podman keeps the older ``{HERMES_HOME}/home`` behavior because the
+    container's persistent volume is the only durable home-like location.
     """
+    explicit = os.getenv("HERMES_REAL_HOME", "").strip()
+    if explicit:
+        return explicit
+
     hermes_home = get_hermes_home_override() or os.getenv("HERMES_HOME")
     if not hermes_home:
         return None
+
     profile_home = os.path.join(hermes_home, "home")
-    if os.path.isdir(profile_home):
+    if not os.path.isdir(profile_home):
+        return None
+
+    if is_container():
         return profile_home
+
+    current_home = os.getenv("HOME", "").strip()
+    try:
+        current_resolved = os.path.normcase(os.path.abspath(os.path.expanduser(current_home)))
+        profile_resolved = os.path.normcase(os.path.abspath(profile_home))
+    except Exception:
+        current_resolved = current_home
+        profile_resolved = profile_home
+
+    if not current_home:
+        return None
+
+    if current_home and current_resolved != profile_resolved:
+        return None
+
+    def is_real_home_candidate(candidate: str) -> bool:
+        candidate = candidate.strip()
+        if not candidate:
+            return False
+        try:
+            return os.path.normcase(os.path.abspath(candidate)) != profile_resolved
+        except Exception:
+            return candidate != profile_home
+
+    try:
+        import pwd
+
+        real_home = pwd.getpwuid(os.getuid()).pw_dir.strip()
+    except Exception:
+        real_home = ""
+
+    if is_real_home_candidate(real_home):
+        return real_home
+
+    real_home = os.getenv("USERPROFILE", "").strip()
+    if is_real_home_candidate(real_home):
+        return real_home
+
+    home_drive = os.getenv("HOMEDRIVE", "").strip()
+    home_path = os.getenv("HOMEPATH", "").strip()
+    if home_drive and home_path:
+        if home_path.startswith(("\\", "/")):
+            real_home = f"{home_drive}{home_path}"
+        else:
+            real_home = os.path.join(home_drive, home_path)
+        if is_real_home_candidate(real_home):
+            return real_home
+
     return None
 
 

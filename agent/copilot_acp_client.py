@@ -69,7 +69,7 @@ def _resolve_args() -> list[str]:
 
 
 def _resolve_home_dir() -> str:
-    """Return a stable HOME for child ACP processes."""
+    """Return the real HOME for child ACP processes."""
 
     try:
         from hermes_constants import get_subprocess_home
