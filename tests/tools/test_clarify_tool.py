@@ -9,6 +9,7 @@ from tools.clarify_tool import (
     check_clarify_requirements,
     MAX_CHOICES,
     CLARIFY_SCHEMA,
+    _sanitize_clarify_text,
 )
 
 
@@ -192,3 +193,57 @@ class TestClarifySchema:
     def test_max_choices_is_four(self):
         """MAX_CHOICES constant should be 4."""
         assert MAX_CHOICES == 4
+
+
+class TestSanitizeClarifyText:
+    """Tests for _sanitize_clarify_text — stripping Discord/chat markup."""
+
+    def test_strips_user_mentions(self):
+        """Should strip <@123> user mentions."""
+        assert _sanitize_clarify_text("Hello <@123> there") == "Hello  there"
+
+    def test_strips_nickname_mentions(self):
+        """Should strip <@!123> nickname mentions."""
+        assert _sanitize_clarify_text("Hey <@!456>!") == "Hey !"
+
+    def test_strips_role_mentions(self):
+        """Should strip <@&123> role mentions."""
+        assert _sanitize_clarify_text("<@&789> check this") == "check this"
+
+    def test_strips_channel_mentions(self):
+        """Should strip <#123> channel mentions."""
+        assert _sanitize_clarify_text("Join <#123>?") == "Join ?"
+        assert _sanitize_clarify_text("<#123456789012345678>") == ""
+
+    def test_strips_everyone(self):
+        """Should strip standalone @everyone."""
+        assert _sanitize_clarify_text("@everyone please read") == "please read"
+
+    def test_strips_here(self):
+        """Should strip standalone @here."""
+        assert _sanitize_clarify_text("@here quick question") == "quick question"
+
+    def test_preserves_plain_text(self):
+        """Normal text should pass through unchanged."""
+        assert _sanitize_clarify_text("What is your name?") == "What is your name?"
+
+    def test_preserves_valid_at_mentions_in_context(self):
+        """Legitimate @-prefixed words should be preserved."""
+        assert _sanitize_clarify_text("Use @property decorator") == "Use @property decorator"
+        assert _sanitize_clarify_text("The @pytest.fixture syntax") == "The @pytest.fixture syntax"
+
+    def test_does_not_partial_match_here(self):
+        """Should NOT strip @here from inside longer words (word boundary regression)."""
+        assert _sanitize_clarify_text("@hereditary disease") == "@hereditary disease"
+        assert _sanitize_clarify_text("contact@hereford.org") == "contact@hereford.org"
+
+    def test_strips_multiple_mentions(self):
+        """Should strip all mention types from a single string."""
+        result = _sanitize_clarify_text("<@123> and <@&456> and <#789> @everyone @here")
+        assert result == "and  and"
+
+    def test_question_with_mention_example(self):
+        """Real-world example: @bot mention with natural language."""
+        result = _sanitize_clarify_text("<@&1234567890> how is the provided information?")
+        assert "how is the provided information?" in result
+        assert "<@&" not in result
