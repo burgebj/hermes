@@ -702,6 +702,73 @@ except Exception:  # pragma: no cover - scanner is optional hardening
     _scan_cron_prompt = None
 
 
+# Cap the serialised `response.completed` payload below CPython's
+# `http.client._MAXLINE` SSE-line limit (128 KB; not configurable). Leaves
+# 28 KB headroom for the SSE envelope (`event:` line, `data: ` prefix,
+# wrapping `response` envelope fields).
+_RESPONSE_COMPLETED_SAFE_BYTES = 100_000
+
+
+def _trim_response_completed_string(s: str, soft: bool) -> str:
+    """Replace strings above the soft (500) / hard (100) char limit with a
+    length annotation. Used for `response.completed` payloads only — the
+    full content already shipped via the progressive SSE events earlier in
+    the stream."""
+    limit = 500 if soft else 100
+    if len(s) <= limit:
+        return s
+    return f"[{len(s)} chars — truncated for response.completed]"
+
+
+def _trim_response_completed_items(items: list, soft: bool) -> None:
+    """Trim function_call args and function_call_output text in-place.
+
+    `soft=True` runs first and replaces any oversized string with a length
+    annotation, preserving structure. If the resulting payload still exceeds
+    `_RESPONSE_COMPLETED_SAFE_BYTES`, the caller runs again with `soft=False`
+    which uses a tighter (100-char) limit and reduces multi-entry tool
+    outputs to their first entry only.
+    """
+    for _item in items:
+        if _item.get("type") == "function_call":
+            try:
+                _raw = _item.get("arguments", "{}")
+                _args = json.loads(_raw) if isinstance(_raw, str) else _raw
+                if isinstance(_args, dict):
+                    for _k, _v in list(_args.items()):
+                        if isinstance(_v, str):
+                            _args[_k] = _trim_response_completed_string(_v, soft)
+                    _item["arguments"] = json.dumps(_args)
+            except Exception:
+                pass
+        elif _item.get("type") == "function_call_output":
+            _output = _item.get("output", [])
+            if isinstance(_output, list):
+                _trimmed = []
+                for _entry in _output:
+                    if isinstance(_entry, dict) and isinstance(_entry.get("text"), str):
+                        _entry = {**_entry, "text": _trim_response_completed_string(_entry["text"], soft)}
+                    _trimmed.append(_entry)
+                _item["output"] = _trimmed if soft else _trimmed[:1]
+
+
+def _trim_response_completed_payload(items: list) -> list:
+    """Apply soft trimming, then hard trimming if still over the safe limit.
+
+    Modifies `items` in place and returns the same list. After this call,
+    `len(json.dumps(items))` is bounded by `_RESPONSE_COMPLETED_SAFE_BYTES`
+    in practice — though the JSON envelope around it (`output`, `usage`,
+    request id) adds a few hundred bytes more.
+    """
+    _trim_response_completed_items(items, soft=True)
+    try:
+        if len(json.dumps(items)) > _RESPONSE_COMPLETED_SAFE_BYTES:
+            _trim_response_completed_items(items, soft=False)
+    except Exception:
+        pass
+    return items
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -2621,29 +2688,12 @@ class APIServerAdapter(BasePlatformAdapter):
             # shape produced by _extract_output_items in the batch path.
             final_items: List[Dict[str, Any]] = list(emitted_items)
 
-            # Trim large content from tool call arguments to keep the
-            # response.completed event under ~100KB.  Clients already
-            # received full details via incremental events.
-            for _item in final_items:
-                if _item.get("type") == "function_call":
-                    try:
-                        _args = json.loads(_item.get("arguments", "{}")) if isinstance(_item.get("arguments"), str) else _item.get("arguments", {})
-                        if isinstance(_args, dict):
-                            for _k in ("content", "query", "pattern", "old_string", "new_string"):
-                                if isinstance(_args.get(_k), str) and len(_args[_k]) > 500:
-                                    _args[_k] = "[" + str(len(_args[_k])) + " chars — truncated for response.completed]"
-                            _item["arguments"] = json.dumps(_args)
-                    except Exception:
-                        pass
-                elif _item.get("type") == "function_call_output":
-                    _output = _item.get("output", [])
-                    if isinstance(_output, list) and _output:
-                        _first = _output[0]
-                        if isinstance(_first, dict) and _first.get("type") == "input_text":
-                            _text = _first.get("text", "")
-                            if len(_text) > 1000:
-                                _first["text"] = _text[:500] + "...[" + str(len(_text) - 500) + " more chars]"
-                                _item["output"] = [_first]
+            # Cap the response.completed payload below CPython's
+            # `http.client._MAXLINE` SSE-line limit (128 KB; not configurable).
+            # Clients already received full details via incremental
+            # output_item.added / output_text.delta events — this terminal
+            # envelope only needs summaries.
+            _trim_response_completed_payload(final_items)
 
             final_items.append({
                 "type": "message",
