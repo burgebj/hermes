@@ -20,7 +20,10 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Any, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, TYPE_CHECKING, Tuple
+
+if TYPE_CHECKING:
+    from discord import RawReactionActionEvent
 
 logger = logging.getLogger(__name__)
 
@@ -706,6 +709,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
             )
             intents.voice_states = True
+            # guild_reactions and dm_reactions are included in Intents.default()
+            # above; no explicit assignment is needed for inbound reaction routing.
 
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
@@ -885,6 +890,14 @@ class DiscordAdapter(BasePlatformAdapter):
                         else f"moved {before.channel.name} -> {after.channel.name}",
                         guild_id,
                     )
+
+            @self._client.event
+            async def on_raw_reaction_add(payload):
+                await adapter_self._handle_inbound_reaction(payload, "added")
+
+            @self._client.event
+            async def on_raw_reaction_remove(payload):
+                await adapter_self._handle_inbound_reaction(payload, "removed")
 
             # Register slash commands
             if self._slash_commands:
@@ -1407,6 +1420,77 @@ class DiscordAdapter(BasePlatformAdapter):
                 await self._add_reaction(message, "✅")
             elif outcome == ProcessingOutcome.FAILURE:
                 await self._add_reaction(message, "❌")
+
+    async def _handle_inbound_reaction(self, payload: RawReactionActionEvent, action: Literal["added", "removed"]) -> None:
+        """Route user reactions on bot messages as synthetic text events.
+
+        Mirrors the Feishu adapter's _handle_reaction_event pattern:
+        reactions on bot messages are converted to 'reaction:{action}:{emoji}'
+        synthetic text events and routed through the normal message pipeline.
+        """
+        try:
+            if not self._reactions_enabled():
+                return
+            if not self._client or not self._client.user:
+                return
+            if payload.user_id == self._client.user.id:
+                return
+            if not self._is_allowed_user(str(payload.user_id)):
+                return
+
+            # Dedup: Discord RESUME replays events after reconnects
+            emoji = str(payload.emoji)
+            dedup_key = f"reaction:{payload.message_id}:{action}:{payload.user_id}:{emoji}"
+            if self._dedup.is_duplicate(dedup_key):
+                return
+
+            channel = self._client.get_channel(payload.channel_id)
+            if channel is None:
+                channel = await self._client.fetch_channel(payload.channel_id)
+
+            message = await channel.fetch_message(payload.message_id)
+            if message.author != self._client.user:
+                return
+
+            synthetic_text = f"reaction:{action}:{emoji}"
+
+            # Resolve reactor display name
+            user_name = str(payload.user_id)
+            if payload.member and hasattr(payload.member, "display_name"):
+                user_name = payload.member.display_name
+
+            chat_type = "dm"
+            chat_name = str(payload.channel_id)
+            if hasattr(channel, "guild") and channel.guild:
+                chat_type = "group"
+                chat_name = getattr(channel, "name", str(channel.id))
+                chat_name = f"{channel.guild.name} / #{chat_name}"
+
+            source = self.build_source(
+                chat_id=str(payload.channel_id),
+                chat_name=chat_name,
+                chat_type=chat_type,
+                user_id=str(payload.user_id),
+                user_name=user_name,
+            )
+
+            event = MessageEvent(
+                text=synthetic_text,
+                message_type=MessageType.TEXT,
+                source=source,
+                raw_message=payload,
+                message_id=str(payload.message_id),
+            )
+            logger.info(
+                "[%s] Routing reaction %s:%s on bot message %s",
+                self.name, action, emoji, payload.message_id,
+            )
+            await self.handle_message(event)
+        except Exception:
+            logger.warning(
+                "[%s] Failed to handle inbound reaction: %s %s",
+                self.name, action, payload, exc_info=True,
+            )
 
     async def send(
         self,
