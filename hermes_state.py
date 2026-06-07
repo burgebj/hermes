@@ -1411,10 +1411,17 @@ class SessionDB:
         if not title:
             return None
 
-        # Remove ASCII control characters (0x00-0x1F, 0x7F) but keep
+        # Remove ANSI escape sequences (CSI, OSC, etc.) before stripping
+        # individual control chars — otherwise the sequence body (e.g.
+        # "[31mRed[0m") survives as visible garbage in session titles.
+        cleaned = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', title)           # CSI
+        cleaned = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', cleaned)  # OSC
+        cleaned = re.sub(r'\x1b[()][AB012]', '', cleaned)               # charset
+
+        # Remove remaining ASCII control characters (0x00-0x1F, 0x7F) but keep
         # whitespace chars (\t=0x09, \n=0x0A, \r=0x0D) so they can be
         # normalized to spaces by the whitespace collapsing step below
-        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', title)
+        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', cleaned)
 
         # Remove problematic Unicode control characters:
         # - Zero-width chars (U+200B-U+200F, U+FEFF)
