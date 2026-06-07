@@ -8837,6 +8837,8 @@ class HermesCLI:
             self.show_toolsets()
         elif canonical == "config":
             self.show_config()
+        elif canonical == "login":
+            self._handle_login_command(cmd_original)
         elif canonical == "redraw":
             # Manual recovery for terminal buffer drift from multiplexer
             # tab switches, subshell ``clear``, SSH window restores, etc.
@@ -9312,6 +9314,18 @@ class HermesCLI:
                     _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
         
         return True
+
+    def _handle_login_command(self, cmd: str):
+        """Handle /login — convenience wrapper around `hermes auth`."""
+        try:
+            from hermes_cli.login_slash import run_login_slash
+            run_login_slash(cmd)
+        except SystemExit as exc:
+            code = getattr(exc, "code", 0)
+            if code not in (0, None) and not isinstance(code, int):
+                _cprint(f"  {_escape(str(code))}")
+        except Exception as exc:
+            _cprint(f"  Login command failed: {_escape(str(exc))}")
     
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
