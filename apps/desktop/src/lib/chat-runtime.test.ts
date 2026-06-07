@@ -1,6 +1,24 @@
 import { describe, expect, it } from 'vitest'
 
-import { coerceThinkingText } from './chat-runtime'
+import { coerceThinkingText, parseCommandDispatch } from './chat-runtime'
+
+describe('parseCommandDispatch', () => {
+  it('parses the prefill directive returned by /undo', () => {
+    expect(parseCommandDispatch({ message: 'edit me', notice: '↶ Undid 1 turn', type: 'prefill' })).toEqual({
+      message: 'edit me',
+      notice: '↶ Undid 1 turn',
+      type: 'prefill'
+    })
+  })
+
+  it('parses a prefill directive with no message or notice', () => {
+    expect(parseCommandDispatch({ type: 'prefill' })).toEqual({ type: 'prefill' })
+  })
+
+  it('returns null for unknown directive types', () => {
+    expect(parseCommandDispatch({ type: 'mystery' })).toBeNull()
+  })
+})
 
 describe('coerceThinkingText', () => {
   it('strips streaming status prefixes from thinking deltas', () => {
