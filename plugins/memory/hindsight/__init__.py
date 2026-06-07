@@ -19,6 +19,9 @@ Config via environment variables:
   HINDSIGHT_IDLE_TIMEOUT           — embedded daemon idle timeout seconds; 0 disables shutdown (default: 300)
   HINDSIGHT_RETAIN_TAGS            — comma-separated tags attached to retained memories
   HINDSIGHT_RETAIN_SOURCE          — metadata source value attached to retained memories
+  HINDSIGHT_RETAIN_OBSERVATION_SCOPES — consolidation scopes: combined, per_tag, or JSON list[list[str]]
+  HINDSIGHT_RETAIN_DOCUMENT_TAGS   — comma-separated document-level tags for batch retains
+  HINDSIGHT_RETAIN_STRATEGY        — optional named retain strategy
   HINDSIGHT_RETAIN_USER_PREFIX     — label used before user turns in retained transcripts
   HINDSIGHT_RETAIN_ASSISTANT_PREFIX — label used before assistant turns in retained transcripts
 
@@ -327,6 +330,9 @@ def _load_config() -> dict:
         "idle_timeout": _parse_int_setting(os.environ.get("HINDSIGHT_IDLE_TIMEOUT"), _DEFAULT_IDLE_TIMEOUT),
         "retain_tags": os.environ.get("HINDSIGHT_RETAIN_TAGS", ""),
         "retain_source": os.environ.get("HINDSIGHT_RETAIN_SOURCE", ""),
+        "retain_observation_scopes": os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", ""),
+        "retain_document_tags": os.environ.get("HINDSIGHT_RETAIN_DOCUMENT_TAGS", ""),
+        "retain_strategy": os.environ.get("HINDSIGHT_RETAIN_STRATEGY", ""),
         "retain_user_prefix": os.environ.get("HINDSIGHT_RETAIN_USER_PREFIX", "User"),
         "retain_assistant_prefix": os.environ.get("HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant"),
         "banks": {
@@ -374,6 +380,38 @@ def _normalize_retain_tags(value: Any) -> List[str]:
         seen.add(tag)
         normalized.append(tag)
     return normalized
+
+
+def _parse_observation_scopes(value: Any) -> str | list[list[str]] | None:
+    """Normalize Hindsight observation_scopes config.
+
+    Hindsight accepts either "combined" / "per_tag" or an explicit
+    list[list[str]]. Empty/invalid values mean "let Hindsight use its default".
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        scopes: list[list[str]] = []
+        for group in value:
+            if isinstance(group, list):
+                tags = [str(item).strip() for item in group if str(item).strip()]
+                if tags:
+                    scopes.append(tags)
+        return scopes or None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text in {"combined", "per_tag"}:
+            return text
+        if text.startswith("["):
+            try:
+                return _parse_observation_scopes(json.loads(text))
+            except Exception:
+                logger.warning("Invalid Hindsight observation_scopes JSON %r; using default", value)
+                return None
+    logger.warning("Invalid Hindsight observation_scopes %r; using default", value)
+    return None
 
 
 def _utc_timestamp() -> str:
@@ -529,6 +567,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._memory_mode = "hybrid"  # "context", "tools", or "hybrid"
         self._prefetch_method = "recall"  # "recall" or "reflect"
         self._retain_tags: List[str] = []
+        self._retain_document_tags: List[str] = []
+        self._retain_observation_scopes: str | list[list[str]] | None = None
+        self._retain_strategy = ""
         self._retain_source = ""
         self._retain_user_prefix = "User"
         self._retain_assistant_prefix = "Assistant"
@@ -860,6 +901,9 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "memory_mode", "description": "Memory integration mode", "default": "hybrid", "choices": ["hybrid", "context", "tools"]},
             {"key": "recall_prefetch_method", "description": "Auto-recall method", "default": "recall", "choices": ["recall", "reflect"]},
             {"key": "retain_tags", "description": "Default tags applied to retained memories (comma-separated)", "default": ""},
+            {"key": "retain_document_tags", "description": "Document-level tags applied to batch retains (comma-separated)", "default": ""},
+            {"key": "retain_observation_scopes", "description": "Observation consolidation scopes: combined, per_tag, or JSON list[list[str]]", "default": ""},
+            {"key": "retain_strategy", "description": "Optional named Hindsight retain strategy", "default": ""},
             {"key": "retain_source", "description": "Metadata source value attached to retained memories", "default": ""},
             {"key": "retain_user_prefix", "description": "Label used before user turns in retained transcripts", "default": "User"},
             {"key": "retain_assistant_prefix", "description": "Label used before assistant turns in retained transcripts", "default": "Assistant"},
@@ -1176,6 +1220,17 @@ class HindsightMemoryProvider(MemoryProvider):
             self._config.get("retain_tags")
             or os.environ.get("HINDSIGHT_RETAIN_TAGS", "")
         )
+        self._retain_document_tags = _normalize_retain_tags(
+            self._config.get("retain_document_tags")
+            or os.environ.get("HINDSIGHT_RETAIN_DOCUMENT_TAGS", "")
+        )
+        self._retain_observation_scopes = _parse_observation_scopes(
+            self._config.get("retain_observation_scopes")
+            or os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", "")
+        )
+        self._retain_strategy = str(
+            self._config.get("retain_strategy") or os.environ.get("HINDSIGHT_RETAIN_STRATEGY", "")
+        ).strip()
         self._tags = self._retain_tags or None
         self._recall_tags = self._config.get("recall_tags") or None
         self._recall_tags_match = self._config.get("recall_tags_match", "any")
@@ -1402,6 +1457,8 @@ class HindsightMemoryProvider(MemoryProvider):
             metadata["thread_id"] = self._thread_id
         if self._agent_identity:
             metadata["agent_identity"] = self._agent_identity
+        if self._agent_workspace:
+            metadata["agent_workspace"] = self._agent_workspace
         return metadata
 
     def _build_retain_kwargs(
@@ -1412,6 +1469,8 @@ class HindsightMemoryProvider(MemoryProvider):
         document_id: str | None = None,
         metadata: Dict[str, str] | None = None,
         tags: List[str] | None = None,
+        observation_scopes: str | list[list[str]] | None = None,
+        strategy: str | None = None,
         retain_async: bool | None = None,
     ) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
@@ -1425,6 +1484,12 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs["document_id"] = document_id
         if retain_async is not None:
             kwargs["retain_async"] = retain_async
+        scopes = observation_scopes if observation_scopes is not None else self._retain_observation_scopes
+        if scopes is not None:
+            kwargs["observation_scopes"] = scopes
+        strategy_value = strategy if strategy is not None else self._retain_strategy
+        if strategy_value:
+            kwargs["strategy"] = strategy_value
         merged_tags = _normalize_retain_tags(self._retain_tags)
         for tag in _normalize_retain_tags(tags):
             if tag not in merged_tags:
@@ -1480,6 +1545,7 @@ class HindsightMemoryProvider(MemoryProvider):
         num_turns = len(self._session_turns)
         document_id, update_mode = self._resolve_retain_target(self._document_id)
         bank_id = self._bank_id
+        document_tags = list(self._retain_document_tags)
         retain_async_flag = self._retain_async
         retain_context = self._retain_context
 
@@ -1501,6 +1567,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     bank_id=bank_id,
                     items=[item],
                     document_id=document_id,
+                    document_tags=document_tags or None,
                     retain_async=retain_async_flag,
                 )
             )
@@ -1527,9 +1594,22 @@ class HindsightMemoryProvider(MemoryProvider):
                     context=context,
                     tags=args.get("tags"),
                 )
-                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                             self._bank_id, len(content), context)
-                self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
+                document_id, update_mode = self._resolve_retain_target(self._document_id)
+                if update_mode is not None:
+                    retain_kwargs["update_mode"] = update_mode
+                retain_kwargs.pop("bank_id", None)
+                retain_kwargs.pop("retain_async", None)
+                logger.debug("Tool hindsight_retain: bank=%s, doc=%s, mode=%s, content_len=%d, context=%s",
+                             self._bank_id, document_id, update_mode, len(content), context)
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(
+                        bank_id=self._bank_id,
+                        items=[retain_kwargs],
+                        document_id=document_id,
+                        document_tags=self._retain_document_tags or None,
+                        retain_async=self._retain_async,
+                    )
+                )
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
             except Exception as e:
@@ -1673,6 +1753,7 @@ class HindsightMemoryProvider(MemoryProvider):
                             bank_id=self._bank_id,
                             items=[item],
                             document_id=old_document_id,
+                            document_tags=self._retain_document_tags or None,
                             retain_async=self._retain_async,
                         )
                     )

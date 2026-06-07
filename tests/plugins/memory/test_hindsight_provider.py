@@ -23,6 +23,7 @@ from plugins.memory.hindsight import (
     _load_config,
     _build_embedded_profile_env,
     _normalize_retain_tags,
+    _parse_observation_scopes,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
 )
@@ -153,6 +154,16 @@ def test_normalize_retain_tags_accepts_json_array_string():
     assert _normalize_retain_tags(value) == ["agent:fakeassistantname", "source_system:hermes-agent"]
 
 
+def test_parse_observation_scopes_accepts_named_modes_and_json_groups():
+    assert _parse_observation_scopes("combined") == "combined"
+    assert _parse_observation_scopes("per_tag") == "per_tag"
+    assert _parse_observation_scopes(json.dumps([["agent:langlang"], ["platform:feishu", "layer:live"]])) == [
+        ["agent:langlang"],
+        ["platform:feishu", "layer:live"],
+    ]
+    assert _parse_observation_scopes("") is None
+
+
 # ---------------------------------------------------------------------------
 # Schema tests
 # ---------------------------------------------------------------------------
@@ -228,6 +239,9 @@ class TestConfig:
     def test_custom_config_values(self, provider_with_config):
         p = provider_with_config(
             retain_tags=["tag1", "tag2"],
+            retain_document_tags=["doc:live", "agent:fakeassistantname"],
+            retain_observation_scopes="per_tag",
+            retain_strategy="exact",
             retain_source="hermes",
             retain_user_prefix="User (fakeusername)",
             retain_assistant_prefix="Assistant (fakeassistantname)",
@@ -247,6 +261,9 @@ class TestConfig:
         assert p._tags == ["tag1", "tag2"]
         assert p._retain_tags == ["tag1", "tag2"]
         assert p._retain_source == "hermes"
+        assert p._retain_document_tags == ["doc:live", "agent:fakeassistantname"]
+        assert p._retain_observation_scopes == "per_tag"
+        assert p._retain_strategy == "exact"
         assert p._retain_user_prefix == "User (fakeusername)"
         assert p._retain_assistant_prefix == "Assistant (fakeassistantname)"
         assert p._recall_tags == ["recall-tag"]
@@ -468,16 +485,16 @@ class TestToolHandlers:
             "hindsight_retain", {"content": "user likes dark mode"}
         ))
         assert result["result"] == "Memory stored successfully."
-        provider._client.aretain.assert_called_once()
-        call_kwargs = provider._client.aretain.call_args.kwargs
+        provider._client.aretain_batch.assert_called_once()
+        call_kwargs = provider._client.aretain_batch.call_args.kwargs
         assert call_kwargs["bank_id"] == "test-bank"
-        assert call_kwargs["content"] == "user likes dark mode"
+        assert call_kwargs["items"][0]["content"] == "user likes dark mode"
 
     def test_retain_with_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
         p.handle_tool_call("hindsight_retain", {"content": "likes dark mode"})
-        call_kwargs = p._client.aretain.call_args.kwargs
-        assert call_kwargs["tags"] == ["pref", "ui"]
+        item = p._client.aretain_batch.call_args.kwargs["items"][0]
+        assert item["tags"] == ["pref", "ui"]
 
     def test_retain_merges_per_call_tags_with_config_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
@@ -485,13 +502,13 @@ class TestToolHandlers:
             "hindsight_retain",
             {"content": "likes dark mode", "tags": ["client:x", "ui"]},
         )
-        call_kwargs = p._client.aretain.call_args.kwargs
-        assert call_kwargs["tags"] == ["pref", "ui", "client:x"]
+        item = p._client.aretain_batch.call_args.kwargs["items"][0]
+        assert item["tags"] == ["pref", "ui", "client:x"]
 
     def test_retain_without_tags(self, provider):
         provider.handle_tool_call("hindsight_retain", {"content": "hello"})
-        call_kwargs = provider._client.aretain.call_args.kwargs
-        assert "tags" not in call_kwargs
+        item = provider._client.aretain_batch.call_args.kwargs["items"][0]
+        assert "tags" not in item
 
     def test_retain_missing_content(self, provider):
         result = json.loads(provider.handle_tool_call(
@@ -557,7 +574,7 @@ class TestToolHandlers:
         assert "error" in result
 
     def test_retain_error_handling(self, provider):
-        provider._client.aretain.side_effect = RuntimeError("connection failed")
+        provider._client.aretain_batch.side_effect = RuntimeError("connection failed")
         result = json.loads(provider.handle_tool_call(
             "hindsight_retain", {"content": "test"}
         ))
@@ -739,6 +756,21 @@ class TestSyncTurn:
         assert "conv" in item["tags"]
         assert "session1" in item["tags"]
         assert "session:test-session" in item["tags"]
+
+    def test_sync_turn_passes_observation_scopes_strategy_and_document_tags(self, provider_with_config):
+        p = provider_with_config(
+            retain_tags=["conv"],
+            retain_document_tags=["doc:live", "agent:fakeassistantname"],
+            retain_observation_scopes=[["conv"], ["session:test-session"]],
+            retain_strategy="exact",
+        )
+        p.sync_turn("hello", "hi")
+        p._retain_queue.join()
+        call_kwargs = p._client.aretain_batch.call_args.kwargs
+        item = call_kwargs["items"][0]
+        assert call_kwargs["document_tags"] == ["doc:live", "agent:fakeassistantname"]
+        assert item["observation_scopes"] == [["conv"], ["session:test-session"]]
+        assert item["strategy"] == "exact"
 
     def test_sync_turn_uses_aretain_batch(self, provider):
         """sync_turn should use aretain_batch with retain_async."""
