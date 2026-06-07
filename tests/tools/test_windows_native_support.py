@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -432,6 +433,20 @@ class TestTzdataDependencyDeclared:
         assert pattern.search(source), (
             "tzdata must be a Windows-only dep in pyproject.toml dependencies "
             "(declared with a `; sys_platform == 'win32'` marker)"
+        )
+
+
+class TestPytestTimeoutConfig:
+    """The default pytest config must stay cross-platform."""
+
+    def test_pyproject_does_not_force_signal_timeout_method(self):
+        root = Path(__file__).resolve().parents[2]
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        addopts = data["tool"]["pytest"]["ini_options"]["addopts"]
+        assert "--timeout=30" in addopts
+        assert "--timeout-method=signal" not in addopts, (
+            "pyproject.toml must not force pytest-timeout's POSIX-only signal "
+            "backend; Windows needs the plugin's platform-appropriate default"
         )
 
 
