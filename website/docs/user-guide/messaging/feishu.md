@@ -245,6 +245,16 @@ FEISHU_REQUIRE_MENTION=false
 
 For per-chat control, set `require_mention` on a `group_rules` entry — see [Per-Group Access Control](#per-group-access-control) below.
 
+### Topic Reply Behavior
+
+When a Feishu/Lark message arrives from a topic or thread, Hermes replies in that same topic by default. Set `FEISHU_REPLY_IN_THREAD=false` to post responses directly to the parent chat instead:
+
+```bash
+FEISHU_REPLY_IN_THREAD=false
+```
+
+This is also configurable as `feishu.reply_in_thread` in `config.yaml` (env wins when both are set).
+
 ### Bot Identity
 
 Hermes auto-detects the bot's `open_id` and display name on startup. You only need to set these manually when auto-detection cannot reach the Feishu API, or when your app uses tenant-scoped user IDs:
@@ -547,6 +557,7 @@ Inbound messages are deduplicated using message IDs with a 24-hour TTL. The dedu
 | `FEISHU_ALLOWED_USERS` | — | _(empty)_ | Comma-separated open_id list for user allowlist |
 | `FEISHU_ALLOW_BOTS` | — | `none` | Accept messages from other bots: `none`, `mentions`, or `all` |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | Whether group messages must @mention the bot |
+| `FEISHU_REPLY_IN_THREAD` | — | `true` | Whether topic/thread messages should receive topic/thread replies |
 | `FEISHU_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
 | `FEISHU_ENCRYPT_KEY` | — | _(empty)_ | Encrypt key for webhook signature verification |
 | `FEISHU_VERIFICATION_TOKEN` | — | _(empty)_ | Verification token for webhook payload auth |
