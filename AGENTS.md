@@ -15,6 +15,14 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+## Reuse Before Build
+
+Before implementing new behavior, scan for existing Hermes mechanisms, docs,
+and nearby tests that already solve or partially solve the problem. Prefer
+existing routing, fallback, config, tool, MCP, and provider abstractions over
+bespoke systems. Do not design a new subsystem until you have reported the reuse
+scan.
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.
