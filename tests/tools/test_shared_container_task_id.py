@@ -105,3 +105,47 @@ def test_get_active_env_honours_rl_override():
         terminal_tool.clear_task_env_overrides("rl-42")
         terminal_tool._active_environments.pop("default", None)
         terminal_tool._active_environments.pop("rl-42", None)
+
+
+# ── Session-key scoping (WebUI / gateway mode) ─────────────────────────────
+#
+# When HERMES_SESSION_KEY is set, _resolve_container_task_id returns a
+# "session:<key>" key so that each WebUI session gets its own isolated
+# environment.  This prevents a cached SSHEnvironment built for profile A
+# from being reused by a session running under profile B (different SSH host).
+# CLI mode (no session key) is unchanged and still uses "default".
+
+def test_session_key_scopes_environment_key(monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_KEY", "abc123def456")
+    assert terminal_tool._resolve_container_task_id(None) == "session:abc123def456"
+
+
+def test_session_key_also_scopes_subagent_task_ids(monkeypatch):
+    # Subagent IDs collapse into the session-scoped key so they share the
+    # parent's already-established SSH/Docker environment for that session.
+    monkeypatch.setenv("HERMES_SESSION_KEY", "webui-session-42")
+    assert terminal_tool._resolve_container_task_id("subagent-0-deadbeef") == "session:webui-session-42"
+
+
+def test_rl_override_takes_priority_over_session_key(monkeypatch):
+    # Registered RL/benchmark task overrides bypass session scoping —
+    # they need their own isolated sandbox regardless of session context.
+    monkeypatch.setenv("HERMES_SESSION_KEY", "some-session")
+    terminal_tool.register_task_env_overrides("tb2-task", {"docker_image": "x:y"})
+    try:
+        assert terminal_tool._resolve_container_task_id("tb2-task") == "tb2-task"
+    finally:
+        terminal_tool.clear_task_env_overrides("tb2-task")
+
+
+def test_empty_session_key_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_KEY", "")
+    assert terminal_tool._resolve_container_task_id(None) == "default"
+
+
+def test_no_session_key_uses_default_cli_mode(monkeypatch):
+    # Without HERMES_SESSION_KEY (CLI mode), all task_ids still collapse to
+    # "default" — no behavior change for non-WebUI users.
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    assert terminal_tool._resolve_container_task_id(None) == "default"
+    assert terminal_tool._resolve_container_task_id("subagent-0-cafe") == "default"

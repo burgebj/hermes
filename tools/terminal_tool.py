@@ -1006,9 +1006,24 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     task_id, we honour it by returning the task_id unchanged -- those
     rollouts need their own isolated sandbox, which is the whole point of
     the override.
+
+    In WebUI/gateway mode HERMES_SESSION_KEY is set per-session. Scope the
+    environment key by session so that switching profiles between sessions
+    doesn't reuse a cached environment built for a different SSH host or
+    terminal backend. CLI mode (no session key) keeps the old "default" key.
     """
     if task_id and task_id in _task_env_overrides:
         return task_id
+    # Prefer contextvars (gateway async path) then fall back to os.environ
+    # (WebUI threading path where streaming.py sets HERMES_SESSION_KEY).
+    session_key = ""
+    try:
+        from gateway.session_context import get_session_env
+        session_key = get_session_env("HERMES_SESSION_KEY", "")
+    except ImportError:
+        session_key = os.getenv("HERMES_SESSION_KEY", "")
+    if session_key:
+        return f"session:{session_key}"
     return "default"
 
 
