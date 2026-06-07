@@ -588,7 +588,31 @@ def test_render_run_script_resets_home_before_exec() -> None:
     run_text = S6ServiceManager._render_run_script("coder", {})
 
     assert "export HOME=/opt/data" in run_text
-    assert "exec s6-setuidgid hermes hermes -p coder gateway run" in run_text
+    assert (
+        "exec ${HERMES_S6_EXEC_WRAPPER:-} s6-setuidgid hermes "
+        "hermes -p coder gateway run"
+    ) in run_text
+
+
+def test_render_run_script_emits_exec_wrapper_hook() -> None:
+    # Both exec paths (root → drop, and already-unprivileged) must
+    # expand ${HERMES_S6_EXEC_WRAPPER:-} so secret-broker prefixes
+    # (agent-vault run --, vault agent exec --, …) cover the
+    # supervised worker. Unset/empty = no-op (additive contract).
+    run_text = S6ServiceManager._render_run_script("coder", {})
+    assert (
+        "exec ${HERMES_S6_EXEC_WRAPPER:-} s6-setuidgid hermes "
+        "hermes -p coder gateway run"
+    ) in run_text
+    assert (
+        "exec ${HERMES_S6_EXEC_WRAPPER:-} hermes -p coder gateway run"
+    ) in run_text
+
+    default_run = S6ServiceManager._render_run_script("default", {})
+    assert (
+        "exec ${HERMES_S6_EXEC_WRAPPER:-} s6-setuidgid hermes "
+        "hermes gateway run"
+    ) in default_run
 
 
 def test_s6_register_rejects_invalid_profile_name(s6_scandir) -> None:

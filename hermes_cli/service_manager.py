@@ -618,10 +618,16 @@ class S6ServiceManager:
             gateway_cmd = "hermes gateway run"
         else:
             gateway_cmd = f"hermes -p {shlex.quote(profile)} gateway run"
+        # Optional exec prefix for secret-broker integrations; see
+        # HERMES_S6_EXEC_WRAPPER in docs/operations/secret-brokers.md.
+        # Word-split intentionally; unset/empty is a no-op.
+        wrapper = "${HERMES_S6_EXEC_WRAPPER:-}"
         # Skip the drop when already non-root (setgroups() lacks CAP_SETGID →
         # s6 boot-loop).
-        lines.append(f'[ "$(id -u)" = 0 ] || exec {gateway_cmd}')
-        lines.append(f"exec s6-setuidgid hermes {gateway_cmd}")
+        lines.append("# shellcheck disable=SC2086")
+        lines.append(f'[ "$(id -u)" = 0 ] || exec {wrapper} {gateway_cmd}')
+        lines.append("# shellcheck disable=SC2086")
+        lines.append(f"exec {wrapper} s6-setuidgid hermes {gateway_cmd}")
         return "\n".join(lines) + "\n"
 
     @staticmethod

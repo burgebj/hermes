@@ -47,9 +47,11 @@ case "${HERMES_DASHBOARD_INSECURE:-}" in
     1|true|TRUE|True|yes|YES|Yes) insecure="--insecure" ;;
 esac
 
-# Skip the drop when already non-root.
-# shellcheck disable=SC2086  # word-splitting of $insecure is intentional
-[ "$(id -u)" = 0 ] || exec hermes dashboard --host "$dash_host" --port "$dash_port" --no-open $insecure
-# shellcheck disable=SC2086  # word-splitting of $insecure is intentional
-exec s6-setuidgid hermes hermes dashboard \
+# Optional exec prefix for secret-broker integrations; see
+# HERMES_S6_EXEC_WRAPPER in docs/operations/secret-brokers.md.
+# Word-split intentionally; unset/empty is a no-op.
+# shellcheck disable=SC2086
+[ "$(id -u)" = 0 ] || exec ${HERMES_S6_EXEC_WRAPPER:-} hermes dashboard --host "$dash_host" --port "$dash_port" --no-open $insecure
+# shellcheck disable=SC2086
+exec ${HERMES_S6_EXEC_WRAPPER:-} s6-setuidgid hermes hermes dashboard \
     --host "$dash_host" --port "$dash_port" --no-open $insecure
