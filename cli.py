@@ -3622,6 +3622,27 @@ class HermesCLI:
             return "class:status-bar-warn"
         return "class:status-bar-good"
 
+    def _cache_hit_rate(self, snapshot: dict, precision: int = 1) -> "tuple[float, str] | None":
+        """Return (cache_pct, formatted_label) or None if no cache data.
+
+        Centralises the cache-hit-rate computation so both the plain-text
+        status bar and the prompt-toolkit fragment path share one formula.
+        """
+        cache_read = snapshot.get("session_cache_read_tokens", 0)
+        prompt_total = snapshot.get("session_prompt_tokens", 0)
+        if cache_read > 0 and prompt_total > 0:
+            cache_pct = cache_read / prompt_total * 100
+            return cache_pct, f"◎ {cache_pct:.{precision}f}%"
+        return None
+
+    def _cache_hit_rate_style(self, cache_pct: float) -> str:
+        """Style for cache hit rate — higher is better (opposite of context %)."""
+        if cache_pct >= 70:
+            return "class:status-bar-good"
+        if cache_pct >= 40:
+            return "class:status-bar-warn"
+        return "class:status-bar-bad"
+
     @staticmethod
     def _compression_count_style(count: int) -> str:
         """Return a style class reflecting context compression pressure."""
@@ -3973,6 +3994,9 @@ class HermesCLI:
                 return self._trim_status_bar_text(text, width)
             if width < 76:
                 parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                cache = self._cache_hit_rate(snapshot, precision=0)
+                if cache:
+                    parts.append(cache[1])
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
                     parts.append(f"🗜️ {compressions}")
@@ -3996,6 +4020,9 @@ class HermesCLI:
 
             compressions = snapshot.get("compressions", 0)
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            cache = self._cache_hit_rate(snapshot)
+            if cache:
+                parts.append(cache[1])
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             bg_count = snapshot.get("active_background_tasks", 0)
@@ -4052,6 +4079,10 @@ class HermesCLI:
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
                     ]
+                    cache = self._cache_hit_rate(snapshot, precision=0)
+                    if cache:
+                        frags.append(("class:status-bar-dim", " · "))
+                        frags.append((self._cache_hit_rate_style(cache[0]), cache[1]))
                     if compressions:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
@@ -4091,6 +4122,10 @@ class HermesCLI:
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
                     ]
+                    cache = self._cache_hit_rate(snapshot)
+                    if cache:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append((self._cache_hit_rate_style(cache[0]), cache[1]))
                     if compressions:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
