@@ -590,6 +590,9 @@ class CreateTaskBody(BaseModel):
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
+    runner: Optional[str] = None
+    runner_mode: Optional[str] = None
+    runner_config: Optional[dict[str, Any]] = None
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
 
@@ -614,6 +617,9 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=payload.skills,
+            runner=payload.runner,
+            runner_mode=payload.runner_mode,
+            runner_config=payload.runner_config,
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
         )

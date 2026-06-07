@@ -252,6 +252,37 @@ def test_branch_name_requires_worktree_workspace(kanban_home):
         )
 
 
+def test_create_task_persists_runner_metadata(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="codex lane",
+            runner="codex-cli",
+            runner_mode="goal",
+            runner_config={"source": "tracker", "identifier": "TICKET-123"},
+        )
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    assert task is not None
+    assert task.runner == "codex-cli"
+    assert task.runner_mode == "goal"
+    assert task.runner_config == {"source": "tracker", "identifier": "TICKET-123"}
+    assert events[0].payload is not None
+    assert events[0].payload["runner"] == "codex-cli"
+    assert events[0].payload["runner_mode"] == "goal"
+
+
+def test_create_task_rejects_invalid_runner_metadata(kanban_home):
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="runner must be"):
+            kb.create_task(conn, title="bad runner", runner="not-a-runner")
+        with pytest.raises(ValueError, match="runner_mode is only valid"):
+            kb.create_task(conn, title="bad mode", runner_mode="exec")
+        with pytest.raises(ValueError, match="runner_config must be"):
+            kb.create_task(conn, title="bad config", runner_config=["not", "object"])  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # Links + dependency resolution
 # ---------------------------------------------------------------------------

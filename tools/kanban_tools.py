@@ -762,6 +762,13 @@ def _handle_create(args: dict, **kw) -> str:
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
     skills = args.get("skills")
+    runner = args.get("runner")
+    runner_mode = args.get("runner_mode")
+    runner_config = args.get("runner_config")
+    if runner_config is not None and not isinstance(runner_config, dict):
+        return tool_error(
+            f"runner_config must be an object/dict, got {type(runner_config).__name__}"
+        )
     if isinstance(skills, str):
         # Accept a single skill name as a string for convenience.
         skills = [skills]
@@ -809,6 +816,9 @@ def _handle_create(args: dict, **kw) -> str:
                     if max_runtime_seconds is not None else None
                 ),
                 skills=skills,
+                runner=runner,
+                runner_mode=runner_mode,
+                runner_config=runner_config,
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None
@@ -1276,6 +1286,24 @@ KANBAN_CREATE_SCHEMA = {
                     "The names must match skills installed on the "
                     "assignee's profile."
                 ),
+            },
+            "runner": {
+                "type": "string",
+                "enum": ["codex-cli", "hermes"],
+                "description": (
+                    "Explicit implementation runner intent. Omit or use "
+                    "'hermes' for the normal Hermes worker path; use "
+                    "'codex-cli' to request Codex CLI as the implementation lane."
+                ),
+            },
+            "runner_mode": {
+                "type": "string",
+                "enum": ["exec", "goal"],
+                "description": "Runner mode for runner='codex-cli' (default: exec).",
+            },
+            "runner_config": {
+                "type": "object",
+                "description": "Runner-specific structured metadata/options.",
             },
             "goal_mode": {
                 "type": "boolean",

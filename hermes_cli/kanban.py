@@ -75,6 +75,10 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "completed_at": t.completed_at,
         "result": t.result,
         "skills": list(t.skills) if t.skills else [],
+        "model_override": t.model_override,
+        "runner": t.runner,
+        "runner_mode": t.runner_mode,
+        "runner_config": t.runner_config,
         "max_retries": t.max_retries,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
@@ -333,6 +337,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "(repeatable). Appended to the built-in "
                                "kanban-worker skill. Example: "
                                "--skill translation --skill github-code-review")
+    p_create.add_argument("--runner",
+                          choices=sorted(kb.VALID_RUNNERS),
+                          default=None,
+                          help="Explicit implementation runner intent (default: hermes)")
+    p_create.add_argument("--runner-mode",
+                          choices=sorted(kb.VALID_CODEX_RUNNER_MODES),
+                          default=None,
+                          help="Runner mode for --runner codex-cli (default: exec)")
+    p_create.add_argument("--runner-config", default=None,
+                          help="JSON object of runner-specific options")
     p_create.add_argument("--max-retries", type=int, default=None,
                           metavar="N",
                           help="Per-task override for the consecutive-failure "
@@ -1325,6 +1339,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    runner_config = None
+    raw_runner_config = getattr(args, "runner_config", None)
+    if raw_runner_config:
+        try:
+            runner_config = json.loads(raw_runner_config)
+        except json.JSONDecodeError as exc:
+            print(f"kanban: --runner-config must be valid JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(runner_config, dict):
+            print("kanban: --runner-config must be a JSON object", file=sys.stderr)
+            return 2
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -1342,6 +1367,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
+            runner=getattr(args, "runner", None),
+            runner_mode=getattr(args, "runner_mode", None),
+            runner_config=runner_config,
             max_retries=max_retries,
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),

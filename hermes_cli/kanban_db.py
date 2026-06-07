@@ -100,6 +100,8 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+VALID_RUNNERS = {"hermes", "codex-cli"}
+VALID_CODEX_RUNNER_MODES = {"exec", "goal"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -774,6 +776,13 @@ class Task:
     # list = explicitly no extra skills.
     skills: Optional[list] = None
     model_override: Optional[str] = None
+    # Explicit implementation runner intent and runner-specific metadata.
+    # These are intentionally advisory to the core dispatcher: product
+    # scripts and worker profiles use them to select/record lanes such as
+    # Codex CLI without losing Hermes/Kanban lifecycle ownership.
+    runner: Optional[str] = None
+    runner_mode: Optional[str] = None
+    runner_config: Optional[dict] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
     # ``max_retries=1`` blocks on the first failure (zero retries),
@@ -814,6 +823,14 @@ class Task:
                     skills_value = [str(s) for s in parsed if s]
             except Exception:
                 skills_value = None
+        runner_config_value: Optional[dict] = None
+        if "runner_config" in keys and row["runner_config"]:
+            try:
+                parsed_runner_config = json.loads(row["runner_config"])
+                if isinstance(parsed_runner_config, dict):
+                    runner_config_value = parsed_runner_config
+            except Exception:
+                runner_config_value = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -864,6 +881,9 @@ class Task:
             ),
             skills=skills_value,
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
+            runner=row["runner"] if "runner" in keys and row["runner"] else None,
+            runner_mode=row["runner_mode"] if "runner_mode" in keys and row["runner_mode"] else None,
+            runner_config=runner_config_value,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
             ),
@@ -1016,6 +1036,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to the worker, overriding the profile's default model. NULL = use
     -- the profile default.
     model_override       TEXT,
+    -- Explicit implementation runner intent. NULL/hermes = normal Hermes
+    -- worker path; codex-cli = route implementation through Codex CLI.
+    runner               TEXT,
+    -- Runner-specific mode. For codex-cli, NULL defaults to exec.
+    runner_mode          TEXT,
+    -- Runner-specific structured metadata/options, stored as JSON object.
+    runner_config        TEXT,
     -- Per-task override for the consecutive-failure circuit breaker.
     -- The value is the failure count at which the breaker trips — e.g.
     -- ``max_retries=1`` blocks on the first failure. NULL (the common
@@ -1670,6 +1697,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
 
+    if "runner" not in cols:
+        _add_column_if_missing(conn, "tasks", "runner", "runner TEXT")
+    if "runner_mode" not in cols:
+        _add_column_if_missing(conn, "tasks", "runner_mode", "runner_mode TEXT")
+    if "runner_config" not in cols:
+        _add_column_if_missing(conn, "tasks", "runner_config", "runner_config TEXT")
+
     if "goal_mode" not in cols:
         # Ralph-style goal loop toggle for the dispatched worker. 0 (the
         # default) = classic single-shot worker, preserving the behaviour
@@ -2066,6 +2100,9 @@ def create_task(
     idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
+    runner: Optional[str] = None,
+    runner_mode: Optional[str] = None,
+    runner_config: Optional[dict] = None,
     max_retries: Optional[int] = None,
     goal_mode: bool = False,
     goal_max_turns: Optional[int] = None,
@@ -2160,6 +2197,34 @@ def create_task(
             )
         skills_list = cleaned
 
+    runner_value = (str(runner).strip().lower() if runner is not None else None) or None
+    if runner_value is not None and runner_value not in VALID_RUNNERS:
+        raise ValueError(
+            f"runner must be one of {sorted(VALID_RUNNERS)}, got {runner!r}"
+        )
+
+    runner_mode_value = (str(runner_mode).strip().lower() if runner_mode is not None else None) or None
+    if runner_value == "codex-cli":
+        runner_mode_value = runner_mode_value or "exec"
+        if runner_mode_value not in VALID_CODEX_RUNNER_MODES:
+            raise ValueError(
+                "runner_mode must be one of "
+                f"{sorted(VALID_CODEX_RUNNER_MODES)} for runner='codex-cli', "
+                f"got {runner_mode!r}"
+            )
+    elif runner_mode_value is not None:
+        raise ValueError("runner_mode is only valid when runner='codex-cli'")
+
+    runner_config_value: Optional[dict] = None
+    if runner_config is not None:
+        if not isinstance(runner_config, dict):
+            raise ValueError("runner_config must be a JSON object/dict")
+        try:
+            json.dumps(runner_config)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"runner_config must be JSON-serializable: {exc}") from exc
+        runner_config_value = dict(runner_config)
+
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
     # and to avoid holding a write lock during the lookup. Race is
@@ -2236,8 +2301,9 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, runner, runner_mode, runner_config, max_retries,
+                        goal_mode, goal_max_turns, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2255,6 +2321,9 @@ def create_task(
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
+                        runner_value,
+                        runner_mode_value,
+                        json.dumps(runner_config_value) if runner_config_value is not None else None,
                         int(max_retries) if max_retries is not None else None,
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
@@ -2277,6 +2346,9 @@ def create_task(
                         "tenant": tenant,
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
+                        "runner": runner_value,
+                        "runner_mode": runner_mode_value,
+                        "runner_config": runner_config_value,
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
