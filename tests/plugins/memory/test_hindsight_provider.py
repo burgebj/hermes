@@ -473,6 +473,14 @@ class TestToolHandlers:
         assert call_kwargs["bank_id"] == "test-bank"
         assert call_kwargs["content"] == "user likes dark mode"
 
+    def test_manual_retain_uses_configured_async_mode(self, provider_with_config):
+        p = provider_with_config(retain_async=True)
+        result = json.loads(p.handle_tool_call(
+            "hindsight_retain", {"content": "user likes dark mode"}
+        ))
+        assert result["result"] == "Memory stored successfully."
+        assert p._client.aretain.call_args.kwargs["retain_async"] is True
+
     def test_retain_with_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
         p.handle_tool_call("hindsight_retain", {"content": "likes dark mode"})
