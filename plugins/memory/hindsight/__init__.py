@@ -575,6 +575,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._retain_context = "conversation between Hermes Agent and the User"
         self._turn_counter = 0
         self._session_turns: list[str] = []  # accumulates ALL turns for the session
+        self._last_retained_turn_count = 0  # how many turns have been sent to Hindsight (for append-mode incremental retain)
 
         # Recall controls
         self._auto_recall = True
@@ -1119,6 +1120,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
         self._turn_index = 0
         self._session_turns = []
+        self._last_retained_turn_count = 0
         self._mode = self._config.get("mode", "cloud")
         # Read timeout from config or env var, fall back to default
         self._timeout = _parse_int_setting(
@@ -1461,9 +1463,30 @@ class HindsightMemoryProvider(MemoryProvider):
                          self._turn_counter, self._turn_counter + (self._retain_every_n_turns - self._turn_counter % self._retain_every_n_turns))
             return
 
-        logger.debug("sync_turn: retaining %d turns, total session content %d chars",
-                     len(self._session_turns), sum(len(t) for t in self._session_turns))
-        content = "[" + ",".join(self._session_turns) + "]"
+        # Resolve append capability early so we can send only new turns.
+        document_id, update_mode = self._resolve_retain_target(self._document_id)
+
+        if update_mode == "append":
+            # Hindsight >=0.5.0 supports append-only documents. Sending the
+            # full accumulated session on every retain would create quadratic
+            # token usage (turn 1, then turns 1+2, then turns 1+2+3...) and
+            # duplicate memories. Instead, send only turns buffered since the
+            # last retain. _session_turns itself is NOT cleared — it must
+            # remain populated so on_session_switch() can still flush partial
+            # buffers when retain_every_n_turns > 1.
+            turns_to_retain = self._session_turns[self._last_retained_turn_count:]
+        else:
+            # Legacy overwrite mode: send the full session snapshot so the
+            # document replaces prior content without data loss.
+            turns_to_retain = list(self._session_turns)
+
+        logger.debug("sync_turn: retaining %d turns (%d new of %d total), content %d chars, mode=%s",
+                     len(turns_to_retain), len(turns_to_retain), len(self._session_turns),
+                     sum(len(t) for t in turns_to_retain), update_mode)
+        content = "[" + ",".join(turns_to_retain) + "]"
+
+        if update_mode == "append":
+            self._last_retained_turn_count = len(self._session_turns)
 
         lineage_tags: list[str] = []
         if self._session_id:
@@ -1474,11 +1497,10 @@ class HindsightMemoryProvider(MemoryProvider):
         # Snapshot the state needed for the retain. The writer may run after
         # _session_turns / _turn_index are mutated by a later sync_turn().
         metadata_snapshot = self._build_metadata(
-            message_count=len(self._session_turns) * 2,
+            message_count=len(turns_to_retain) * 2,
             turn_index=self._turn_index,
         )
-        num_turns = len(self._session_turns)
-        document_id, update_mode = self._resolve_retain_target(self._document_id)
+        num_turns = len(turns_to_retain)
         bank_id = self._bank_id
         retain_async_flag = self._retain_async
         retain_context = self._retain_context
@@ -1706,6 +1728,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._session_turns = []
         self._turn_counter = 0
         self._turn_index = 0
+        self._last_retained_turn_count = 0
         logger.debug(
             "Hindsight on_session_switch: new_session=%s parent=%s reset=%s doc=%s",
             self._session_id, self._parent_session_id, reset, self._document_id,
