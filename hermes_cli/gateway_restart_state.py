@@ -22,20 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    # Used by RestartLock._acquire_os_lock / _release_os_lock on non-Windows.
-    # On Windows, msvcrt is used instead.  This import is needed for
-    # cross-platform tests and non-Windows deployments.
-    import fcntl
-
-_IS_WINDOWS = sys.platform == "win32"
 _SCHEMA_VERSION = 1
 _INTENT_MAX_BYTES = 4096
 _DEFAULT_TTL_S = 300  # 5 minutes
 _LOCK_TTL_S = 120     # 2 minutes
-_COALESCE_WINDOW_S = 5  # collapse restarts within this window
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +205,6 @@ class RestartLock:
 
     def __init__(self, profile: str = "default"):
         self._path = lock_path(profile)
-        self._handle: Any = None
         self._owner_token: str = ""
         self._owner_request_id: str = ""
 
@@ -285,7 +274,6 @@ class RestartLock:
         Reads the lock file and verifies ``owner_token`` and ``request_id``
         match before deleting.  Non-owner callers are silently rejected.
         """
-        self._release_os_lock()
         existing = self._read_lock()
         if not existing:
             return
@@ -347,7 +335,6 @@ class RestartLock:
         prevents a scenario where another request replaced the lock
         between our first read and this delete.
         """
-        self._release_os_lock()
         if expected:
             # Re-read and compare — only delete if unchanged
             current = self._read_lock()
@@ -361,43 +348,6 @@ class RestartLock:
             self._path.unlink(missing_ok=True)
         except OSError:
             pass
-
-    def _acquire_os_lock(self) -> bool:
-        """Best-effort OS file lock on the lock file."""
-        try:
-            self._handle = open(str(self._path), "r+", encoding="utf-8")
-            if _IS_WINDOWS:
-                self._handle.seek(0, os.SEEK_END)
-                if self._handle.tell() == 0:
-                    self._handle.write("\n")
-                    self._handle.flush()
-                self._handle.seek(1024 * 1024)
-                msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except (BlockingIOError, OSError):
-            if self._handle:
-                self._handle.close()
-                self._handle = None
-            return True  # Lock file created, OS lock is best-effort
-
-    def _release_os_lock(self) -> None:
-        if self._handle is None:
-            return
-        try:
-            if _IS_WINDOWS:
-                self._handle.seek(1024 * 1024)
-                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            self._handle.close()
-        except OSError:
-            pass
-        self._handle = None
 
 
 # ---------------------------------------------------------------------------

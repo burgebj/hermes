@@ -35,17 +35,34 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Gateway restart worker")
-    parser.add_argument("--intent", required=True, help="JSON intent string")
+    parser.add_argument("--intent-file", required=True,
+                        help="Path to JSON intent file")
     args = parser.parse_args()
 
+    # Read and delete the intent file (nonce-safe: removed from disk)
+    intent_path = Path(args.intent_file)
     try:
-        intent = json.loads(args.intent)
+        raw = intent_path.read_text(encoding="utf-8")
+    except OSError as e:
+        _log_error("intent_file_read", f"Failed to read intent file: {e}",
+                   path=str(intent_path))
+        sys.exit(1)
+    finally:
+        try:
+            intent_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    try:
+        intent = json.loads(raw)
     except json.JSONDecodeError as e:
-        _log_error("invalid_intent", f"Failed to parse intent JSON: {e}")
+        _log_error("invalid_intent", f"Failed to parse intent JSON: {e}",
+                   raw_length=len(raw))
         sys.exit(1)
 
     if not isinstance(intent, dict):
-        _log_error("invalid_intent", "Intent is not a dict")
+        _log_error("invalid_intent", "Intent is not a dict",
+                   intent_type=type(intent).__name__)
         sys.exit(1)
 
     profile = intent.get("profile", "default")
@@ -99,6 +116,7 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
         update_intent_state,
         validate_intent_nonce,
         write_status,
+        _pid_exists,
     )
 
     profile = intent.get("profile", "default")
@@ -125,27 +143,27 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
     disk_intent = read_intent(profile)
     if not disk_intent:
         _fail_closed(profile, request_id, old_pid, origin, "missing_intent",
-                     "Intent file missing or unreadable")
+                     "Intent file missing or unreadable", nonce=nonce)
     if disk_intent["request_id"] != request_id:
         _fail_closed(profile, request_id, old_pid, origin, "request_id_mismatch",
-                     f"Expected {request_id}, got {disk_intent['request_id']}")
+                     f"Expected {request_id}, got {disk_intent['request_id']}", nonce=nonce)
     if not validate_intent_nonce(disk_intent, intent.get("nonce", "")):
         _fail_closed(profile, request_id, old_pid, origin, "nonce_mismatch",
-                     "Nonce validation failed")
+                     "Nonce validation failed", nonce=nonce)
     if disk_intent["profile"] != profile:
         _fail_closed(profile, request_id, old_pid, origin, "profile_mismatch",
-                     f"Expected profile {profile}, got {disk_intent['profile']}")
+                     f"Expected profile {profile}, got {disk_intent['profile']}", nonce=nonce)
     if disk_intent["target_pid"] != old_pid:
         _fail_closed(profile, request_id, old_pid, origin, "target_pid_mismatch",
-                     f"Expected PID {old_pid}, got {disk_intent['target_pid']}")
+                     f"Expected PID {old_pid}, got {disk_intent['target_pid']}", nonce=nonce)
     if disk_intent.get("schema_version") != 1:
         _fail_closed(profile, request_id, old_pid, origin, "schema_version_unsupported",
-                     f"Unsupported schema_version: {disk_intent.get('schema_version')}")
+                     f"Unsupported schema_version: {disk_intent.get('schema_version')}", nonce=nonce)
     # TTL already checked above (expires_at), but re-check on disk intent
     disk_expires = disk_intent.get("expires_at", 0)
     if isinstance(disk_expires, (int, float)) and time.time() > disk_expires:
         _fail_closed(profile, request_id, old_pid, origin, "expired_intent",
-                     f"Disk intent expired at {disk_expires}")
+                     f"Disk intent expired at {disk_expires}", nonce=nonce)
     # Mark intent as consumed to prevent replay
     update_intent_state(profile, "consumed")
 
@@ -215,6 +233,7 @@ def _drain_and_stop(
     from hermes_cli.gateway_restart_state import (
         append_restart_log,
         write_status,
+        _pid_exists,
     )
 
     if old_pid <= 0:
@@ -640,6 +659,7 @@ def _verify_new_gateway(
         append_restart_log,
         cleanup_status,
         write_status,
+        _pid_exists,
     )
 
     if new_pid <= 0:
@@ -713,42 +733,11 @@ def _verify_new_gateway(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _pid_exists(pid: int) -> bool:
-    """Cross-platform PID existence check."""
-    try:
-        import psutil
-        return bool(psutil.pid_exists(int(pid)))
-    except ImportError:
-        pass
-
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            k32 = ctypes.windll.kernel32
-            k32.OpenProcess.restype = ctypes.c_void_p
-            k32.WaitForSingleObject.restype = ctypes.c_uint
-            k32.GetLastError.restype = ctypes.c_uint
-            h = k32.OpenProcess(0x1000 | 0x100000, False, int(pid))
-            if not h:
-                return k32.GetLastError() != 87
-            try:
-                return k32.WaitForSingleObject(h, 0) == 0x102
-            finally:
-                k32.CloseHandle(h)
-        except (OSError, AttributeError):
-            return False
-    else:
-        try:
-            os.kill(int(pid), 0)
-            return True
-        except (ProcessLookupError, OSError):
-            return False
-        except PermissionError:
-            return True
-
 
 def _pid_wait(pid: int, timeout: float = 10.0) -> bool:
     """Wait for PID to exit.  Returns True if it exited within timeout."""
+    from hermes_cli.gateway_restart_state import _pid_exists
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _pid_exists(pid):
@@ -795,7 +784,17 @@ def _is_ancestor(pid: int) -> bool:
                 finally:
                     k32.CloseHandle(h)
             else:
-                break
+                # POSIX fallback: read ppid from /proc (Linux only)
+                try:
+                    with open(f"/proc/{ppid}/stat", "r") as f:
+                        parts = f.read().split(")")
+                        if len(parts) >= 2:
+                            fields = parts[1].split()
+                            ppid = int(fields[1]) if len(fields) > 1 else 0
+                        else:
+                            break
+                except (OSError, ValueError, IndexError):
+                    break
     except Exception:
         pass
     return False
@@ -808,6 +807,7 @@ def _fail_closed(
     origin: str,
     error_code: str,
     detail: str,
+    nonce: str = "",
 ) -> None:
     """Fail closed: write status, log, cleanup, and exit.
 
@@ -825,14 +825,18 @@ def _fail_closed(
         request_id=request_id, profile=profile, old_pid=old_pid,
         origin=origin, state="failed", error=f"{error_code}: {detail}",
     )
-    cleanup_intent(profile, request_id=request_id)
+    cleanup_intent(profile, request_id=request_id, nonce=nonce)
     sys.exit(1)
 
 
 def _log_error(code: str, detail: str, **extra: Any) -> None:
     """Log an error to JSONL."""
     from hermes_cli.gateway_restart_state import append_restart_log
-    append_restart_log(state="failed", error=f"{code}: {detail}", **extra)
+    # Filter extra to only include fields append_restart_log accepts
+    _KNOWN = {"request_id", "profile", "old_pid", "new_pid", "origin",
+              "launcher", "reason", "error", "listener_pid", "port"}
+    filtered = {k: v for k, v in extra.items() if k in _KNOWN}
+    append_restart_log(state="failed", error=f"{code}: {detail}", **filtered)
 
 
 if __name__ == "__main__":

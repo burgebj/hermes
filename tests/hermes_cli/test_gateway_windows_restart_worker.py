@@ -287,7 +287,7 @@ class TestPidPort:
         )
         # Mock _pid_exists to return True for old_pid (still alive), False for others
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker._pid_exists",
+            "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: pid == 1234,
         )
         # Mock _start_new_gateway to track if it's called
@@ -447,7 +447,7 @@ class TestWorkerStatusFallback:
     """Verify status file handling, unhandled exceptions, and coordinator
     wait-for-completion logic."""
 
-    def test_unhandled_exception_writes_failed(self, worker_env, monkeypatch):
+    def test_unhandled_exception_writes_failed(self, worker_env, tmp_path, monkeypatch):
         """Unhandled exception in _run_restart_transaction → status 'failed'."""
         from hermes_cli.gateway_windows_restart_worker import main
         from hermes_cli.gateway_restart_state import create_intent, RestartLock
@@ -471,13 +471,15 @@ class TestWorkerStatusFallback:
         )
         # Ensure _pid_exists returns False so the PID check passes
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker._pid_exists",
+            "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: False,
         )
 
-        # Call main() with the intent
+        # Call main() with the intent via file
+        intent_file = tmp_path / "intent.json"
+        intent_file.write_text(json.dumps(intent), encoding="utf-8")
         monkeypatch.setattr(sys, "argv", [
-            "worker", "--intent", json.dumps(intent),
+            "worker", "--intent-file", str(intent_file),
         ])
 
         with pytest.raises(SystemExit) as exc_info:
@@ -528,7 +530,7 @@ class TestWorkerStatusFallback:
 
         # Mock _pid_exists: new_pid is dead immediately
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker._pid_exists",
+            "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: pid != 5678,  # 5678 (new_pid) is dead
         )
 
@@ -564,7 +566,7 @@ class TestWorkerStatusFallback:
             return False  # old_pid is dead
 
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker._pid_exists",
+            "hermes_cli.gateway_restart_state._pid_exists",
             mock_pid_exists,
         )
 
@@ -583,7 +585,7 @@ class TestWorkerStatusFallback:
         assert status["state"] == "failed"
         assert "stability" in status.get("error", "").lower() or "died" in status.get("error", "").lower()
 
-    def test_unhandled_exception_writes_failed_status_field(self, worker_env, monkeypatch):
+    def test_unhandled_exception_writes_failed_status_field(self, worker_env, tmp_path, monkeypatch):
         """Unhandled exception → status file has request_id matching the
         intent's request_id, enabling coordinator correlation."""
         from hermes_cli.gateway_windows_restart_worker import main
@@ -605,12 +607,14 @@ class TestWorkerStatusFallback:
             MagicMock(side_effect=RuntimeError("boom")),
         )
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker._pid_exists",
+            "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: False,
         )
 
+        intent_file = tmp_path / "intent2.json"
+        intent_file.write_text(json.dumps(intent), encoding="utf-8")
         monkeypatch.setattr(sys, "argv", [
-            "worker", "--intent", json.dumps(intent),
+            "worker", "--intent-file", str(intent_file),
         ])
 
         with pytest.raises(SystemExit):
@@ -680,7 +684,7 @@ class TestWorkerStatusFallback:
 
         # All PIDs are alive
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker._pid_exists",
+            "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: True,
         )
 

@@ -1302,7 +1302,7 @@ def stop() -> None:
         print("✗ No gateway was running")
 
 
-def restart() -> None:
+def restart(profile: str = "default") -> None:
     """Stop the gateway then start it again.
 
     Uses the transactional restart coordinator for a safer restart that
@@ -1314,7 +1314,8 @@ def restart() -> None:
     """
     _assert_windows()
     from hermes_cli.gateway_windows_restart import schedule_restart_handoff
-    result = schedule_restart_handoff(origin="gateway_windows_restart", wait=True)
+    result = schedule_restart_handoff(origin="gateway_windows_restart",
+                                     wait=True, profile=profile)
     if result.get("completed"):
         return
     if result.get("scheduled") and not result.get("completed"):

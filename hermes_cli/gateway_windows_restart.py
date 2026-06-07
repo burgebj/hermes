@@ -320,17 +320,27 @@ def _spawn_worker(intent: dict[str, Any], profile: str) -> int:
     Returns the worker PID.
 
     The worker does NOT inherit _HERMES_GATEWAY=1.
+    The intent is written to a temp file (not passed via CLI) to avoid
+    leaking the nonce in the process table.
     """
     import subprocess
+    import tempfile
     from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
     from hermes_cli.gateway_windows import _build_gateway_argv, _derive_venv_pythonw
 
     python_exe = sys.executable
     pythonw = _derive_venv_pythonw(python_exe) or python_exe
 
+    # Write intent to a temp file (nonce-safe: not visible in process table)
+    from hermes_cli.config import get_hermes_home
+    intent_dir = Path(get_hermes_home()) / "run"
+    intent_dir.mkdir(parents=True, exist_ok=True)
+    intent_file = intent_dir / f".worker-intent-{uuid.uuid4().hex}.json"
+    intent_file.write_text(json.dumps(intent, ensure_ascii=False), encoding="utf-8")
+
     # Build worker command
     worker_module = "hermes_cli.gateway_windows_restart_worker"
-    argv = [pythonw, "-m", worker_module, "--intent", json.dumps(intent)]
+    argv = [pythonw, "-m", worker_module, "--intent-file", str(intent_file)]
 
     # Clean environment: remove _HERMES_GATEWAY
     env = os.environ.copy()
