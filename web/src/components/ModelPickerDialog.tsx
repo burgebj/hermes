@@ -63,6 +63,8 @@ interface Props {
 
   onClose(): void;
   title?: string;
+  /** Button text for the confirm action — defaults to "Switch". */
+  confirmLabel?: string;
   /** If true, hides "Persist globally" checkbox — always saves to config.yaml. */
   alwaysGlobal?: boolean;
 }
@@ -76,6 +78,7 @@ export function ModelPickerDialog(props: Props) {
     onApply,
     onClose,
     title = "Switch Model",
+    confirmLabel = "Switch",
     alwaysGlobal = false,
   } = props;
   const standalone = !!loader && !!onApply;
@@ -315,7 +318,7 @@ export function ModelPickerDialog(props: Props) {
               Cancel
             </Button>
             <Button onClick={confirm} disabled={!canConfirm}>
-              {applying ? <Spinner /> : "Switch"}
+              {applying ? <Spinner /> : confirmLabel}
             </Button>
           </div>
         </footer>
