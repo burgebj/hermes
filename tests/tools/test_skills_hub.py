@@ -2201,3 +2201,54 @@ class TestInstallPathSafety:
 
         assert not (skills_dir / "bad-skill" / "leak.txt").exists()
         assert secret.read_text() == "data exfiltration payload\n"
+
+    def test_install_from_quarantine_accepts_symlinked_skills_root_alias(
+        self, tmp_path, patch_lock_file
+    ):
+        """Install bookkeeping should tolerate aliased skills roots like /tmp -> /private/tmp."""
+        import tools.skills_hub as hub
+        from tools.skills_guard import ScanResult
+
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        alias_home = tmp_path / "alias-home"
+        try:
+            alias_home.symlink_to(real_home, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unsupported on this platform")
+
+        skills_dir = alias_home / "skills"
+        quarantine_root = skills_dir / ".hub" / "quarantine"
+        quarantine_root.mkdir(parents=True)
+
+        q_dir = quarantine_root / "pending"
+        q_dir.mkdir()
+        skill_text = "---\nname: good-skill\n---\n"
+        (q_dir / "SKILL.md").write_text(skill_text)
+
+        bundle = hub.SkillBundle(
+            name="good-skill",
+            files={"SKILL.md": skill_text},
+            source="community",
+            identifier="skills-sh/example/good-skill",
+            trust_level="community",
+        )
+        scan_result = ScanResult(
+            skill_name="good-skill",
+            source="community",
+            trust_level="community",
+            verdict="safe",
+        )
+        lock_path = tmp_path / "lock.json"
+        patch_lock_file(lock_path)
+
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "QUARANTINE_DIR", quarantine_root), \
+             patch.object(hub, "AUDIT_LOG", tmp_path / "audit.log"):
+            install_dir = hub.install_from_quarantine(
+                q_dir, "good-skill", "note-taking", bundle, scan_result,
+            )
+
+        assert install_dir == (real_home / "skills" / "note-taking" / "good-skill")
+        lock = hub.HubLockFile(path=lock_path)
+        assert lock.get_installed("good-skill")["install_path"] == "note-taking/good-skill"

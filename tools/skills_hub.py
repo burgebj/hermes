@@ -3255,6 +3255,8 @@ def install_from_quarantine(
     install_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(quarantine_path), str(install_dir))
 
+    install_path = str(install_dir.relative_to(SKILLS_DIR.resolve()))
+
     # Record in lock file
     lock = HubLockFile()
     lock.record_install(
@@ -3264,7 +3266,7 @@ def install_from_quarantine(
         trust_level=bundle.trust_level,
         scan_verdict=scan_result.verdict,
         skill_hash=content_hash(install_dir),
-        install_path=str(install_dir.relative_to(SKILLS_DIR)),
+        install_path=install_path,
         files=list(bundle.files.keys()),
         metadata=bundle.metadata,
     )
