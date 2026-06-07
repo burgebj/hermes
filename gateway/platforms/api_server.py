@@ -2,7 +2,9 @@
 OpenAI-compatible API server platform adapter.
 
 Exposes an HTTP server with endpoints:
-- POST /v1/chat/completions        — OpenAI Chat Completions format (stateless; opt-in session continuity via X-Hermes-Session-Id header; opt-in long-term memory scoping via X-Hermes-Session-Key header)
+- POST /v1/chat/completions        — OpenAI Chat Completions format (stateless; opt-in session continuity via X-Hermes-Session-Id header; opt-in long-term memory scoping via X-Hermes-Session-Key header).
+                                      Set API_SERVER_STATELESS=true to disable server-side SessionDB persistence entirely
+                                      (useful for multi-tenant SaaS frontends that manage their own session storage).
 - POST /v1/responses               — OpenAI Responses API format (stateful via previous_response_id; X-Hermes-Session-Key supported)
 - GET  /v1/responses/{response_id} — Retrieve a stored response
 - DELETE /v1/responses/{response_id} — Delete a stored response
@@ -952,7 +954,20 @@ class APIServerAdapter(BasePlatformAdapter):
 
         Sessions are persisted to ``state.db`` so that ``hermes sessions list``
         shows API-server conversations alongside CLI and gateway ones.
+
+        When ``API_SERVER_STATELESS=true`` is set in the environment, this
+        returns ``None`` unconditionally — the API server then runs in a
+        truly stateless mode where ``/v1/chat/completions`` does not write
+        to ``state.db``. This is intended for multi-tenant SaaS frontends
+        that manage their own session storage externally (e.g. in Redis).
+
+        ``AIAgent`` already supports ``session_db=None`` (see
+        ``run_agent.py``'s ``_flush_messages_to_session_db`` early-return),
+        so this only exposes that existing capability via an env-var switch.
         """
+        if os.getenv("API_SERVER_STATELESS", "").lower() in ("true", "1", "yes"):
+            return None
+
         if self._session_db is None:
             try:
                 from hermes_state import SessionDB
@@ -1754,6 +1769,16 @@ class APIServerAdapter(BasePlatformAdapter):
         # read arbitrary session history by guessing/enumerating session IDs.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         if provided_session_id:
+            if os.getenv("API_SERVER_STATELESS", "").lower() in ("true", "1", "yes"):
+                return web.json_response(
+                    _openai_error(
+                        "X-Hermes-Session-Id is not supported when API_SERVER_STATELESS=true. "
+                        "Either unset API_SERVER_STATELESS or remove the X-Hermes-Session-Id "
+                        "header and pass full conversation history in the messages array."
+                    ),
+                    status=400,
+                )
+
             if not self._api_key:
                 logger.warning(
                     "Session continuation via X-Hermes-Session-Id rejected: "

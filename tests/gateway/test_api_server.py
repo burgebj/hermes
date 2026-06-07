@@ -3495,3 +3495,70 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             data = await resp.json()
             assert data["features"]["session_key_header"] == "X-Hermes-Session-Key"
+
+
+# ---------------------------------------------------------------------------
+# API_SERVER_STATELESS env variable (multi-tenant SaaS use case)
+# ---------------------------------------------------------------------------
+
+
+class TestStatelessMode:
+    """Tests for API_SERVER_STATELESS=true — server skips SessionDB entirely."""
+
+    def test_ensure_session_db_returns_none_when_stateless_env_set(self, adapter, monkeypatch):
+        """With API_SERVER_STATELESS=true, _ensure_session_db returns None."""
+        monkeypatch.setenv("API_SERVER_STATELESS", "true")
+        assert adapter._ensure_session_db() is None
+        # The cached instance stays None — no implicit SessionDB() created.
+        assert adapter._session_db is None
+
+    def test_ensure_session_db_accepts_alternate_truthy_values(self, adapter, monkeypatch):
+        """Accept '1', 'yes', 'true' (case-insensitive)."""
+        for value in ("true", "True", "TRUE", "1", "yes", "YES"):
+            monkeypatch.setenv("API_SERVER_STATELESS", value)
+            # Reset _session_db so we re-evaluate the env on each iteration.
+            adapter._session_db = None
+            assert adapter._ensure_session_db() is None, f"Failed for value={value!r}"
+
+    def test_ensure_session_db_unchanged_when_env_unset(self, adapter, monkeypatch):
+        """Default behavior preserved when API_SERVER_STATELESS is unset."""
+        monkeypatch.delenv("API_SERVER_STATELESS", raising=False)
+
+        sentinel = object()
+        with patch("hermes_state.SessionDB", return_value=sentinel):
+            result = adapter._ensure_session_db()
+            assert result is sentinel
+
+    def test_ensure_session_db_unchanged_when_env_falsy(self, adapter, monkeypatch):
+        """API_SERVER_STATELESS=false (or other falsy values) behaves like unset."""
+        for value in ("false", "False", "0", "no", ""):
+            monkeypatch.setenv("API_SERVER_STATELESS", value)
+            adapter._session_db = None
+            sentinel = object()
+            with patch("hermes_state.SessionDB", return_value=sentinel):
+                result = adapter._ensure_session_db()
+                assert result is sentinel, f"Failed for value={value!r}"
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_rejects_session_id_in_stateless_mode(
+        self, auth_adapter, monkeypatch
+    ):
+        """When stateless mode is on, sending X-Hermes-Session-Id returns 400 with a clear error."""
+        monkeypatch.setenv("API_SERVER_STATELESS", "true")
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer sk-secret",
+                    "X-Hermes-Session-Id": "some-session-id",
+                },
+                json={
+                    "model": "hermes-agent",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            assert resp.status == 400
+            body = await resp.json()
+            assert "API_SERVER_STATELESS" in body["error"]["message"]
+            assert "X-Hermes-Session-Id" in body["error"]["message"]

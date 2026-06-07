@@ -496,6 +496,49 @@ In Open WebUI, add each as a separate connection. The model dropdown shows `alic
 - **No file upload** — inline images are supported on both `/v1/chat/completions` and `/v1/responses`, but uploaded files (`file`, `input_file`, `file_id`) and non-image document inputs are not supported through the API.
 - **Model field is cosmetic** — the `model` field in requests is accepted but the actual LLM model used is configured server-side in config.yaml.
 
+## Stateless Mode (for SaaS Frontends)
+
+For frontends that manage their own conversation storage externally (e.g. multi-tenant SaaS platforms storing history in Redis or Postgres), set:
+
+```bash
+API_SERVER_STATELESS=true
+```
+
+In stateless mode:
+
+- `/v1/chat/completions` does **not** write to `state.db`. Each request is treated as a self-contained conversation, fully described by the `messages` array.
+- `X-Hermes-Session-Id` header is **not supported** — sending it returns `400` with a clear error.
+- `X-Hermes-Session-Key` (long-term memory scoping) is also bypassed since SessionDB is the persistence layer.
+- `hermes sessions list` will not show API-server conversations (they are not persisted).
+- `/v1/responses` (the OpenAI Responses API endpoint) is **unaffected** — it has its own `ResponseStore` persistence for `previous_response_id` chaining.
+
+### When to use
+
+Enable stateless mode when:
+
+- You're building a multi-tenant frontend where conversation history is per-tenant in *your* database, and shadow copies in Hermes's `state.db` would conflict with your tenant isolation
+- You want `/v1/chat/completions` to behave exactly like OpenAI's API (no server-side state)
+- You're running many concurrent users against a single Hermes process and don't want SQLite write contention
+
+### When NOT to use
+
+Keep stateless mode **off** (default) when:
+
+- You're using Open WebUI, LobeChat, or other frontends that benefit from server-side session continuation via `X-Hermes-Session-Id`
+- You want `session_search` to work across API-server conversations
+- You need `hermes sessions list` to show API-server conversations
+
+### Example
+
+```bash
+docker run \
+  -e API_SERVER_ENABLED=true \
+  -e API_SERVER_STATELESS=true \
+  -e API_SERVER_KEY=$(openssl rand -hex 32) \
+  -p 8642:8642 \
+  nousresearch/hermes-agent
+```
+
 ## Proxy Mode
 
 The API server also serves as the backend for **gateway proxy mode**. When another Hermes gateway instance is configured with `GATEWAY_PROXY_URL` pointing at this API server, it forwards all messages here instead of running its own agent. This enables split deployments — for example, a Docker container handling Matrix E2EE that relays to a host-side agent.
