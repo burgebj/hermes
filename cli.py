@@ -5346,12 +5346,19 @@ class HermesCLI:
         term_width = shutil.get_terminal_size().columns
         use_compact = self.compact or term_width < 80
         
+        enabled_toolsets = getattr(self, "enabled_toolsets", None) or []
+        disabled_toolsets = getattr(self, "disabled_toolsets", None) or []
+
         if use_compact:
             self._console_print(_build_compact_banner())
             self._show_status()
         else:
             # Get tools for display
-            tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+            tools = get_tool_definitions(
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+                quiet_mode=True,
+            )
             
             # Get terminal working directory (where commands will execute)
             cwd = os.getenv("TERMINAL_CWD", os.getcwd())
@@ -5362,7 +5369,8 @@ class HermesCLI:
                 model=self.model,
                 cwd=cwd,
                 tools=tools,
-                enabled_toolsets=self.enabled_toolsets,
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
                 session_id=self.session_id,
                 context_length=ctx_len,
             )
@@ -6210,11 +6218,18 @@ class HermesCLI:
     
     def _show_status(self):
         """Show compact startup status line."""
+        enabled_toolsets = getattr(self, "enabled_toolsets", None) or []
+        disabled_toolsets = getattr(self, "disabled_toolsets", None) or []
+
         # Avoid pulling the full tool registry into the bare Termux prompt path.
         if os.environ.get("HERMES_DEFER_AGENT_STARTUP") == "1":
             tool_status = "tools deferred"
         else:
-            tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+            tools = get_tool_definitions(
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+                quiet_mode=True,
+            )
             tool_count = len(tools) if tools else 0
             tool_status = f"{tool_count} tools"
 
@@ -6239,8 +6254,8 @@ class HermesCLI:
         except Exception:
             separator_color, accent_color, label_color = "#B8860B", "#FFBF00", "cyan"
         toolsets_info = ""
-        if self.enabled_toolsets and "all" not in self.enabled_toolsets:
-            toolsets_info = f" [dim {separator_color}]·[/] [{label_color}]toolsets: {', '.join(self.enabled_toolsets)}[/]"
+        if enabled_toolsets and "all" not in enabled_toolsets:
+            toolsets_info = f" [dim {separator_color}]·[/] [{label_color}]toolsets: {', '.join(enabled_toolsets)}[/]"
 
         provider_info = f" [dim {separator_color}]·[/] [dim]provider: {self.provider}[/]"
         if self._provider_source:
@@ -6372,7 +6387,11 @@ class HermesCLI:
     
     def show_tools(self):
         """Display available tools with kawaii ASCII art."""
-        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+        tools = get_tool_definitions(
+            enabled_toolsets=self.enabled_toolsets,
+            disabled_toolsets=self.disabled_toolsets,
+            quiet_mode=True,
+        )
         
         if not tools:
             print("(;_;) No tools available")
@@ -8874,7 +8893,11 @@ class HermesCLI:
                 if self.compact or term_w < 80:
                     cc.print(_build_compact_banner())
                 else:
-                    tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+                    tools = get_tool_definitions(
+                        enabled_toolsets=self.enabled_toolsets,
+                        disabled_toolsets=self.disabled_toolsets,
+                        quiet_mode=True,
+                    )
                     cwd = os.getenv("TERMINAL_CWD", os.getcwd())
                     ctx_len = None
                     if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
@@ -8885,6 +8908,7 @@ class HermesCLI:
                         cwd=cwd,
                         tools=tools,
                         enabled_toolsets=self.enabled_toolsets,
+                        disabled_toolsets=self.disabled_toolsets,
                         session_id=self.session_id,
                         context_length=ctx_len,
                     )
@@ -11072,6 +11096,8 @@ class HermesCLI:
                 self.agent.tools = get_tool_definitions(
                     enabled_toolsets=self.agent.enabled_toolsets
                     if hasattr(self.agent, "enabled_toolsets") else None,
+                    disabled_toolsets=self.agent.disabled_toolsets
+                    if hasattr(self.agent, "disabled_toolsets") else None,
                     quiet_mode=True,
                 )
                 self.agent.valid_tool_names = {
