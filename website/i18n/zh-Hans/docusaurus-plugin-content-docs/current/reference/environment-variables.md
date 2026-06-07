@@ -332,6 +332,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `FEISHU_ENCRYPT_KEY` | webhook 模式的可选加密密钥 |
 | `FEISHU_VERIFICATION_TOKEN` | webhook 模式的可选验证 token |
 | `FEISHU_ALLOWED_USERS` | 允许向 bot 发送消息的逗号分隔飞书用户 ID |
+| `FEISHU_GROUP_ALLOWED_CHATS` | 允许向 bot 发送消息的逗号分隔飞书群聊 ID |
 | `FEISHU_ALLOW_BOTS` | `none`（默认）/`mentions`/`all`——接受来自其他 bot 的入站消息。参见 [bot 间消息传递](../user-guide/messaging/feishu.md#bot-to-bot-messaging) |
 | `FEISHU_REQUIRE_MENTION` | `true`（默认）/`false`——群组消息是否必须 @mention bot。可通过 `group_rules.<chat_id>.require_mention` 按聊天覆盖。 |
 | `FEISHU_HOME_CHANNEL` | cron 投递和通知的飞书聊天 ID |

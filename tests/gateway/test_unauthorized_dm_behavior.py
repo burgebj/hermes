@@ -18,6 +18,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "SIGNAL_ALLOWED_USERS",
         "SIGNAL_GROUP_ALLOWED_USERS",
         "TELEGRAM_GROUP_ALLOWED_CHATS",
+        "FEISHU_GROUP_ALLOWED_CHATS",
         "EMAIL_ALLOWED_USERS",
         "SMS_ALLOWED_USERS",
         "MATTERMOST_ALLOWED_USERS",
@@ -274,6 +275,81 @@ def test_telegram_group_chat_allowlist_authorizes_group_chat_without_user_allowl
     )
 
     assert runner._is_user_authorized(source) is True
+
+
+def test_feishu_group_chat_allowlist_authorizes_group_chat_without_user_allowlist(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("FEISHU_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_allowed_chat")
+
+    runner, _adapter = _make_runner(
+        Platform.FEISHU,
+        GatewayConfig(platforms={Platform.FEISHU: PlatformConfig(enabled=True)}),
+    )
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        user_id="ou_stranger",
+        chat_id="oc_allowed_chat",
+        user_name="tester",
+        chat_type="group",
+    )
+
+    assert runner._is_user_authorized(source) is True
+
+
+def test_feishu_group_chat_allowlist_does_not_authorize_other_groups(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("FEISHU_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_allowed_chat")
+
+    runner, _adapter = _make_runner(
+        Platform.FEISHU,
+        GatewayConfig(platforms={Platform.FEISHU: PlatformConfig(enabled=True)}),
+    )
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        user_id="ou_stranger",
+        chat_id="oc_other_chat",
+        user_name="tester",
+        chat_type="group",
+    )
+
+    assert runner._is_user_authorized(source) is False
+
+
+def test_feishu_group_chat_allowlist_does_not_authorize_dms(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("FEISHU_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_allowed_chat")
+
+    runner, _adapter = _make_runner(
+        Platform.FEISHU,
+        GatewayConfig(platforms={Platform.FEISHU: PlatformConfig(enabled=True)}),
+    )
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        user_id="ou_stranger",
+        chat_id="oc_allowed_chat",
+        user_name="tester",
+        chat_type="dm",
+    )
+
+    assert runner._is_user_authorized(source) is False
+
+
+def test_feishu_group_chat_allowlist_makes_unauthorized_dms_silent(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("FEISHU_GROUP_ALLOWED_CHATS", "oc_allowed_chat")
+
+    runner, _adapter = _make_runner(
+        Platform.FEISHU,
+        GatewayConfig(platforms={Platform.FEISHU: PlatformConfig(enabled=True)}),
+    )
+
+    assert runner._get_unauthorized_dm_behavior(Platform.FEISHU) == "ignore"
 
 
 def test_telegram_group_chat_allowlist_authorizes_anonymous_sender(monkeypatch):

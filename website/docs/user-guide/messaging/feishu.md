@@ -189,6 +189,14 @@ FEISHU_ALLOWED_USERS=ou_xxx,ou_yyy
 
 If you leave the allowlist empty, anyone who can reach the bot may be able to use it. In group chats, the allowlist is checked against the sender's open_id before the message is processed.
 
+To allow a specific group chat without opening direct messages from unknown users, set a chat ID allowlist:
+
+```bash
+FEISHU_GROUP_ALLOWED_CHATS=oc_xxx,oc_yyy
+```
+
+This authorizes messages from the listed group chats while leaving direct-message access governed by `FEISHU_ALLOWED_USERS`, pairing, or `FEISHU_ALLOW_ALL_USERS`.
+
 ### Webhook Encryption Key
 
 When running in webhook mode, set an encryption key to enable signature verification of inbound webhook payloads:
@@ -545,6 +553,7 @@ Inbound messages are deduplicated using message IDs with a 24-hour TTL. The dedu
 | `FEISHU_DOMAIN` | — | `feishu` | `feishu` (China) or `lark` (international) |
 | `FEISHU_CONNECTION_MODE` | — | `websocket` | `websocket` or `webhook` |
 | `FEISHU_ALLOWED_USERS` | — | _(empty)_ | Comma-separated open_id list for user allowlist |
+| `FEISHU_GROUP_ALLOWED_CHATS` | — | _(empty)_ | Comma-separated chat ID allowlist for Feishu group chats |
 | `FEISHU_ALLOW_BOTS` | — | `none` | Accept messages from other bots: `none`, `mentions`, or `all` |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | Whether group messages must @mention the bot |
 | `FEISHU_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
