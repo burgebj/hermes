@@ -420,3 +420,57 @@ def test_viking_client_health_sends_auth_headers(monkeypatch):
     assert client.health() is True
     assert captured["url"] == "https://example.com/health"
     assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_tool_delete_sends_uri_param():
+    provider = OpenVikingMemoryProvider()
+    provider._client = MagicMock()
+    provider._client.delete.return_value = {
+        "result": {"uri": "viking://user/memories/test.md", "estimated_deleted_count": 1}
+    }
+
+    result = json.loads(provider._tool_delete({"uri": "viking://user/memories/test.md"}))
+
+    assert result["status"] == "deleted"
+    assert result["uri"] == "viking://user/memories/test.md"
+    assert result["estimated_deleted_count"] == 1
+    provider._client.delete.assert_called_once_with(
+        "/api/v1/fs", params={"uri": "viking://user/memories/test.md"}
+    )
+
+
+def test_tool_delete_sends_recursive_true():
+    provider = OpenVikingMemoryProvider()
+    provider._client = MagicMock()
+    provider._client.delete.return_value = {
+        "result": {"uri": "viking://user/memories/patterns/", "estimated_deleted_count": 5}
+    }
+
+    result = json.loads(provider._tool_delete({
+        "uri": "viking://user/memories/patterns/",
+        "recursive": True,
+    }))
+
+    assert result["status"] == "deleted"
+    assert result["estimated_deleted_count"] == 5
+    provider._client.delete.assert_called_once_with(
+        "/api/v1/fs",
+        params={"uri": "viking://user/memories/patterns/", "recursive": "true"},
+    )
+
+
+def test_tool_delete_requires_uri():
+    provider = OpenVikingMemoryProvider()
+    provider._client = MagicMock()
+
+    result = json.loads(provider._tool_delete({}))
+    assert "error" in result
+    assert "uri is required" in result["error"]
+
+
+def test_get_tool_schemas_includes_delete():
+    provider = OpenVikingMemoryProvider()
+    schemas = provider.get_tool_schemas()
+    names = [s["name"] for s in schemas]
+    assert "viking_delete" in names
+    assert len(schemas) == 6
