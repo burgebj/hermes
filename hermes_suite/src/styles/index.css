@@ -1,0 +1,120 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Theme: Ops Dark (default) ─────────────────────────────── */
+:root,
+.ops-dark {
+  --color-bg: #0a0a0f;
+  --color-surface: #111118;
+  --color-surface-raised: #1a1a24;
+  --color-border: #1e1e2e;
+  --color-accent: #00d4ff;
+  --color-accent-secondary: #7c3aed;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --color-text: #e2e8f0;
+  --color-text-muted: #64748b;
+}
+
+/* ─── Theme: Paper Light ────────────────────────────────────── */
+.paper-light {
+  --color-bg: #faf9f7;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f5f4f2;
+  --color-border: #e5e4e0;
+  --color-accent: #0066cc;
+  --color-accent-secondary: #7c3aed;
+  --color-success: #059669;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  --color-text: #1a1a1a;
+  --color-text-muted: #6b7280;
+}
+
+/* ─── Theme: Premium Dark ───────────────────────────────────── */
+.premium-dark {
+  --color-bg: #080810;
+  --color-surface: #0f0f1a;
+  --color-surface-raised: #16162a;
+  --color-border: #252540;
+  --color-accent: #c084fc;
+  --color-accent-secondary: #818cf8;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-text: #e2e8f0;
+  --color-text-muted: #4b5563;
+}
+
+/* ─── Base resets ───────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* ─── Selection ─────────────────────────────────────────────── */
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+  color: var(--color-text);
+}
+
+/* ─── Focus ─────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ─── React Grid Layout overrides ────────────────────────────── */
+.react-grid-layout {
+  position: relative;
+}
+.react-grid-item {
+  transition: all 150ms ease-out;
+}
+.react-grid-item.react-grid-placeholder {
+  background: var(--color-accent);
+  opacity: 0.15;
+  border-radius: 8px;
+}
+
+/* ─── xterm.js overrides ────────────────────────────────────── */
+.xterm {
+  padding: 8px;
+}
