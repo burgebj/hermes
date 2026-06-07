@@ -799,10 +799,9 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
     import shutil
     import subprocess
 
-    install_cmd = (
-        "/bin/bash -c \"$(curl -fsSL "
+    install_url = (
         "https://raw.githubusercontent.com/trycua/cua/main/"
-        "libs/cua-driver/scripts/install.sh)\""
+        "libs/cua-driver/scripts/install.sh"
     )
     if verbose:
         _print_info(f"    {label} cua-driver (macOS background computer-use)...")
@@ -810,7 +809,20 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
         _print_info(f"    {label} cua-driver...")
     driver_cmd = _cua_driver_cmd()
     try:
-        result = subprocess.run(install_cmd, shell=True, timeout=300)
+        # Step 1: Download the script to a temp file without shell=True
+        download_proc = subprocess.run(
+            ["curl", "-fsSL", "-o", "/tmp/cua-driver-install.sh", install_url],
+            timeout=60,
+        )
+        if download_proc.returncode != 0:
+            _print_warning(f"    cua-driver {label.lower()} download failed.")
+            return False
+
+        # Step 2: Execute the downloaded script directly with argv list
+        result = subprocess.run(
+            ["/bin/bash", "/tmp/cua-driver-install.sh"],
+            timeout=300,
+        )
         if result.returncode == 0 and shutil.which(driver_cmd):
             if verbose:
                 _print_success(f"    {driver_cmd} installed.")
@@ -820,7 +832,7 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
                 _print_info("    Both must allow the terminal / Hermes process.")
             return True
         _print_warning(f"    cua-driver {label.lower()} did not complete. Re-run manually:")
-        _print_info(f"      {install_cmd}")
+        _print_info(f"      curl -fsSL -o /tmp/cua-driver-install.sh {install_url} && /bin/bash /tmp/cua-driver-install.sh")
         return False
     except subprocess.TimeoutExpired:
         _print_warning(f"    cua-driver {label.lower()} timed out. Re-run manually.")
