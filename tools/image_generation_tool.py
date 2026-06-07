@@ -1003,13 +1003,10 @@ IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
     "description": (
         "Generate high-quality images from text prompts. The underlying "
-        "backend (FAL, OpenAI, etc.) and model are user-configured and not "
-        "selectable by the agent. Returns either a URL or an absolute file "
-        "path in the `image` field; display it with markdown "
-        "![description](url-or-path) and the gateway will deliver it. When "
-        "the active terminal backend has a different filesystem, successful "
-        "local-file results may also include `agent_visible_image` for "
-        "follow-up terminal/file operations."
+        "backend (FAL, OpenAI, Poe, etc.) is user-configured; the model can be "
+        "overridden per-call via the optional 'model' parameter. Returns either "
+        "a URL or an absolute file path in the `image` field; display it with "
+        "markdown ![description](url-or-path) and the gateway will deliver it."
     ),
     "parameters": {
         "type": "object",
@@ -1023,6 +1020,10 @@ IMAGE_GENERATE_SCHEMA = {
                 "enum": list(VALID_ASPECT_RATIOS),
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
+            },
+            "model": {
+                "type": "string",
+                "description": "Optional model ID override (e.g. 'FLUX-pro', 'gpt-image-1', 'Imagen-3'). If omitted, uses the configured default.",
             },
         },
         "required": ["prompt"],
@@ -1069,7 +1070,7 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str, model: Optional[str] = None):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -1080,6 +1081,11 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     ``plugins/image_gen/fal/`` plugin (the plugin re-enters this module's
     pipeline via ``_it`` indirection so behavior is identical to the
     direct call, just routed through the registry).
+
+    Args:
+        prompt: Image generation prompt.
+        aspect_ratio: "landscape" | "square" | "portrait".
+        model: Optional per-call model override passed to the provider.
     """
     configured = _read_configured_image_provider()
     if not configured:
@@ -1124,7 +1130,9 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
 
     try:
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
-        if configured_model:
+        if model:
+            kwargs["model"] = model
+        elif configured_model:
             kwargs["model"] = configured_model
         result = provider.generate(**kwargs)
     except Exception as exc:
@@ -1153,11 +1161,12 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    model = args.get("model")
     task_id = kw.get("task_id")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio, model=model)
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)
 
