@@ -11,6 +11,7 @@ import pytest
 
 
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -449,6 +450,48 @@ class TestPreflightCompression:
         assert events[0][0] == "lifecycle"
         assert "Compacting context" in events[0][1]
         assert events[1] == ("compress", "started")
+
+    def test_compress_context_touches_activity_while_summary_runs(self, agent, monkeypatch):
+        """Long compression work must keep cron/gateway inactivity trackers warm."""
+        import agent.conversation_compression as compression_mod
+
+        monkeypatch.setattr(
+            compression_mod,
+            "_COMPRESSION_ACTIVITY_HEARTBEAT_SECONDS",
+            0.02,
+        )
+
+        saw_running_heartbeat = threading.Event()
+        original_touch = agent._touch_activity
+
+        def _record_touch(desc):
+            original_touch(desc)
+            if "context compression running" in desc:
+                saw_running_heartbeat.set()
+
+        agent._touch_activity = _record_touch
+
+        def _slow_compress(messages, current_tokens=None, focus_topic=None, force=False):
+            threading.Event().wait(0.08)
+            return [{"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"}]
+
+        with (
+            patch.object(agent.context_compressor, "compress", side_effect=_slow_compress),
+            patch.object(agent, "_build_system_prompt", return_value="new system prompt"),
+            patch("run_agent.estimate_request_tokens_rough", return_value=42),
+        ):
+            compressed, new_system_prompt = agent._compress_context(
+                [{"role": "user", "content": "hello"}],
+                "system prompt",
+                approx_tokens=1234,
+            )
+
+        assert compressed == [{"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"}]
+        assert new_system_prompt == "new system prompt"
+        assert saw_running_heartbeat.is_set(), (
+            "compression should emit activity heartbeats while the summary call is still running"
+        )
+        assert agent.get_activity_summary()["last_activity_desc"] == "context compression finished"
 
     def test_preflight_compresses_oversized_history(self, agent):
         """When loaded history exceeds the model's context threshold, compress before API call."""

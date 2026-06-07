@@ -31,6 +31,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +41,68 @@ from typing import Any, Optional, Tuple
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
+
+_COMPRESSION_ACTIVITY_HEARTBEAT_SECONDS = 30.0
+
+
+def _start_compression_activity_heartbeat(agent: Any) -> tuple[threading.Event | None, threading.Thread | None]:
+    """Keep the agent activity tracker warm while compression is running.
+
+    Cron/gateway watchdogs rely on ``agent._touch_activity()`` to distinguish
+    "still working" from "wedged". Tool execution and main-model API calls
+    already emit heartbeats, but context compression runs synchronously in the
+    agent loop and can spend tens of seconds inside an auxiliary summarizer with
+    no activity updates at all. That makes a healthy post-tool compaction phase
+    look like an idle hang, which is exactly the #5209 shape.
+    """
+    interval = _COMPRESSION_ACTIVITY_HEARTBEAT_SECONDS
+    if interval <= 0 or not hasattr(agent, "_touch_activity"):
+        return None, None
+
+    started_at = time.monotonic()
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(interval):
+            try:
+                elapsed = int(time.monotonic() - started_at)
+                agent._touch_activity(
+                    f"context compression running ({elapsed}s)"
+                )
+            except Exception:
+                # Activity heartbeats are best-effort; compression itself
+                # must continue even if the tracker is unavailable.
+                return
+
+    try:
+        agent._touch_activity("context compression started")
+    except Exception:
+        return None, None
+
+    thread = threading.Thread(
+        target=_beat,
+        daemon=True,
+        name="compression-activity-heartbeat",
+    )
+    thread.start()
+    return stop, thread
+
+
+def _stop_compression_activity_heartbeat(
+    agent: Any,
+    stop: threading.Event | None,
+    thread: threading.Thread | None,
+) -> None:
+    """Tear down the compression heartbeat thread and mark completion."""
+    if stop is not None:
+        stop.set()
+    if thread is not None:
+        thread.join(timeout=0.5)
+    if hasattr(agent, "_touch_activity"):
+        try:
+            agent._touch_activity("context compression finished")
+        except Exception:
+            pass
 
 
 def _compression_lock_holder(agent: Any) -> str:
@@ -432,17 +496,21 @@ def compress_context(
         except Exception:
             pass
 
+    _heartbeat_stop, _heartbeat_thread = _start_compression_activity_heartbeat(agent)
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        try:
+            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        except TypeError:
+            # Plugin context engine with strict signature that doesn't accept
+            # focus_topic / force — fall back to calling without them.
+            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
     except BaseException:
         # ANY exception during compress() must release the lock so the
         # session isn't permanently blocked from future compression.
         _release_lock()
         raise
+    finally:
+        _stop_compression_activity_heartbeat(agent, _heartbeat_stop, _heartbeat_thread)
 
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the
