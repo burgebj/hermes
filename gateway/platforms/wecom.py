@@ -144,6 +144,11 @@ class WeComAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     SUPPORTS_MESSAGE_EDITING = False
+    REQUIRES_EDIT_FINALIZE = True
+    # WeCom native stream frames: APP_CMD_RESPONSE with msgtype="stream".
+    # The final frame (finish=True) lands the message natively — no separate
+    # sendMessage call is needed.  20 KiB matches the server-side payload cap.
+    STREAM_MESSAGE_MAX_BYTES = 20 * 1024
     # Threshold for detecting WeCom client-side message splits.
     # When a chunk is near the 4000-char limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 3900
@@ -192,6 +197,9 @@ class WeComAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._device_id = uuid.uuid4().hex
         self._last_chat_req_ids: Dict[str, str] = {}
+        # Native stream sessions: maps (chat_id, draft_id) -> stream_id string.
+        # Scoped per-draft so concurrent conversations don't cross streams.
+        self._stream_sessions: Dict[tuple, str] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -923,6 +931,133 @@ class WeComAdapter(BasePlatformAdapter):
             return None
         return self._reply_req_ids.get(normalized)
 
+    def supports_draft_streaming(
+        self,
+        chat_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """WeCom AI Bot supports native passive streaming via msgtype='stream'.
+
+        Both DMs and group chats support the stream protocol as long as
+        a valid inbound ``req_id`` is available to correlate the reply.
+        Returns False when the WebSocket is not yet connected so the consumer
+        does not attempt a first frame that is guaranteed to fail.
+        """
+        return self._ws is not None and not self._ws.closed
+
+    async def send_draft(
+        self,
+        chat_id: str,
+        draft_id: int,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        finish: bool = False,
+    ) -> "SendResult":
+        """Send a WeCom native stream frame via APP_CMD_RESPONSE msgtype='stream'.
+
+        Intermediate frames (finish=False) are fire-and-forget: sent directly
+        over the WebSocket without waiting for a server ack so delivery latency
+        stays low.  The final frame (finish=True) waits for the server ack; on
+        error 846609 (req_id expired) it falls back to a plain markdown send so
+        the user always receives the complete answer.
+
+        Args:
+            chat_id: Target chat or user-id.
+            draft_id: Monotonically increasing integer assigned by the consumer
+                to identify this response stream.  Stable across all frames.
+            content: Accumulated response text so far (UTF-8).
+            metadata: Optional gateway metadata dict (unused, kept for parity).
+            finish: True on the last frame; the server lands the message
+                natively and the consumer skips the redundant sendMessage.
+
+        Returns:
+            SendResult(success=True) on success.
+            SendResult(success=False, error=...) on failure.
+        """
+        reply_req_id = self._resolve_stream_req_id(chat_id)
+        if not reply_req_id:
+            logger.debug(
+                "[%s] send_draft: no req_id available for chat %s, skipping frame",
+                self.name,
+                chat_id,
+            )
+            return SendResult(success=False, error="no reply context available")
+
+        session_key = (chat_id, draft_id)
+        if session_key not in self._stream_sessions:
+            self._stream_sessions[session_key] = (
+                f"stream-{draft_id}-{uuid.uuid4().hex[:8]}"
+            )
+        stream_id = self._stream_sessions[session_key]
+
+        body = {
+            "msgtype": "stream",
+            "stream": {
+                "id": stream_id,
+                "finish": finish,
+                "content": self._truncate_utf8(
+                    content, self.STREAM_MESSAGE_MAX_BYTES
+                ),
+            },
+        }
+
+        try:
+            if finish:
+                # Final frame: wait for server ack so we know the message landed.
+                try:
+                    response = await self._send_reply_request(reply_req_id, body)
+                    self._raise_for_wecom_error(response, "send stream finish frame")
+                except Exception as exc:
+                    if "846609" in str(exc):
+                        # req_id expired during a long response — fall back to
+                        # a regular markdown send so the user still gets the answer.
+                        logger.warning(
+                            "[%s] Stream req_id expired (846609) for chat %s, "
+                            "falling back to markdown send",
+                            self.name,
+                            chat_id,
+                        )
+                        return await self.send(
+                            chat_id=chat_id,
+                            content=content,
+                            metadata=metadata,
+                        )
+                    raise
+                finally:
+                    self._stream_sessions.pop(session_key, None)
+            else:
+                # Intermediate frame: fire-and-forget for low latency.
+                await self._send_json(
+                    {
+                        "cmd": APP_CMD_RESPONSE,
+                        "headers": {"req_id": reply_req_id},
+                        "body": body,
+                    }
+                )
+        except Exception as exc:
+            logger.debug("[%s] send_draft frame failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
+
+        return SendResult(success=True, message_id=None)
+
+    def _resolve_stream_req_id(self, chat_id: str) -> Optional[str]:
+        """Return the best available inbound req_id for streaming replies.
+
+        Uses the most recently cached req_id for the chat, which is updated
+        on every inbound message and covers both DMs and group chats.
+        """
+        normalized = str(chat_id or "").strip()
+        return self._last_chat_req_ids.get(normalized)
+
+    @staticmethod
+    def _truncate_utf8(text: str, max_bytes: int) -> str:
+        """Truncate *text* so its UTF-8 encoding fits within *max_bytes*."""
+        normalized = str(text or "")
+        encoded = normalized.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return normalized
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
     # ------------------------------------------------------------------
     # Outbound messaging
     # ------------------------------------------------------------------
@@ -1494,8 +1629,12 @@ class WeComAdapter(BasePlatformAdapter):
         )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """WeCom does not expose typing indicators in this adapter."""
-        del chat_id, metadata
+        """WeCom does not expose a dedicated typing-indicator API.
+
+        A follow-up improvement can send an empty ``msgtype=stream`` frame
+        (finish=false, content="") here to trigger WeCom's native typing
+        animation before the first draft frame arrives.
+        """
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return minimal chat info."""

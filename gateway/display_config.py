@@ -125,8 +125,12 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "whatsapp":        _TIER_MEDIUM,  # Baileys bridge supports /edit
     "bluebubbles":     _TIER_LOW,
     "weixin":          _TIER_LOW,
-    "wecom":           _TIER_LOW,
-    "wecom_callback":  _TIER_LOW,
+    # WeCom AI Bot does not support message editing but implements native
+    # passive streaming via msgtype="stream".  Override streaming=None so the
+    # top-level streaming config decides; the draft-streaming path in
+    # stream_consumer handles token-by-token delivery.
+    "wecom":           {**_TIER_LOW, "streaming": None},
+    "wecom_callback":  {**_TIER_LOW, "streaming": None},
     "dingtalk":        _TIER_LOW,
 
     # Tier 4 — batch or non-interactive delivery

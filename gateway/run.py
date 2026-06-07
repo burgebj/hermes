@@ -17828,8 +17828,26 @@ class GatewayRunner:
                         # without edit support, the consumer sends a partial
                         # first message that can never be updated, resulting in
                         # duplicate messages (partial + final).
+                        #
+                        # Exception: adapters that implement native draft
+                        # streaming (supports_draft_streaming() == True) deliver
+                        # progressive updates via send_draft frames instead of
+                        # edit_message, so they can stream without edit support.
+                        # WeCom is the canonical example — its msgtype="stream"
+                        # protocol delivers full-replacement draft frames over
+                        # the WebSocket and lands the final message with a
+                        # finish=True frame, never invoking edit_message.
                         _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                        if not _adapter_supports_edit:
+                        try:
+                            _adapter_supports_draft = bool(
+                                _adapter.supports_draft_streaming(
+                                    chat_type=getattr(source, "chat_type", "") or None,
+                                    metadata=_status_thread_metadata,
+                                )
+                            )
+                        except Exception:
+                            _adapter_supports_draft = False
+                        if not _adapter_supports_edit and not _adapter_supports_draft:
                             raise RuntimeError("skip streaming for non-editable platform")
                         _effective_cursor = _scfg.cursor
                         # Some Matrix clients render the streaming cursor

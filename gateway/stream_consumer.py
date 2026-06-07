@@ -182,6 +182,12 @@ class GatewayStreamConsumer:
         # first failure we permanently disable drafts for the remainder of
         # this response and route through edit-based for graceful degradation.
         self._draft_failures = 0
+        # Set once a draft adapter that REQUIRES_EDIT_FINALIZE has landed its
+        # final answer in-place via a finish frame (e.g. WeCom's
+        # msgtype="stream" finish=true, which the server promotes to a real
+        # message).  When True the run() done-path suppresses the regular
+        # final send so the user does not receive a duplicate message.
+        self._draft_finalized = False
 
     @property
     def already_sent(self) -> bool:
@@ -277,6 +283,9 @@ class GatewayStreamConsumer:
         if self._use_draft_streaming:
             type(self)._draft_id_counter += 1
             self._draft_id = type(self)._draft_id_counter
+            # New segment starts a fresh draft session, so the prior finish
+            # frame no longer applies — the next segment must finalize itself.
+            self._draft_finalized = False
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
@@ -574,6 +583,13 @@ class GatewayStreamConsumer:
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
+                    # A REQUIRES_EDIT_FINALIZE draft adapter already landed the
+                    # final answer in-place via a finish frame (set in
+                    # _send_or_edit during the finalize=True flush above).  The
+                    # delivery flags are set; nothing more to send — returning
+                    # here avoids emitting a redundant non-finish frame below.
+                    if self._draft_finalized:
+                        return
                     # Final edit without cursor. If progressive editing failed
                     # mid-stream, send a single continuation/fallback message
                     # here instead of letting the base gateway path send the
@@ -938,8 +954,18 @@ class GatewayStreamConsumer:
             return False
         return True
 
-    async def _send_draft_frame(self, text: str) -> bool:
+    async def _send_draft_frame(self, text: str, finish: bool = False) -> bool:
         """Emit a single animated draft frame for the current accumulated text.
+
+        When ``finish`` is True the frame is the final one: REQUIRES_EDIT_FINALIZE
+        adapters promote the streaming preview to a real message in place, so no
+        separate sendMessage is needed.  ``finish`` is only forwarded to the
+        adapter when set, keeping adapters whose ``send_draft`` predates the
+        ``finish`` parameter working for the mid-stream (preview-only) case.
+
+        Callers pass cursor-free text: the draft transport renders its own
+        native typing animation, so the synthetic cursor glyph is stripped
+        before frames reach this method.
 
         Returns True when the frame landed.  On any failure, permanently
         disables drafts for the remainder of this run so subsequent frames
@@ -952,12 +978,14 @@ class GatewayStreamConsumer:
             # set in tandem with _draft_id in run().  Disable to be safe.
             self._use_draft_streaming = False
             return False
+        _draft_kwargs = {"finish": True} if finish else {}
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id,
                 draft_id=self._draft_id,
                 content=text,
                 metadata=self.metadata,
+                **_draft_kwargs,
             )
         except Exception as e:
             logger.debug(
@@ -1180,31 +1208,50 @@ class GatewayStreamConsumer:
                 and len(_visible_stripped) < _MIN_NEW_MSG_CHARS):
             return True  # too short for a standalone message — accumulate more
 
-        # Native draft streaming: route mid-stream frames through send_draft.
-        # The final answer is delivered via the regular sendMessage path
-        # below — drafts have no message_id so we can't finalize them
-        # in-place; the regular sendMessage clears the draft naturally on
-        # the client and gives the user a real message in their history.
-        # Skip when:
-        #   * finalize=True (this is the final answer; needs to be a real message)
-        #   * an edit path is already established (message_id is set, e.g. after
-        #     a tool-boundary segment break where the prior text was finalized
-        #     as a real sendMessage and the next text segment continues editing
-        #     that one — staying on edit-based for that segment is correct).
+        # Native draft streaming: route frames through send_draft.
+        #
+        # Two finalize models, selected by the adapter's REQUIRES_EDIT_FINALIZE
+        # contract:
+        #
+        #   * Default drafts (e.g. Telegram sendMessageDraft): drafts are pure
+        #     previews that clear naturally on the client.  Mid-stream frames go
+        #     through send_draft; the FINAL answer falls through to the regular
+        #     sendMessage path below so the user gets a real message in history.
+        #
+        #   * REQUIRES_EDIT_FINALIZE drafts (e.g. WeCom msgtype="stream"): the
+        #     preview does NOT clear on its own — the platform promotes the
+        #     stream to a real message only when it receives a finish frame.  So
+        #     here we deliver the final answer as a send_draft(finish=True) frame
+        #     in-place and mark _draft_finalized so run()'s done-path suppresses
+        #     the regular send (which would otherwise duplicate the message).
+        #
+        # In both models we skip the draft branch once an edit path is
+        # established (message_id set after a tool-boundary segment break), since
+        # that segment is correctly staying on edit-based delivery.
+        _draft_finalize_inplace = finalize and self._adapter_requires_finalize
         if (
             self._use_draft_streaming
-            and not finalize
             and self._message_id is None
+            and (not finalize or _draft_finalize_inplace)
         ):
-            # No-op skip: identical to the last frame we sent.
-            if text == self._last_sent_text:
+            # No-op skip: identical to the last frame we sent.  A finalize frame
+            # must still go through even when unchanged, so the platform can
+            # promote the preview to a real message.
+            if text == self._last_sent_text and not _draft_finalize_inplace:
                 return True
-            ok = await self._send_draft_frame(text)
+            ok = await self._send_draft_frame(text, finish=_draft_finalize_inplace)
             if ok:
-                # Drafts mark "we put something on screen" but DO NOT set
-                # _already_sent — that flag gates the gateway's fallback
-                # final-send path and we still need that to fire so the
-                # user gets a real message (drafts have no message_id).
+                if _draft_finalize_inplace:
+                    # The finish frame landed the real message in-place; record
+                    # delivery so the gateway suppresses its redundant final
+                    # send and the user sees exactly one message.
+                    self._draft_finalized = True
+                    self._final_response_sent = True
+                    self._final_content_delivered = True
+                # Mid-stream drafts mark "we put something on screen" but DO NOT
+                # set _already_sent — that flag gates the gateway's fallback
+                # final-send path, which default-draft adapters still need so
+                # the user gets a real message (drafts have no message_id).
                 return True
             # Failure already disabled drafts for this run; fall through to
             # the regular edit/send path below.
