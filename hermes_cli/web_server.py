@@ -1005,6 +1005,56 @@ async def get_system_stats():
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/fs/readdir")
+async def get_readdir(request: Request, path: str = ""):
+    """List directory contents on the server filesystem.
+
+    Used by Hermes Desktop's file browser when connected to a remote
+    dashboard.  Returns the same ``HermesReadDirResult`` shape the
+    desktop's local Electron IPC would produce, so the frontend can
+    swap between local and remote transparently.
+
+    Auth-gated by the same ephemeral session token as every other
+    sensitive dashboard endpoint (see ``_require_token``).
+    """
+    _require_token(request)
+
+    if not path:
+        raise HTTPException(status_code=400, detail="query parameter 'path' is required")
+
+    try:
+        resolved = (Path(path)).resolve()
+    except (OSError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Invalid path: {path}")
+
+    if not resolved.exists():
+        return {"entries": [], "error": "ENOENT"}
+
+    if not resolved.is_dir():
+        return {"entries": [], "error": "ENOTDIR"}
+
+    try:
+        entries = []
+        for entry in os.scandir(resolved):
+            entries.append({
+                "name": entry.name,
+                "path": str(entry.path),
+                "isDirectory": entry.is_dir(follow_symlinks=False),
+            })
+
+        # Sort: directories first, then by name case-insensitively
+        entries.sort(key=lambda e: (not e["isDirectory"], e["name"].lower()))
+
+        return {"entries": entries, "error": None}
+    except PermissionError:
+        return {"entries": [], "error": "EACCES"}
+    except OSError as exc:
+        return {"entries": [], "error": exc.strerror or str(type(exc).__name__)}
+    except Exception:
+        _log.exception("GET /api/fs/readdir failed")
+        raise HTTPException(status_code=500, detail="Failed to list directory")
+
+
 @app.get("/api/curator")
 async def get_curator_status():
     try:

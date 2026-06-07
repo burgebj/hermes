@@ -1,6 +1,7 @@
 import ignore from 'ignore'
 
 import type { HermesReadDirEntry, HermesReadDirResult } from '@/global'
+import { $connection } from '@/store/session'
 
 export type ProjectTreeEntry = HermesReadDirEntry
 
@@ -137,13 +138,55 @@ async function filterIgnored(entries: HermesReadDirEntry[], rootPath: string, di
   return rules.length > 0 ? entries.filter(entry => !ignoredBy(rules, entry)) : entries
 }
 
+/**
+ * Read a directory using the dashboard's remote API when connected to a
+ * remote backend.  Falls back to the local Electron IPC when connected
+ * locally or when the API call fails unexpectedly.
+ */
+async function readProjectDirRemote(dirPath: string): Promise<HermesReadDirResult> {
+  const conn = $connection.get()
+
+  if (!conn?.baseUrl) {
+    return { entries: [], error: 'no-connection' }
+  }
+
+  try {
+    const result = await window.hermesDesktop!.api<HermesReadDirResult>({
+      path: `/api/fs/readdir?path=${encodeURIComponent(dirPath)}`
+    })
+
+    return result
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+
+    return { entries: [], error: `remote-error: ${message}` }
+  }
+}
+
+/** Return ``true`` when the active connection is a remote (non-local) backend. */
+function isRemoteConnection(): boolean {
+  const conn = $connection.get()
+
+  return conn?.mode === 'remote' && Boolean(conn.baseUrl)
+}
+
 export async function readProjectDir(dirPath: string, rootPath = dirPath): Promise<HermesReadDirResult> {
+  // Remote mode: fetch directory listing from the dashboard's HTTP API
+  // instead of Electron IPC (which only reads the local filesystem).
+  if (isRemoteConnection()) {
+    return readProjectDirRemote(dirPath)
+  }
+
   if (!window.hermesDesktop) {
     return { entries: [], error: 'no-bridge' }
   }
 
   const result = await window.hermesDesktop.readDir(dirPath)
 
+  // Gitignore filtering is skipped in remote mode — it requires local
+  // Electron IPC (gitRoot / readFileDataUrl).  Showing unfiltered files
+  // is strictly better than showing nothing (ENOENT).
+  // Remote gitignore filtering can be added server-side as a follow-up.
   return { ...result, entries: await filterIgnored(result.entries, rootPath, dirPath) }
 }
 
