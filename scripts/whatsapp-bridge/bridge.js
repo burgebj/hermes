@@ -393,6 +393,40 @@ async function startSocket() {
         } catch (err) {
           console.error('[bridge] Failed to download document:', err.message);
         }
+      } else if (messageContent.locationMessage) {
+        hasMedia = true;
+        mediaType = 'location';
+        const loc = messageContent.locationMessage;
+        const lat = loc.degreesLatitude;
+        const lng = loc.degreesLongitude;
+        const lines = [];
+        if (loc.name) lines.push(`📍 ${loc.name}`);
+        if (loc.address) lines.push(loc.address);
+        lines.push(`🗺 https://maps.google.com/?q=${lat},${lng}`);
+        lines.push(`📍 ${lat}, ${lng}`);
+        body = lines.join('\n');
+      } else if (messageContent.liveLocationMessage) {
+        hasMedia = true;
+        mediaType = 'location';
+        const loc = messageContent.liveLocationMessage;
+        const lat = loc.degreesLatitude;
+        const lng = loc.degreesLongitude;
+        const lines = [];
+        if (loc.caption) lines.push(`📍 Live: ${loc.caption}`);
+        lines.push(`🗺 https://maps.google.com/?q=${lat},${lng}`);
+        lines.push(`📍 ${lat}, ${lng} (live)`);
+        body = lines.join('\n');
+      } else if (messageContent.contactMessage) {
+        hasMedia = true;
+        mediaType = 'contact';
+        const ct = messageContent.contactMessage;
+        const lines = ['👤 Contact shared'];
+        if (ct.displayName) lines.push(`Name: ${ct.displayName}`);
+        if (ct.vcard) {
+          const telMatch = ct.vcard.match(/TEL[^:]*:([^\n]+)/i);
+          if (telMatch) lines.push(`Phone: ${telMatch[1].trim()}`);
+        }
+        body = lines.join('\n');
       }
 
       // For media without caption, use a placeholder so the API message is never empty
