@@ -335,6 +335,17 @@ def _stable_gateway_working_dir(project_root: Path) -> str:
 # Script rendering
 # ---------------------------------------------------------------------------
 
+def _cmd_safe_path(path: str) -> str:
+    """Replace APPDATA/LOCALAPPDATA prefix with env-var form to avoid
+    non-ASCII characters in .cmd files that confuse cmd.exe on
+    non-English Windows."""
+    for var, val in [("APPDATA", os.environ.get("APPDATA")),
+                     ("LOCALAPPDATA", os.environ.get("LOCALAPPDATA"))]:
+        if val and path.startswith(val):
+            return f"%{var}%" + path[len(val):]
+    return path
+
+
 def _build_gateway_cmd_script(
     python_path: str,
     working_dir: str,
@@ -354,16 +365,25 @@ def _build_gateway_cmd_script(
     rewriting PATH tends to break Homebrew/nvm-style installations.
     """
     lines = ["@echo off", f"rem {_TASK_DESCRIPTION}"]
-    lines.append(f"cd /d {_quote_cmd_script_arg(working_dir)}")
-    lines.append(f'set "HERMES_HOME={hermes_home}"')
+    lines.append(f"cd /d {_quote_cmd_script_arg(_cmd_safe_path(working_dir))}")
+    lines.append(f'set "HERMES_HOME={_cmd_safe_path(hermes_home)}"')
     lines.append('set "PYTHONIOENCODING=utf-8"')
     lines.append('set "HERMES_GATEWAY_DETACHED=1"')
-    # VIRTUAL_ENV lets the gateway's own python detection find the venv
-    # if someone imports hermes_constants-based logic during startup.
-    venv_dir = str(Path(python_path).resolve().parent.parent)
-    lines.append(f'set "VIRTUAL_ENV={venv_dir}"')
+    # Use uv-aware pythonw: uv venv's pythonw.exe is a shim that spawns
+    # base python.exe (console) -> visible console window.
+    extra_pythonpath = []
+    try:
+        windowed, vdir, extra = _resolve_detached_python(python_path)
+        pythonw_path = _cmd_safe_path(windowed)
+        venv_dir = str(vdir)
+        extra_pythonpath = extra
+    except Exception:
+        pythonw_path = _cmd_safe_path(_derive_venv_pythonw(python_path))
+        venv_dir = str(Path(python_path).resolve().parent.parent)
 
-    pythonw_path = _derive_venv_pythonw(python_path)
+    lines.append(f'set "VIRTUAL_ENV={_cmd_safe_path(venv_dir)}"')
+    if extra_pythonpath:
+        lines.append(f'set "PYTHONPATH={_cmd_safe_path(extra_pythonpath[0])};%PYTHONPATH%"')
     prog_args = [pythonw_path, "-m", "hermes_cli.main"]
     if profile_arg:
         prog_args.extend(profile_arg.split())
@@ -1050,9 +1070,13 @@ def start() -> None:
     if task_installed:
         code, _out, err = _exec_schtasks(["/Run", "/TN", get_task_name()])
         if code == 0:
-            _report_gateway_start(f"Scheduled Task {get_task_name()!r}")
-            return
-        print(f"⚠ schtasks /Run failed (code {code}): {err.strip()} — falling back to direct spawn")
+            pids = _wait_for_gateway_ready()
+            if pids:
+                print(f"✓ Gateway started via Scheduled Task {get_task_name()!r} (PID: {', '.join(map(str, pids))})")
+                return
+            print("⚠ Scheduled Task triggered but no process detected — falling back to direct spawn")
+        else:
+            print(f"⚠ schtasks /Run failed (code {code}): {err.strip()} — falling back to direct spawn")
 
     # Startup fallback or failed /Run: direct spawn one foreground-detached gateway.
     pid = _spawn_detached()
