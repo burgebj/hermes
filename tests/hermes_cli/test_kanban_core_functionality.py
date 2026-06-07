@@ -2758,6 +2758,45 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
     assert env.get("HERMES_PROFILE") == "some-profile"
 
 
+def test_default_spawn_forces_cli_for_headless_worker(kanban_home, monkeypatch):
+    """Dispatcher workers must not inherit an interactive TUI preference.
+
+    _default_spawn uses stdin=DEVNULL and start_new_session=True, so the child
+    is headless. The chat subcommand owns its own --cli flag, which must appear
+    after "chat" to override display.interface=tui.
+    """
+    captured = {}
+
+    class FakeProc:
+        pid = 123
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["stdin"] = kwargs.get("stdin")
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="headless cli", assignee="worker")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb._default_spawn(task, str(workspace))
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    chat_idx = cmd.index("chat")
+    assert cmd[chat_idx + 1] == "--cli", (
+        f"headless worker must force CLI after chat subcommand: {cmd}"
+    )
+    assert cmd[chat_idx + 2] == "-q", cmd
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["start_new_session"] is True
+
+
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):
     """A task runtime cap should raise the worker's terminal default.
 
