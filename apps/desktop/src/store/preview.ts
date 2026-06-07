@@ -42,6 +42,7 @@ type SessionPreviewRegistry = Record<string, SessionPreviewRecord[]>
 
 export interface FilePreviewTab {
   id: `file:${string}`
+  sessionId: string
   target: PreviewTarget
 }
 
@@ -103,11 +104,11 @@ export function filePreviewTabId(target: PreviewTarget): `file:${string}` {
   return `file:${target.url}`
 }
 
-function openFilePreviewTarget(target: PreviewTarget) {
+function openFilePreviewTarget(sessionId: string, target: PreviewTarget) {
   const id = filePreviewTabId(target)
   const current = $filePreviewTabs.get()
   const index = current.findIndex(tab => tab.id === id)
-  const tab: FilePreviewTab = { id, target }
+  const tab: FilePreviewTab = { id, sessionId, target }
 
   $filePreviewTabs.set(index === -1 ? [...current, tab] : current.map((item, i) => (i === index ? tab : item)))
   selectRightRailTab(id)
@@ -127,12 +128,12 @@ function previewTargetForSource(target: PreviewTarget, source: PreviewRecordSour
   return { ...target, renderMode: isFilePreviewSource(source) ? 'source' : 'preview' }
 }
 
-function tryOpenFilePreview(target: PreviewTarget, source: PreviewRecordSource): boolean {
+function tryOpenFilePreview(sessionId: string, target: PreviewTarget, source: PreviewRecordSource): boolean {
   if (target.kind !== 'file' || !isFilePreviewSource(source)) {
     return false
   }
 
-  openFilePreviewTarget(previewTargetForSource(target, source))
+  openFilePreviewTarget(sessionId, previewTargetForSource(target, source))
 
   return true
 }
@@ -285,7 +286,7 @@ export function setSessionPreviewTarget(
   source: PreviewRecordSource,
   rawTarget = target.source
 ): SessionPreviewRecord | null {
-  if (tryOpenFilePreview(target, source)) {
+  if (tryOpenFilePreview(sessionId?.trim() || '', target, source)) {
     return null
   }
 
@@ -399,6 +400,35 @@ export function closeRightRailTab(tabId: RightRailTabId) {
 }
 
 export const closeActiveRightRailTab = () => closeRightRailTab($rightRailActiveTabId.get())
+
+/**
+ * Scope the open file preview tabs to the active conversation. File previews
+ * are opened against whichever session was current at the time (tagged with
+ * `currentPreviewSessionId()`), so switching to another conversation must drop
+ * tabs that belong elsewhere — the file is not part of the new conversation.
+ *
+ * The comparison uses `currentPreviewSessionId()` — the exact same derivation
+ * used when the tab is tagged — so the two can never diverge. Re-syncing while
+ * the active session is unchanged is a no-op, so the session-routing effect can
+ * call this on every render without clobbering same-session tabs.
+ */
+export function syncFilePreviewTabsForSession() {
+  const id = currentPreviewSessionId()
+  const current = $filePreviewTabs.get()
+  const next = current.filter(tab => tab.sessionId === id)
+
+  if (next.length === current.length) {
+    return
+  }
+
+  $filePreviewTabs.set(next)
+
+  const activeTabId = $rightRailActiveTabId.get()
+
+  if (activeTabId.startsWith('file:') && !next.some(tab => tab.id === activeTabId)) {
+    selectRightRailTab(next[0]?.id ?? RIGHT_RAIL_PREVIEW_TAB_ID)
+  }
+}
 
 /** Dismisses the active preview + every file tab so the rail pane unmounts. */
 export function closeRightRail() {

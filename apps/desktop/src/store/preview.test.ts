@@ -15,7 +15,8 @@ import {
   getSessionPreviewRecord,
   type PreviewTarget,
   progressPreviewServerRestart,
-  setCurrentSessionPreviewTarget
+  setCurrentSessionPreviewTarget,
+  syncFilePreviewTabsForSession
 } from './preview'
 import { $activeSessionId, $selectedStoredSessionId } from './session'
 
@@ -131,5 +132,57 @@ describe('preview store', () => {
     expect($filePreviewTarget.get()).toBeNull()
     expect($rightRailActiveTabId.get()).toBe(RIGHT_RAIL_PREVIEW_TAB_ID)
     expect($previewTarget.get()).toEqual(withRenderMode(live, 'preview'))
+  })
+
+  it('drops file preview tabs from other sessions when the active session changes', () => {
+    const file = previewTarget('/work/file.html')
+
+    setCurrentSessionPreviewTarget(file, 'manual')
+
+    expect($filePreviewTabs.get()).toHaveLength(1)
+    expect($filePreviewTabs.get()[0]?.sessionId).toBe('session-1')
+    expect($rightRailActiveTabId.get()).toBe(`file:${file.url}`)
+
+    // Switching to a conversation that does not contain the attachment must
+    // dismiss the leaked file tab and fall back to the live preview tab.
+    $activeSessionId.set('session-2')
+    syncFilePreviewTabsForSession()
+
+    expect($filePreviewTabs.get()).toEqual([])
+    expect($rightRailActiveTabId.get()).toBe(RIGHT_RAIL_PREVIEW_TAB_ID)
+  })
+
+  it('keeps file preview tabs when re-syncing the active session', () => {
+    const file = previewTarget('/work/file.html')
+
+    setCurrentSessionPreviewTarget(file, 'manual')
+
+    // The routing effect re-runs on every registry update within the same
+    // session, so syncing the unchanged active session must be a no-op.
+    syncFilePreviewTabsForSession()
+
+    expect($filePreviewTabs.get()).toHaveLength(1)
+    expect($rightRailActiveTabId.get()).toBe(`file:${file.url}`)
+  })
+
+  it('tags file tabs and syncs against the same session derivation', () => {
+    const file = previewTarget('/work/file.html')
+
+    // A stored session selection takes precedence over the active session for
+    // both tagging and syncing, so a tab opened while a stored session is
+    // selected survives a no-op sync.
+    $selectedStoredSessionId.set('stored-7')
+    setCurrentSessionPreviewTarget(file, 'manual')
+
+    expect($filePreviewTabs.get()[0]?.sessionId).toBe('stored-7')
+
+    syncFilePreviewTabsForSession()
+    expect($filePreviewTabs.get()).toHaveLength(1)
+
+    // Clearing the stored selection falls back to the active session, which no
+    // longer matches the tab, so it is dropped.
+    $selectedStoredSessionId.set(null)
+    syncFilePreviewTabsForSession()
+    expect($filePreviewTabs.get()).toEqual([])
   })
 })
