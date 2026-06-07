@@ -1181,6 +1181,11 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         try:
             formatted = self.format_message(content)
+            # Slack's chat.update has the same ~40k char limit as postMessage.
+            # Unlike send() we can't split into multiple messages (we're
+            # editing an existing one), so truncate to fit.
+            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            formatted = chunks[0] if chunks else formatted
             await self._get_client(chat_id).chat_update(
                 channel=chat_id,
                 ts=message_id,
