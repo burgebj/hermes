@@ -4205,6 +4205,18 @@ def run_conversation(
                         )
                         final_response = _recovered
                         agent._response_was_previewed = True
+                        # Emit the recovered text to streaming clients before
+                        # closing so SSE/TUI consumers don't drain an empty
+                        # delta queue and render a blank bubble. Mirrors the
+                        # guardrail-halt emit pattern landed in PR #31448
+                        # (issue #30770); this is the partial_stream_recovery
+                        # sibling site flagged by #31449.
+                        if final_response and agent.stream_delta_callback:
+                            try:
+                                agent.stream_delta_callback(final_response)
+                                agent.stream_delta_callback(None)
+                            except Exception:
+                                pass
                         break
 
                     # If the previous turn already delivered real content alongside
@@ -4231,6 +4243,20 @@ def run_conversation(
                         # fallback text as the final response and break.
                         final_response = agent._strip_think_blocks(fallback).strip()
                         agent._response_was_previewed = True
+                        # Emit the fallback text to streaming clients before
+                        # closing. The previous turn's content was streamed on
+                        # the PRIOR SSE response, so the current SSE writer
+                        # would otherwise drain an empty queue and the client
+                        # sees a finish chunk with zero content. Mirrors the
+                        # guardrail-halt emit pattern landed in PR #31448; this
+                        # is the fallback_prior_turn_content sibling site
+                        # flagged by #31449.
+                        if final_response and agent.stream_delta_callback:
+                            try:
+                                agent.stream_delta_callback(final_response)
+                                agent.stream_delta_callback(None)
+                            except Exception:
+                                pass
                         break
 
                     # ── Post-tool-call empty response nudge ───────────

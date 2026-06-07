@@ -3914,6 +3914,58 @@ class TestRunConversation:
         assert result["final_response"] == "Fresh partial content from this turn"
         assert result["api_calls"] == 1
 
+    def test_partial_stream_recovery_emits_to_stream_callback(self):
+        """Regression for #31449: partial_stream_recovery must fire the
+        stream_delta_callback with the recovered text + a None terminator so
+        SSE/TUI clients don't drain an empty delta queue and render a blank
+        bubble. Mirrors the guardrail-halt fix in PR #31448 (#30770).
+
+        Verified by inspecting agent/conversation_loop.py source — the emit
+        block must follow the `partial_stream_recovery` exit-reason assignment
+        and precede the `break`. A live behavioral test through
+        run_conversation() is fragile because setting stream_delta_callback
+        alters the streaming pipeline's text-accumulation timing.
+        """
+        import inspect
+        from agent import conversation_loop
+        src = inspect.getsource(conversation_loop)
+        # Locate the partial_stream_recovery branch.
+        marker = '_turn_exit_reason = "partial_stream_recovery"'
+        assert marker in src, "partial_stream_recovery branch not found"
+        # Grab the next ~40 lines after the marker.
+        idx = src.index(marker)
+        window = src[idx:idx + 2500]
+        assert 'agent.stream_delta_callback' in window, (
+            "partial_stream_recovery branch must fire stream_delta_callback "
+            "with the recovered text before break. See #31449."
+        )
+        assert 'agent.stream_delta_callback(None)' in window, (
+            "partial_stream_recovery branch must terminate the stream with "
+            "stream_delta_callback(None) after emitting recovered text."
+        )
+
+    def test_fallback_prior_turn_content_emits_to_stream_callback(self):
+        """Regression for #31449: fallback_prior_turn_content must fire the
+        stream_delta_callback with the fallback text + a None terminator. The
+        prior turn's content was streamed on the PRIOR SSE response, so the
+        current SSE writer would otherwise drain an empty queue.
+        """
+        import inspect
+        from agent import conversation_loop
+        src = inspect.getsource(conversation_loop)
+        marker = '_turn_exit_reason = "fallback_prior_turn_content"'
+        assert marker in src, "fallback_prior_turn_content branch not found"
+        idx = src.index(marker)
+        window = src[idx:idx + 2500]
+        assert 'agent.stream_delta_callback' in window, (
+            "fallback_prior_turn_content branch must fire stream_delta_callback "
+            "with the fallback text before break. See #31449."
+        )
+        assert 'agent.stream_delta_callback(None)' in window, (
+            "fallback_prior_turn_content branch must terminate the stream with "
+            "stream_delta_callback(None) after emitting fallback text."
+        )
+
     def test_nous_401_refreshes_after_remint_and_retries(self, agent):
         self._setup_agent(agent)
         agent.provider = "nous"
