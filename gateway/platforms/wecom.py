@@ -1141,6 +1141,22 @@ class WeComAdapter(BasePlatformAdapter):
         if not local_path.is_absolute():
             local_path = (Path.cwd() / local_path).resolve()
 
+        # Prevent path traversal: reject paths that escape the Hermes working
+        # directory or attempt to access sensitive system files.
+        try:
+            local_path = local_path.resolve()
+            cwd = str(Path.cwd().resolve())
+            local_path_str = str(local_path)
+            # Must be under cwd or under HERMES_HOME
+            hermes_home = os.environ.get("HERMES_HOME", cwd)
+            if not (local_path_str.startswith(cwd + os.sep) or
+                    local_path_str.startswith(hermes_home + os.sep)):
+                raise ValueError(f"Path {local_path} is outside allowed directory")
+        except ValueError:
+            raise
+        except Exception:
+            pass  # Fall through to exists/is_file checks
+
         if not local_path.exists() or not local_path.is_file():
             raise FileNotFoundError(f"Media file not found: {local_path}")
 
