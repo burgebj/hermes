@@ -35,9 +35,15 @@ import json
 import logging
 import os
 import queue
+import re
+import shutil
+import subprocess
+import sys
 import threading
+import time
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -52,6 +58,10 @@ _DEFAULT_LOCAL_URL = "http://localhost:8888"
 _MIN_CLIENT_VERSION = "0.4.22"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
+_PG0_OPENSSL_OLD_ROOT = "/opt/homebrew/opt/openssl@3/lib"
+_PG0_OPENSSL_PATCH_WINDOW_SECONDS = 20.0
+_PG0_OPENSSL_PATCH_POLL_SECONDS = 0.2
+_PG0_OPENSSL_LIB_NAMES = ("libssl.3.dylib", "libcrypto.3.dylib")
 # Mirrors hindsight-integrations/openclaw — Hindsight 0.5.0 added
 # `update_mode='append'` semantics on retain (vectorize-io/hindsight#932).
 # Without it, reusing a stable session-scoped document_id silently
@@ -440,8 +450,6 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
 
 
 def _embedded_profile_env_path(config: dict[str, Any]):
-    from pathlib import Path
-
     return Path.home() / ".hindsight" / "profiles" / f"{_embedded_profile_name(config)}.env"
 
 
@@ -455,6 +463,200 @@ def _materialize_embedded_profile_env(config: dict[str, Any], *, llm_api_key: st
         encoding="utf-8",
     )
     return profile_env
+
+
+def _pg0_instance_path(profile: str | None) -> Path:
+    """Return the pg0 instance directory used by hindsight-embed for *profile*."""
+    safe_profile = re.sub(r"[^a-zA-Z0-9_-]", "-", profile or "default")
+    return Path.home() / ".pg0" / "instances" / f"hindsight-embed-{safe_profile}"
+
+
+def _discover_macos_homebrew_openssl_lib_dir(
+    *,
+    env: dict[str, str] | None = None,
+    run_cmd=None,
+) -> str | None:
+    """Return a non-standard Homebrew OpenSSL lib dir on macOS, if one exists."""
+    if sys.platform != "darwin":
+        return None
+
+    env_map = env or os.environ
+    candidate_roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add_root(root: Path | None) -> None:
+        if root is None:
+            return
+        root = root.expanduser()
+        if root in seen:
+            return
+        seen.add(root)
+        candidate_roots.append(root)
+
+    homebrew_prefix = env_map.get("HOMEBREW_PREFIX")
+    if homebrew_prefix:
+        _add_root(Path(homebrew_prefix))
+
+    brew_bin = shutil.which("brew")
+    runner = run_cmd or subprocess.run
+    if brew_bin:
+        for formula in ("openssl@3", "openssl"):
+            try:
+                result = runner(
+                    [brew_bin, "--prefix", formula],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError:
+                continue
+            if result.returncode == 0 and result.stdout.strip():
+                _add_root(Path(result.stdout.strip()))
+
+    for root in candidate_roots:
+        lib_dir = root / "lib" if root.name.startswith("openssl") else root / "opt" / "openssl@3" / "lib"
+        if all((lib_dir / name).exists() for name in _PG0_OPENSSL_LIB_NAMES):
+            if str(lib_dir) != _PG0_OPENSSL_OLD_ROOT:
+                return str(lib_dir)
+
+    return None
+
+
+class _TemporaryEnvPatch:
+    """Temporarily patch environment variables and restore them on exit."""
+
+    def __init__(self, updates: dict[str, str]):
+        self._updates = dict(updates)
+        self._originals: dict[str, str | None] = {}
+
+    def __enter__(self):
+        for key, value in self._updates.items():
+            self._originals[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for key, original in self._originals.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+        return False
+
+
+def _temporary_pg0_macos_dyld_env(openssl_lib_dir: str | None):
+    """Temporarily expose a non-standard Homebrew OpenSSL lib dir to pg0."""
+    if sys.platform != "darwin" or not openssl_lib_dir:
+        return _TemporaryEnvPatch({})
+
+    updates: dict[str, str] = {}
+    for key in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
+        current = os.environ.get(key, "")
+        parts = [segment for segment in current.split(":") if segment]
+        if openssl_lib_dir not in parts:
+            parts.insert(0, openssl_lib_dir)
+        updates[key] = ":".join(parts)
+    return _TemporaryEnvPatch(updates)
+
+
+def _iter_pg0_candidate_binaries(instance_root: Path) -> list[Path]:
+    """Return pg0 Mach-O candidates under *instance_root*."""
+    paths: list[Path] = []
+    for relative in ("bin", "lib"):
+        root = instance_root / relative
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                paths.append(path)
+    return paths
+
+
+def _patch_pg0_macos_openssl_paths(
+    instance_root: Path,
+    openssl_lib_dir: str,
+    *,
+    run_cmd=None,
+) -> list[Path]:
+    """Rewrite broken /opt/homebrew OpenSSL references inside a pg0 instance."""
+    if sys.platform != "darwin" or not instance_root.exists():
+        return []
+
+    otool = shutil.which("otool")
+    install_name_tool = shutil.which("install_name_tool")
+    if not otool or not install_name_tool:
+        return []
+
+    runner = run_cmd or subprocess.run
+    patched: list[Path] = []
+    new_root = Path(openssl_lib_dir)
+    old_to_new = {
+        f"{_PG0_OPENSSL_OLD_ROOT}/{name}": str(new_root / name)
+        for name in _PG0_OPENSSL_LIB_NAMES
+    }
+
+    for candidate in _iter_pg0_candidate_binaries(instance_root):
+        try:
+            deps = runner([otool, "-L", str(candidate)], capture_output=True, text=True, check=False)
+        except OSError:
+            continue
+        if deps.returncode != 0:
+            continue
+
+        changed = False
+        for old_path, new_path in old_to_new.items():
+            if old_path not in deps.stdout:
+                continue
+            result = runner(
+                [install_name_tool, "-change", old_path, new_path, str(candidate)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                changed = True
+            else:
+                logger.debug("install_name_tool -change failed for %s: %s", candidate, result.stderr.strip())
+
+        try:
+            load_cmds = runner([otool, "-l", str(candidate)], capture_output=True, text=True, check=False)
+        except OSError:
+            load_cmds = None
+        if load_cmds and load_cmds.returncode == 0 and _PG0_OPENSSL_OLD_ROOT in load_cmds.stdout:
+            result = runner(
+                [install_name_tool, "-rpath", _PG0_OPENSSL_OLD_ROOT, openssl_lib_dir, str(candidate)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                changed = True
+            else:
+                logger.debug("install_name_tool -rpath failed for %s: %s", candidate, result.stderr.strip())
+
+        if changed:
+            patched.append(candidate)
+
+    return patched
+
+
+def _patch_pg0_macos_instance_when_ready(
+    instance_root: Path,
+    openssl_lib_dir: str,
+    stop_event: threading.Event,
+) -> None:
+    """Watch for pg0 instance materialization and patch it once it exists."""
+    deadline = time.monotonic() + _PG0_OPENSSL_PATCH_WINDOW_SECONDS
+    while not stop_event.is_set() and time.monotonic() < deadline:
+        patched = _patch_pg0_macos_openssl_paths(instance_root, openssl_lib_dir)
+        if patched:
+            logger.info(
+                "Patched pg0 OpenSSL paths for %d file(s) under %s",
+                len(patched),
+                instance_root,
+            )
+            return
+        stop_event.wait(_PG0_OPENSSL_PATCH_POLL_SECONDS)
 
 def _sanitize_bank_segment(value: str) -> str:
     """Sanitize a bank_id_template placeholder value.
@@ -1249,6 +1451,9 @@ class HindsightMemoryProvider(MemoryProvider):
 
                     client = self._get_client()
                     profile = self._config.get("profile", "hermes")
+                    openssl_lib_dir = _discover_macos_homebrew_openssl_lib_dir()
+                    patch_stop_event: threading.Event | None = None
+                    patch_thread: threading.Thread | None = None
 
                     # Update the profile .env to match our current config so
                     # the daemon always starts with the right settings.
@@ -1265,7 +1470,31 @@ class HindsightMemoryProvider(MemoryProvider):
                                 f.write("\n=== Config changed, restarting daemon ===\n")
                             client._manager.stop(profile)
 
-                    client._ensure_started()
+                    if openssl_lib_dir:
+                        instance_root = _pg0_instance_path(profile)
+                        already_patched = _patch_pg0_macos_openssl_paths(instance_root, openssl_lib_dir)
+                        if already_patched:
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(
+                                    f"\n=== Patched existing pg0 OpenSSL paths in {len(already_patched)} file(s) ===\n"
+                                )
+                        patch_stop_event = threading.Event()
+                        patch_thread = threading.Thread(
+                            target=_patch_pg0_macos_instance_when_ready,
+                            args=(instance_root, openssl_lib_dir, patch_stop_event),
+                            daemon=True,
+                            name="hindsight-pg0-openssl-patch",
+                        )
+                        patch_thread.start()
+
+                    try:
+                        with _temporary_pg0_macos_dyld_env(openssl_lib_dir):
+                            client._ensure_started()
+                    finally:
+                        if patch_stop_event is not None:
+                            patch_stop_event.set()
+                        if patch_thread is not None:
+                            patch_thread.join(timeout=0.2)
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write("\n=== Daemon started successfully ===\n")
                 except Exception as e:

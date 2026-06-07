@@ -22,9 +22,12 @@ from plugins.memory.hindsight import (
     RETAIN_SCHEMA,
     _load_config,
     _build_embedded_profile_env,
+    _discover_macos_homebrew_openssl_lib_dir,
     _normalize_retain_tags,
+    _patch_pg0_macos_openssl_paths,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
+    _temporary_pg0_macos_dyld_env,
 )
 
 
@@ -296,6 +299,128 @@ class TestConfig:
         })
 
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "42"
+
+    def test_discover_macos_homebrew_openssl_lib_dir_uses_nonstandard_prefix(self, tmp_path, monkeypatch):
+        prefix = tmp_path / "homebrew"
+        lib_dir = prefix / "opt" / "openssl@3" / "lib"
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "libssl.3.dylib").write_text("")
+        (lib_dir / "libcrypto.3.dylib").write_text("")
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        found = _discover_macos_homebrew_openssl_lib_dir(
+            env={"HOMEBREW_PREFIX": str(prefix)},
+            run_cmd=lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        )
+
+        assert found == str(lib_dir)
+
+    def test_temporary_pg0_macos_dyld_env_restores_original_values(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setenv("DYLD_LIBRARY_PATH", "/existing/lib")
+        monkeypatch.delenv("DYLD_FALLBACK_LIBRARY_PATH", raising=False)
+
+        with _temporary_pg0_macos_dyld_env("/custom/lib"):
+            assert os.environ["DYLD_LIBRARY_PATH"] == "/custom/lib:/existing/lib"
+            assert os.environ["DYLD_FALLBACK_LIBRARY_PATH"] == "/custom/lib"
+
+        assert os.environ["DYLD_LIBRARY_PATH"] == "/existing/lib"
+        assert "DYLD_FALLBACK_LIBRARY_PATH" not in os.environ
+
+    def test_patch_pg0_macos_openssl_paths_rewrites_matching_binaries(self, tmp_path, monkeypatch):
+        instance_root = tmp_path / "pg0" / "instances" / "hindsight-embed-hermes"
+        bin_dir = instance_root / "bin"
+        lib_dir = instance_root / "lib"
+        bin_dir.mkdir(parents=True)
+        lib_dir.mkdir()
+        postgres = bin_dir / "postgres"
+        dylib = lib_dir / "libpq.dylib"
+        postgres.write_text("")
+        dylib.write_text("")
+
+        calls = []
+
+        def fake_run(cmd, capture_output=False, text=False, check=False):
+            calls.append(cmd)
+            cmd_text = " ".join(cmd)
+            if cmd[:2] == ["/usr/bin/otool", "-L"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        f"{cmd[-1]}:\n"
+                        "\t/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib\n"
+                        "\t/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib\n"
+                    ),
+                    stderr="",
+                )
+            if cmd[:2] == ["/usr/bin/otool", "-l"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="cmd LC_RPATH\npath /opt/homebrew/opt/openssl@3/lib\n",
+                    stderr="",
+                )
+            if cmd[0] == "/usr/bin/install_name_tool":
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"Unexpected command: {cmd_text}")
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr("plugins.memory.hindsight.shutil.which", lambda name: f"/usr/bin/{name}")
+
+        patched = _patch_pg0_macos_openssl_paths(instance_root, "/Users/me/homebrew/opt/openssl@3/lib", run_cmd=fake_run)
+
+        assert patched == [postgres, dylib]
+        assert [
+            cmd for cmd in calls
+            if cmd[0] == "/usr/bin/install_name_tool" and cmd[1] == "-change"
+        ] == [
+            [
+                "/usr/bin/install_name_tool",
+                "-change",
+                "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib",
+                "/Users/me/homebrew/opt/openssl@3/lib/libssl.3.dylib",
+                str(postgres),
+            ],
+            [
+                "/usr/bin/install_name_tool",
+                "-change",
+                "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib",
+                "/Users/me/homebrew/opt/openssl@3/lib/libcrypto.3.dylib",
+                str(postgres),
+            ],
+            [
+                "/usr/bin/install_name_tool",
+                "-change",
+                "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib",
+                "/Users/me/homebrew/opt/openssl@3/lib/libssl.3.dylib",
+                str(dylib),
+            ],
+            [
+                "/usr/bin/install_name_tool",
+                "-change",
+                "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib",
+                "/Users/me/homebrew/opt/openssl@3/lib/libcrypto.3.dylib",
+                str(dylib),
+            ],
+        ]
+        assert [
+            cmd for cmd in calls
+            if cmd[0] == "/usr/bin/install_name_tool" and cmd[1] == "-rpath"
+        ] == [
+            [
+                "/usr/bin/install_name_tool",
+                "-rpath",
+                "/opt/homebrew/opt/openssl@3/lib",
+                "/Users/me/homebrew/opt/openssl@3/lib",
+                str(postgres),
+            ],
+            [
+                "/usr/bin/install_name_tool",
+                "-rpath",
+                "/opt/homebrew/opt/openssl@3/lib",
+                "/Users/me/homebrew/opt/openssl@3/lib",
+                str(dylib),
+            ],
+        ]
 
     def test_get_client_passes_idle_timeout_to_hindsight_embedded(self, monkeypatch):
         captured = {}
