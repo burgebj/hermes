@@ -380,6 +380,21 @@ def _scrub_identity_mapping(hermes_host: dict) -> None:
         hermes_host.pop(key, None)
 
 
+def _resolve_base_url(cfg: dict) -> str:
+    """Resolve base_url with host -> root fallback (snake_case and camelCase)."""
+    host = (cfg.get("hosts") or {}).get(_host_key()) or {}
+    return (
+        host.get("baseUrl") or host.get("base_url")
+        or cfg.get("baseUrl") or cfg.get("base_url")
+        or ""
+    )
+
+
+def _is_configured(cfg: dict) -> bool:
+    """Return True if Honcho is configured with either an API key or a base_url."""
+    return bool(_resolve_api_key(cfg) or _resolve_base_url(cfg))
+
+
 def _prompt(label: str, default: str | None = None, secret: bool = False) -> str:
     suffix = f" [{default}]" if default else ""
     sys.stdout.write(f"  {label}{suffix}: ")
@@ -1251,8 +1266,8 @@ def cmd_tokens(args) -> None:
 def cmd_identity(args) -> None:
     """Seed AI peer identity or show both peer representations."""
     cfg = _read_config()
-    if not _resolve_api_key(cfg):
-        print("  No API key configured. Run 'hermes honcho setup' first.\n")
+    if not _is_configured(cfg):
+        print("  No API key or base_url configured. Run 'hermes honcho setup' first.\n")
         return
 
     file_path = getattr(args, "file", None)
