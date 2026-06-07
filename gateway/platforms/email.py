@@ -23,6 +23,7 @@ import os
 import re
 import smtplib
 import ssl
+import time
 import uuid
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
@@ -268,8 +269,11 @@ class EmailAdapter(BasePlatformAdapter):
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
         self._poll_task: Optional[asyncio.Task] = None
 
-        # Map chat_id (sender email) -> last subject + message-id for threading
-        self._thread_context: Dict[str, Dict[str, str]] = {}
+        # Map (sender_addr, message_id) -> subject/message-id/last_seen_ts for threading.
+        # Keyed by (sender, message_id) so two concurrent inbound messages from the
+        # same sender can coexist without one clobbering the other's reply headers.
+        self._thread_context: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._thread_context_max: int = 500
 
         logger.info("[Email] Adapter initialized for %s", self._address)
 
@@ -292,6 +296,51 @@ class EmailAdapter(BasePlatformAdapter):
         except (ValueError, TypeError):
             # Fallback: just clear old entries if sort fails
             self._seen_uids = set(list(self._seen_uids)[-self._seen_uids_max // 2:])
+
+    def _trim_thread_context(self) -> None:
+        """Bound `_thread_context` size to prevent unbounded memory growth.
+
+        When the dict exceeds `_thread_context_max`, drop the oldest half by
+        insertion order (Python 3.7+ preserves dict insertion order). Snapshot
+        keys via `list(items())` before iterating so callers can safely invoke
+        this from inside a write path without tripping "dict changed size
+        during iteration".
+        """
+        if len(self._thread_context) <= self._thread_context_max:
+            return
+        items = list(self._thread_context.items())
+        keep = self._thread_context_max // 2
+        self._thread_context = dict(items[-keep:])
+        logger.debug("[Email] Trimmed thread context to %d entries", len(self._thread_context))
+
+    def _lookup_thread_context(
+        self,
+        to_addr: str,
+        thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Look up reply-threading context for an outbound send.
+
+        If `thread_id` is provided, try an exact `(to_addr, thread_id)` match
+        — this is how PR B's session-keyed callers resolve to the correct
+        thread. Otherwise, fall back to the most-recent entry (by
+        `last_seen_ts`) whose key's first element is `to_addr` — preserves the
+        pre-tuple-rekey "reply with this sender's latest subject" behavior
+        for callers that haven't been plumbed `thread_id` through yet.
+        """
+        if thread_id is not None:
+            ctx = self._thread_context.get((to_addr, thread_id))
+            if ctx is not None:
+                return ctx
+        latest: Optional[Dict[str, Any]] = None
+        latest_ts: float = -1.0
+        for (sender, _mid), ctx in self._thread_context.items():
+            if sender != to_addr:
+                continue
+            ts = ctx.get("last_seen_ts", 0.0)
+            if ts > latest_ts:
+                latest_ts = ts
+                latest = ctx
+        return latest or {}
 
     async def connect(self) -> bool:
         """Connect to the IMAP server and start polling for new messages."""
@@ -473,11 +522,16 @@ class EmailAdapter(BasePlatformAdapter):
             if att["type"] == "image":
                 msg_type = MessageType.PHOTO
 
-        # Store thread context for reply threading
-        self._thread_context[sender_addr] = {
+        # Store thread context for reply threading.
+        # Key is (sender_addr, message_id) so concurrent inbound messages from
+        # the same sender don't overwrite each other's reply headers.
+        ctx_key = (sender_addr, msg_data["message_id"])
+        self._thread_context[ctx_key] = {
             "subject": subject,
             "message_id": msg_data["message_id"],
+            "last_seen_ts": time.time(),
         }
+        self._trim_thread_context()
 
         source = self.build_source(
             chat_id=sender_addr,
@@ -529,8 +583,10 @@ class EmailAdapter(BasePlatformAdapter):
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        # Thread context for reply
-        ctx = self._thread_context.get(to_addr, {})
+        # Thread context for reply — helper finds the right entry under the
+        # (sender, message_id) tuple key. Without a thread_id hint (plumbed in
+        # PR B), falls back to the most-recent entry from this sender.
+        ctx = self._lookup_thread_context(to_addr)
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -721,7 +777,7 @@ class EmailAdapter(BasePlatformAdapter):
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._lookup_thread_context(to_addr)
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -764,7 +820,7 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic info about the email chat."""
-        ctx = self._thread_context.get(chat_id, {})
+        ctx = self._lookup_thread_context(chat_id)
         return {
             "name": chat_id,
             "type": "dm",

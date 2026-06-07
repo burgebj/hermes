@@ -547,17 +547,21 @@ class TestThreadContext(unittest.TestCase):
         }
 
         asyncio.run(adapter._dispatch_message(msg_data))
-        ctx = adapter._thread_context.get("user@test.com")
+        # After PR A, _thread_context is keyed by (sender, message_id).
+        ctx = adapter._thread_context.get(("user@test.com", "<original@test.com>"))
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx["subject"], "Project question")
         self.assertEqual(ctx["message_id"], "<original@test.com>")
+        self.assertIn("last_seen_ts", ctx)
 
     def test_reply_uses_re_prefix(self):
         """Reply subject should have Re: prefix."""
+        import time
         adapter = self._make_adapter()
-        adapter._thread_context["user@test.com"] = {
+        adapter._thread_context[("user@test.com", "<original@test.com>")] = {
             "subject": "Project question",
             "message_id": "<original@test.com>",
+            "last_seen_ts": time.time(),
         }
 
         with patch("smtplib.SMTP") as mock_smtp:
@@ -575,10 +579,12 @@ class TestThreadContext(unittest.TestCase):
 
     def test_reply_does_not_double_re(self):
         """If subject already has Re:, don't add another."""
+        import time
         adapter = self._make_adapter()
-        adapter._thread_context["user@test.com"] = {
+        adapter._thread_context[("user@test.com", "<reply@test.com>")] = {
             "subject": "Re: Project question",
             "message_id": "<reply@test.com>",
+            "last_seen_ts": time.time(),
         }
 
         with patch("smtplib.SMTP") as mock_smtp:
@@ -604,6 +610,100 @@ class TestThreadContext(unittest.TestCase):
             send_call = mock_server.send_message.call_args[0][0]
             self.assertEqual(send_call["Subject"], "Re: Hermes Agent")
             self.assertIn("Date", send_call)
+
+    def test_concurrent_threads_no_clobber(self):
+        """Two concurrent inbound emails from the same sender must keep both
+        thread contexts distinct so each reply threads to the correct
+        Message-ID. Pre-PR-A this clobbered the first thread with the second."""
+        import asyncio
+        adapter = self._make_adapter()
+
+        async def noop_handle(event):
+            pass
+
+        adapter.handle_message = noop_handle
+
+        base = {
+            "sender_addr": "alice@example.com",
+            "sender_name": "Alice",
+            "in_reply_to": "",
+            "body": "x",
+            "attachments": [],
+            "date": "",
+        }
+        asyncio.run(adapter._dispatch_message({
+            **base, "uid": b"1", "subject": "Topic A", "message_id": "<a@x>",
+        }))
+        asyncio.run(adapter._dispatch_message({
+            **base, "uid": b"2", "subject": "Topic B", "message_id": "<b@x>",
+        }))
+
+        # Both entries must coexist under distinct tuple keys.
+        self.assertEqual(len(adapter._thread_context), 2)
+        self.assertIn(("alice@example.com", "<a@x>"), adapter._thread_context)
+        self.assertIn(("alice@example.com", "<b@x>"), adapter._thread_context)
+
+        # Explicit thread_id lookup returns the exact entry for each.
+        ctx_a = adapter._lookup_thread_context("alice@example.com", "<a@x>")
+        ctx_b = adapter._lookup_thread_context("alice@example.com", "<b@x>")
+        self.assertEqual(ctx_a["subject"], "Topic A")
+        self.assertEqual(ctx_b["subject"], "Topic B")
+
+    def test_thread_context_trim_bounds_memory(self):
+        """When _thread_context exceeds the cap, the trimmer keeps only the
+        most-recent entries (by insertion order) up to ~half the cap."""
+        import time
+        adapter = self._make_adapter()
+        adapter._thread_context_max = 10  # shrink cap for a fast test
+
+        for i in range(adapter._thread_context_max + 1):
+            adapter._thread_context[("alice@example.com", f"<m{i}@x>")] = {
+                "subject": f"s{i}",
+                "message_id": f"<m{i}@x>",
+                "last_seen_ts": time.time() + i,
+            }
+        adapter._trim_thread_context()
+
+        self.assertLessEqual(len(adapter._thread_context), adapter._thread_context_max)
+        # Most-recent entry survives (inserted last).
+        self.assertIn(
+            ("alice@example.com", f"<m{adapter._thread_context_max}@x>"),
+            adapter._thread_context,
+        )
+        # Oldest entry was dropped.
+        self.assertNotIn(("alice@example.com", "<m0@x>"), adapter._thread_context)
+
+    def test_lookup_helper_falls_back_to_latest_when_no_thread_id(self):
+        """Without thread_id, the helper returns the most-recent entry from
+        this sender. This preserves today's 'reply with sender's latest
+        subject' behavior for callers not yet plumbing thread_id."""
+        import time
+        adapter = self._make_adapter()
+        now = time.time()
+        adapter._thread_context[("alice@example.com", "<old@x>")] = {
+            "subject": "Old",
+            "message_id": "<old@x>",
+            "last_seen_ts": now - 100,
+        }
+        adapter._thread_context[("alice@example.com", "<new@x>")] = {
+            "subject": "New",
+            "message_id": "<new@x>",
+            "last_seen_ts": now,
+        }
+        # Decoy: different sender with a newer timestamp must NOT match.
+        adapter._thread_context[("bob@example.com", "<decoy@x>")] = {
+            "subject": "Decoy",
+            "message_id": "<decoy@x>",
+            "last_seen_ts": now + 100,
+        }
+
+        ctx = adapter._lookup_thread_context("alice@example.com")
+        self.assertEqual(ctx["subject"], "New")
+
+    def test_lookup_helper_returns_empty_for_unknown_sender(self):
+        """Helper returns {} when no entry matches."""
+        adapter = self._make_adapter()
+        self.assertEqual(adapter._lookup_thread_context("nobody@example.com"), {})
 
 
 class TestSendMethods(unittest.TestCase):
@@ -713,8 +813,13 @@ class TestSendMethods(unittest.TestCase):
     def test_get_chat_info(self):
         """get_chat_info should return email address as chat info."""
         import asyncio
+        import time
         adapter = self._make_adapter()
-        adapter._thread_context["user@test.com"] = {"subject": "Test", "message_id": "<m@t>"}
+        adapter._thread_context[("user@test.com", "<m@t>")] = {
+            "subject": "Test",
+            "message_id": "<m@t>",
+            "last_seen_ts": time.time(),
+        }
 
         info = asyncio.run(
             adapter.get_chat_info("user@test.com")
