@@ -313,8 +313,44 @@ def _apply_profile_override() -> None:
     profile_name = None
     consume = 0
 
+    # ``cron create|add|edit`` has its own ``--profile`` argument with
+    # job-pin semantics (cf. ``hermes_cli/cron.py``). When the user writes
+    # ``hermes cron create ... --profile oracle``, the trailing flag belongs
+    # to the cron subparser, not to the global profile override — otherwise
+    # we silently switch HERMES_HOME to ``oracle`` at create time and the
+    # job lands in oracle's jobs.json with ``profile=null``, never firing
+    # from the default scheduler. See issue #32046.
+    #
+    # Only treat ``cron`` as the actual subcommand when it appears at the
+    # subcommand position — i.e. as the first positional token, after any
+    # leading ``-p VAL`` / ``--profile VAL`` / ``--profile=VAL`` pair (and
+    # skipping unknown leading ``-x`` flags as nargs=0). Otherwise a literal
+    # ``cron create`` string buried in a positional arg (e.g.
+    # ``hermes chat tell me about cron create``) would incorrectly suppress
+    # global ``--profile`` parsing.
+    cron_subcmd_pos = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in {"-p", "--profile"} and i + 1 < len(argv):
+            i += 2
+            continue
+        if arg.startswith("--profile="):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            # Unknown leading flag — assume nargs=0 and keep walking.
+            i += 1
+            continue
+        # First positional token: this is argparse's subcommand.
+        if arg == "cron" and i + 1 < len(argv) and argv[i + 1] in {"create", "add", "edit"}:
+            cron_subcmd_pos = i
+        break
+
     # 1. Check for explicit -p / --profile flag
     for i, arg in enumerate(argv):
+        if cron_subcmd_pos is not None and i >= cron_subcmd_pos:
+            break
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]
             consume = 2
