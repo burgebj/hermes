@@ -504,7 +504,7 @@ class AIAgent:
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
-        if self._session_db_created or not self._session_db:
+        if getattr(self, "_session_db_created", False) or not self._session_db:
             return
         source = self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli")
         try:
@@ -512,10 +512,10 @@ class AIAgent:
                 session_id=self.session_id,
                 source=source,
                 model=self.model,
-                model_config=self._session_init_model_config,
-                system_prompt=self._cached_system_prompt,
+                model_config=getattr(self, "_session_init_model_config", None),
+                system_prompt=getattr(self, "_cached_system_prompt", None),
                 user_id=None,
-                parent_session_id=self._parent_session_id,
+                parent_session_id=getattr(self, "_parent_session_id", None),
                 cwd=_launch_cwd_for_session(source),
             )
             self._session_db_created = True
@@ -602,7 +602,7 @@ class AIAgent:
         carry_over_context: bool = False,
     ):
         """Reset all session-scoped token counters to 0 for a fresh session.
-        
+
         This method encapsulates the reset logic for all session-level metrics
         including:
         - Token usage counters (input, output, total, prompt, completion)
@@ -611,7 +611,7 @@ class AIAgent:
         - Reasoning tokens
         - Estimated cost tracking
         - Context compressor internal counters
-        
+
         The method safely handles optional attributes (e.g., context compressor)
         using ``hasattr`` checks.
 
@@ -1542,10 +1542,55 @@ class AIAgent:
         self._apply_persist_user_message_override(messages)
         try:
             # Retry row creation if the earlier attempt failed transiently.
-            if not self._session_db_created:
+            if not getattr(self, "_session_db_created", False):
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+
+            # ``conversation_history`` is an API-call context cursor, not a
+            # durable SessionDB cursor.  After context compression/session
+            # rotation it may refer to messages that have not been written to
+            # the new session row yet.  If we trust it blindly, ``flush_from``
+            # can jump past the end of the current DB transcript and SQLite
+            # gets zero rows while the raw session JSON has the full chat.
+            try:
+                if hasattr(self._session_db, "message_count"):
+                    _raw_persisted_count = self._session_db.message_count(self.session_id)
+                else:
+                    _raw_persisted_count = len(self._session_db.get_messages(self.session_id))
+                persisted_count = (
+                    _raw_persisted_count
+                    if isinstance(_raw_persisted_count, int)
+                    and not isinstance(_raw_persisted_count, bool)
+                    and _raw_persisted_count >= 0
+                    else None
+                )
+            except Exception:
+                persisted_count = None
+            durable_flush_from = None
+            if persisted_count is not None:
+                durable_flush_from = (
+                    persisted_count
+                    if start_idx >= len(messages)
+                    else start_idx + persisted_count
+                )
+            if durable_flush_from is not None and durable_flush_from < flush_from:
+                # SessionDB appends messages in the same relative order as the
+                # suffix being flushed.  When ``conversation_history`` is a
+                # prefix boundary, persisted rows correspond to messages after
+                # that boundary; when it covers the whole local transcript, the
+                # durable count is an absolute prefix for this session row.
+                logger.warning(
+                    "Session DB flush cursor ahead of persisted messages for %s "
+                    "(flush_from=%s, persisted=%s, durable_flush_from=%s); "
+                    "resuming from durable cursor",
+                    self.session_id,
+                    flush_from,
+                    persisted_count,
+                    durable_flush_from,
+                )
+                flush_from = durable_flush_from
+
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
