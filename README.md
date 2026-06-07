@@ -206,6 +206,7 @@ scripts/run_tests.sh
 - 🐛 [Issues](https://github.com/NousResearch/hermes-agent/issues)
 - 🔌 [computer-use-linux](https://github.com/avifenesh/computer-use-linux) — Linux desktop-control MCP server for Hermes and other MCP hosts, with AT-SPI accessibility trees, Wayland/X11 input, screenshots, and compositor window targeting.
 - 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — Community WeChat bridge: Run Hermes Agent and OpenClaw on the same WeChat account.
+- 🌐 [hermes-multitenancy](https://github.com/eggyrooch-blip/hermes-multitenancy) — Community Feishu multi-tenant router: One Feishu bot serving N users, each routed to their own profile (independent SOUL, sessions, memories). Plugin only — zero patches to hermes-agent.
 
 ---
 
