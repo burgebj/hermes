@@ -9878,10 +9878,18 @@ class GatewayRunner:
                     try:
                         _foot_adapter = self.adapters.get(source.platform)
                         if _foot_adapter:
+                            _footer_meta = self._thread_metadata_for_source(
+                                source, self._reply_anchor_for_event(event)
+                            )
+                            if _footer_meta is not None:
+                                _footer_meta = dict(_footer_meta)
+                            else:
+                                _footer_meta = {}
+                            _footer_meta["suppress_post_send_typing"] = True
                             await _foot_adapter.send(
                                 source.chat_id,
                                 _footer_line,
-                                metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+                                metadata=_footer_meta,
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)

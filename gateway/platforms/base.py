@@ -4228,6 +4228,13 @@ class BasePlatformAdapter(ABC):
                         _thread_metadata["notify"] = True
                     else:
                         _thread_metadata = {"notify": True}
+                    # Telegram re-triggers typing after each send() to keep the
+                    # bubble alive across intermediate progress/status messages.
+                    # Mark the terminal reply so adapters can skip that post-send
+                    # refresh; otherwise users can receive the final answer while
+                    # the client still shows Hermes as typing for a few extra
+                    # seconds.
+                    _thread_metadata["suppress_post_send_typing"] = True
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,

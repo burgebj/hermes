@@ -2080,10 +2080,16 @@ class TelegramAdapter(BasePlatformAdapter):
             # so without this the "...typing" bubble disappears mid-response
             # (especially noticeable when the agent sends intermediate progress
             # messages like "Checking:" before running tools).
-            try:
-                await self.send_typing(chat_id, metadata=metadata)
-            except Exception:
-                pass  # Typing failures are non-fatal
+            #
+            # Skip the refresh on terminal/final sends. Otherwise the final
+            # answer itself creates a brand-new typing bubble with no more work
+            # behind it, making the bot look stuck "typing" for a few seconds
+            # after it already replied.
+            if not (metadata or {}).get("suppress_post_send_typing"):
+                try:
+                    await self.send_typing(chat_id, metadata=metadata)
+                except Exception:
+                    pass  # Typing failures are non-fatal
 
             return SendResult(
                 success=True,
