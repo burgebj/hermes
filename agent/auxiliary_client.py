@@ -1066,7 +1066,7 @@ class _AnthropicCompletionsAdapter:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
-            reasoning_config=None,
+            reasoning_config=kwargs.get("reasoning_config"),
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )
@@ -1077,6 +1077,19 @@ class _AnthropicCompletionsAdapter:
             from agent.anthropic_adapter import _forbids_sampling_params
             if not _forbids_sampling_params(model):
                 anthropic_kwargs["temperature"] = temperature
+
+        # Pass through any caller-supplied extra_body so providers behind
+        # Anthropic-compatible gateways can receive their per-vendor request
+        # fields (e.g. thinking control, metadata, service_tier). The dict
+        # form is the documented Anthropic SDK passthrough for non-standard
+        # request body keys; merge on top of whatever build_anthropic_kwargs
+        # already produced to preserve call-time settings.
+        caller_extra_body = kwargs.get("extra_body")
+        if caller_extra_body and isinstance(caller_extra_body, dict):
+            existing = anthropic_kwargs.get("extra_body") or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            anthropic_kwargs["extra_body"] = {**existing, **caller_extra_body}
 
         response = self._client.messages.create(**anthropic_kwargs)
         _transport = get_transport("anthropic_messages")
