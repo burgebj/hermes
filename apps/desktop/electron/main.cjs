@@ -1014,7 +1014,7 @@ function findPythonForRoot(root) {
   if (override && fileExists(override)) return override
 
   const relativePaths = IS_WINDOWS
-    ? [path.join('.venv', 'Scripts', 'python.exe'), path.join('venv', 'Scripts', 'python.exe')]
+    ? [path.join('.venv', 'Scripts', 'pythonw.exe'), path.join('venv', 'Scripts', 'pythonw.exe')]
     : [path.join('.venv', 'bin', 'python'), path.join('venv', 'bin', 'python')]
 
   for (const relativePath of relativePaths) {
@@ -1183,7 +1183,7 @@ function findGitBash() {
 }
 
 function getVenvPython(venvRoot) {
-  return path.join(venvRoot, IS_WINDOWS ? path.join('Scripts', 'python.exe') : path.join('bin', 'python'))
+  return path.join(venvRoot, IS_WINDOWS ? path.join('Scripts', 'pythonw.exe') : path.join('bin', 'python'))
 }
 
 // resolveGitBinary — locate git.exe on Windows. A fresh installer-driven
