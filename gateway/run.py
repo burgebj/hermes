@@ -4870,6 +4870,10 @@ class GatewayRunner:
 
         The CLI process is poll-blocked on the row's terminal state and
         prints the result to the user.
+
+        NOTE: All SessionDB operations are offloaded to the executor to prevent
+        blocking the asyncio event loop. This is critical for Discord (and other
+        asyncio-backed gateways) where blocking the loop starves heartbeat tasks.
         """
         # Initial delay so the gateway is fully connected to its platforms
         # before we try to dispatch handoffs through them.
@@ -4879,23 +4883,34 @@ class GatewayRunner:
                 if self._session_db is None:
                     await asyncio.sleep(interval)
                     continue
-                pending = self._session_db.list_pending_handoffs()
+                loop = asyncio.get_event_loop()
+                pending = await loop.run_in_executor(
+                    None, self._session_db.list_pending_handoffs
+                )
                 for row in pending:
                     session_id = row.get("id")
                     if not session_id:
                         continue
-                    if not self._session_db.claim_handoff(session_id):
+                    claimed = await loop.run_in_executor(
+                        None, self._session_db.claim_handoff, session_id
+                    )
+                    if not claimed:
                         # Another tick or another gateway already claimed it.
                         continue
                     try:
                         await self._process_handoff(row)
-                        self._session_db.complete_handoff(session_id)
+                        await loop.run_in_executor(
+                            None, self._session_db.complete_handoff, session_id
+                        )
                     except Exception as exc:
                         logger.warning(
                             "Handoff for session %s failed: %s",
                             session_id, exc, exc_info=True,
                         )
-                        self._session_db.fail_handoff(session_id, str(exc))
+                        await loop.run_in_executor(
+                            None, self._session_db.fail_handoff,
+                            session_id, str(exc)
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
