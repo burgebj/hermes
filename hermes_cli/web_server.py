@@ -8763,6 +8763,20 @@ def mount_spa(application: FastAPI):
                 css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
         return Response(content=css, media_type="text/css")
 
+    @application.get("/assets/{filename}.js")
+    async def serve_js(filename: str, request: Request):
+        """Serve .js assets with correct application/javascript MIME type.
+
+        Prevents blank Dashboard on Windows where stdlib mimetypes may map
+        .js to text/plain, causing browsers to reject module scripts.
+        """
+        js_path = WEB_DIST / "assets" / f"{filename}.js"
+        if not js_path.is_file() or not js_path.resolve().is_relative_to(
+            WEB_DIST.resolve()
+        ):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return Response(content=js_path.read_bytes(), media_type="application/javascript")
+
     application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
     @application.get("/{full_path:path}")
