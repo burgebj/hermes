@@ -2080,6 +2080,43 @@ def convert_messages_to_anthropic(
     return system, result
 
 
+# Keyword arguments that belong to OpenAI's Responses/Codex or Chat APIs and are
+# rejected outright by ``anthropic.resources.messages.Messages.stream`` /
+# ``.create`` with a non-retryable ``TypeError`` such as:
+#   ``Messages.stream() got an unexpected keyword argument 'instructions'``
+# These have been observed leaking into the main-agent kwargs after a
+# successful ``vision_analyze`` aux call when the user's main provider is
+# Anthropic (see #31673).  Drop them defensively at every Anthropic SDK
+# boundary so a transient build-state leak becomes a logged warning rather
+# than a session-killing crash that cascades through the fallback chain.
+_FOREIGN_OPENAI_ONLY_KWARGS = ("instructions", "input", "parallel_tool_calls")
+
+
+def sanitize_anthropic_kwargs(
+    kwargs: Dict[str, Any],
+    *,
+    model: Optional[str] = None,
+    where: str = "anthropic",
+) -> Dict[str, Any]:
+    """Drop OpenAI-only kwargs from an Anthropic Messages payload.
+
+    Mutates ``kwargs`` in place and returns it for chaining.  Each dropped
+    key is logged at WARNING so the leak source can still be diagnosed.
+    Called both inside ``build_anthropic_kwargs`` (build-stage defense) and
+    immediately before every ``messages.stream`` / ``messages.create`` call
+    site (wire-stage defense) — defense in depth for #31673.
+    """
+    for _foreign_key in _FOREIGN_OPENAI_ONLY_KWARGS:
+        if _foreign_key in kwargs:
+            logger.warning(
+                "%s: dropping OpenAI-only kwarg %r before "
+                "Anthropic Messages call (model=%s)",
+                where, _foreign_key, model or kwargs.get("model"),
+            )
+            kwargs.pop(_foreign_key, None)
+    return kwargs
+
+
 def build_anthropic_kwargs(
     model: str,
     messages: List[Dict],
@@ -2276,6 +2313,12 @@ def build_anthropic_kwargs(
     if _forbids_sampling_params(model):
         for _sampling_key in ("temperature", "top_p", "top_k"):
             kwargs.pop(_sampling_key, None)
+
+    # ── Strip OpenAI-Responses-only kwargs ────────────────────────────
+    # See ``sanitize_anthropic_kwargs`` for context — applied here too so
+    # any leak that happens before this function returns is caught at the
+    # build stage and never reaches the SDK.  Defense in depth for #31673.
+    sanitize_anthropic_kwargs(kwargs, model=model, where="build_anthropic_kwargs")
 
     # ── Fast mode (Opus 4.6 only) ────────────────────────────────────
     # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x

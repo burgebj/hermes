@@ -5710,6 +5710,55 @@ class TestAnthropicCredentialRefresh:
         agent._anthropic_client.messages.create.assert_called_once_with(model="claude-sonnet-4-20250514")
         assert result is response
 
+    def test_anthropic_messages_create_strips_leaked_instructions(self):
+        """Regression for #31673.
+
+        When an OpenAI-Responses-shaped kwarg like ``instructions`` leaks
+        into ``api_kwargs`` (observed after a successful ``vision_analyze``
+        aux call routed through the Codex adapter), the Anthropic Messages
+        SDK rejects it with a non-retryable ``TypeError`` that propagates
+        through the entire fallback chain.  ``_anthropic_messages_create``
+        must drop the foreign kwarg before forwarding to the SDK.
+        """
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
+        ):
+            agent = AIAgent(
+                api_key="sk-ant-api03-test",
+                base_url="https://api.anthropic.com",
+                api_mode="anthropic_messages",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        response = SimpleNamespace(content=[])
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.create.return_value = response
+
+        contaminated_kwargs = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 4096,
+            # Simulated leak from a Codex/Responses adapter:
+            "instructions": "You are a helpful assistant.",
+            "input": [{"role": "user", "content": "leaked"}],
+        }
+
+        with patch.object(agent, "_try_refresh_anthropic_client_credentials", return_value=True):
+            agent._anthropic_messages_create(contaminated_kwargs)
+
+        # The foreign kwargs must have been stripped before reaching the SDK.
+        call_kwargs = agent._anthropic_client.messages.create.call_args.kwargs
+        assert "instructions" not in call_kwargs
+        assert "input" not in call_kwargs
+        # Legitimate Anthropic kwargs are preserved.
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["max_tokens"] == 4096
+        assert call_kwargs["messages"] == [{"role": "user", "content": "Hi"}]
+
 
 # ===================================================================
 # _streaming_api_call tests
