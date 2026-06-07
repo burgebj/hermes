@@ -111,7 +111,9 @@ async def test_runner_allows_cron_only_mode_when_no_platforms_are_enabled(monkey
 
     assert ok is True
     assert runner.should_exit_cleanly is False
-    assert runner.adapters == {}
+    # TUI/CLI adapters are always registered for kanban delivery;
+    # only external platform adapters should be absent.
+    assert {k for k in runner.adapters} <= {Platform("tui"), Platform("cli")}
     state = read_runtime_status()
     assert state["gateway_state"] == "running"
 
@@ -379,7 +381,9 @@ async def test_runner_degrades_gracefully_when_all_adapters_missing(monkeypatch,
     # Must NOT return False — gateway should keep running for cron.
     assert ok is True
     assert runner.should_exit_cleanly is False
-    assert runner.adapters == {}
+    # TUI/CLI adapters are always registered for kanban delivery;
+    # only external platform adapters should be absent.
+    assert {k for k in runner.adapters} <= {Platform("tui"), Platform("cli")}
     # Runtime state must remain "running", not "startup_failed".
     state = read_runtime_status()
     assert state["gateway_state"] == "running"
