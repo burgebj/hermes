@@ -4506,6 +4506,23 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("Process checkpoint recovery: %s", e)
 
+        # Re-hydrate pending clarify-button entries (#32762).  When the
+        # gateway is killed by SIGTERM between an agent posting a clarify
+        # prompt and the user tapping a button, the in-memory entry was
+        # lost and the tap silently failed.  Restoring from the JSON
+        # sidecar lets the next process at least acknowledge the tap and
+        # tell the user the session was reset.  Best-effort.
+        try:
+            from tools import clarify_gateway as _clarify_mod
+            _restored = _clarify_mod.restore_pending()
+            if _restored:
+                logger.info(
+                    "Recovered %d pending clarify entr%s from previous run",
+                    len(_restored), "y" if len(_restored) == 1 else "ies",
+                )
+        except Exception as e:
+            logger.warning("Clarify state recovery: %s", e)
+
         # Suspend sessions that were active when the gateway last exited.
         # This prevents stuck sessions from being blindly resumed on restart,
         # which can create an unrecoverable loop (#7536).  Suspended sessions
@@ -7618,6 +7635,14 @@ class GatewayRunner:
             # so the user can retry; if it times out, the agent unblocks
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                try:
+                    _clarify_was_restored = bool(
+                        _clarify_mod.was_restored(_pending_clarify.clarify_id)
+                    )
+                except Exception:
+                    _clarify_was_restored = bool(
+                        getattr(_pending_clarify, "restored", False)
+                    )
                 _resolved = _clarify_mod.resolve_gateway_clarify(
                     _pending_clarify.clarify_id, _raw_clarify_reply,
                 )
@@ -7626,10 +7651,22 @@ class GatewayRunner:
                         "Gateway intercepted clarify text response (session=%s, id=%s)",
                         _quick_key, _pending_clarify.clarify_id,
                     )
+                    if _clarify_was_restored:
+                        return (
+                            "⚠️ Gateway restarted before this clarify response "
+                            "arrived, so the previous agent run is no longer "
+                            "waiting. Please /retry to re-run it."
+                        )
                     # Acknowledge with empty string so adapters that emit
                     # the agent's response don't double-post.  The agent
                     # itself will produce the next user-facing message.
                     return ""
+                logger.warning(
+                    "Gateway clarify text response could not resolve stale prompt "
+                    "(session=%s, id=%s)",
+                    _quick_key, _pending_clarify.clarify_id,
+                )
+                return "This clarify prompt is no longer active. Please ask again."
 
         # Intercept messages that are responses to a pending /reload-mcp
         # (or future) slash-confirm prompt.  Recognized confirm replies are

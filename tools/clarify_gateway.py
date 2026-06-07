@@ -31,10 +31,14 @@ Two delivery paths from the adapter:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -54,6 +58,13 @@ class _ClarifyEntry:
     event: threading.Event = field(default_factory=threading.Event)
     response: Optional[str] = None
     awaiting_text: bool = False  # set when user picked "Other" or clarify is open-ended
+    registered_at: float = field(default_factory=time.time)
+    # True when this entry was restored from disk after a gateway restart —
+    # no agent thread is waiting on ``event``.  The button callback can
+    # still record the user's response (so the tap is acknowledged instead
+    # of silently dropped — see #32762) but the agent run that originally
+    # asked is gone, and the user will need to re-trigger it.
+    restored: bool = False
 
     def signature(self) -> Dict[str, object]:
         return {
@@ -63,12 +74,201 @@ class _ClarifyEntry:
             "choices": list(self.choices) if self.choices else None,
         }
 
+    def to_dict(self) -> Dict[str, object]:
+        """Serialize the persistable fields (excludes runtime-only Event/response)."""
+        return {
+            "clarify_id": self.clarify_id,
+            "session_key": self.session_key,
+            "question": self.question,
+            "choices": list(self.choices) if self.choices else None,
+            "awaiting_text": self.awaiting_text,
+            "registered_at": self.registered_at,
+        }
+
 
 _lock = threading.RLock()
 # clarify_id → _ClarifyEntry  (primary lookup for button callbacks)
 _entries: Dict[str, _ClarifyEntry] = {}
 # session_key → list[clarify_id]  (FIFO; for text-fallback intercept and session cleanup)
 _session_index: Dict[str, List[str]] = {}
+
+
+# =========================================================================
+# On-disk persistence (#32762)
+# =========================================================================
+# In-memory state is lost when the gateway receives SIGTERM (launchd
+# watchdog, systemd unit restart, ``hermes gateway restart``, etc).  Any
+# button tap that arrives during the window between "agent posted the
+# clarify prompt" and "gateway came back up" used to silently fail
+# (``resolve_gateway_clarify`` returned False with no user feedback).
+#
+# We persist a minimal JSON sidecar so the next process can re-hydrate
+# pending entries on startup, expire any that aged past the timeout, and
+# at least acknowledge late taps to the user.  The agent thread that
+# called ``wait_for_response`` is gone after a restart — restored entries
+# carry ``restored=True`` so callers can tell the difference and surface
+# the right message ("session was restarted; please /retry").
+_PERSIST_FILENAME = "clarify_pending.json"
+_persist_path_override: Optional[Path] = None
+
+
+def _persist_path() -> Optional[Path]:
+    """Return the JSON sidecar path, honouring tests' override.
+
+    Returns ``None`` if the Hermes home directory can't be located — in
+    which case persistence is silently skipped and the module degrades to
+    its old in-memory-only behaviour.
+    """
+    if _persist_path_override is not None:
+        return _persist_path_override
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / _PERSIST_FILENAME
+    except Exception:
+        return None
+
+
+def set_persist_path(path: Optional[Path]) -> None:
+    """Override the persistence path (test seam)."""
+    global _persist_path_override
+    _persist_path_override = path
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    """Write ``payload`` to ``path`` atomically via a sibling tempfile.
+
+    Never raises — persistence is best-effort; the gateway must keep
+    running even if the state dir is read-only or full.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.debug("clarify_gateway: persist write failed: %s", exc)
+
+
+def _flush_persist_locked() -> None:
+    """Write the current ``_entries`` snapshot to disk.  Caller holds _lock."""
+    path = _persist_path()
+    if path is None:
+        return
+    payload = {
+        "version": 1,
+        "entries": [e.to_dict() for e in _entries.values()],
+    }
+    _atomic_write_json(path, payload)
+
+
+def _load_persist_payload() -> Optional[Dict[str, object]]:
+    path = _persist_path()
+    if path is None or not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("clarify_gateway: persist read failed: %s", exc)
+        return None
+
+
+def restore_pending(
+    timeout_seconds: Optional[float] = None,
+    now: Optional[float] = None,
+) -> List[_ClarifyEntry]:
+    """Re-hydrate pending clarify entries from disk.
+
+    Called by the gateway on startup so a button tap that arrives after a
+    restart can still be acknowledged (#32762).  Entries whose age exceeds
+    ``timeout_seconds`` are dropped — the agent that asked has long given
+    up.  Returns the list of restored entries (caller can log a count).
+
+    Restored entries carry ``restored=True`` and have no thread waiting on
+    their ``event``; ``resolve_gateway_clarify`` still records the
+    response so the user-visible tap acknowledgement works.
+    """
+    payload = _load_persist_payload()
+    if not payload:
+        return []
+
+    if timeout_seconds is None:
+        timeout_seconds = float(get_clarify_timeout())
+    if now is None:
+        now = time.time()
+
+    restored: List[_ClarifyEntry] = []
+    expired = 0
+    with _lock:
+        for raw in payload.get("entries", []) or []:
+            try:
+                clarify_id = str(raw["clarify_id"])
+                session_key = str(raw["session_key"])
+                question = str(raw.get("question") or "")
+                choices_raw = raw.get("choices")
+                choices = (
+                    [str(c) for c in choices_raw]
+                    if isinstance(choices_raw, list) and choices_raw
+                    else None
+                )
+                registered_at = float(raw.get("registered_at") or now)
+                awaiting_text = bool(raw.get("awaiting_text"))
+            except Exception:
+                continue
+
+            # Drop entries already older than the timeout — the agent
+            # that asked is gone and re-delivering would be confusing.
+            age = max(now - registered_at, 0.0)
+            if age >= timeout_seconds:
+                expired += 1
+                continue
+
+            # Don't clobber a live in-memory entry (e.g. duplicate restore).
+            if clarify_id in _entries:
+                continue
+
+            entry = _ClarifyEntry(
+                clarify_id=clarify_id,
+                session_key=session_key,
+                question=question,
+                choices=choices,
+                awaiting_text=awaiting_text,
+                registered_at=registered_at,
+                restored=True,
+            )
+            _entries[clarify_id] = entry
+            _session_index.setdefault(session_key, []).append(clarify_id)
+            restored.append(entry)
+
+        if restored or expired:
+            _flush_persist_locked()
+
+    if restored:
+        logger.info(
+            "clarify_gateway: restored %d pending clarify entr%s from disk "
+            "(%d expired)",
+            len(restored), "y" if len(restored) == 1 else "ies", expired,
+        )
+    elif expired:
+        logger.info(
+            "clarify_gateway: dropped %d expired clarify entr%s from disk",
+            expired, "y" if expired == 1 else "ies",
+        )
+    return restored
 
 
 # =========================================================================
@@ -97,6 +297,7 @@ def register(
     with _lock:
         _entries[clarify_id] = entry
         _session_index.setdefault(session_key, []).append(clarify_id)
+        _flush_persist_locked()
     return entry
 
 
@@ -139,6 +340,7 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
             ids.remove(clarify_id)
             if not ids:
                 _session_index.pop(entry.session_key, None)
+        _flush_persist_locked()
 
     return entry.response
 
@@ -152,6 +354,13 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
 
     Returns True if an entry was found and resolved, False otherwise
     (already resolved, expired, or never existed).
+
+    For entries restored from disk after a gateway restart (#32762), no
+    agent thread is waiting — setting ``event`` is a no-op — but we still
+    return True so the platform callback can acknowledge the tap to the
+    user instead of silently dropping it.  Restored entries are also
+    cleaned out of the persistence sidecar immediately, since there's no
+    ``wait_for_response`` thread to do it on the way out.
     """
     with _lock:
         entry = _entries.get(clarify_id)
@@ -159,7 +368,30 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
             return False
     entry.response = str(response) if response is not None else ""
     entry.event.set()
+    if entry.restored:
+        # No waiter to clean up after itself — drop it now so the next
+        # restart doesn't replay an already-answered entry.
+        with _lock:
+            _entries.pop(clarify_id, None)
+            ids = _session_index.get(entry.session_key)
+            if ids and clarify_id in ids:
+                ids.remove(clarify_id)
+                if not ids:
+                    _session_index.pop(entry.session_key, None)
+            _flush_persist_locked()
     return True
+
+
+def was_restored(clarify_id: str) -> bool:
+    """Return True if this clarify entry was re-hydrated from disk.
+
+    Lets adapters distinguish "we resolved an active agent's clarify" from
+    "we acknowledged a late tap whose agent was lost to a restart" so they
+    can tailor the user-visible message (see #32762).
+    """
+    with _lock:
+        entry = _entries.get(clarify_id)
+        return bool(entry and entry.restored)
 
 
 def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
@@ -190,6 +422,7 @@ def mark_awaiting_text(clarify_id: str) -> bool:
         if entry is None:
             return False
         entry.awaiting_text = True
+        _flush_persist_locked()
         return True
 
 
@@ -210,6 +443,7 @@ def clear_session(session_key: str) -> int:
     with _lock:
         ids = list(_session_index.pop(session_key, []) or [])
         entries = [_entries.pop(cid, None) for cid in ids]
+        _flush_persist_locked()
     cancelled = 0
     for entry in entries:
         if entry is None:
