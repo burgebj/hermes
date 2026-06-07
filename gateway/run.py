@@ -1740,6 +1740,16 @@ def _normalize_empty_agent_response(
     return response
 
 
+def _ensure_deliverable_gateway_response(agent_result: dict, response: str) -> str:
+    """Never let a normal inbound turn silently collapse into an empty reply."""
+    if response or agent_result.get("interrupted"):
+        return response
+    return (
+        "⚠️ Your message was received but this turn produced no deliverable "
+        "response. Please send it again."
+    )
+
+
 def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
     """Return True only when a gateway turn really completed successfully.
 
@@ -9549,15 +9559,6 @@ class GatewayRunner:
                     "rephrase your question."
                 )
             agent_messages = agent_result.get("messages", [])
-            _response_time = time.time() - _msg_start_time
-            _api_calls = agent_result.get("api_calls", 0)
-            _resp_len = len(response)
-            logger.info(
-                "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
-                _platform_name, source.chat_id or "unknown",
-                _response_time, _api_calls, _resp_len,
-            )
-
             # Successful turn — clear any stuck-loop counter for this session.
             # This ensures the counter only accumulates across CONSECUTIVE
             # restarts where the session was active (never completed).
@@ -9581,7 +9582,28 @@ class GatewayRunner:
             response = _normalize_empty_agent_response(
                 agent_result, response, history_len=len(history),
             )
+            if not response:
+                logger.warning(
+                    "Zero-length final response for %s chat=%s after normalization "
+                    "(api_calls=%s failed=%s partial=%s interrupted=%s completed=%s)",
+                    _platform_name,
+                    source.chat_id or "unknown",
+                    agent_result.get("api_calls", 0),
+                    agent_result.get("failed", False),
+                    agent_result.get("partial", False),
+                    agent_result.get("interrupted", False),
+                    agent_result.get("completed"),
+                )
+            response = _ensure_deliverable_gateway_response(agent_result, response)
             response = _sanitize_gateway_final_response(source.platform, response)
+            _response_time = time.time() - _msg_start_time
+            _api_calls = agent_result.get("api_calls", 0)
+            _resp_len = len(response)
+            logger.info(
+                "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
+                _platform_name, source.chat_id or "unknown",
+                _response_time, _api_calls, _resp_len,
+            )
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
