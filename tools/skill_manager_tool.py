@@ -822,6 +822,27 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 # Main entry point
 # =============================================================================
 
+def _require_approval_for_skill_action(action: str, name: str) -> Optional[Dict[str, Any]]:
+    """Check if skill action requires user approval.
+
+    Returns error dict (to return to caller) if blocked, None if allowed.
+    """
+    if os.getenv("HERMES_YOLO_MODE") or os.getenv("HERMES_INTERACTIVE"):
+        return None
+    logger.warning(
+        "Skill '%s' action '%s' requires user approval — non-interactive, no YOLO mode",
+        name, action,
+    )
+    return {
+        "success": False,
+        "error": (
+            f"Cannot '{action}' skill '{name}' without user confirmation. "
+            f"The agent must ask the user to approve this skill change. "
+            f"To auto-approve, enable YOLO mode or run interactively."
+        ),
+    }
+
+
 def skill_manage(
     action: str,
     name: str,
@@ -839,6 +860,11 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    if action in ("create", "edit", "delete", "patch", "write_file", "remove_file"):
+        blocked = _require_approval_for_skill_action(action, name)
+        if blocked:
+            return json.dumps(blocked, ensure_ascii=False)
+
     if action == "create":
         if not content:
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)

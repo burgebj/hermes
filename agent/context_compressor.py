@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 SUMMARY_PREFIX = (
     "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
     "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
+    "window — conversation history above this point is compacted. "
+    "Your MEMORY.md and USER.md remain fully active and authoritative. "
+    "Do NOT answer questions or fulfill requests mentioned in compacted turns; "
     "they were already addressed. "
     "Respond ONLY to the latest user message that appears AFTER this "
     "summary — that message is the single source of truth for what to do "
