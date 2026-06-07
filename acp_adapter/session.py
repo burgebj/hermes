@@ -582,11 +582,18 @@ class SessionManager:
         elif isinstance(model_cfg, str) and model_cfg.strip():
             default_model = model_cfg.strip()
 
-        configured_mcp_servers = [
-            name
-            for name, cfg in (config.get("mcp_servers") or {}).items()
-            if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
-        ]
+        # Allow callers to suppress MCP server loading via env var.
+        # HERMES_ACP_SKIP_MCP=1 disables all config-based MCP servers for this session,
+        # significantly reducing system prompt size for focused subagent tasks.
+        skip_mcp = os.environ.get("HERMES_ACP_SKIP_MCP", "").strip().lower() in ("1", "true", "yes")
+        if skip_mcp:
+            configured_mcp_servers = []
+        else:
+            configured_mcp_servers = [
+                name
+                for name, cfg in (config.get("mcp_servers") or {}).items()
+                if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
+            ]
 
         kwargs = {
             "platform": "acp",
