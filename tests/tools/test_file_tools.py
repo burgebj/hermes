@@ -6,6 +6,7 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tools.file_tools import (
@@ -66,6 +67,18 @@ class TestReadFileHandler:
 
 
 class TestWriteFileHandler:
+    def _handle_write_file_success(self, args, result_path="/tmp/out.txt"):
+        from tools.file_tools import _handle_write_file
+
+        with patch("tools.file_tools._get_file_ops") as mock_get:
+            mock_ops = MagicMock()
+            result_obj = MagicMock()
+            result_obj.to_dict.return_value = {"status": "ok", "path": result_path}
+            mock_ops.write_file.return_value = result_obj
+            mock_get.return_value = mock_ops
+            result = json.loads(_handle_write_file(args))
+        return result, mock_ops
+
     @patch("tools.file_tools._get_file_ops")
     def test_writes_content(self, mock_get):
         mock_ops = MagicMock()
@@ -130,6 +143,59 @@ class TestWriteFileHandler:
 
             result = json.loads(_handle_write_file({"path": "/tmp/empty.txt", "content": ""}))
             assert result["status"] == "ok"
+
+    def test_accepts_file_content_alias(self):
+        """#39964 — tolerate skill_manage's file_content name on write_file."""
+        result, mock_ops = self._handle_write_file_success(
+            {"path": "/tmp/out.txt", "file_content": "hello"}
+        )
+
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once_with(
+            str(Path("/tmp/out.txt").resolve()), "hello"
+        )
+
+    def test_accepts_file_path_alias(self):
+        """#39964 — tolerate skill_manage's file_path name on write_file."""
+        result, mock_ops = self._handle_write_file_success(
+            {"file_path": "/tmp/out.txt", "content": "hello"}
+        )
+
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once_with(
+            str(Path("/tmp/out.txt").resolve()), "hello"
+        )
+
+    def test_canonical_content_wins_over_alias_even_when_empty(self):
+        """Canonical content remains authoritative so truncation is preserved."""
+        result, mock_ops = self._handle_write_file_success(
+            {
+                "path": "/tmp/out.txt",
+                "content": "",
+                "file_content": "alias should not win",
+            }
+        )
+
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once_with(
+            str(Path("/tmp/out.txt").resolve()), ""
+        )
+
+    def test_canonical_path_wins_over_alias(self):
+        """Canonical path remains authoritative when both names are present."""
+        result, mock_ops = self._handle_write_file_success(
+            {
+                "path": "/tmp/canonical.txt",
+                "file_path": "/tmp/alias.txt",
+                "content": "hello",
+            },
+            result_path="/tmp/canonical.txt",
+        )
+
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once_with(
+            str(Path("/tmp/canonical.txt").resolve()), "hello"
+        )
 
     def test_non_string_content_returns_error(self):
         """#19096 — content must be a string, not a dict or list."""
