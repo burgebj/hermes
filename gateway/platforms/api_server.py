@@ -53,6 +53,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.display_config import resolve_display_setting
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
@@ -1798,6 +1799,13 @@ class APIServerAdapter(BasePlatformAdapter):
         model_name = body.get("model", self._model_name)
         created = int(time.time())
 
+        # Resolve show_reasoning once, before the stream/non-stream branch.
+        try:
+            from gateway.run import _load_gateway_config as _lgc
+            _show_reasoning = resolve_display_setting(_lgc(), "api_server", "show_reasoning", False)
+        except Exception:
+            _show_reasoning = False
+
         if stream:
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
@@ -1812,6 +1820,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 # completion via agent_task.done() instead.
                 if delta is not None:
                     _stream_q.put(delta)
+
+            def _on_reasoning_progress(event_type, tool_name=None, preview=None, args=None, **kwargs):
+                """Forward reasoning.available events as tagged tuples to the stream queue."""
+                if event_type == "reasoning.available" and preview:
+                    _stream_q.put(("__reasoning__", preview))
 
             # Track which tool_call_ids we've emitted a "running" lifecycle
             # event for, so a "completed" event without a matching "running"
@@ -1864,11 +1877,11 @@ class APIServerAdapter(BasePlatformAdapter):
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
             #
-            # ``tool_progress_callback`` is intentionally not wired here:
-            # it would duplicate every emit because ``run_agent`` fires it
-            # side-by-side with ``tool_start_callback``/``tool_complete_callback``.
-            # The structured callbacks are strictly richer (they carry the
-            # tool_call id), so they own the chat-completions SSE channel.
+            # ``tool_progress_callback`` carries reasoning.available events
+            # when show_reasoning is enabled; for non-reasoning streams it is
+            # None so run_agent skips the callback entirely.  The structured
+            # tool_start_callback / tool_complete_callback own the tool-progress
+            # SSE channel and are always wired.
             agent_ref = [None]
             agent_task = asyncio.ensure_future(self._run_agent(
                 user_message=user_message,
@@ -1876,6 +1889,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 stream_delta_callback=_on_delta,
+                tool_progress_callback=_on_reasoning_progress if _show_reasoning else None,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
@@ -1923,6 +1937,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
 
         final_response = result.get("final_response") or ""
+        last_reasoning = result.get("last_reasoning") or ""
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
         completed = bool(result.get("completed", True))
@@ -1976,6 +1991,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     "message": {
                         "role": "assistant",
                         "content": final_response,
+                        **({
+                            "reasoning_content": last_reasoning,
+                        } if _show_reasoning and last_reasoning else {}),
                     },
                     "finish_reason": finish_reason,
                 }
@@ -2049,13 +2067,23 @@ class APIServerAdapter(BasePlatformAdapter):
                 """Write a single queue item to the SSE stream.
 
                 Plain strings are sent as normal ``delta.content`` chunks.
+                Tagged tuples ``("__reasoning__", text)`` are sent as
+                ``delta.reasoning_content`` chunks when show_reasoning is
+                enabled (gated by the caller before enqueueing).
                 Tagged tuples ``("__tool_progress__", payload)`` are sent
                 as a custom ``event: hermes.tool.progress`` SSE event so
                 frontends can display them without storing the markers in
                 conversation history.  See #6972 for the original event,
                 #16588 for the ``toolCallId``/``status`` lifecycle fields.
                 """
-                if isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "__reasoning__":
+                    reasoning_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"reasoning_content": item[1]}, "finish_reason": None}],
+                    }
+                    await response.write(f"data: {json.dumps(reasoning_chunk)}\n\n".encode())
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
                     event_data = json.dumps(item[1])
                     await response.write(
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
