@@ -25,6 +25,9 @@ from typing import Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
+# Cap on a tool error body; only trims runaway interpolated exceptions (static msgs are ~115 chars).
+_MAX_TOOL_ERROR_CHARS = 2048
+
 
 def _is_registry_register_call(node: ast.AST) -> bool:
     """Return True when *node* is a ``registry.register(...)`` call expression."""
@@ -568,7 +571,13 @@ def tool_error(message, **extra) -> str:
     >>> tool_error("bad input", success=False)
     '{"error": "bad input", "success": false}'
     """
-    result = {"error": str(message)}
+    # Bound the context-bound copy so a raw exception can't bloat history across retries.
+    text = str(message)
+    if len(text) > _MAX_TOOL_ERROR_CHARS:
+        # Full body stays in logs; only the copy returned into context is trimmed.
+        logger.debug("tool_error body truncated for context (%d chars): %s", len(text), text)
+        text = text[:_MAX_TOOL_ERROR_CHARS] + "… [truncated]"
+    result = {"error": text}
     if extra:
         result.update(extra)
     return json.dumps(result, ensure_ascii=False)

@@ -5,7 +5,13 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.registry import ToolRegistry, _module_registers_tools, discover_builtin_tools
+from tools.registry import (
+    ToolRegistry,
+    _MAX_TOOL_ERROR_CHARS,
+    _module_registers_tools,
+    discover_builtin_tools,
+    tool_error,
+)
 
 
 def _dummy_handler(args, **kwargs):
@@ -118,6 +124,34 @@ class TestUnknownToolDispatch:
         result = json.loads(reg.dispatch("nonexistent", {}))
         assert "error" in result
         assert "Unknown tool" in result["error"]
+
+
+class TestToolErrorBounding:
+    def test_short_message_unchanged(self):
+        result = json.loads(tool_error("Missing required parameter: query"))
+        assert result["error"] == "Missing required parameter: query"
+
+    def test_extra_kwargs_preserved(self):
+        result = json.loads(tool_error("bad input", success=False))
+        assert result["error"] == "bad input"
+        assert result["success"] is False
+
+    def test_oversized_body_truncated(self):
+        result = json.loads(tool_error("boom: " + "X" * 5000))
+        assert result["error"].endswith("… [truncated]")
+        assert len(result["error"]) <= _MAX_TOOL_ERROR_CHARS + len("… [truncated]")
+
+    def test_at_limit_not_truncated(self):
+        msg = "Y" * _MAX_TOOL_ERROR_CHARS
+        result = json.loads(tool_error(msg))
+        assert result["error"] == msg
+
+    def test_full_body_preserved_in_logs_when_truncated(self, caplog):
+        import logging
+        body = "boom: " + "Z" * 5000
+        with caplog.at_level(logging.DEBUG, logger="tools.registry"):
+            json.loads(tool_error(body))
+        assert any(body in rec.getMessage() for rec in caplog.records)
 
 
 class TestToolsetAvailability:
