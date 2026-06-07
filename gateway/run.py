@@ -8370,6 +8370,17 @@ class GatewayRunner:
             if command in quick_commands:
                 qcmd = quick_commands[command]
                 if qcmd.get("type") == "exec":
+                    # Guard: shell-exec quick commands require admin to prevent
+                    # arbitrary command execution by any authenticated user.
+                    from gateway.slash_access import policy_for_source as _policy_for_source
+
+                    source = getattr(event, "source", None)
+                    user_id = (source.user_id if source else None)
+                    if not _policy_for_source(self.config, source).is_admin(user_id):
+                        return (
+                            f"Quick command '/{command}' is not available: "
+                            f"shell-execution commands require admin access."
+                        )
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
