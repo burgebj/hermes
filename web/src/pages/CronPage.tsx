@@ -593,6 +593,22 @@ export default function CronPage() {
                 />
               </div>
 
+              {/* Script-backed jobs (no_agent) run a script instead of an
+                  agent prompt, so the prompt box above is empty by design.
+                  Surface the script path read-only so the modal doesn't look
+                  blank/broken for these jobs. */}
+              {asText(editJob.script) && (
+                <div className="grid gap-2">
+                  <Label htmlFor="edit-cron-script">Script</Label>
+                  <Input
+                    id="edit-cron-script"
+                    readOnly
+                    value={asText(editJob.script)}
+                    className="font-courier text-muted-foreground"
+                  />
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="edit-cron-schedule">{t.cron.schedule}</Label>
@@ -708,6 +724,11 @@ export default function CronPage() {
                       {t.cron.next}: {formatTime(job.next_run_at)}
                     </span>
                   </div>
+                  {asText(job.script) && (
+                    <p className="text-xs text-muted-foreground font-courier truncate mt-1">
+                      ⚙ {asText(job.script)}
+                    </p>
+                  )}
                   {job.last_error && (
                     <p className="text-xs text-destructive mt-1">
                       {job.last_error}
