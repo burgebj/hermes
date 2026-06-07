@@ -161,6 +161,118 @@ class TestResolveAutoMainFirst:
         assert mock_resolve.call_args.args[0] == "anthropic"
         assert mock_resolve.call_args.args[1] == "runtime-model"
 
+    def test_custom_provider_no_runtime_reads_config_base_url(self):
+        """Cron/background path: `custom` provider with no runtime override
+        must resolve ``model.base_url`` and ``model.api_key`` from config
+        via ``_resolve_custom_runtime`` instead of dropping them and
+        falling through to the Step-2 fallback chain (#33333).
+        """
+        with patch(
+            "agent.auxiliary_client._read_main_provider", return_value="custom",
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value="some-model",
+        ), patch(
+            "agent.auxiliary_client._resolve_custom_runtime",
+            return_value=("https://endpoint.example.com/v1", "sk-cfg-key", None),
+        ), patch(
+            "agent.auxiliary_client.resolve_provider_client"
+        ) as mock_resolve:
+            mock_client = MagicMock()
+            mock_resolve.return_value = (mock_client, "some-model")
+
+            from agent.auxiliary_client import _resolve_auto
+
+            client, model = _resolve_auto()
+
+        assert client is mock_client
+        assert model == "some-model"
+        # Provider resolved to "custom"; base_url and api_key forwarded from config
+        assert mock_resolve.call_args.args[0] == "custom"
+        assert mock_resolve.call_args.kwargs["explicit_base_url"] == "https://endpoint.example.com/v1"
+        assert mock_resolve.call_args.kwargs["explicit_api_key"] == "sk-cfg-key"
+
+    def test_custom_provider_no_runtime_forwards_api_mode(self):
+        """When `_resolve_custom_runtime` reports an api_mode (e.g.
+        anthropic_messages for a Zhipu/MiniMax gateway), the cron-path
+        fallback must forward it to ``resolve_provider_client`` so the
+        Anthropic transport is selected.
+        """
+        with patch(
+            "agent.auxiliary_client._read_main_provider", return_value="custom",
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value="claude-sonnet-4",
+        ), patch(
+            "agent.auxiliary_client._resolve_custom_runtime",
+            return_value=("https://gateway.example.com/anthropic", "sk-cfg", "anthropic_messages"),
+        ), patch(
+            "agent.auxiliary_client.resolve_provider_client"
+        ) as mock_resolve:
+            mock_resolve.return_value = (MagicMock(), "claude-sonnet-4")
+
+            from agent.auxiliary_client import _resolve_auto
+
+            _resolve_auto()
+
+        assert mock_resolve.call_args.kwargs["api_mode"] == "anthropic_messages"
+
+    def test_custom_provider_no_runtime_no_config_falls_to_chain(self):
+        """If no runtime override AND no config-level custom base_url, the
+        cron-path code MUST NOT pass an empty `custom` to
+        ``resolve_provider_client`` — it should leave Step-1 unsuccessful
+        and let the Step-2 fallback chain handle it.
+        """
+        chain_client = MagicMock()
+        with patch(
+            "agent.auxiliary_client._read_main_provider", return_value="custom",
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value="some-model",
+        ), patch(
+            "agent.auxiliary_client._resolve_custom_runtime",
+            return_value=(None, None, None),
+        ), patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(None, None),
+        ), patch(
+            "agent.auxiliary_client._try_openrouter",
+            return_value=(chain_client, "google/gemini-3-flash-preview"),
+        ):
+            from agent.auxiliary_client import _resolve_auto
+
+            client, model = _resolve_auto()
+
+        assert client is chain_client
+
+    def test_custom_provider_with_runtime_override_unchanged(self):
+        """When a session-level runtime override is present, the existing
+        behavior must be preserved — runtime values win over the config
+        fallback path added for #33333.
+        """
+        with patch(
+            "agent.auxiliary_client._read_main_provider", return_value="custom",
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value="cfg-model",
+        ), patch(
+            "agent.auxiliary_client._resolve_custom_runtime",
+        ) as mock_cfg, patch(
+            "agent.auxiliary_client.resolve_provider_client"
+        ) as mock_resolve:
+            mock_resolve.return_value = (MagicMock(), "cfg-model")
+
+            from agent.auxiliary_client import _resolve_auto
+
+            _resolve_auto(main_runtime={
+                "provider": "custom",
+                "model": "cfg-model",
+                "base_url": "https://session-runtime.example.com/v1",
+                "api_key": "sk-session",
+                "api_mode": "",
+            })
+
+        # Runtime path used — config helper NOT consulted
+        mock_cfg.assert_not_called()
+        assert mock_resolve.call_args.kwargs["explicit_base_url"] == "https://session-runtime.example.com/v1"
+        assert mock_resolve.call_args.kwargs["explicit_api_key"] == "sk-session"
+
 
 # ── Vision — resolve_vision_provider_client ─────────────────────────────────
 

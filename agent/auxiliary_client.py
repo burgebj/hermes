@@ -3125,10 +3125,26 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
         resolved_provider = main_provider
         explicit_base_url = None
         explicit_api_key = None
-        if runtime_base_url and (main_provider == "custom" or main_provider.startswith("custom:")):
-            resolved_provider = "custom"
-            explicit_base_url = runtime_base_url
-            explicit_api_key = runtime_api_key or None
+        explicit_api_mode = runtime_api_mode or None
+        if main_provider == "custom" or main_provider.startswith("custom:"):
+            if runtime_base_url:
+                resolved_provider = "custom"
+                explicit_base_url = runtime_base_url
+                explicit_api_key = runtime_api_key or None
+            else:
+                # No session-level runtime override (cron jobs, gateway
+                # background tasks). Resolve ``model.base_url`` /
+                # ``model.api_key`` from config.yaml via the canonical
+                # custom-runtime helper so aux calls hit the user's
+                # configured endpoint instead of dropping to the Step-2
+                # fallback chain with the wrong credentials.
+                cfg_base, cfg_key, cfg_mode = _resolve_custom_runtime()
+                if cfg_base:
+                    resolved_provider = "custom"
+                    explicit_base_url = cfg_base
+                    explicit_api_key = cfg_key or None
+                    if cfg_mode and not explicit_api_mode:
+                        explicit_api_mode = cfg_mode
         elif runtime_api_key:
             # Pin auxiliary to the same api_key as the active main chat session
             # so that a working key is reused instead of re-selecting from the pool
@@ -3148,7 +3164,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
                 main_model,
                 explicit_base_url=explicit_base_url,
                 explicit_api_key=explicit_api_key,
-                api_mode=runtime_api_mode or None,
+                api_mode=explicit_api_mode,
             )
             if client is not None:
                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
