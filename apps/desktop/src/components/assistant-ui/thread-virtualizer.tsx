@@ -276,16 +276,19 @@ function useThreadScrollAnchor({
   const jumpToBottom = useCallback(() => {
     setMutableRef(stickyBottomRef, true)
 
-    if (groupCount > 0) {
-      virtualizer.scrollToIndex(groupCount - 1, { align: 'end', behavior: 'auto' })
-    }
-
+    // Intentionally NOT calling virtualizer.scrollToIndex() here.
+    // scrollToIndex uses the virtualizer's internal offset calculation which
+    // can diverge from the actual DOM scrollHeight when async content
+    // rendering (Shiki, KaTeX) causes delayed height changes. The
+    // virtualizer then "corrects" against pinToBottom's direct scrollTop
+    // write, creating a reflow fight that manifests as scroll jitter.
+    // pinToBottom alone handles all scroll-to-bottom cases correctly.
     requestAnimationFrame(() => {
       if (stickyBottomRef.current) {
         pinToBottom()
       }
     })
-  }, [groupCount, pinToBottom, stickyBottomRef, virtualizer])
+  }, [pinToBottom])
 
   useEffect(() => () => setThreadScrolledUp(false), [])
 
