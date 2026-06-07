@@ -676,7 +676,7 @@ export function ChatBar({
     // across browsers) and nativeEvent.isComposing (Chromium fallback).  Without
     // this guard, pressing Enter to finalise a Korean/Japanese/Chinese IME
     // preedit fires submitDraft() and splits the message mid-word.
-    if (composingRef.current || event.nativeEvent.isComposing) {
+   if (event.nativeEvent.isComposing) {
       return
     }
 
