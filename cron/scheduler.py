@@ -1986,6 +1986,29 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to set cron session title: %s", job_id, e)
             try:
+                # Give the cron session a clean, human-readable title instead of
+                # leaving it NULL (the dashboard then falls back to rendering the
+                # raw cron prompt, e.g. "[IMPORTANT: You are ru...", as the title
+                # for every run). Format: "⏰ <job name> · <Mon DD YYYY>".
+                # Collisions (same job same day) and the 100-char cap are handled
+                # defensively; failures are non-fatal.
+                try:
+                    _title_date = _hermes_now().strftime("%b %d %Y")
+                    _base_title = f"\u23f0 {job_name} \u00b7 {_title_date}"
+                    _base_title = _base_title[:100]
+                    for _candidate in (
+                        _base_title,
+                        f"{_base_title[:92]} {_hermes_now().strftime('%H:%M')}",
+                        f"{_base_title[:89]} {_hermes_now().strftime('%H:%M:%S')}",
+                    ):
+                        try:
+                            if _session_db.set_session_title(_cron_session_id, _candidate):
+                                break
+                        except ValueError:
+                            # Title-in-use collision — try the next, more specific candidate.
+                            continue
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Job '%s': failed to set session title: %s", job_id, e)
                 _session_db.end_session(_cron_session_id, "cron_complete")
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to end session: %s", job_id, e)
