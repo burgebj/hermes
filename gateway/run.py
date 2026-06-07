@@ -4304,6 +4304,203 @@ class GatewayRunner:
             )
         return scheduled
 
+
+    # HERMES_CLARIFY_TOOL_TAIL_RESUME_v1
+    def _clarify_tool_tail_info(self, agent_result: Any) -> Optional[Dict[str, str]]:
+        """Return metadata when a turn stopped immediately after a clarify tool result."""
+        if not isinstance(agent_result, dict):
+            return None
+        if str(agent_result.get("final_response") or "").strip():
+            return None
+        messages = agent_result.get("messages") or []
+        if not messages:
+            return None
+
+        last_msg = None
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role"):
+                last_msg = msg
+                break
+        if not last_msg or last_msg.get("role") != "tool":
+            return None
+
+        tool_call_id = str(last_msg.get("tool_call_id") or "")
+        tool_name = str(last_msg.get("tool_name") or last_msg.get("name") or "")
+        if not tool_name and tool_call_id:
+            for msg in reversed(messages):
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                for call in msg.get("tool_calls") or []:
+                    if str(call.get("id") or call.get("call_id") or "") != tool_call_id:
+                        continue
+                    fn = call.get("function") or {}
+                    tool_name = str(fn.get("name") or "")
+                    break
+                if tool_name:
+                    break
+        if tool_name != "clarify":
+            return None
+        return {"tool_call_id": tool_call_id, "tool_name": tool_name}
+
+    def _enqueue_internal_session_resume(
+        self,
+        session_key: str,
+        source: SessionSource,
+        *,
+        reason: str,
+        clarify_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+    ) -> bool:
+        """Queue a synthetic empty turn that resumes an unfinished session."""
+        adapter = self.adapters.get(source.platform)
+        if adapter is None or not hasattr(adapter, "_pending_messages"):
+            logger.warning(
+                "Clarify resume not enqueued: adapter unavailable (session=%s, reason=%s, clarify_id=%s)",
+                session_key,
+                reason,
+                clarify_id,
+            )
+            return False
+
+        pending = getattr(adapter, "_pending_messages", {})
+        if session_key in pending:
+            logger.info(
+                "Clarify resume not enqueued: pending event already exists (session=%s, reason=%s, clarify_id=%s)",
+                session_key,
+                reason,
+                clarify_id,
+            )
+            return False
+
+        resume_event = MessageEvent(
+            text="",
+            message_type=MessageType.TEXT,
+            source=source,
+            internal=True,
+        )
+        setattr(resume_event, "_hermes_resume_reason", reason)
+        if clarify_id:
+            setattr(resume_event, "_hermes_clarify_id", clarify_id)
+        if tool_call_id:
+            setattr(resume_event, "_hermes_tool_call_id", tool_call_id)
+        pending[session_key] = resume_event
+        logger.info(
+            "Clarify session run/resume enqueued (session=%s, reason=%s, clarify_id=%s, tool_call_id=%s)",
+            session_key,
+            reason,
+            clarify_id,
+            tool_call_id,
+        )
+        return True
+
+    def _maybe_enqueue_clarify_tool_tail_resume(
+        self,
+        agent_result: Any,
+        source: SessionSource,
+        session_key: str,
+        *,
+        reason: str = "clarify_tool_tail",
+        clarify_id: Optional[str] = None,
+    ) -> bool:
+        info = self._clarify_tool_tail_info(agent_result)
+        if not info:
+            return False
+        tool_call_id = info.get("tool_call_id") or ""
+        dedupe_key = f"{session_key}:{tool_call_id or clarify_id or reason}"
+        seen = getattr(self, "_clarify_auto_resume_keys", None)
+        if seen is None:
+            seen = set()
+            self._clarify_auto_resume_keys = seen
+        if dedupe_key in seen:
+            logger.info(
+                "Clarify resume already attempted for tool tail (session=%s, clarify_id=%s, tool_call_id=%s)",
+                session_key,
+                clarify_id,
+                tool_call_id,
+            )
+            return False
+        seen.add(dedupe_key)
+        return self._enqueue_internal_session_resume(
+            session_key,
+            source,
+            reason=reason,
+            clarify_id=clarify_id,
+            tool_call_id=tool_call_id,
+        )
+
+    def _schedule_clarify_callback_resume_watchdog(
+        self,
+        session_key: str,
+        clarify_id: str,
+    ) -> bool:
+        """After a button callback, enqueue a resume if the turn stops at the clarify result."""
+        try:
+            delay = float(os.getenv("HERMES_CLARIFY_RESUME_WATCHDOG_SECONDS", "1.5"))
+        except (TypeError, ValueError):
+            delay = 1.5
+
+        async def _watchdog() -> None:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if session_key in self._running_agents:
+                logger.debug(
+                    "Clarify callback resume watchdog: active run still owns session (session=%s, clarify_id=%s)",
+                    session_key,
+                    clarify_id,
+                )
+                return
+            try:
+                entry = self.session_store._entries.get(session_key)  # noqa: SLF001
+            except Exception:
+                entry = None
+            source = getattr(entry, "origin", None)
+            session_id = getattr(entry, "session_id", None)
+            if source is None or not session_id or self._session_db is None:
+                logger.debug(
+                    "Clarify callback resume watchdog: missing session source/db (session=%s, clarify_id=%s)",
+                    session_key,
+                    clarify_id,
+                )
+                return
+            try:
+                messages = self._session_db.get_messages(session_id)
+            except Exception as exc:
+                logger.debug(
+                    "Clarify callback resume watchdog: transcript read failed (session=%s, clarify_id=%s): %s",
+                    session_key,
+                    clarify_id,
+                    exc,
+                )
+                return
+            agent_result = {"messages": messages, "final_response": ""}
+            self._maybe_enqueue_clarify_tool_tail_resume(
+                agent_result,
+                source,
+                session_key,
+                reason="clarify_callback_watchdog",
+                clarify_id=clarify_id,
+            )
+
+        try:
+            task = asyncio.create_task(_watchdog())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            logger.info(
+                "Clarify callback resume watchdog scheduled (session=%s, clarify_id=%s, delay=%.2fs)",
+                session_key,
+                clarify_id,
+                delay,
+            )
+            return True
+        except Exception as exc:
+            logger.debug(
+                "Clarify callback resume watchdog scheduling failed (session=%s, clarify_id=%s): %s",
+                session_key,
+                clarify_id,
+                exc,
+            )
+            return False
+
     async def start(self) -> bool:
         """
         Start the gateway and all configured platform adapters.
@@ -8573,6 +8770,19 @@ class GatewayRunner:
 
         try:
             _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
+            try:
+                self._maybe_enqueue_clarify_tool_tail_resume(
+                    _agent_result,
+                    event.source,
+                    _quick_key,
+                    reason="clarify_tool_tail",
+                )
+            except Exception as _clarify_resume_exc:
+                logger.debug(
+                    "clarify tool-tail auto-resume enqueue failed for %s: %s",
+                    _quick_key,
+                    _clarify_resume_exc,
+                )
             # Goal continuation: after the agent returns a final response
             # for this turn, check any standing /goal — the judge will
             # either mark it done, pause it (budget), or enqueue a

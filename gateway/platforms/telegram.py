@@ -3532,6 +3532,17 @@ class TelegramAdapter(BasePlatformAdapter):
                         "Telegram clarify button resolved (id=%s, choice=%r, user=%s)",
                         clarify_id, resolved_text, user_display,
                     )
+                    try:
+                        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+                        resume_fn = getattr(runner, "_schedule_clarify_callback_resume_watchdog", None)
+                        if callable(resume_fn):
+                            resume_fn(session_key, clarify_id)
+                    except Exception:
+                        logger.debug(
+                            "[%s] clarify callback resume watchdog scheduling failed",
+                            self.name,
+                            exc_info=True,
+                        )
                 else:
                     logger.warning(
                         "Telegram clarify button: resolve_gateway_clarify returned False (id=%s)",
