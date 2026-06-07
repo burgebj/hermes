@@ -386,6 +386,8 @@ export const api = {
       body: JSON.stringify({ key }),
     });
   },
+  getMissionControlLaneDashboard: () =>
+    fetchJSON<MissionControlLaneDashboardResponse>("/api/mission-control/lane-dashboard", { cache: "no-store" }),
 
   // Cron jobs
   getCronJobs: (profile = "all") =>
@@ -1615,6 +1617,643 @@ export interface ModelsAnalyticsResponse {
     total_api_calls: number;
   };
   period_days: number;
+}
+
+export interface OpsApproval {
+  id: string;
+  created_at: string;
+  created_by: string;
+  project: string;
+  profile: string;
+  risk_label: string;
+  title: string;
+  proposed_action: string;
+  target: string;
+  preview: string;
+  reason: string;
+  rollback_or_verification: string;
+  blocked_until_approved: boolean;
+  status: "pending" | "approved" | "rejected" | "expired" | "clarification_requested" | "snoozed";
+  expires_at: string;
+  decided_at?: string | null;
+  decided_by?: string | null;
+  decision_note?: string | null;
+  execution_allowed: boolean;
+  execution_result?: unknown;
+  generated_command?: string | null;
+  proposal_kind?: "manual" | "gated_action" | string;
+  source_surface?: string | null;
+  source_ref?: string | null;
+  conversation_excerpt?: string | null;
+  related_paths?: string[];
+}
+
+export interface OpsApprovalCreate {
+  title: string;
+  project: string;
+  profile?: string;
+  risk_label: string;
+  proposed_action: string;
+  target: string;
+  preview: string;
+  reason: string;
+  rollback_or_verification: string;
+  created_by?: string;
+  expires_at?: string;
+  source_surface?: string;
+  source_ref?: string;
+  conversation_excerpt?: string;
+  related_paths?: string[];
+}
+
+export interface OpsApprovalDecision {
+  decided_by: string;
+  decision_note?: string;
+}
+
+export interface OpsApprovalAuditEvent {
+  event: string;
+  approval_id?: string | null;
+  status?: string | null;
+  actor?: string | null;
+  note?: string | null;
+  timestamp: string;
+}
+
+export interface OpsApprovalSummary {
+  pending_count: number;
+  total_count: number;
+  blocked_execution: boolean;
+  pending: OpsApproval[];
+  review_text: string;
+}
+
+export interface OpsActionDryRun {
+  ok: boolean;
+  reason: string;
+  approval_id?: string | null;
+  action: {
+    name: string;
+    title: string;
+    description: string;
+    risk_label: string;
+    verification: string;
+  };
+  config: {
+    allowed: boolean;
+    reason: string;
+    execution_enabled: boolean;
+    allowed_actions: string[];
+  };
+  approval: {
+    approval_ok: boolean;
+    reason: string;
+  };
+  execution_allowed: false;
+  would_execute: false;
+  message: string;
+}
+
+export interface OpsActionRegistryStatus {
+  execution_enabled: boolean;
+  allowed_actions: string[];
+  actions: Array<OpsActionDryRun["action"] & {
+    configured_allowed: boolean;
+    executable: boolean;
+    mutation_scope: "audit_log_only" | "none";
+  }>;
+  blocked_action_classes: string[];
+  message: string;
+}
+
+export interface OpsMemoryFileStatus {
+  target: "memory" | "user" | string;
+  filename: string;
+  path: string;
+  exists: boolean;
+  enabled: boolean;
+  chars: number;
+  limit: number;
+  percent_used: number;
+  entries: number;
+  duplicate_entries: number;
+  status: "ok" | "warning" | "critical" | "missing" | "disabled" | string;
+}
+
+export interface OpsMemoryStatus {
+  ok: boolean;
+  mode: "local_read_only";
+  profile_home: string;
+  provider: string;
+  memory_enabled: boolean;
+  user_profile_enabled: boolean;
+  updated_at: string;
+  status: "ok" | "warning" | "critical" | "missing" | "disabled" | string;
+  total_chars: number;
+  total_limit: number;
+  total_percent_used: number;
+  warning?: string | null;
+  files: OpsMemoryFileStatus[];
+}
+
+export interface OpsSocialPlatformStatusItem {
+  platform: string;
+  published: string;
+  scheduled: string;
+  issues_private: string;
+  readiness: string;
+  source: string;
+  status: string;
+  last_checked_at?: string | null;
+}
+
+export interface OpsSocialPlatformStatus {
+  ok: boolean;
+  mode: "local_read_only";
+  path: string;
+  updated_at?: string | null;
+  warning?: string | null;
+  source?: string | null;
+  platforms: OpsSocialPlatformStatusItem[];
+}
+
+export interface OpsSocialPlatformStatusUpdate {
+  source?: string;
+  updated_at?: string;
+  platforms: Array<Partial<OpsSocialPlatformStatusItem> & { platform: string }>;
+}
+
+export interface OpsSocialPlatformHistoryEvent {
+  timestamp?: string | null;
+  source?: string | null;
+  mode?: string;
+  platform_count?: number;
+  status_counts?: Record<string, number>;
+  platforms?: Array<Partial<OpsSocialPlatformStatusItem> & { platform?: string | null }>;
+}
+
+export interface OpsSocialPlatformHistory {
+  ok: boolean;
+  mode: "local_read_only";
+  path: string;
+  warning?: string | null;
+  events: OpsSocialPlatformHistoryEvent[];
+}
+
+export type MissionControlPacketKind = "codex_prompt" | "worker_result" | "operator_note" | "block_flag";
+export type MissionControlPacketStatus = "draft" | "queued" | "imported" | "reviewed" | "archived";
+
+export interface MissionControlPacketSummary {
+  id: string;
+  kind: MissionControlPacketKind;
+  project: string;
+  title: string;
+  status: MissionControlPacketStatus;
+  dry_run: boolean;
+  review_required: boolean;
+  trusted_for_execution: boolean;
+  author?: string;
+  created_at: string;
+  updated_at: string;
+  redacted_payload_preview?: string;
+  warnings: string[];
+}
+
+export interface MissionControlPacket {
+  id: string;
+  kind: MissionControlPacketKind;
+  project: string;
+  title: string;
+  payload: Record<string, unknown> & {
+    prompt?: string;
+    worker_result?: string;
+    parsed_metadata?: Record<string, unknown>;
+    flag?: string;
+    reason?: string;
+    advisory_only?: boolean;
+  };
+  redacted_payload_preview: string;
+  source_refs: string[];
+  approval_gates: unknown[];
+  dry_run: boolean;
+  review_required: boolean;
+  trusted_for_execution: boolean;
+  status: MissionControlPacketStatus;
+  author: string;
+  created_at: string;
+  updated_at: string;
+  warnings: string[];
+}
+
+export interface MissionControlPacketListResponse {
+  generated_at: string;
+  source: string;
+  source_refs: string[];
+  items: MissionControlPacketSummary[];
+  warnings: string[];
+}
+
+export interface MissionControlPacketDetailResponse {
+  generated_at: string;
+  source: string;
+  source_refs: string[];
+  packet: MissionControlPacket;
+  warnings: string[];
+}
+
+export interface MissionControlPacketCreateResponse {
+  packet: MissionControlPacket;
+}
+
+export interface MissionControlArtifact {
+  source_type: string;
+  record_id: string;
+  title: string;
+  project: string;
+  status: string;
+  kind: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  archived_at?: string | null;
+  counts: Record<string, number>;
+  linked_ids: Record<string, string[]>;
+  source_ref_count: number;
+  flags: Record<string, unknown>;
+  warnings: string[];
+  trusted_for_execution: false;
+  inert_context_only: true;
+  untrusted: true;
+}
+
+export interface MissionControlArtifactListResponse {
+  generated_at: string;
+  source: string;
+  items: MissionControlArtifact[];
+  warnings: string[];
+}
+
+export interface MissionControlActiveEnvelopeMetadata {
+  id?: string | null;
+  schema?: string | null;
+  status?: string | null;
+  title?: string | null;
+  mode?: string | null;
+  mode_label?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  trusted_for_execution: false;
+  inert_context_only: true;
+  vocabulary_version?: string | null;
+}
+
+export interface MissionControlActiveEnvelopeResponse {
+  exists: boolean;
+  active_lane?: string | null;
+  active_mode?: string | null;
+  execution_boundary: string;
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  checkpoint?: string | null;
+  repo_state: {
+    status?: string | null;
+    source?: string | null;
+  };
+  evidence: {
+    count: number;
+    links: string[];
+  };
+  data_source: string;
+  task_control_envelope?: MissionControlActiveEnvelopeMetadata;
+  selection?: {
+    selected_from_count: number;
+    ambiguous: boolean;
+    selection_reason: string;
+  };
+  trusted_for_execution: false;
+  inert_context_only: true;
+}
+
+export interface MissionControlLaneEvidenceSummary {
+  id?: string | null;
+  kind?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  source?: string | null;
+  created_at?: string | null;
+  trusted_for_execution: false;
+  inert_context_only: true;
+  authorizing: false;
+}
+
+export interface MissionControlLaneDashboardResponse {
+  mode: "local_read_only";
+  active_lane: {
+    label: string;
+    mode?: string | null;
+    status: string;
+    source: string;
+  };
+  task_control_envelope: {
+    exists: boolean;
+    id?: string | null;
+    summary?: string | null;
+    mode_label?: string | null;
+    checkpoint?: string | null;
+    selected_from_count: number;
+    policy_model?: {
+      active_lane: string;
+      mode: string;
+      lane_state: string;
+      approval_tier: string;
+      repo_path: string;
+      branch: string;
+      allowed_actions: string[];
+      forbidden_actions: string[];
+      allowed_files: string[];
+      forbidden_files: string[];
+      allowed_start_gate_dirty_files: string[];
+      focused_test_files: string[];
+      stop_condition: string;
+      trusted_for_execution: false;
+      inert_context_only: true;
+    } | null;
+    trusted_for_execution: false;
+    inert_context_only: true;
+  };
+  approval_tier: {
+    label: string;
+    active_slice_count: number;
+    latest_slice_id?: string | null;
+    latest_slice_title?: string | null;
+  };
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  start_gate: {
+    status: string;
+    source: string;
+    repo_state: string;
+  };
+  guard_decisions: {
+    start_gate: {
+      allowed: boolean;
+      approval_tier: string;
+      reason: string;
+      violations: string[];
+      execution_enabled: false;
+      trusted_for_execution: false;
+      inert_context_only: true;
+    };
+  };
+  evidence: {
+    count: number;
+    summaries: MissionControlLaneEvidenceSummary[];
+    details_on_demand: boolean;
+  };
+  next_action: {
+    kind: "auto" | "one_click_approval" | "forbidden";
+    label: string;
+    reason: string;
+    execution_enabled: false;
+    trusted_for_execution: false;
+    inert_context_only: true;
+  };
+  next_recommended_action: string;
+  token_context_budget: {
+    estimated_input_tokens: number;
+    estimated_output_tokens: number;
+    remaining_context_window: string;
+    show_token_estimates: true;
+    conservation_behavior: string;
+  };
+  safety: {
+    quarantine_parent_scan_warning: string;
+    parent_scan_performed: false;
+    quarantined_path_accessed: false;
+    transcript_loaded: false;
+    execution_controls: false;
+    runner_integration: false;
+    tool_interception: false;
+  };
+  trusted_for_execution: false;
+  inert_context_only: true;
+}
+
+export type ApprovalSliceStatus = "active" | "revoked" | "expired" | "completed";
+
+export interface ApprovalSliceSummary {
+  id: string;
+  status: ApprovalSliceStatus;
+  title: string;
+  repo_path?: string | null;
+  allowed_actions: string[];
+  forbidden_actions: string[];
+  stop_condition?: string | null;
+  checkpoint?: string | null;
+  linked_goal_contract_id?: string | null;
+  created_by?: string | null;
+  created_from?: string | null;
+  created_at: string;
+  updated_at: string;
+  revoked_at?: string | null;
+  expired_at?: string | null;
+  completed_at?: string | null;
+  trusted_for_execution: false;
+  inert_context_only: true;
+}
+
+export interface ApprovalSlicesResponse {
+  items: ApprovalSliceSummary[];
+  warnings: string[];
+}
+
+export interface MissionControlCodexPromptPacketCreate {
+  project: string;
+  title: string;
+  prompt: string;
+  source_refs?: string[];
+  author?: string;
+}
+
+export interface MissionControlWorkerResultPacketCreate {
+  project: string;
+  title: string;
+  worker_result: string;
+  source_refs?: string[];
+  author?: string;
+}
+
+export interface MissionControlBlockFlagPacketCreate {
+  project: string;
+  title: string;
+  flag: "pause_future_outreach" | "block_all_sends" | "pause_cron_triggered_outreach" | "disable_launch_actions";
+  reason: string;
+  source_refs?: string[];
+  author?: string;
+}
+
+export interface MissionBrief {
+  id: string;
+  title: string;
+  summary: string;
+  references: string[];
+  status: "active" | "archived";
+  author: string;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+  trusted_for_execution: false;
+  inert_context_only: true;
+}
+
+export interface MissionBriefSummary {
+  id: string;
+  title: string;
+  summary: string;
+  status: "active" | "archived";
+  reference_count: number;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+  trusted_for_execution: false;
+  inert_context_only: true;
+}
+
+export interface MissionBriefListResponse {
+  items: MissionBriefSummary[];
+  warnings: string[];
+}
+
+export interface MissionBriefDetailResponse {
+  brief: MissionBrief;
+}
+
+export interface MissionBriefCreate {
+  title: string;
+  summary?: string;
+  references?: string[];
+  author?: string;
+}
+
+export type MissionBriefUpdate = Partial<MissionBriefCreate>;
+
+export interface MissionBriefCreateResponse {
+  brief: MissionBrief;
+}
+
+export interface ProjectRoom {
+  id: string;
+  slug: string;
+  title: string;
+  project_key: string;
+  description: string;
+  trusted_for_execution: false;
+  inert_context_only: true;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  attachment_count: number;
+}
+
+export interface ProjectRoomsResponse {
+  generated_at: string;
+  source: string;
+  source_refs: string[];
+  rooms: ProjectRoom[];
+  warnings: string[];
+}
+
+export interface ProjectRoomCreate {
+  title: string;
+  project_key?: string;
+  description?: string;
+}
+
+export interface ProjectRoomCreateResponse {
+  room: ProjectRoom;
+}
+
+export interface ProjectRoomMessage {
+  id: string;
+  room_id: string;
+  author: string;
+  role: string;
+  content_type: string;
+  content_text: string;
+  source_refs: string[];
+  linked_packet_ids: string[];
+  trusted_for_execution: false;
+  inert_context_only: true;
+  created_at: string;
+}
+
+export interface ProjectRoomMessagesResponse {
+  generated_at: string;
+  source: string;
+  room: ProjectRoom;
+  messages: ProjectRoomMessage[];
+  warnings: string[];
+}
+
+export interface ProjectRoomMessageCreate {
+  author?: string;
+  role?: string;
+  content_type?: string;
+  content_text: string;
+  source_refs?: string[];
+  linked_packet_ids?: string[];
+  trusted_for_execution?: boolean;
+}
+
+export interface ProjectRoomMessageCreateResponse {
+  message: ProjectRoomMessage;
+}
+
+export interface ProjectRoomAttachment {
+  id: string;
+  room_id: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  trusted_for_execution: false;
+  inert_context_only: true;
+  created_at: string;
+}
+
+export interface ProjectRoomAttachmentCreateResponse {
+  attachment: ProjectRoomAttachment;
+}
+
+export interface ProjectRoomAttachmentResponse {
+  attachment: ProjectRoomAttachment;
+}
+
+export interface OpsActionExecute {
+  ok: boolean;
+  executed: true;
+  approval_id?: string | null;
+  action: OpsActionDryRun["action"];
+  approval: {
+    allowed: boolean;
+    would_execute: false;
+    execution_allowed: false;
+    reason: string;
+    approval_id?: string | null;
+  };
+  mutation_scope: "audit_log_only";
+  result: {
+    timestamp: string;
+    gateway_running?: boolean | null;
+    gateway_state?: string | null;
+    gateway_pid?: number | string | null;
+    gateway_platform_count: number;
+    gateway_updated_at?: string | null;
+    gateway_exit_reason?: string | null;
+    action_execution_enabled: boolean;
+    allowed_actions: string[];
+    approval_status?: string | null;
+  };
+  message: string;
 }
 
 export interface CronJob {

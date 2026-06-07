@@ -64,7 +64,7 @@ from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
 try:
-    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
@@ -76,7 +76,7 @@ except ImportError:
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
-        from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
@@ -5539,6 +5539,1083 @@ class CronJobCreate(BaseModel):
 
 class CronJobUpdate(BaseModel):
     updates: dict
+
+
+class ApprovalCreate(BaseModel):
+    title: str
+    project: str
+    profile: str = "default"
+    risk_label: str
+    proposed_action: str
+    target: str
+    preview: str
+    reason: str
+    rollback_or_verification: str
+    created_by: str = "dashboard"
+    expires_at: Optional[str] = None
+    source_surface: Optional[str] = None
+    source_ref: Optional[str] = None
+    conversation_excerpt: Optional[str] = None
+    related_paths: Optional[List[str]] = None
+
+
+class ApprovalDecision(BaseModel):
+    decided_by: str
+    decision_note: Optional[str] = None
+
+
+def _model_dump(body: BaseModel) -> Dict[str, Any]:
+    if hasattr(body, "model_dump"):
+        return body.model_dump(exclude_none=True)  # type: ignore[attr-defined]
+    return body.dict(exclude_none=True)
+
+
+def _approval_store():
+    from hermes_cli.ops_approvals import ApprovalStore
+    return ApprovalStore()
+
+
+def _approval_error(exc: Exception) -> HTTPException:
+    detail = str(exc) or "Invalid approval request"
+    status = 404 if "not found" in detail.lower() else 400
+    return HTTPException(status_code=status, detail=detail)
+
+
+@app.get("/api/ops/approvals")
+async def list_ops_approvals():
+    try:
+        return _approval_store().list()
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals")
+async def create_ops_approval(body: ApprovalCreate):
+    try:
+        return _approval_store().create(_model_dump(body))
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/propose")
+async def propose_ops_approval(body: ApprovalCreate):
+    try:
+        return _approval_store().propose_from_context(_model_dump(body))
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/ops/approvals/audit")
+async def list_ops_approval_audit(approval_id: Optional[str] = None):
+    try:
+        return _approval_store().audit_events(approval_id)
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/ops/approvals/summary")
+async def summarize_ops_approvals():
+    try:
+        return _approval_store().summary()
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/ops/actions")
+async def get_ops_action_registry_status():
+    try:
+        from hermes_cli.ops_actions import action_registry_status
+
+        return action_registry_status()
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/ops/memory-status")
+async def get_ops_memory_status():
+    try:
+        from hermes_cli.ops_memory_status import read_ops_memory_status
+
+        return read_ops_memory_status()
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/ops/social-platform-status")
+async def get_ops_social_platform_status(response: Response):
+    try:
+        from hermes_cli.ops_social_status import read_social_platform_status
+
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return read_social_platform_status()
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/ops/social-platform-status/history")
+async def get_ops_social_platform_status_history(response: Response, limit: int = 8):
+    try:
+        from hermes_cli.ops_social_status import read_social_platform_history
+
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return read_social_platform_history(limit=limit)
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/social-platform-status")
+async def update_ops_social_platform_status(payload: Dict[str, Any]):
+    try:
+        from hermes_cli.ops_social_status import write_manual_social_platform_status
+
+        return write_manual_social_platform_status(payload)
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/{approval_id}/actions/{action_name}/dry-run")
+async def dry_run_ops_approval_action(approval_id: str, action_name: str):
+    try:
+        from hermes_cli.ops_actions import dry_run_action
+
+        store = _approval_store()
+        approval = store.get(approval_id)
+        return dry_run_action(action_name, approval)
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/{approval_id}/actions/{action_name}/execute")
+async def execute_ops_approval_action(approval_id: str, action_name: str):
+    try:
+        from hermes_cli.ops_actions import execute_read_only_status_probe
+
+        store = _approval_store()
+        approval = store.get(approval_id)
+
+        def _audit(event: str, item: Dict[str, Any], actor: str) -> None:
+            store.append_audit_event(event, dict(item), actor=actor, note=action_name)
+
+        return execute_read_only_status_probe(
+            action_name,
+            approval,
+            audit=_audit,
+            actor="dashboard",
+        )
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/{approval_id}/approve")
+async def approve_ops_approval(approval_id: str, body: ApprovalDecision):
+    try:
+        return _approval_store().decide(
+            approval_id,
+            "approved",
+            decided_by=body.decided_by,
+            decision_note=body.decision_note,
+        )
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/{approval_id}/reject")
+async def reject_ops_approval(approval_id: str, body: ApprovalDecision):
+    try:
+        return _approval_store().decide(
+            approval_id,
+            "rejected",
+            decided_by=body.decided_by,
+            decision_note=body.decision_note,
+        )
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/{approval_id}/clarify")
+async def clarify_ops_approval(approval_id: str, body: ApprovalDecision):
+    try:
+        return _approval_store().decide(
+            approval_id,
+            "clarification_requested",
+            decided_by=body.decided_by,
+            decision_note=body.decision_note,
+        )
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.post("/api/ops/approvals/{approval_id}/snooze")
+async def snooze_ops_approval(approval_id: str, body: ApprovalDecision):
+    try:
+        return _approval_store().decide(
+            approval_id,
+            "snoozed",
+            decided_by=body.decided_by,
+            decision_note=body.decision_note,
+        )
+    except Exception as exc:
+        raise _approval_error(exc) from exc
+
+
+@app.get("/api/mission-control/project-status")
+async def get_mission_control_project_status():
+    from hermes_cli.mission_control import project_status
+
+    return project_status()
+
+
+@app.get("/api/mission-control/open-tasks")
+async def get_mission_control_open_tasks():
+    from hermes_cli.mission_control import open_tasks
+
+    return open_tasks()
+
+
+@app.get("/api/mission-control/latest-worker-results")
+async def get_mission_control_latest_worker_results():
+    from hermes_cli.mission_control import latest_worker_results
+
+    return latest_worker_results()
+
+
+@app.get("/api/mission-control/repo-status")
+async def get_mission_control_repo_status():
+    from hermes_cli.mission_control import repo_status
+
+    return repo_status()
+
+
+@app.get("/api/mission-control/approval-gates")
+async def get_mission_control_approval_gates():
+    from hermes_cli.mission_control import approval_gates
+
+    return approval_gates()
+
+
+@app.get("/api/mission-control/recent-audit-log")
+async def get_mission_control_recent_audit_log():
+    from hermes_cli.mission_control import recent_audit_log
+
+    return recent_audit_log()
+
+
+@app.get("/api/mission-control/active-envelope")
+async def get_mission_control_active_envelope():
+    from hermes_cli.mission_control_task_control_envelopes import active_task_control_envelope_selection
+
+    selection = active_task_control_envelope_selection()
+    envelope = selection.get("task_control_envelope")
+    if envelope:
+        selected_from_count = int(selection.get("selected_from_count") or 0)
+        repo_context = envelope.get("repo_context") or {}
+        lane_lock = envelope.get("lane_lock") if isinstance(envelope.get("lane_lock"), dict) else {}
+        return {
+            "exists": True,
+            "active_lane": lane_lock.get("active_lane"),
+            "active_mode": envelope.get("mode"),
+            "execution_boundary": "persisted_envelope_inert_non_authorizing",
+            "allowed_actions": envelope.get("allowed_actions", []),
+            "forbidden_actions": envelope.get("forbidden_actions", []),
+            "checkpoint": envelope.get("checkpoint"),
+            "repo_state": {
+                "status": repo_context.get("dirty_state", "not_probed"),
+                "source": repo_context.get("source", "unknown"),
+            },
+            "evidence": {
+                "count": selected_from_count,
+                "links": [],
+            },
+            "data_source": "persisted_task_control_envelope",
+            "task_control_envelope": {
+                "id": envelope.get("id"),
+                "schema": envelope.get("schema"),
+                "status": envelope.get("status"),
+                "title": envelope.get("title"),
+                "mode": envelope.get("mode"),
+                "mode_label": envelope.get("mode_label", ""),
+                "created_at": envelope.get("created_at"),
+                "updated_at": envelope.get("updated_at"),
+                "trusted_for_execution": False,
+                "inert_context_only": True,
+                "vocabulary_version": "g1",
+            },
+            "selection": {
+                "selected_from_count": selected_from_count,
+                "ambiguous": selected_from_count > 1,
+                "selection_reason": "newest_active_updated_at",
+            },
+            "trusted_for_execution": False,
+            "inert_context_only": True,
+        }
+    return {
+        "exists": False,
+        "active_lane": None,
+        "active_mode": None,
+        "execution_boundary": "no_active_authorization",
+        "allowed_actions": [],
+        "forbidden_actions": [],
+        "checkpoint": None,
+        "repo_state": {
+            "status": "unknown",
+            "source": "not_probed",
+        },
+        "evidence": {
+            "count": 0,
+            "links": [],
+        },
+        "data_source": "no_persisted_envelope",
+        "trusted_for_execution": False,
+        "inert_context_only": True,
+    }
+
+
+def _read_json_records(directory: Path, pattern: str) -> list[dict[str, Any]]:
+    if not directory.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(directory.glob(pattern)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            records.append(data)
+    return records
+
+
+def _first_text(value: Any, fallback: str) -> str:
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    return text or fallback
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
+
+
+def _token_estimates(envelope: dict[str, Any] | None, evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    metadata = envelope.get("metadata") if isinstance(envelope, dict) else {}
+    budget = {}
+    if isinstance(metadata, dict):
+        budget = (
+            metadata.get("context_budget")
+            or metadata.get("token_context_budget")
+            or metadata.get("token_budget")
+        )
+    if not isinstance(budget, dict):
+        budget = {}
+    estimated_input = budget.get("estimated_input_tokens", budget.get("input_estimate"))
+    estimated_output = budget.get("estimated_output_tokens", budget.get("output_estimate"))
+    if not isinstance(estimated_input, int):
+        estimated_input = min(12000, 1200 + sum(len(str(card.get("summary") or "")) for card in evidence))
+    if not isinstance(estimated_output, int):
+        estimated_output = 1800
+    return {
+        "estimated_input_tokens": estimated_input,
+        "estimated_output_tokens": estimated_output,
+        "remaining_context_window": _first_text(budget.get("remaining_context_window"), "unknown"),
+        "show_token_estimates": True,
+        "conservation_behavior": "summary_first_details_on_demand_no_transcript_load",
+    }
+
+
+def _mission_control_state_dir(name: str) -> Path:
+    return Path(get_hermes_home()) / "state" / "mission-control" / name
+
+
+def _lane_policy_read_model(envelope: dict[str, Any] | None) -> dict[str, Any]:
+    from hermes_cli.mission_control_autonomy import (
+        ApprovalTier,
+        GuardDecision,
+        next_action_decision_summary,
+        summarize_guard_decision,
+        task_control_envelope_model_from_record,
+        task_control_envelope_model_summary,
+        validate_start_gate,
+    )
+
+    if not envelope:
+        start_gate = GuardDecision(
+            allowed=False,
+            approval_tier=ApprovalTier.FORBIDDEN,
+            reason="no_task_control_envelope",
+        )
+        return {
+            "policy_model": None,
+            "start_gate": summarize_guard_decision(start_gate),
+            "next_action": next_action_decision_summary(None, start_gate),
+        }
+
+    model = task_control_envelope_model_from_record(envelope)
+    metadata = envelope.get("metadata") if isinstance(envelope.get("metadata"), dict) else {}
+    start_gate_dirty_files = _safe_string_list(metadata.get("start_gate_dirty_files"))
+    start_gate = validate_start_gate(
+        model,
+        repo_path=model.repo_path,
+        branch=model.branch,
+        dirty_files=tuple(start_gate_dirty_files),
+    )
+    return {
+        "policy_model": task_control_envelope_model_summary(model),
+        "start_gate": summarize_guard_decision(start_gate),
+        "next_action": next_action_decision_summary(model, start_gate),
+    }
+
+
+def _active_lane_dashboard_payload() -> dict[str, Any]:
+    envelopes = [
+        record
+        for record in _read_json_records(_mission_control_state_dir("task-control-envelopes"), "envelope_*.json")
+        if record.get("status") == "active"
+    ]
+    envelopes.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    envelope = envelopes[0] if envelopes else None
+    lane_lock = envelope.get("lane_lock") if isinstance(envelope, dict) and isinstance(envelope.get("lane_lock"), dict) else {}
+    repo_context = envelope.get("repo_context") if isinstance(envelope, dict) and isinstance(envelope.get("repo_context"), dict) else {}
+    metadata = envelope.get("metadata") if isinstance(envelope, dict) and isinstance(envelope.get("metadata"), dict) else {}
+
+    slices = [
+        record
+        for record in _read_json_records(_mission_control_state_dir("approval-slices"), "slice_*.json")
+        if record.get("status") == "active"
+    ]
+    slices.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    latest_slice = slices[0] if slices else None
+
+    evidence_cards = _read_json_records(_mission_control_state_dir("evidence-cards"), "card_*.json")
+    evidence_cards.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    evidence_summaries = [
+        {
+            "id": card.get("id"),
+            "kind": card.get("kind"),
+            "title": card.get("title"),
+            "summary": card.get("summary"),
+            "source": card.get("source", ""),
+            "created_at": card.get("created_at"),
+            "trusted_for_execution": False,
+            "inert_context_only": True,
+            "authorizing": False,
+        }
+        for card in evidence_cards[:5]
+    ]
+
+    allowed_actions = _safe_string_list((envelope or {}).get("allowed_actions"))
+    forbidden_actions = _safe_string_list((envelope or {}).get("forbidden_actions"))
+    checkpoint = None
+    checkpoints = _safe_string_list((envelope or {}).get("checkpoints"))
+    if checkpoints:
+        checkpoint = checkpoints[0]
+
+    start_gate_status = _first_text(metadata.get("start_gate_status"), "unknown")
+    next_action = _first_text(
+        metadata.get("next_recommended_action"),
+        "Attach a Task Control Envelope before starting lane work.",
+    )
+    quarantine_warning = _first_text(
+        metadata.get("quarantine_warning"),
+        "No parent scans or quarantined path access are allowed from this dashboard.",
+    )
+    policy_read_model = _lane_policy_read_model(envelope)
+
+    return {
+        "mode": "local_read_only",
+        "active_lane": {
+            "label": _first_text(lane_lock.get("active_lane"), "No active lane"),
+            "mode": (envelope or {}).get("mode"),
+            "status": (envelope or {}).get("status", "none"),
+            "source": "persisted_task_control_envelope" if envelope else "no_persisted_envelope",
+        },
+        "task_control_envelope": {
+            "exists": envelope is not None,
+            "id": (envelope or {}).get("id"),
+            "summary": (envelope or {}).get("title"),
+            "mode_label": (envelope or {}).get("mode_label", ""),
+            "checkpoint": checkpoint,
+            "selected_from_count": len(envelopes),
+            "policy_model": policy_read_model["policy_model"],
+            "trusted_for_execution": False,
+            "inert_context_only": True,
+        },
+        "approval_tier": {
+            "label": _first_text(metadata.get("approval_tier"), "No approval slice" if not latest_slice else "approval slice active"),
+            "active_slice_count": len(slices),
+            "latest_slice_id": (latest_slice or {}).get("id"),
+            "latest_slice_title": (latest_slice or {}).get("title"),
+        },
+        "allowed_actions": allowed_actions,
+        "forbidden_actions": forbidden_actions,
+        "start_gate": {
+            "status": start_gate_status,
+            "source": _first_text(repo_context.get("source"), "not_probed"),
+            "repo_state": _first_text(repo_context.get("dirty_state"), "unknown"),
+        },
+        "guard_decisions": {
+            "start_gate": policy_read_model["start_gate"],
+        },
+        "evidence": {
+            "count": len(evidence_cards),
+            "summaries": evidence_summaries,
+            "details_on_demand": True,
+        },
+        "next_action": policy_read_model["next_action"],
+        "next_recommended_action": next_action,
+        "token_context_budget": _token_estimates(envelope, evidence_cards),
+        "safety": {
+            "quarantine_parent_scan_warning": quarantine_warning,
+            "parent_scan_performed": False,
+            "quarantined_path_accessed": False,
+            "transcript_loaded": False,
+            "execution_controls": False,
+            "runner_integration": False,
+            "tool_interception": False,
+        },
+        "trusted_for_execution": False,
+        "inert_context_only": True,
+    }
+
+
+@app.get("/api/mission-control/lane-dashboard")
+async def get_mission_control_lane_dashboard():
+    return _active_lane_dashboard_payload()
+
+
+@app.get("/api/mission-control/artifacts")
+async def get_mission_control_artifacts(kind: str | None = None, status: str | None = None):
+    from hermes_cli.mission_control_artifacts import list_artifacts
+
+    return list_artifacts(kind=kind, status=status)
+
+
+def _mission_control_packet_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_control import MissionControlPacketError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Packet not found")
+    if isinstance(exc, MissionControlPacketError):
+        if str(exc) == "Invalid packet id":
+            return HTTPException(status_code=404, detail="Packet not found")
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Mission Control packet error")
+
+
+def _project_room_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_control_project_rooms import ProjectRoomError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Project Room item not found")
+    if isinstance(exc, OverflowError):
+        return HTTPException(status_code=413, detail=str(exc))
+    if isinstance(exc, ProjectRoomError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Project Rooms error")
+
+
+def _mission_briefs_enabled() -> bool:
+    config = load_config()
+    return cfg_get(config, "dashboard", "mission_briefs_enabled", default=False) is True
+
+
+def _require_mission_briefs_enabled() -> None:
+    if not _mission_briefs_enabled():
+        raise HTTPException(status_code=404, detail="Mission Briefs disabled")
+
+
+def _goal_contracts_enabled() -> bool:
+    config = load_config()
+    return cfg_get(config, "dashboard", "goal_contracts_enabled", default=False) is True
+
+
+def _require_goal_contracts_enabled() -> None:
+    if not _goal_contracts_enabled():
+        raise HTTPException(status_code=404, detail="Goal Contracts disabled")
+
+
+def _approval_slices_enabled() -> bool:
+    config = load_config()
+    return cfg_get(config, "dashboard", "approval_slices_enabled", default=False) is True
+
+
+def _require_approval_slices_enabled() -> None:
+    if not _approval_slices_enabled():
+        raise HTTPException(status_code=404, detail="Approval Slices disabled")
+
+
+def _task_control_envelopes_enabled() -> bool:
+    config = load_config()
+    return cfg_get(config, "dashboard", "task_control_envelopes_enabled", default=False) is True
+
+
+def _require_task_control_envelopes_enabled() -> None:
+    if not _task_control_envelopes_enabled():
+        raise HTTPException(status_code=404, detail="Task Control Envelopes disabled")
+
+
+def _evidence_cards_enabled() -> bool:
+    config = load_config()
+    return cfg_get(config, "dashboard", "evidence_cards_enabled", default=False) is True
+
+
+def _require_evidence_cards_enabled() -> None:
+    if not _evidence_cards_enabled():
+        raise HTTPException(status_code=404, detail="Evidence Cards disabled")
+
+
+def _mission_brief_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_briefs import MissionBriefError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Mission Brief not found")
+    if isinstance(exc, MissionBriefError):
+        if str(exc) == "Invalid brief id":
+            return HTTPException(status_code=404, detail="Mission Brief not found")
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Mission Brief error")
+
+
+def _goal_contract_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_control_goal_contracts import GoalContractError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Goal Contract not found")
+    if isinstance(exc, GoalContractError):
+        if str(exc) == "Invalid contract id":
+            return HTTPException(status_code=404, detail="Goal Contract not found")
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Goal Contract error")
+
+
+def _approval_slice_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_control_approval_slices import ApprovalSliceError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Approval Slice not found")
+    if isinstance(exc, ApprovalSliceError):
+        if str(exc) == "Invalid approval slice id":
+            return HTTPException(status_code=404, detail="Approval Slice not found")
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Approval Slice error")
+
+
+def _task_control_envelope_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_control_task_control_envelopes import TaskControlEnvelopeError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Task Control Envelope not found")
+    if isinstance(exc, TaskControlEnvelopeError):
+        if str(exc) == "Invalid task control envelope id":
+            return HTTPException(status_code=404, detail="Task Control Envelope not found")
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Task Control Envelope error")
+
+
+def _evidence_card_error(exc: Exception) -> HTTPException:
+    from hermes_cli.mission_control_evidence_cards import EvidenceCardError
+
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail="Evidence Card not found")
+    if isinstance(exc, EvidenceCardError):
+        if str(exc) == "Invalid evidence card id":
+            return HTTPException(status_code=404, detail="Evidence Card not found")
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Evidence Card error")
+
+
+@app.get("/api/mission-control/packets")
+async def get_mission_control_packets():
+    from hermes_cli.mission_control import list_packets
+
+    return list_packets()
+
+
+@app.get("/api/mission-control/packets/{packet_id}")
+async def get_mission_control_packet(packet_id: str):
+    from hermes_cli.mission_control import get_packet
+
+    try:
+        return get_packet(packet_id)
+    except Exception as exc:
+        raise _mission_control_packet_error(exc) from exc
+
+
+@app.post("/api/mission-control/packets/codex-prompt")
+async def post_mission_control_codex_prompt_packet(body: Dict[str, Any]):
+    from hermes_cli.mission_control import (
+        create_rejection_audit,
+        save_next_codex_prompt,
+    )
+
+    try:
+        packet = save_next_codex_prompt(dict(body))
+        return {"packet": packet}
+    except Exception as exc:
+        create_rejection_audit(dict(body), str(exc), packet_kind="codex_prompt")
+        raise _mission_control_packet_error(exc) from exc
+
+
+@app.post("/api/mission-control/packets/worker-result")
+async def post_mission_control_worker_result_packet(body: Dict[str, Any]):
+    from hermes_cli.mission_control import (
+        create_rejection_audit,
+        import_worker_result,
+    )
+
+    try:
+        packet = import_worker_result(dict(body))
+        return {"packet": packet}
+    except Exception as exc:
+        create_rejection_audit(dict(body), str(exc), packet_kind="worker_result")
+        raise _mission_control_packet_error(exc) from exc
+
+
+@app.post("/api/mission-control/packets/block-flag")
+async def post_mission_control_block_flag_packet(body: Dict[str, Any]):
+    from hermes_cli.mission_control import (
+        create_rejection_audit,
+        set_block_flag,
+    )
+
+    try:
+        packet = set_block_flag(dict(body))
+        return {"packet": packet}
+    except Exception as exc:
+        create_rejection_audit(dict(body), str(exc), packet_kind="block_flag")
+        raise _mission_control_packet_error(exc) from exc
+
+
+@app.get("/api/mission-control/mission-briefs")
+async def get_mission_briefs():
+    _require_mission_briefs_enabled()
+    from hermes_cli.mission_briefs import list_briefs
+
+    return list_briefs()
+
+
+@app.post("/api/mission-control/mission-briefs")
+async def post_mission_brief(body: Dict[str, Any]):
+    _require_mission_briefs_enabled()
+    from hermes_cli.mission_briefs import create_brief
+
+    try:
+        return {"brief": create_brief(dict(body))}
+    except Exception as exc:
+        raise _mission_brief_error(exc) from exc
+
+
+@app.get("/api/mission-control/mission-briefs/{brief_id}")
+async def get_mission_brief(brief_id: str):
+    _require_mission_briefs_enabled()
+    from hermes_cli.mission_briefs import get_brief
+
+    try:
+        return get_brief(brief_id)
+    except Exception as exc:
+        raise _mission_brief_error(exc) from exc
+
+
+@app.put("/api/mission-control/mission-briefs/{brief_id}")
+async def put_mission_brief(brief_id: str, body: Dict[str, Any]):
+    _require_mission_briefs_enabled()
+    from hermes_cli.mission_briefs import update_brief
+
+    try:
+        return update_brief(brief_id, dict(body))
+    except Exception as exc:
+        raise _mission_brief_error(exc) from exc
+
+
+@app.delete("/api/mission-control/mission-briefs/{brief_id}")
+async def delete_mission_brief(brief_id: str):
+    _require_mission_briefs_enabled()
+    from hermes_cli.mission_briefs import archive_brief
+
+    try:
+        return archive_brief(brief_id)
+    except Exception as exc:
+        raise _mission_brief_error(exc) from exc
+
+
+@app.get("/api/mission-control/goal-contracts")
+async def get_goal_contracts():
+    _require_goal_contracts_enabled()
+    from hermes_cli.mission_control_goal_contracts import list_contracts
+
+    return list_contracts()
+
+
+@app.post("/api/mission-control/goal-contracts")
+async def post_goal_contract(body: Dict[str, Any]):
+    _require_goal_contracts_enabled()
+    from hermes_cli.mission_control_goal_contracts import create_contract
+
+    try:
+        return {"contract": create_contract(dict(body))}
+    except Exception as exc:
+        raise _goal_contract_error(exc) from exc
+
+
+@app.get("/api/mission-control/goal-contracts/{contract_id}")
+async def get_goal_contract(contract_id: str):
+    _require_goal_contracts_enabled()
+    from hermes_cli.mission_control_goal_contracts import get_contract
+
+    try:
+        return get_contract(contract_id)
+    except Exception as exc:
+        raise _goal_contract_error(exc) from exc
+
+
+@app.put("/api/mission-control/goal-contracts/{contract_id}")
+async def put_goal_contract(contract_id: str, body: Dict[str, Any]):
+    _require_goal_contracts_enabled()
+    from hermes_cli.mission_control_goal_contracts import update_contract
+
+    try:
+        return update_contract(contract_id, dict(body))
+    except Exception as exc:
+        raise _goal_contract_error(exc) from exc
+
+
+@app.delete("/api/mission-control/goal-contracts/{contract_id}")
+async def delete_goal_contract(contract_id: str):
+    _require_goal_contracts_enabled()
+    from hermes_cli.mission_control_goal_contracts import archive_contract
+
+    try:
+        return archive_contract(contract_id)
+    except Exception as exc:
+        raise _goal_contract_error(exc) from exc
+
+
+@app.get("/api/mission-control/approval-slices")
+async def get_approval_slices(include_inactive: bool = False):
+    _require_approval_slices_enabled()
+    from hermes_cli.mission_control_approval_slices import list_approval_slices
+
+    return list_approval_slices(include_inactive=include_inactive)
+
+
+@app.post("/api/mission-control/approval-slices")
+async def post_approval_slice(body: Dict[str, Any]):
+    _require_approval_slices_enabled()
+    from hermes_cli.mission_control_approval_slices import create_approval_slice
+
+    try:
+        return {"approval_slice": create_approval_slice(dict(body))}
+    except Exception as exc:
+        raise _approval_slice_error(exc) from exc
+
+
+@app.get("/api/mission-control/approval-slices/{slice_id}")
+async def get_approval_slice(slice_id: str):
+    _require_approval_slices_enabled()
+    from hermes_cli.mission_control_approval_slices import get_approval_slice as read_approval_slice
+
+    try:
+        return read_approval_slice(slice_id)
+    except Exception as exc:
+        raise _approval_slice_error(exc) from exc
+
+
+@app.post("/api/mission-control/approval-slices/{slice_id}/revoke")
+async def revoke_approval_slice(slice_id: str):
+    _require_approval_slices_enabled()
+    from hermes_cli.mission_control_approval_slices import transition_approval_slice
+
+    try:
+        return transition_approval_slice(slice_id, "revoked")
+    except Exception as exc:
+        raise _approval_slice_error(exc) from exc
+
+
+@app.post("/api/mission-control/approval-slices/{slice_id}/expire")
+async def expire_approval_slice(slice_id: str):
+    _require_approval_slices_enabled()
+    from hermes_cli.mission_control_approval_slices import transition_approval_slice
+
+    try:
+        return transition_approval_slice(slice_id, "expired")
+    except Exception as exc:
+        raise _approval_slice_error(exc) from exc
+
+
+@app.post("/api/mission-control/approval-slices/{slice_id}/complete")
+async def complete_approval_slice(slice_id: str):
+    _require_approval_slices_enabled()
+    from hermes_cli.mission_control_approval_slices import transition_approval_slice
+
+    try:
+        return transition_approval_slice(slice_id, "completed")
+    except Exception as exc:
+        raise _approval_slice_error(exc) from exc
+
+
+@app.get("/api/mission-control/task-control-envelopes")
+async def get_task_control_envelopes(include_inactive: bool = False):
+    _require_task_control_envelopes_enabled()
+    from hermes_cli.mission_control_task_control_envelopes import list_task_control_envelopes
+
+    return list_task_control_envelopes(include_inactive=include_inactive)
+
+
+@app.post("/api/mission-control/task-control-envelopes")
+async def post_task_control_envelope(body: Dict[str, Any]):
+    _require_task_control_envelopes_enabled()
+    from hermes_cli.mission_control_task_control_envelopes import create_task_control_envelope
+
+    try:
+        return {"task_control_envelope": create_task_control_envelope(dict(body))}
+    except Exception as exc:
+        raise _task_control_envelope_error(exc) from exc
+
+
+@app.get("/api/mission-control/task-control-envelopes/{envelope_id}")
+async def get_task_control_envelope(envelope_id: str):
+    _require_task_control_envelopes_enabled()
+    from hermes_cli.mission_control_task_control_envelopes import (
+        get_task_control_envelope as read_task_control_envelope,
+    )
+
+    try:
+        return read_task_control_envelope(envelope_id)
+    except Exception as exc:
+        raise _task_control_envelope_error(exc) from exc
+
+
+@app.post("/api/mission-control/task-control-envelopes/{envelope_id}/complete")
+async def complete_task_control_envelope(envelope_id: str):
+    _require_task_control_envelopes_enabled()
+    from hermes_cli.mission_control_task_control_envelopes import transition_task_control_envelope
+
+    try:
+        return transition_task_control_envelope(envelope_id, "completed")
+    except Exception as exc:
+        raise _task_control_envelope_error(exc) from exc
+
+
+@app.post("/api/mission-control/task-control-envelopes/{envelope_id}/archive")
+async def archive_task_control_envelope(envelope_id: str):
+    _require_task_control_envelopes_enabled()
+    from hermes_cli.mission_control_task_control_envelopes import transition_task_control_envelope
+
+    try:
+        return transition_task_control_envelope(envelope_id, "archived")
+    except Exception as exc:
+        raise _task_control_envelope_error(exc) from exc
+
+
+@app.get("/api/mission-control/evidence-cards")
+async def get_evidence_cards():
+    _require_evidence_cards_enabled()
+    from hermes_cli.mission_control_evidence_cards import list_cards
+
+    return list_cards()
+
+
+@app.post("/api/mission-control/evidence-cards")
+async def post_evidence_card(body: Dict[str, Any]):
+    _require_evidence_cards_enabled()
+    from hermes_cli.mission_control_evidence_cards import create_card
+
+    try:
+        return {"card": create_card(dict(body))}
+    except Exception as exc:
+        raise _evidence_card_error(exc) from exc
+
+
+@app.get("/api/mission-control/evidence-cards/{card_id}")
+async def get_evidence_card(card_id: str):
+    _require_evidence_cards_enabled()
+    from hermes_cli.mission_control_evidence_cards import get_card
+
+    try:
+        return get_card(card_id)
+    except Exception as exc:
+        raise _evidence_card_error(exc) from exc
+
+
+@app.get("/api/mission-control/project-rooms")
+async def get_project_rooms():
+    from hermes_cli.mission_control_project_rooms import list_rooms
+
+    return list_rooms()
+
+
+@app.post("/api/mission-control/project-rooms")
+async def post_project_room(body: Dict[str, Any]):
+    from hermes_cli.mission_control_project_rooms import create_room
+
+    try:
+        return {"room": create_room(dict(body))}
+    except Exception as exc:
+        raise _project_room_error(exc) from exc
+
+
+@app.get("/api/mission-control/project-rooms/{room_id}/messages")
+async def get_project_room_messages(room_id: str):
+    from hermes_cli.mission_control_project_rooms import list_messages
+
+    try:
+        return list_messages(room_id)
+    except Exception as exc:
+        raise _project_room_error(exc) from exc
+
+
+@app.post("/api/mission-control/project-rooms/{room_id}/messages")
+async def post_project_room_message(room_id: str, body: Dict[str, Any]):
+    from hermes_cli.mission_control_project_rooms import add_message
+
+    try:
+        return {"message": add_message(room_id, dict(body))}
+    except Exception as exc:
+        raise _project_room_error(exc) from exc
+
+
+@app.post("/api/mission-control/project-rooms/{room_id}/attachments")
+async def post_project_room_attachment(room_id: str, file: UploadFile = File(...)):
+    from hermes_cli.mission_control_project_rooms import add_attachment
+
+    try:
+        content = await file.read()
+        attachment = add_attachment(
+            room_id,
+            filename=file.filename or "",
+            mime_type=file.content_type or "application/octet-stream",
+            content=content,
+        )
+        return {"attachment": attachment}
+    except Exception as exc:
+        raise _project_room_error(exc) from exc
+    finally:
+        await file.close()
+
+
+@app.get("/api/mission-control/project-rooms/{room_id}/attachments/{attachment_id}")
+async def get_project_room_attachment(room_id: str, attachment_id: str):
+    from hermes_cli.mission_control_project_rooms import get_attachment
+
+    try:
+        return {"attachment": get_attachment(room_id, attachment_id)}
+    except Exception as exc:
+        raise _project_room_error(exc) from exc
+
+
+@app.get("/api/mission-control/project-rooms/{room_id}/attachments/{attachment_id}/download")
+async def download_project_room_attachment(room_id: str, attachment_id: str):
+    from hermes_cli.mission_control_project_rooms import attachment_file_path
+
+    try:
+        path, attachment = attachment_file_path(room_id, attachment_id)
+        return FileResponse(
+            path,
+            media_type=str(attachment.get("mime_type") or "application/octet-stream"),
+            filename=str(attachment.get("original_filename") or path.name),
+        )
+    except Exception as exc:
+        raise _project_room_error(exc) from exc
 
 
 _CRON_PROFILE_LOCK = threading.RLock()
