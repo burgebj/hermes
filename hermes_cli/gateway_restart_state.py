@@ -290,10 +290,7 @@ class RestartLock:
             "claimed_at": time.time(),
         }
         try:
-            self._path.write_text(
-                json.dumps(claimed_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _atomic_write_json(self._path, claimed_data)
             return True
         except OSError:
             return False

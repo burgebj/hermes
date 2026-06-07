@@ -218,8 +218,18 @@ def schedule_restart_handoff(
         }
 
     # P0-4: Wait for worker to claim lease before releasing coordinator hold
-    _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
+    claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
+    if not claimed:
+        # Worker failed to claim within timeout — the worker may have
+        # crashed before reaching claim_lease().  Do NOT release the lock
+        # yet; let the worker's finally block or TTL expiry handle cleanup.
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            origin=origin, state="scheduled",
+            reason="worker_claim_timeout",
+        )
     # Coordinator releases its reference — worker now owns the lock
+    # (or lock will expire via TTL if worker never claimed)
     lock.release()
 
     result: dict[str, Any] = {
