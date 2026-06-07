@@ -207,14 +207,25 @@ class QQAdapter(BasePlatformAdapter):
         ).strip()
         self._markdown_support = bool(extra.get("markdown_support", True))
 
-        # Auth/ACL policies
-        self._dm_policy = str(extra.get("dm_policy", "open")).strip().lower()
+        # Auth/ACL policies — read from config extra first, then env vars so
+        # that env-only setups (e.g. written by the setup wizard) work without
+        # a config.yaml entry.  Mirrors the identical fallback pattern in WeCom
+        # (f7a3509b2), WhatsApp (PR #37452), and WeCom group (PR #37678).
+        self._dm_policy = str(
+            extra.get("dm_policy") or os.getenv("QQBOT_DM_POLICY", "open")
+        ).strip().lower()
         self._allow_from = _coerce_list(
-            extra.get("allow_from") or extra.get("allowFrom")
+            extra.get("allow_from")
+            or extra.get("allowFrom")
+            or os.getenv("QQBOT_ALLOWED_USERS", "")
         )
-        self._group_policy = str(extra.get("group_policy", "open")).strip().lower()
+        self._group_policy = str(
+            extra.get("group_policy") or os.getenv("QQBOT_GROUP_POLICY", "open")
+        ).strip().lower()
         self._group_allow_from = _coerce_list(
-            extra.get("group_allow_from") or extra.get("groupAllowFrom")
+            extra.get("group_allow_from")
+            or extra.get("groupAllowFrom")
+            or os.getenv("QQBOT_GROUP_ALLOWED_USERS", "")
         )
 
         # Connection state
