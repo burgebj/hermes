@@ -1012,6 +1012,19 @@ def skill_view(
             seen_md.add(key)
             candidates.append((sd, smd))
 
+        def _is_nested_under_directory_skill(search_root: Path, found_md: Path) -> bool:
+            try:
+                rel_parts = found_md.relative_to(search_root).parts[:-1]
+            except Exception:
+                return False
+
+            current = search_root
+            for part in rel_parts:
+                current = current / part
+                if (current / "SKILL.md").exists():
+                    return True
+            return False
+
         for search_dir in all_dirs:
             # Strategy 1: direct path (e.g., "mlops/axolotl" or bare "axolotl"
             # at the top of the dir).
@@ -1040,6 +1053,11 @@ def skill_view(
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
             for found_md in search_dir.rglob(f"{name}.md"):
                 if found_md.name != "SKILL.md":
+                    # Ignore linked/reference files nested under a directory
+                    # skill. Only standalone legacy flat skills should
+                    # participate in bare-name resolution.
+                    if _is_nested_under_directory_skill(search_dir, found_md):
+                        continue
                     _record(None, found_md)
 
         if len(candidates) > 1:

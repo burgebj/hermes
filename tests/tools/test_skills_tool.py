@@ -1223,6 +1223,25 @@ class TestSkillViewCollisionDetection:
         assert result["success"] is True
         assert "EXTERNAL BODY" in result["content"]
 
+    def test_asset_markdown_name_does_not_trigger_false_collision(self, tmp_path):
+        """A markdown asset in another skill should not be treated as a
+        legacy flat skill candidate."""
+        local_dir = tmp_path / "local"
+        local_dir.mkdir()
+
+        _make_skill(local_dir, "shared-name", body="TARGET BODY")
+        other_skill = _make_skill(local_dir, "other-skill", body="OTHER BODY")
+        assets_dir = other_skill / "assets"
+        assets_dir.mkdir()
+        (assets_dir / "shared-name.md").write_text("asset payload", encoding="utf-8")
+
+        with patch("tools.skills_tool.SKILLS_DIR", local_dir):
+            raw = skill_view("shared-name")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "TARGET BODY" in result["content"]
+
     def test_two_externals_same_name_also_refuse(self, tmp_path):
         """Collision detection is symmetric — two external dirs with
         same-name skills also trigger the refusal."""
