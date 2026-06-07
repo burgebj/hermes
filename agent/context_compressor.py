@@ -1889,6 +1889,20 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 
         if compress_start >= compress_end:
+            # No middle region to compress — tail protection covers everything.
+            # Count this as an ineffective compression attempt so the anti-thrash
+            # guard fires after two consecutive no-ops (fixes #36624: the counter
+            # was never incremented on this early-return path, allowing the
+            # preflight loop to retry indefinitely without making progress).
+            self._ineffective_compression_count += 1
+            if not self.quiet_mode:
+                logger.warning(
+                    "Compression no-op: tail protection covers all %d messages "
+                    "beyond head (%d ineffective attempt(s) so far). "
+                    "Consider /new to start a fresh session.",
+                    len(messages) - compress_start,
+                    self._ineffective_compression_count,
+                )
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
