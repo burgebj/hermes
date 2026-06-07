@@ -135,7 +135,7 @@ class AnthropicTransport(ProviderTransport):
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
         if raw_content:
-            provider_data["anthropic_content"] = raw_content
+            provider_data["_anthropic_content_blocks"] = raw_content
 
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None,
