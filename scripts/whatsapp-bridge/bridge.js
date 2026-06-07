@@ -87,6 +87,12 @@ function formatOutgoingMessage(message) {
   return REPLY_PREFIX ? `${REPLY_PREFIX}${message}` : message;
 }
 
+function textMessagePayload(text, extra = {}) {
+  // Baileys dynamically imports link-preview-js when link previews are enabled.
+  // Keep Hermes text sends simple and avoid that optional dependency/path.
+  return { text, linkPreview: null, ...extra };
+}
+
 function splitLongMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   const text = String(message || '');
   if (!text) return [];
@@ -504,7 +510,7 @@ app.post('/send', async (req, res) => {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
     for (let i = 0; i < chunks.length; i += 1) {
-      const sent = await sendWithTimeout(chatId, { text: chunks[i] });
+      const sent = await sendWithTimeout(chatId, textMessagePayload(chunks[i]));
       trackSentMessageId(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
       if (chunks.length > 1 && i < chunks.length - 1) {
@@ -538,10 +544,10 @@ app.post('/edit', async (req, res) => {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
 
-    await sendWithTimeout(chatId, { text: chunks[0], edit: key });
+    await sendWithTimeout(chatId, textMessagePayload(chunks[0], { edit: key }));
     if (chunks.length > 1) {
       for (let i = 1; i < chunks.length; i += 1) {
-        const sent = await sendWithTimeout(chatId, { text: chunks[i] });
+        const sent = await sendWithTimeout(chatId, textMessagePayload(chunks[i]));
         trackSentMessageId(sent);
         if (sent?.key?.id) messageIds.push(sent.key.id);
         if (i < chunks.length - 1) {
