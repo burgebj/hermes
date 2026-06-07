@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { ArrowUpRight } from '@/lib/icons'
 
+import { isLikelyDownloadUrl } from './download-targets'
 import { cn } from './utils'
 
 const titleCache = new Map<string, string>()
@@ -106,7 +107,7 @@ export function urlSlugTitleLabel(value: string): string {
 }
 
 export function isTitleFetchable(value: string): boolean {
-  if (!value || SKIP_PROTO_RE.test(value)) {
+  if (!value || SKIP_PROTO_RE.test(value) || isLikelyDownloadUrl(value)) {
     return false
   }
 

@@ -57,6 +57,7 @@ describe('external link helpers', () => {
     expect(isTitleFetchable('http://localhost:5174')).toBe(false)
     expect(isTitleFetchable('file:///tmp/demo.html')).toBe(false)
     expect(isTitleFetchable('mailto:hello@example.com')).toBe(false)
+    expect(isTitleFetchable('https://hermes-assets.nousresearch.com/Hermes-Setup.dmg')).toBe(false)
   })
 
   it('deduplicates in-flight title fetches and caches results', async () => {
@@ -76,6 +77,14 @@ describe('external link helpers', () => {
 
     expect(third).toBe('El Yunque Tour Water Slide, Rope Swing & Pickup')
     expect(bridge).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not ask the desktop bridge for titles on likely download links', async () => {
+    const bridge = vi.fn().mockResolvedValue('Hermes Setup')
+    installDesktopBridge({ fetchLinkTitle: bridge as unknown as Window['hermesDesktop']['fetchLinkTitle'] })
+
+    await expect(fetchLinkTitle('https://hermes-assets.nousresearch.com/Hermes-Setup.dmg')).resolves.toBe('')
+    expect(bridge).not.toHaveBeenCalled()
   })
 
   it('shares cache across protocol/www URL variants', async () => {

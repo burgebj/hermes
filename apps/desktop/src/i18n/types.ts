@@ -1244,6 +1244,7 @@ export interface Translations {
       fileChanged: (url: string) => string
       filesChanged: (count: number, url: string) => string
       watchFailed: (message: string) => string
+      downloadNotPreviewable: string
       moduleMimeDescription: string
       loadFailedConsole: (code: number | undefined, message: string) => string
       unreachableDescription: string

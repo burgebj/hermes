@@ -28,6 +28,7 @@ const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = requ
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
+const { backgroundNavigationHeaderPolicy, classifyResponseHeaders, isLikelyDownloadUrl } = require('./link-targets.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const {
   buildPosixCleanupScript,
@@ -2496,6 +2497,7 @@ const titleCache = new Map()
 const titleInflight = new Map()
 const TITLE_CACHE_LIMIT = 500
 const TITLE_BYTE_BUDGET = 96 * 1024
+const LINK_TARGET_SNIFF_BYTE_BUDGET = 4096
 const TITLE_TIMEOUT_MS = 5000
 const TITLE_MAX_REDIRECTS = 3
 // Browser-shaped UA — many bot-walled sites (GetYourGuide, Cloudflare-protected
@@ -2560,6 +2562,150 @@ function parseHtmlTitle(html) {
   return raw ? decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim() : ''
 }
 
+function headersObjectFromFetch(headers) {
+  const result = {}
+
+  for (const [key, value] of headers.entries()) {
+    result[key] = [value]
+  }
+
+  return result
+}
+
+async function readResponsePrefix(response, maxBytes, controller) {
+  const reader = response.body?.getReader?.()
+
+  if (!reader) {
+    return ''
+  }
+
+  const chunks = []
+  let bytes = 0
+
+  try {
+    while (bytes < maxBytes) {
+      const { done, value } = await reader.read()
+
+      if (done) {
+        break
+      }
+
+      const buffer = Buffer.from(value)
+      const remaining = maxBytes - bytes
+      const next = buffer.length > remaining ? buffer.subarray(0, remaining) : buffer
+
+      chunks.push(next)
+      bytes += next.length
+
+      if (buffer.length > remaining) {
+        await reader.cancel().catch(() => undefined)
+        controller.abort()
+        break
+      }
+    }
+  } catch {
+    // Timeout/abort during sniffing is treated as an unknown target.
+  }
+
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+function sniffLinkTargetKind(prefix) {
+  const value = String(prefix || '')
+    .replace(/^\uFEFF/, '')
+    .trimStart()
+    .slice(0, 512)
+    .toLowerCase()
+
+  if (/^(?:<!doctype\s+html\b|<html\b|<head\b|<title\b|<meta\b)/.test(value)) {
+    return { kind: 'html', reason: 'sniffed-html' }
+  }
+
+  if (prefix.includes('\u0000')) {
+    return { kind: 'download', reason: 'sniffed-binary' }
+  }
+
+  return { kind: 'unknown', reason: 'sniffed-unknown' }
+}
+
+async function fetchLinkTargetHeaders(rawUrl, method) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), TITLE_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(rawUrl, {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
+        'Accept-Encoding': 'identity',
+        'Accept-Language': 'en-US,en;q=0.7',
+        ...(method === 'GET' ? { Range: `bytes=0-${LINK_TARGET_SNIFF_BYTE_BUDGET - 1}` } : {}),
+        'User-Agent': TITLE_USER_AGENT
+      },
+      method,
+      redirect: 'follow',
+      signal: controller.signal
+    })
+    const headers = headersObjectFromFetch(response.headers)
+    const result = classifyResponseHeaders(headers)
+
+    if (result.kind !== 'unknown' || method !== 'GET') {
+      return {
+        ...result,
+        finalUrl: response.url,
+        ok: response.ok,
+        status: response.status
+      }
+    }
+
+    const sniffed = sniffLinkTargetKind(await readResponsePrefix(response, LINK_TARGET_SNIFF_BYTE_BUDGET, controller))
+
+    return {
+      ...result,
+      finalUrl: response.url,
+      kind: sniffed.kind,
+      ok: response.ok,
+      reason: sniffed.reason,
+      status: response.status
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function classifyLinkTarget(rawUrl) {
+  const url = String(rawUrl || '').trim()
+
+  if (!url) {
+    return { kind: 'unknown', reason: 'empty-url' }
+  }
+
+  let parsed = null
+
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { kind: 'unknown', reason: 'invalid-url' }
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return { kind: 'unknown', reason: 'unsupported-protocol' }
+  }
+
+  if (isLikelyDownloadUrl(url)) {
+    return { finalUrl: url, kind: 'download', reason: 'download-extension' }
+  }
+
+  const head = await fetchLinkTargetHeaders(url, 'HEAD').catch(() => null)
+
+  if (head?.kind === 'download' || head?.kind === 'html') {
+    return head
+  }
+
+  const get = await fetchLinkTargetHeaders(url, 'GET').catch(() => null)
+
+  return get || head || { finalUrl: url, kind: 'unknown', reason: 'network-error' }
+}
+
 function fetchHtmlTitleWithCurl(rawUrl) {
   return new Promise(resolve => {
     const url = String(rawUrl || '').trim()
@@ -2611,7 +2757,17 @@ function getLinkTitleSession() {
   if (linkTitleSession || !app.isReady()) return linkTitleSession
   linkTitleSession = session.fromPartition('hermes:link-titles', { cache: false })
   linkTitleSession.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType) })
+    callback({
+      cancel:
+        RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType) ||
+        (details.resourceType === 'mainFrame' && isLikelyDownloadUrl(details.url))
+    })
+  })
+  linkTitleSession.webRequest.onHeadersReceived((details, callback) => {
+    callback(backgroundNavigationHeaderPolicy(details))
+  })
+  linkTitleSession.on('will-download', event => {
+    event.preventDefault()
   })
   return linkTitleSession
 }
@@ -2714,13 +2870,28 @@ function fetchLinkTitle(rawUrl) {
   if (!key) return Promise.resolve('')
   if (titleCache.has(key)) return Promise.resolve(titleCache.get(key))
   if (titleInflight.has(key)) return titleInflight.get(key)
+  if (isLikelyDownloadUrl(url)) {
+    cacheTitle(key, '')
+
+    return Promise.resolve('')
+  }
 
   const pending = fetchHtmlTitleWithCurl(url)
     .catch(() => '')
     .then(value => usableTitle((value || '').slice(0, 240)))
-    .then(
-      async value => value || usableTitle(((await fetchHtmlTitleWithRenderer(url).catch(() => '')) || '').slice(0, 240))
-    )
+    .then(async value => {
+      if (value) {
+        return value
+      }
+
+      const classification = await classifyLinkTarget(url).catch(() => ({ kind: 'unknown' }))
+
+      if (classification.kind === 'download') {
+        return ''
+      }
+
+      return usableTitle(((await fetchHtmlTitleWithRenderer(url).catch(() => '')) || '').slice(0, 240))
+    })
     .then(clean => {
       cacheTitle(key, clean)
       titleInflight.delete(key)
@@ -5187,6 +5358,7 @@ ipcMain.handle('hermes:setting:defaultProjectDir:pick', async () => {
   return { canceled: false, dir: result.filePaths[0] }
 })
 
+ipcMain.handle('hermes:classifyLinkTarget', (_event, url) => classifyLinkTarget(String(url || '')))
 ipcMain.handle('hermes:fetchLinkTitle', (_event, url) => fetchLinkTitle(url))
 
 ipcMain.handle('hermes:logs:reveal', async () => {

@@ -1713,6 +1713,7 @@ export const zh: Translations = {
       fileChanged: url => `文件已变更，正在重新加载预览：${url}`,
       filesChanged: (count, url) => `${count} 个文件变更，正在重新加载预览：${url}`,
       watchFailed: message => `无法监听预览文件：${message}`,
+      downloadNotPreviewable: '此目标看起来是可下载文件，因此 Hermes 未在预览中打开它。',
       moduleMimeDescription:
         '模块脚本使用了错误的 MIME 类型。这通常表示静态文件服务器正在服务 Vite/React 应用，而不是项目开发服务器。',
       loadFailedConsole: (code, message) => `加载失败${code ? ` (${code})` : ''}: ${message}`,

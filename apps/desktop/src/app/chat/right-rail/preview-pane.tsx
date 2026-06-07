@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SetTitlebarToolGroup, TitlebarTool } from '@/app/shell/titlebar-controls'
 import { Tip } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
+import { isLikelyDownloadUrl } from '@/lib/download-targets'
 import { Bug } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
@@ -46,6 +47,17 @@ interface PreviewLoadErrorState {
 
 const FILE_RELOAD_DEBOUNCE_MS = 200
 const SERVER_RESTART_TIMEOUT_MS = 45_000
+const LOCAL_WEB_PREVIEW_HOST_RE = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?$/i
+
+function shouldClassifyPreviewUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+
+    return /^https?:$/.test(url.protocol) && !LOCAL_WEB_PREVIEW_HOST_RE.test(url.host)
+  } catch {
+    return false
+  }
+}
 
 function loadErrorTitle(error: PreviewLoadErrorState, copy: Translations['preview']['web']): string {
   const description = error.description.toLowerCase()
@@ -511,92 +523,147 @@ export function PreviewPane({
       return
     }
 
-    const webview = document.createElement('webview') as PreviewWebview
-    webview.className = 'flex h-full w-full flex-1 bg-transparent'
-    webview.setAttribute('partition', 'persist:hermes-preview')
-    webview.setAttribute('src', target.url)
-    webview.setAttribute('webpreferences', 'contextIsolation=yes,nodeIntegration=no,sandbox=yes')
+    let active = true
 
-    const onConsole = (event: Event) => {
-      const detail = event as Event & {
-        level?: number
-        line?: number
-        message?: string
-        sourceId?: string
-      }
+    let cleanupWebview = () => {}
 
-      const message = detail.message || ''
-
-      appendConsoleEntry({
-        level: detail.level ?? 0,
-        line: detail.line,
-        message,
-        source: detail.sourceId
-      })
-
-      if ((detail.level ?? 0) >= 3 && isModuleMimeError(message)) {
-        setLoadError({
-          description: copy.moduleMimeDescription,
-          url: webview.getURL?.() || target.url
-        })
-        setLoading(false)
-      }
-    }
-
-    const onNavigate = (event: Event) => {
-      const detail = event as Event & { url?: string }
-
-      if (detail.url) {
-        setLoadError(null)
-        setCurrentUrl(detail.url)
-      }
-    }
-
-    const onFail = (event: Event) => {
-      const detail = event as Event & {
-        errorCode?: number
-        errorDescription?: string
-        validatedURL?: string
-      }
-
-      const errorCode = detail.errorCode
-
-      if (errorCode === -3) {
-        return
-      }
-
-      appendConsoleEntry({
-        level: 3,
-        message: copy.loadFailedConsole(errorCode, detail.errorDescription || detail.validatedURL || copy.unknownError)
-      })
+    const blockDownloadPreview = () => {
       setLoadError({
-        code: errorCode,
-        description: detail.errorDescription || copy.unreachableDescription,
-        url: detail.validatedURL || webview.getURL?.() || target.url
+        description: copy.downloadNotPreviewable,
+        url: target.url
       })
       setLoading(false)
     }
 
-    const onStart = () => setLoading(true)
-    const onStop = () => setLoading(false)
+    const mountWebview = () => {
+      if (!active) {
+        return
+      }
 
-    webview.addEventListener('console-message', onConsole)
-    webview.addEventListener('did-fail-load', onFail)
-    webview.addEventListener('did-navigate', onNavigate)
-    webview.addEventListener('did-navigate-in-page', onNavigate)
-    webview.addEventListener('did-start-loading', onStart)
-    webview.addEventListener('did-stop-loading', onStop)
-    host.appendChild(webview)
-    webviewRef.current = webview
+      const webview = document.createElement('webview') as PreviewWebview
+      webview.className = 'flex h-full w-full flex-1 bg-transparent'
+      webview.setAttribute('partition', 'persist:hermes-preview')
+      webview.setAttribute('src', target.url)
+      webview.setAttribute('webpreferences', 'contextIsolation=yes,nodeIntegration=no,sandbox=yes')
+
+      const onConsole = (event: Event) => {
+        const detail = event as Event & {
+          level?: number
+          line?: number
+          message?: string
+          sourceId?: string
+        }
+
+        const message = detail.message || ''
+
+        appendConsoleEntry({
+          level: detail.level ?? 0,
+          line: detail.line,
+          message,
+          source: detail.sourceId
+        })
+
+        if ((detail.level ?? 0) >= 3 && isModuleMimeError(message)) {
+          setLoadError({
+            description: copy.moduleMimeDescription,
+            url: webview.getURL?.() || target.url
+          })
+          setLoading(false)
+        }
+      }
+
+      const onNavigate = (event: Event) => {
+        const detail = event as Event & { url?: string }
+
+        if (detail.url) {
+          setLoadError(null)
+          setCurrentUrl(detail.url)
+        }
+      }
+
+      const onFail = (event: Event) => {
+        const detail = event as Event & {
+          errorCode?: number
+          errorDescription?: string
+          validatedURL?: string
+        }
+
+        const errorCode = detail.errorCode
+
+        if (errorCode === -3) {
+          return
+        }
+
+        appendConsoleEntry({
+          level: 3,
+          message: copy.loadFailedConsole(
+            errorCode,
+            detail.errorDescription || detail.validatedURL || copy.unknownError
+          )
+        })
+        setLoadError({
+          code: errorCode,
+          description: detail.errorDescription || copy.unreachableDescription,
+          url: detail.validatedURL || webview.getURL?.() || target.url
+        })
+        setLoading(false)
+      }
+
+      const onStart = () => setLoading(true)
+      const onStop = () => setLoading(false)
+
+      webview.addEventListener('console-message', onConsole)
+      webview.addEventListener('did-fail-load', onFail)
+      webview.addEventListener('did-navigate', onNavigate)
+      webview.addEventListener('did-navigate-in-page', onNavigate)
+      webview.addEventListener('did-start-loading', onStart)
+      webview.addEventListener('did-stop-loading', onStop)
+      host.appendChild(webview)
+      webviewRef.current = webview
+
+      cleanupWebview = () => {
+        webview.removeEventListener('console-message', onConsole)
+        webview.removeEventListener('did-fail-load', onFail)
+        webview.removeEventListener('did-navigate', onNavigate)
+        webview.removeEventListener('did-navigate-in-page', onNavigate)
+        webview.removeEventListener('did-start-loading', onStart)
+        webview.removeEventListener('did-stop-loading', onStop)
+        webview.remove()
+      }
+    }
+
+    if (isLikelyDownloadUrl(target.url)) {
+      blockDownloadPreview()
+
+      return () => {
+        active = false
+      }
+    }
+
+    if (shouldClassifyPreviewUrl(target.url) && window.hermesDesktop?.classifyLinkTarget) {
+      void window.hermesDesktop
+        .classifyLinkTarget(target.url)
+        .then(result => {
+          if (!active) {
+            return
+          }
+
+          if (result.kind === 'download') {
+            blockDownloadPreview()
+
+            return
+          }
+
+          mountWebview()
+        })
+        .catch(() => mountWebview())
+    } else {
+      mountWebview()
+    }
 
     return () => {
-      webview.removeEventListener('console-message', onConsole)
-      webview.removeEventListener('did-fail-load', onFail)
-      webview.removeEventListener('did-navigate', onNavigate)
-      webview.removeEventListener('did-navigate-in-page', onNavigate)
-      webview.removeEventListener('did-start-loading', onStart)
-      webview.removeEventListener('did-stop-loading', onStop)
-      webview.remove()
+      active = false
+      cleanupWebview()
     }
   }, [appendConsoleEntry, consoleState, copy, isWebPreview, target.url])
 

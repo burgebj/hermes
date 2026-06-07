@@ -1677,6 +1677,8 @@ export const ja = defineLocale({
       fileChanged: url => `ファイルが変更され、プレビューを再読み込み中: ${url}`,
       filesChanged: (count, url) => `${count} 件のファイルが変更され、プレビューを再読み込み中: ${url}`,
       watchFailed: message => `プレビューファイルを監視できませんでした: ${message}`,
+      downloadNotPreviewable:
+        'このターゲットはダウンロード可能なファイルのように見えるため、Hermes はプレビューで開きませんでした。',
       moduleMimeDescription:
         'モジュールスクリプトが間違った MIME タイプで提供されています。通常、静的ファイルサーバーがプロジェクトの開発サーバーの代わりに Vite/React アプリを提供していることを意味します。',
       loadFailedConsole: (code, message) => `読み込みに失敗しました${code ? ` (${code})` : ''}: ${message}`,

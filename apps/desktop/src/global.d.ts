@@ -43,6 +43,7 @@ declare global {
       setTitleBarTheme?: (payload: HermesTitleBarTheme) => void
       setPreviewShortcutActive?: (active: boolean) => void
       openExternal: (url: string) => Promise<void>
+      classifyLinkTarget?: (url: string) => Promise<HermesLinkTargetClassification>
       fetchLinkTitle: (url: string) => Promise<string>
       settings: {
         getDefaultProjectDir: () => Promise<{ defaultLabel: string; dir: null | string }>
@@ -98,6 +99,16 @@ export interface HermesTerminalSession {
 export interface HermesTerminalExit {
   code: number | null
   signal: string | null
+}
+
+export interface HermesLinkTargetClassification {
+  contentDisposition?: string
+  contentType?: string
+  finalUrl?: string
+  kind: 'download' | 'html' | 'unknown'
+  ok?: boolean
+  reason: string
+  status?: number
 }
 
 export interface DesktopVersionInfo {

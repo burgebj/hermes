@@ -40,4 +40,20 @@ describe('PreviewPane console state', () => {
 
     expect(setTitlebarToolGroup).toHaveBeenCalledTimes(initialCalls)
   })
+
+  it('does not mount a webview for likely download targets', () => {
+    const rendered = render(
+      <PreviewPane
+        target={{
+          kind: 'url',
+          label: 'Hermes Setup',
+          source: 'https://hermes-assets.nousresearch.com/Hermes-Setup.dmg',
+          url: 'https://hermes-assets.nousresearch.com/Hermes-Setup.dmg'
+        }}
+      />
+    )
+
+    expect(rendered.container.querySelector('webview')).toBeNull()
+    expect(rendered.container.textContent).toContain('downloadable file')
+  })
 })

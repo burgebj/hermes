@@ -1573,6 +1573,7 @@ export const en: Translations = {
       fileChanged: url => `File changed, reloading preview: ${url}`,
       filesChanged: (count, url) => `${count} file changes, reloading preview: ${url}`,
       watchFailed: message => `Could not watch preview file: ${message}`,
+      downloadNotPreviewable: 'This target looks like a downloadable file, so Hermes did not open it in the preview.',
       moduleMimeDescription:
         'Module scripts are being served with the wrong MIME type. This usually means a static file server is serving a Vite/React app instead of the project dev server.',
       loadFailedConsole: (code, message) => `Load failed${code ? ` (${code})` : ''}: ${message}`,
