@@ -134,6 +134,12 @@ class Mem0MemoryProvider(MemoryProvider):
         # Circuit breaker state
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
+        # Session-level retrieval cache: avoids re-querying Mem0 every turn
+        # so the injected context text stays stable and Anthropic prefix
+        # cache is not invalidated between turns.
+        self._session_cache: dict[str, str] = {}
+        self._session_cache_enabled = True
+        self._current_session_id = ""
 
     @property
     def name(self) -> str:
@@ -209,6 +215,8 @@ class Mem0MemoryProvider(MemoryProvider):
         self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
         self._agent_id = self._config.get("agent_id", "hermes")
         self._rerank = self._config.get("rerank", True)
+        self._session_cache_enabled = self._config.get("retrieve_per_session", True)
+        self._current_session_id = session_id
 
     def _read_filters(self) -> Dict[str, Any]:
         """Filters for search/get_all — scoped to user only for cross-session recall."""
@@ -249,6 +257,12 @@ class Mem0MemoryProvider(MemoryProvider):
         if self._is_breaker_open():
             return
 
+        cache_key = session_id or self._current_session_id
+        if self._session_cache_enabled and cache_key and cache_key in self._session_cache:
+            with self._prefetch_lock:
+                self._prefetch_result = self._session_cache[cache_key]
+            return
+
         def _run():
             try:
                 client = self._get_client()
@@ -258,10 +272,14 @@ class Mem0MemoryProvider(MemoryProvider):
                     rerank=self._rerank,
                     top_k=5,
                 ))
+                formatted = ""
                 if results:
                     lines = [r.get("memory", "") for r in results if r.get("memory")]
-                    with self._prefetch_lock:
-                        self._prefetch_result = "\n".join(f"- {l}" for l in lines)
+                    formatted = "\n".join(f"- {l}" for l in lines)
+                with self._prefetch_lock:
+                    self._prefetch_result = formatted
+                if self._session_cache_enabled and cache_key:
+                    self._session_cache[cache_key] = formatted
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -368,6 +386,20 @@ class Mem0MemoryProvider(MemoryProvider):
         with self._client_lock:
             self._client = None
 
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs,
+    ) -> None:
+        self._current_session_id = new_session_id
+        if reset:
+            self._session_cache.clear()
+        elif parent_session_id and parent_session_id in self._session_cache:
+            del self._session_cache[parent_session_id]
 
 def register(ctx) -> None:
     """Register Mem0 as a memory provider plugin."""
