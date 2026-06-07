@@ -2836,6 +2836,46 @@ def test_command_dispatch_exec_nonzero_surfaces_error(monkeypatch):
     assert "failed" in resp["error"]["message"]
 
 
+def test_command_dispatch_exec_blocks_dangerous_commands(monkeypatch):
+    """dangerous shell commands (rm -rf /, etc.) are blocked by the approval guard."""
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"quick_commands": {"boom": {"type": "exec", "command": "rm -rf /"}}},
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "command.dispatch", "params": {"name": "boom"}}
+    )
+
+    assert "error" in resp
+    assert resp["error"]["code"] == 4005
+    assert "blocked" in resp["error"]["message"]
+
+
+def test_command_dispatch_exec_allows_safe_commands(monkeypatch):
+    """Safe commands (echo hello) pass through the approval guard."""
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"quick_commands": {"hello": {"type": "exec", "command": "echo hello"}}},
+    )
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            returncode=0, stdout="hello\n", stderr=""
+        ),
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "command.dispatch", "params": {"name": "hello"}}
+    )
+
+    assert "result" in resp
+    assert "hello" in resp["result"]["output"]
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(
