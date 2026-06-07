@@ -882,3 +882,44 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+
+class TestBareStringHomeChannel:
+    """Tests for #33141: ``hermes config set platforms.<name>.home_channel <chat_id>``
+    writes a plain string, but HomeChannel.from_dict expects a dict."""
+
+    def test_platformconfig_from_dict_string_home_channel(self):
+        """A bare-string home_channel is coerced into a proper HomeChannel."""
+        pc = PlatformConfig.from_dict(
+            {"enabled": True, "home_channel": "oc_b0b897cce6e70190959898f94fe8f9a8"},
+            platform=Platform.FEISHU,
+        )
+        assert pc.home_channel is not None
+        assert pc.home_channel.chat_id == "oc_b0b897cce6e70190959898f94fe8f9a8"
+        assert pc.home_channel.platform == Platform.FEISHU
+        assert pc.home_channel.name == "Home"
+
+    def test_platformconfig_from_dict_string_home_channel_no_platform(self):
+        """Bare string without platform context defaults to 'local'."""
+        pc = PlatformConfig.from_dict(
+            {"enabled": True, "home_channel": "12345"},
+        )
+        assert pc.home_channel is not None
+        assert pc.home_channel.chat_id == "12345"
+        assert pc.home_channel.platform == Platform.LOCAL
+
+    def test_gatewayconfig_from_dict_string_home_channel(self):
+        """Full GatewayConfig loading with a bare-string home_channel."""
+        data = {
+            "platforms": {
+                "feishu": {
+                    "enabled": True,
+                    "home_channel": "oc_test123",
+                },
+            },
+        }
+        config = GatewayConfig.from_dict(data)
+        hc = config.platforms[Platform.FEISHU].home_channel
+        assert hc is not None
+        assert hc.chat_id == "oc_test123"
+        assert hc.platform == Platform.FEISHU

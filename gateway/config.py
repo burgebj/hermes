@@ -317,10 +317,24 @@ class PlatformConfig:
         return result
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
+    def from_dict(cls, data: Dict[str, Any], platform: Optional["Platform"] = None) -> "PlatformConfig":
         home_channel = None
         if "home_channel" in data:
-            home_channel = HomeChannel.from_dict(data["home_channel"])
+            raw_hc = data["home_channel"]
+            # Gracefully handle plain-string home_channel values written by
+            # ``hermes config set platforms.<name>.home_channel <chat_id>``.
+            # The config setter stores bare strings, but the full structured
+            # form is ``{platform, chat_id, name}``.  When a bare string is
+            # found, wrap it into a proper dict so HomeChannel.from_dict can
+            # parse it, filling in the platform from the enclosing context.
+            # (ref: https://github.com/NousResearch/hermes-agent/issues/33141)
+            if isinstance(raw_hc, str):
+                raw_hc = {
+                    "platform": platform.value if platform else "local",
+                    "chat_id": raw_hc,
+                    "name": "Home",
+                }
+            home_channel = HomeChannel.from_dict(raw_hc)
 
         # gateway_restart_notification may be bridged into extra via the
         # shared-key loop in load_gateway_config(); check both top-level
@@ -611,7 +625,7 @@ class GatewayConfig:
         for platform_name, platform_data in data.get("platforms", {}).items():
             try:
                 platform = Platform(platform_name)
-                platforms[platform] = PlatformConfig.from_dict(platform_data)
+                platforms[platform] = PlatformConfig.from_dict(platform_data, platform=platform)
             except ValueError:
                 pass  # Skip unknown platforms
         
