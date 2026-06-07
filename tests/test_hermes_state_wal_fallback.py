@@ -183,6 +183,41 @@ class TestApplyWalWithFallback:
         finally:
             check.close()
 
+    def test_treats_set_wal_race_as_success_when_disk_says_wal(self, tmp_path):
+        """If the set-WAL path races but disk is already WAL, keep using WAL."""
+        target = tmp_path / "already-wal-race.db"
+        primer = sqlite3.connect(str(target), isolation_level=None)
+        try:
+            primer.execute("PRAGMA journal_mode=WAL")
+            primer.execute("CREATE TABLE t (x INTEGER)")
+            assert primer.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        finally:
+            primer.close()
+
+        calls = {"probe": 0, "set_wal": 0}
+
+        class _WalRaceConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                normalized = sql.lower().replace(" ", "")
+                if normalized == "pragmajournal_mode":
+                    calls["probe"] += 1
+                    if calls["probe"] == 1:
+                        raise sqlite3.OperationalError("locking protocol")
+                if "journal_mode=wal" in normalized:
+                    calls["set_wal"] += 1
+                    raise sqlite3.OperationalError("locking protocol")
+                return super().execute(sql, *args, **kwargs)
+
+        conn = sqlite3.connect(
+            str(target), factory=_WalRaceConnection, isolation_level=None
+        )
+        try:
+            assert apply_wal_with_fallback(conn, db_label="already-wal-race.db") == "wal"
+            assert calls["set_wal"] == 1
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        finally:
+            conn.close()
+
     def test_reraises_unrelated_operational_error(self, tmp_path):
         """Non-WAL-compat errors must NOT be silently swallowed by the fallback."""
         conn, _ = _open_blocking(
