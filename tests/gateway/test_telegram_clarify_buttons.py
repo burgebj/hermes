@@ -78,11 +78,13 @@ class TestTelegramSendClarify:
         _clear_clarify_state()
 
     @pytest.mark.asyncio
-    async def test_multi_choice_renders_buttons_and_other(self):
+    async def test_multi_choice_renders_buttons_with_labels(self):
         adapter = _make_adapter()
         mock_msg = MagicMock()
         mock_msg.message_id = 100
         adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+        # Reset module-level mock so we only see calls from this test.
+        sys.modules["telegram"].InlineKeyboardButton.reset_mock()
 
         result = await adapter.send_clarify(
             chat_id="12345",
@@ -105,10 +107,55 @@ class TestTelegramSendClarify:
         # InlineKeyboardMarkup with N+1 buttons (3 choices + Other)
         markup = kwargs["reply_markup"]
         assert markup is not None
-        # Mocked InlineKeyboardMarkup — just verify it was constructed
-        # with rows.  We check state instead of poking the mock structure.
+
+        # Verify button labels are the choice texts (not numbers)
+        # InlineKeyboardButton is the same mock as InlineKeyboardMarkup in our
+        # minimal telegram mock — inspect constructor calls directly.
+        telegram_mod = sys.modules["telegram"]
+        btn_calls = telegram_mod.InlineKeyboardButton.call_args_list
+        assert len(btn_calls) == 4
+        assert btn_calls[0][0][0] == "alpha"
+        assert btn_calls[1][0][0] == "beta"
+        assert btn_calls[2][0][0] == "gamma"
+        assert btn_calls[3][0][0] == "✏️ Other (type answer)"
+
         assert "cid1" in adapter._clarify_state
         assert adapter._clarify_state["cid1"] == "sk1"
+
+    @pytest.mark.asyncio
+    async def test_long_choice_label_truncated(self):
+        adapter = _make_adapter()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 100
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+        # Reset module-level mock so we only see calls from this test.
+        sys.modules["telegram"].InlineKeyboardButton.reset_mock()
+
+        long_choice = "x" * 200
+        result = await adapter.send_clarify(
+            chat_id="12345",
+            question="?",
+            choices=[long_choice],
+            clarify_id="cid1",
+            session_key="sk1",
+        )
+
+        assert result.success is True
+        kwargs = adapter._bot.send_message.call_args[1]
+        markup = kwargs["reply_markup"]
+        assert markup is not None
+        # InlineKeyboardButton is the same mock as InlineKeyboardMarkup in our
+        # minimal telegram mock — inspect constructor calls directly.
+        telegram_mod = sys.modules["telegram"]
+        btn_calls = telegram_mod.InlineKeyboardButton.call_args_list
+        # Filter calls from previous tests that may have polluted the module-level mock
+        # by checking the first positional arg (the label text).
+        labels = [call[0][0] for call in btn_calls]
+        assert len(labels) >= 2
+        btn_text = labels[0]
+        assert len(btn_text) <= 60
+        assert btn_text.endswith("…")
+        assert btn_text.startswith("x")
 
     @pytest.mark.asyncio
     async def test_open_ended_no_keyboard(self):
