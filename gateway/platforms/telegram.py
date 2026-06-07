@@ -441,6 +441,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
         self._polling_error_callback_ref = None
+        self._send_pool_timeout_count: int = 0
         # After sustained reconnect storms the PTB httpx pool can return
         # SendResult(success=True) for sends that never actually transmit.
         # _handle_polling_network_error sets this; _verify_polling_after_reconnect
@@ -939,6 +940,45 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception:
             logger.debug(
                 "[%s] Polling request re-initialize failed (non-fatal)",
+                self.name, exc_info=True,
+            )
+
+    async def _drain_send_connections(self) -> None:
+        """Reset the httpx connection pool used for send_message / edit_message.
+
+        Unlike the polling pool which is drained on network-error reconnect,
+        the general (send) pool had no recovery path.  Sustained proxy-level
+        connection leaks (half-closed TCP connections through Clash, etc.)
+        could fill all 512 pool slots, after which every send/edit fails
+        with ``Pool timeout: All connections in the connection pool are
+        occupied.``  Retrying doesn't help — the stuck connections must be
+        torn down.
+
+        This drains ONLY ``_request[1]`` (the general request) so concurrent
+        polling is never interrupted.
+        """
+        if not (self._app and self._app.bot):
+            return
+        try:
+            # PTB 22.x: _request is a (get_updates, general) tuple.
+            send_req = self._app.bot._request[1]  # noqa: SLF001
+        except Exception:
+            return
+        try:
+            await send_req.shutdown()
+        except Exception:
+            logger.debug(
+                "[%s] Send request shutdown failed (non-fatal)",
+                self.name, exc_info=True,
+            )
+        try:
+            await send_req.initialize()
+            logger.debug(
+                "[%s] Send request pool drained after pool timeout", self.name
+            )
+        except Exception:
+            logger.debug(
+                "[%s] Send request re-initialize failed (non-fatal)",
                 self.name, exc_info=True,
             )
 
@@ -2051,6 +2091,22 @@ class TelegramAdapter(BasePlatformAdapter):
                             and not self._looks_like_pool_timeout(send_err)
                         ):
                             raise
+                        # Pool timeout: the httpx connection pool is full of
+                        # stuck / half-closed connections. Retrying won't help
+                        # unless we drain the pool. Count consecutive pool
+                        # timeouts and drain after the threshold.
+                        if self._looks_like_pool_timeout(send_err):
+                            pc = getattr(self, '_send_pool_timeout_count', 0)
+                            self._send_pool_timeout_count = pc + 1
+                            if self._send_pool_timeout_count >= 3:
+                                logger.warning(
+                                    "[%s] Send pool timeout count %d — draining send connections",
+                                    self.name, self._send_pool_timeout_count,
+                                )
+                                await self._drain_send_connections()
+                                self._send_pool_timeout_count = 0
+                        else:
+                            self._send_pool_timeout_count = 0
                         if _send_attempt < 2:
                             wait = 2 ** _send_attempt
                             logger.warning("[%s] Network error on send (attempt %d/3), retrying in %ds: %s",
@@ -2074,6 +2130,8 @@ class TelegramAdapter(BasePlatformAdapter):
                                 continue
                         raise
                 message_ids.append(str(msg.message_id))
+                # Reset send pool timeout counter on successful send
+                self._send_pool_timeout_count = 0
 
             # Re-trigger typing indicator after sending a message.
             # Telegram clears the typing state when a new message is delivered,

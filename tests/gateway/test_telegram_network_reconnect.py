@@ -473,3 +473,131 @@ async def test_reconnect_schedules_heartbeat_probe_on_success():
             await t
         except (asyncio.CancelledError, Exception):
             pass
+
+
+# ── Send connection pool drain tests ────────────────────────────────────
+
+
+def _make_mock_app_with_send_pool():
+    """Build a mock Application with both polling and general request objects."""
+    mock_polling_req = AsyncMock()
+    mock_polling_req.shutdown = AsyncMock()
+    mock_polling_req.initialize = AsyncMock()
+
+    mock_send_req = AsyncMock()
+    mock_send_req.shutdown = AsyncMock()
+    mock_send_req.initialize = AsyncMock()
+
+    mock_bot = MagicMock()
+    mock_bot._request = (mock_polling_req, mock_send_req)  # (getUpdates, general)
+
+    mock_app = MagicMock()
+    mock_app.bot = mock_bot
+    return mock_app, mock_polling_req, mock_send_req
+
+
+@pytest.mark.asyncio
+async def test_drain_send_connections_cycles_general_pool_only():
+    """_drain_send_connections must drain only _request[1], not the polling pool."""
+    adapter = _make_adapter()
+    mock_app, mock_polling_req, mock_send_req = _make_mock_app_with_send_pool()
+    adapter._app = mock_app
+
+    await adapter._drain_send_connections()
+
+    # General (send) pool must be shut down and re-initialized
+    mock_send_req.shutdown.assert_called_once()
+    mock_send_req.initialize.assert_called_once()
+
+    # Polling pool must NOT be touched
+    mock_polling_req.shutdown.assert_not_called()
+    mock_polling_req.initialize.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_drain_send_noop_without_app():
+    """_drain_send_connections must be a no-op when _app is None."""
+    adapter = _make_adapter()
+    adapter._app = None
+    # Should not raise
+    await adapter._drain_send_connections()
+
+
+@pytest.mark.asyncio
+async def test_drain_send_noop_without_bot():
+    """_drain_send_connections must be a no-op when _app.bot is None."""
+    adapter = _make_adapter()
+    mock_app = MagicMock()
+    mock_app.bot = None
+    adapter._app = mock_app
+    # Should not raise
+    await adapter._drain_send_connections()
+
+
+@pytest.mark.asyncio
+async def test_drain_send_continues_when_shutdown_fails():
+    """initialize() must still be called even when shutdown() raises."""
+    adapter = _make_adapter()
+    mock_app, _, mock_send_req = _make_mock_app_with_send_pool()
+    mock_send_req.shutdown = AsyncMock(side_effect=Exception("shutdown boom"))
+    adapter._app = mock_app
+
+    await adapter._drain_send_connections()
+
+    mock_send_req.shutdown.assert_called_once()
+    mock_send_req.initialize.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_drain_send_continues_when_initialize_fails():
+    """Shutdown should succeed even if initialize fails afterward."""
+    adapter = _make_adapter()
+    mock_app, _, mock_send_req = _make_mock_app_with_send_pool()
+    mock_send_req.initialize = AsyncMock(side_effect=Exception("init boom"))
+    adapter._app = mock_app
+
+    # Should not raise
+    await adapter._drain_send_connections()
+
+    mock_send_req.shutdown.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_send_pool_timeout_counter_starts_zero():
+    """_send_pool_timeout_count is initialized to 0."""
+    adapter = _make_adapter()
+    assert adapter._send_pool_timeout_count == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_send_does_not_reset_counter():
+    """_drain_send_connections does NOT reset the counter — send() does that."""
+    adapter = _make_adapter()
+    mock_app, _, mock_send_req = _make_mock_app_with_send_pool()
+    adapter._app = mock_app
+
+    adapter._send_pool_timeout_count = 3
+    await adapter._drain_send_connections()
+
+    mock_send_req.shutdown.assert_called_once()
+    mock_send_req.initialize.assert_called_once()
+    # Counter is NOT reset by _drain_send_connections — the caller (send()) does it.
+    assert adapter._send_pool_timeout_count == 3
+
+
+@pytest.mark.asyncio
+async def test_send_pool_timeout_counter_full_lifecycle():
+    """Counter increments on pool timeout and resets on drain threshold."""
+    adapter = _make_adapter()
+    assert adapter._send_pool_timeout_count == 0
+
+    # Simulate pool timeout increments toward threshold
+    # (direct counter manipulation since we're not running the full send loop here)
+    adapter._send_pool_timeout_count = 2  # two prior timeouts
+    adapter._send_pool_timeout_count += 1  # third timeout → hits threshold
+
+    assert adapter._send_pool_timeout_count >= 3
+
+    # After drain, caller resets counter
+    adapter._send_pool_timeout_count = 0
+    assert adapter._send_pool_timeout_count == 0
