@@ -129,7 +129,9 @@ Add to `~/.hermes/.env`:
 ```bash
 # Cloud STT options (local needs no key)
 GROQ_API_KEY=***
+DEEPGRAM_API_KEY=***
 VOICE_TOOLS_OPENAI_KEY=***
+MISTRAL_API_KEY=***
 
 # Premium TTS (optional)
 ELEVENLABS_API_KEY=***
@@ -141,7 +143,32 @@ ELEVENLABS_API_KEY=***
 
 - `local` → best default for privacy and zero-cost use
 - `groq` → very fast cloud transcription
+- `deepgram` → cloud transcription via Deepgram Listen API; set `DEEPGRAM_API_KEY`, then `stt.provider: deepgram`
 - `openai` → good paid fallback
+- `mistral` → Voxtral transcription
+
+Deepgram needs no extra Python package beyond Hermes' normal dependencies. Minimal Deepgram config:
+
+```yaml
+stt:
+  enabled: true
+  provider: "deepgram"
+  deepgram:
+    model: "nova-3"
+    language: ""         # auto-detect; set "en", "es", "fr", etc. to force
+    language_hint: "pt"  # retry hint if auto-detect returns an empty transcript
+    smart_format: true
+    punctuate: true
+    diarize: false
+    detect_language: true
+```
+
+Optional Deepgram environment overrides:
+
+```bash
+STT_DEEPGRAM_MODEL=nova-3
+DEEPGRAM_STT_BASE_URL=https://api.deepgram.com/v1
+```
 
 #### Text-to-speech
 

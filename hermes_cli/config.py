@@ -266,6 +266,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "QQ_HOME_CHANNEL", "QQ_HOME_CHANNEL_NAME",  # legacy aliases (pre-rename, still read for back-compat)
     "QQ_ALLOWED_USERS", "QQ_GROUP_ALLOWED_USERS", "QQ_ALLOW_ALL_USERS", "QQ_MARKDOWN_SUPPORT",
     "QQ_STT_API_KEY", "QQ_STT_BASE_URL", "QQ_STT_MODEL",
+    "DEEPGRAM_API_KEY", "DEEPGRAM_STT_BASE_URL",
     "IRC_SERVER", "IRC_PORT", "IRC_NICKNAME", "IRC_CHANNEL",
     "IRC_USE_TLS", "IRC_SERVER_PASSWORD", "IRC_NICKSERV_PASSWORD",
     "TERMINAL_ENV", "TERMINAL_SSH_KEY", "TERMINAL_SSH_PORT",
@@ -1591,7 +1592,7 @@ DEFAULT_CONFIG = {
     
     "stt": {
         "enabled": True,
-        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "elevenlabs" (Scribe)
+        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "deepgram" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "elevenlabs" (Scribe)
         "local": {
             "model": "base",  # tiny, base, small, medium, large-v3
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
@@ -1601,6 +1602,15 @@ DEFAULT_CONFIG = {
         },
         "mistral": {
             "model": "voxtral-mini-latest",  # voxtral-mini-latest, voxtral-mini-2602
+        },
+        "deepgram": {
+            "model": "nova-3",  # nova-3, nova-2, enhanced, base
+            "language": "",  # auto-detect by default (detect_language=true); set to "en", "es", "fr", etc. to force
+            "language_hint": "pt",  # retry hint when auto-detect returns an empty transcript
+            "smart_format": True,
+            "punctuate": True,
+            "diarize": False,
+            "detect_language": True,
         },
         "elevenlabs": {
             "model_id": "scribe_v2",  # scribe_v2, scribe_v1
@@ -3016,6 +3026,14 @@ OPTIONAL_ENV_VARS = {
         "description": "Mistral API key for Voxtral TTS and transcription (STT)",
         "prompt": "Mistral API key",
         "url": "https://console.mistral.ai/",
+        "password": True,
+        "category": "tool",
+    },
+    "DEEPGRAM_API_KEY": {
+        "description": "Deepgram API key for speech-to-text transcription (STT)",
+        "prompt": "Deepgram API key",
+        "url": "https://console.deepgram.com/",
+        "tools": ["voice_transcription"],
         "password": True,
         "category": "tool",
     },
@@ -5764,6 +5782,7 @@ def show_config():
     keys = [
         ("OPENROUTER_API_KEY", "OpenRouter"),
         ("VOICE_TOOLS_OPENAI_KEY", "OpenAI (STT/TTS)"),
+        ("DEEPGRAM_API_KEY", "Deepgram STT"),
         ("EXA_API_KEY", "Exa"),
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),
@@ -5970,6 +5989,7 @@ def set_config_value(key: str, value: str):
     # Check if it's an API key (goes to .env)
     api_keys = [
         'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_TOOLS_OPENAI_KEY',
+        'DEEPGRAM_API_KEY',
         'EXA_API_KEY', 'PARALLEL_API_KEY', 'FIRECRAWL_API_KEY', 'FIRECRAWL_API_URL',
         'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
         'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY',

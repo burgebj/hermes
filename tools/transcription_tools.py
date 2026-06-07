@@ -2,7 +2,7 @@
 """
 Transcription Tools Module
 
-Provides speech-to-text transcription with six providers:
+Provides speech-to-text transcription with seven providers:
 
   - **local** (default, free) — faster-whisper running locally, no API key needed.
     Auto-downloads the model (~150 MB for ``base``) on first use.
@@ -12,6 +12,7 @@ Provides speech-to-text transcription with six providers:
   - **xai** — xAI Grok STT API, requires ``XAI_API_KEY``. High accuracy,
     Inverse Text Normalization, diarization, 21 languages.
   - **elevenlabs** — ElevenLabs Scribe API, requires ``ELEVENLABS_API_KEY``.
+  - **deepgram** — Deepgram Listen API, requires ``DEEPGRAM_API_KEY``.
 
 Used by the messaging gateway to automatically transcribe voice messages
 sent by users on Telegram, Discord, WhatsApp, Slack, and Signal.
@@ -28,6 +29,7 @@ Usage::
 """
 
 import logging
+import mimetypes
 import os
 import shlex
 import shutil
@@ -90,6 +92,7 @@ DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
 DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
 DEFAULT_ELEVENLABS_STT_MODEL = os.getenv("STT_ELEVENLABS_MODEL", "scribe_v2")
+DEFAULT_DEEPGRAM_STT_MODEL = os.getenv("STT_DEEPGRAM_MODEL", "nova-3")
 LOCAL_STT_COMMAND_ENV = "HERMES_LOCAL_STT_COMMAND"
 LOCAL_STT_LANGUAGE_ENV = "HERMES_LOCAL_STT_LANGUAGE"
 COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
@@ -98,6 +101,7 @@ GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 OPENAI_BASE_URL = os.getenv("STT_OPENAI_BASE_URL", "https://api.openai.com/v1")
 XAI_STT_BASE_URL = os.getenv("XAI_STT_BASE_URL", "https://api.x.ai/v1")
 ELEVENLABS_STT_BASE_URL = os.getenv("ELEVENLABS_STT_BASE_URL", "https://api.elevenlabs.io/v1")
+DEEPGRAM_STT_BASE_URL = os.getenv("DEEPGRAM_STT_BASE_URL", "https://api.deepgram.com/v1")
 
 SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
 LOCAL_NATIVE_AUDIO_FORMATS = {".wav", ".aiff", ".aif"}
@@ -228,7 +232,7 @@ def _try_lazy_install_stt() -> bool:
     return False
 
 
-# Names of the 6 STT providers with native handlers in this module.
+# Names of the 7 STT providers with native handlers in this module.
 # Kept in sync with ``agent.transcription_registry._BUILTIN_NAMES`` —
 # a regression test fails if they drift. The plugin hook from
 # issue #30398-style follow-up rejects plugins registering under any
@@ -241,6 +245,7 @@ BUILTIN_STT_PROVIDERS = frozenset({
     "openai",
     "mistral",
     "xai",
+    "deepgram",
 })
 
 
@@ -255,7 +260,7 @@ BUILTIN_STT_PROVIDERS = frozenset({
 #
 # Resolution order:
 #   1. Built-in (``local``, ``local_command``, ``groq``, ``openai``,
-#      ``mistral``, ``xai``)              → native handler. **Always wins.**
+#      ``mistral``, ``xai``, ``deepgram``) → native handler. **Always wins.**
 #   2. ``stt.providers.<name>: type: command``  → command-provider runner.
 #   3. Plugin-registered TranscriptionProvider  → plugin dispatch.
 #   4. No match                                 → "No STT provider available".
@@ -746,7 +751,8 @@ def _get_provider(stt_config: dict) -> str:
 
     When ``stt.provider`` is explicitly set in config, that choice is
     honoured — no silent cloud fallback.  When no provider is configured,
-    auto-detect tries: local > groq (free) > openai (paid).
+    auto-detect tries: local > groq (free) > deepgram > openai (paid) >
+    mistral > xai > elevenlabs.
     """
     if not is_stt_enabled(stt_config):
         return "none"
@@ -825,11 +831,18 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "deepgram":
+            if str(get_env_value("DEEPGRAM_API_KEY") or "").strip():
+                return "deepgram"
+            logger.warning(
+                "STT provider 'deepgram' configured but DEEPGRAM_API_KEY not set"
+            )
+            return "none"
+
         return provider  # Unknown — let it fail downstream
 
-    # --- Auto-detect (no explicit provider): local > groq > openai > xai > elevenlabs -
-    # mistral is intentionally skipped while `mistralai` is quarantined on
-    # PyPI (malicious 2.4.6 release on 2026-05-12).
+    # --- Auto-detect (no explicit provider): local > groq > deepgram > openai >
+    # mistral > xai > elevenlabs.
 
     if _HAS_FASTER_WHISPER:
         return "local"
@@ -841,6 +854,9 @@ def _get_provider(stt_config: dict) -> str:
     if _HAS_OPENAI and get_env_value("GROQ_API_KEY"):
         logger.info("No local STT available, using Groq Whisper API")
         return "groq"
+    if str(get_env_value("DEEPGRAM_API_KEY") or "").strip():
+        logger.info("No local STT available, using Deepgram Listen API")
+        return "deepgram"
     if _HAS_OPENAI and _has_openai_audio_backend():
         logger.info("No local STT available, using OpenAI Whisper API")
         return "openai"
@@ -1612,6 +1628,153 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: Deepgram (Listen API)
+# ---------------------------------------------------------------------------
+
+
+def _extract_deepgram_transcript(result: Dict[str, Any]) -> str:
+    """Return Deepgram's best transcript from a Listen API JSON response."""
+    channels = result.get("results", {}).get("channels", [])
+    if isinstance(channels, list):
+        transcripts = []
+        for channel in channels:
+            alternatives = channel.get("alternatives", []) if isinstance(channel, dict) else []
+            if alternatives and isinstance(alternatives[0], dict):
+                text = str(alternatives[0].get("transcript") or "").strip()
+                if text:
+                    transcripts.append(text)
+        if transcripts:
+            return " ".join(transcripts).strip()
+    if isinstance(result.get("text"), str):
+        return _extract_transcript_text(result)
+    return ""
+
+
+def _deepgram_bool_param(config: Dict[str, Any], name: str, default: bool) -> str:
+    return "true" if is_truthy_value(config.get(name, default), default=default) else "false"
+
+
+def _transcribe_deepgram(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using Deepgram's REST Listen API.
+
+    Uses ``POST /v1/listen`` with the audio file as the request body and
+    ``Authorization: Token <DEEPGRAM_API_KEY>``. Supported config keys live
+    under ``stt.deepgram``: ``model``, ``language``, ``language_hint``,
+    ``base_url``, ``timeout``, ``smart_format``, ``punctuate``, ``diarize``,
+    and ``detect_language``.
+    """
+    api_key = str(get_env_value("DEEPGRAM_API_KEY") or "").strip()
+    if not api_key:
+        return {"success": False, "transcript": "", "error": "DEEPGRAM_API_KEY not set"}
+
+    stt_config = _load_stt_config()
+    deepgram_config = stt_config.get("deepgram", {}) if isinstance(stt_config.get("deepgram"), dict) else {}
+    base_url = str(
+        deepgram_config.get("base_url")
+        or get_env_value("DEEPGRAM_STT_BASE_URL")
+        or DEEPGRAM_STT_BASE_URL
+    ).strip().rstrip("/")
+    timeout_raw = deepgram_config.get("timeout", deepgram_config.get("timeout_seconds", 120))
+    try:
+        timeout = float(timeout_raw)
+    except (TypeError, ValueError):
+        timeout = 120.0
+    if timeout <= 0:
+        timeout = 120.0
+
+    params: Dict[str, str] = {
+        "model": model_name,
+        "smart_format": _deepgram_bool_param(deepgram_config, "smart_format", True),
+        "punctuate": _deepgram_bool_param(deepgram_config, "punctuate", True),
+    }
+    language = str(deepgram_config.get("language") or "").strip()
+    if language:
+        params["language"] = language
+
+    # Deepgram nova-3 does not reliably auto-detect non-English speech unless
+    # detect_language is sent explicitly. Always enable it when no fixed
+    # language is configured so existing configs generated with the old
+    # ``detect_language: false`` default still work for multilingual voice.
+    if not language:
+        params["detect_language"] = "true"
+    if is_truthy_value(deepgram_config.get("diarize", False), default=False):
+        params["diarize"] = "true"
+
+    try:
+        import requests
+
+        content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+        def post_listen(request_params: Dict[str, str]):
+            with open(file_path, "rb") as audio_file:
+                return requests.post(
+                    f"{base_url}/listen",
+                    headers={
+                        "Authorization": f"Token {api_key}",
+                        "Content-Type": content_type,
+                    },
+                    params=request_params,
+                    data=audio_file,
+                    timeout=timeout,
+                )
+
+        def api_error(response) -> Dict[str, Any]:
+            try:
+                err_body = response.json()
+                detail = str(
+                    err_body.get("err_msg")
+                    or err_body.get("message")
+                    or err_body.get("error")
+                    or response.text[:300]
+                )
+            except Exception:
+                detail = response.text[:300]
+            return {
+                "success": False,
+                "transcript": "",
+                "provider": "deepgram",
+                "error": f"Deepgram STT API error (HTTP {response.status_code}): {detail}",
+            }
+
+        response = post_listen(params)
+        if response.status_code != 200:
+            return api_error(response)
+
+        result = response.json()
+        transcript_text = _extract_deepgram_transcript(result)
+        if not transcript_text and not language:
+            retry_params = dict(params)
+            retry_params.pop("detect_language", None)
+            retry_params["language"] = str(deepgram_config.get("language_hint") or "pt").strip() or "pt"
+            retry_response = post_listen(retry_params)
+            if retry_response.status_code != 200:
+                return api_error(retry_response)
+            transcript_text = _extract_deepgram_transcript(retry_response.json())
+
+        if not transcript_text:
+            return {
+                "success": False,
+                "transcript": "",
+                "provider": "deepgram",
+                "error": "Deepgram STT returned empty transcript",
+            }
+
+        logger.info(
+            "Transcribed %s via Deepgram Listen API (%s, %d chars)",
+            Path(file_path).name,
+            model_name,
+            len(transcript_text),
+        )
+        return {"success": True, "transcript": transcript_text, "provider": "deepgram"}
+
+    except PermissionError:
+        return {"success": False, "transcript": "", "provider": "deepgram", "error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        logger.error("Deepgram STT transcription failed: %s", e, exc_info=True)
+        return {"success": False, "transcript": "", "provider": "deepgram", "error": f"Deepgram STT transcription failed: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1622,7 +1785,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
 
     Provider priority:
       1. User config (``stt.provider`` in config.yaml)
-      2. Auto-detect: local > Groq > OpenAI > Mistral > xAI > ElevenLabs
+      2. Auto-detect: local > Groq > Deepgram > OpenAI > Mistral > xAI > ElevenLabs
 
     Args:
         file_path: Absolute path to the audio file to transcribe.
@@ -1689,6 +1852,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
         return _transcribe_elevenlabs(file_path, model_name)
 
+    if provider == "deepgram":
+        deepgram_cfg = stt_config.get("deepgram", {})
+        model_name = model or deepgram_cfg.get("model", DEFAULT_DEEPGRAM_STT_MODEL)
+        return _transcribe_deepgram(file_path, model_name)
+
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
     # elif chain — built-in names short-circuit upstream so a user's
@@ -1738,8 +1906,9 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         "error": (
             "No STT provider available. Install faster-whisper for free local "
             f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
-            "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
-            "Voxtral Transcribe, configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, "
+            "set GROQ_API_KEY for free Groq Whisper, set DEEPGRAM_API_KEY for Deepgram, "
+            "set MISTRAL_API_KEY for Mistral Voxtral Transcribe, "
+            "configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, "
             "set ELEVENLABS_API_KEY for ElevenLabs Scribe, or set VOICE_TOOLS_OPENAI_KEY "
             "or OPENAI_API_KEY for the OpenAI Whisper API."
         ),

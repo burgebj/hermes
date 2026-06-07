@@ -25,6 +25,8 @@ Acceptable diffs:
   ``command-provider-installed`` scenario (registry shipped with this PR).
 - ``no_provider_error → command_provider`` for
   ``command-vs-plugin-same-name`` (command wins precedence, same as TTS).
+- ``no_provider_error → builtin_deepgram`` for ``explicit-deepgram``
+  (Deepgram is built-in on this branch).
 
 Run from the PR worktree::
 
@@ -70,8 +72,8 @@ os.environ["HERMES_HOME"] = home
 # Clear STT-related env so dispatch decisions are config-driven.
 for k in (
     "GROQ_API_KEY", "OPENAI_API_KEY", "VOICE_TOOLS_OPENAI_KEY",
-    "MISTRAL_API_KEY", "XAI_API_KEY",
-    "HERMES_LOCAL_STT_COMMAND",
+    "MISTRAL_API_KEY", "XAI_API_KEY", "DEEPGRAM_API_KEY",
+    "DEEPGRAM_STT_BASE_URL", "HERMES_LOCAL_STT_COMMAND",
 ):
     os.environ.pop(k, None)
 
@@ -149,6 +151,7 @@ tt._transcribe_groq = _Stub("groq")
 tt._transcribe_openai = _Stub("openai")
 tt._transcribe_mistral = _Stub("mistral")
 tt._transcribe_xai = _Stub("xai")
+tt._transcribe_deepgram = _Stub("deepgram")
 
 # Force _get_provider to honor the explicit config since we don't have
 # real creds. The provider-resolution gates check _HAS_OPENAI /
@@ -185,7 +188,7 @@ elif not success and "is not available" in error_text:
     dispatch_kind = "plugin_unavailable"
 elif not success and "No STT provider" in error_text:
     dispatch_kind = "no_provider_error"
-elif provider_name in ("local", "local_command", "groq", "openai", "mistral", "xai"):
+elif provider_name in ("local", "local_command", "groq", "openai", "mistral", "xai", "deepgram"):
     dispatch_kind = "builtin_" + provider_name
 elif success and isinstance(result, dict) and result.get("transcript", "").startswith("CMD:"):
     # Command-provider scenarios below emit transcripts prefixed with "CMD:"
@@ -194,7 +197,7 @@ elif success and isinstance(result, dict) and result.get("transcript", "").start
     dispatch_kind = "command_provider"
 elif success and isinstance(result, dict) and result.get("transcript", "").startswith("PLUGIN:"):
     dispatch_kind = "plugin"
-elif success and provider_name and provider_name not in ("local", "local_command", "groq", "openai", "mistral", "xai"):
+elif success and provider_name and provider_name not in ("local", "local_command", "groq", "openai", "mistral", "xai", "deepgram"):
     dispatch_kind = "plugin"
 else:
     dispatch_kind = "other"
@@ -241,6 +244,7 @@ SCENARIOS: list[tuple[str, str, dict[str, str], str]] = [
     # (label, config.yaml body, scenario_env, plugin_register)
     ("stt-disabled", "stt:\n  enabled: false\n", {}, "no"),
     ("explicit-groq", "stt:\n  provider: groq\n", {}, "no"),
+    ("explicit-deepgram", "stt:\n  provider: deepgram\n", {}, "no"),
     ("explicit-openai", "stt:\n  provider: openai\n", {}, "no"),
     ("explicit-local", "stt:\n  provider: local\n", {}, "no"),
     ("explicit-xai", "stt:\n  provider: xai\n", {}, "no"),
@@ -392,6 +396,11 @@ def main() -> int:
             and pr_reduced.get("dispatch_kind") == "command_provider"
             and label in {"command-provider-installed", "command-vs-plugin-same-name"}
         )
+        no_provider_to_deepgram = (
+            main_reduced.get("dispatch_kind") == "no_provider_error"
+            and pr_reduced.get("dispatch_kind") == "builtin_deepgram"
+            and label == "explicit-deepgram"
+        )
         if no_provider_to_plugin:
             print(f"  [DIFF] {label}: no_provider_error → plugin — expected")
             intentional_diffs.append((label, main_reduced, pr_reduced))
@@ -400,6 +409,9 @@ def main() -> int:
             intentional_diffs.append((label, main_reduced, pr_reduced))
         elif no_provider_to_command:
             print(f"  [DIFF] {label}: no_provider_error → command_provider — expected")
+            intentional_diffs.append((label, main_reduced, pr_reduced))
+        elif no_provider_to_deepgram:
+            print(f"  [DIFF] {label}: no_provider_error → builtin_deepgram — expected")
             intentional_diffs.append((label, main_reduced, pr_reduced))
         else:
             print(f"  [FAIL] {label}")

@@ -385,6 +385,7 @@ Voice messages sent on Telegram, Discord, WhatsApp, Slack, or Signal are automat
 |----------|---------|------|---------| 
 | **Local Whisper** (default) | Good | Free | None needed |
 | **Groq Whisper API** | Good–Best | Free tier | `GROQ_API_KEY` |
+| **Deepgram Listen API** | Good–Best | Paid / free trial | `DEEPGRAM_API_KEY` |
 | **OpenAI Whisper API** | Good–Best | Paid | `VOICE_TOOLS_OPENAI_KEY` or `OPENAI_API_KEY` |
 
 :::info Zero Config
@@ -396,11 +397,22 @@ Local transcription works out of the box when `faster-whisper` is installed. If 
 ```yaml
 # In ~/.hermes/config.yaml
 stt:
-  provider: "local"           # "local" | "groq" | "openai" | "mistral" | "xai"
+  enabled: true
+  provider: "local"           # "local" | "local_command" | "groq" | "deepgram" | "openai" | "mistral" | "xai" | "elevenlabs"
   local:
     model: "base"             # tiny, base, small, medium, large-v3
   openai:
     model: "whisper-1"        # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
+  deepgram:
+    model: "nova-3"           # nova-3, nova-2, enhanced, base
+    language: ""              # auto-detect; set "en", "es", "fr", etc. to force
+    language_hint: "pt"       # retry hint if auto-detect returns an empty transcript
+    smart_format: true
+    punctuate: true
+    diarize: false
+    detect_language: true
+    # base_url: "https://api.deepgram.com/v1"  # optional; env fallback: DEEPGRAM_STT_BASE_URL
+    # timeout: 120
   mistral:
     model: "voxtral-mini-latest"  # voxtral-mini-latest, voxtral-mini-2602
   xai:
@@ -420,6 +432,8 @@ stt:
 | `large-v3` | ~3 GB | Slowest | Best |
 
 **Groq API** — Requires `GROQ_API_KEY`. Good cloud fallback when you want a free hosted STT option.
+
+**Deepgram Listen API** — Requires `DEEPGRAM_API_KEY`. Hermes posts audio to `https://api.deepgram.com/v1/listen` with `Authorization: Token <key>` and does not require the Deepgram SDK. Defaults to `stt.deepgram.model: nova-3` and `detect_language: true` when no fixed `language` is configured; if auto-detect returns an empty transcript, Hermes retries once with `stt.deepgram.language_hint` (`pt` by default). Optional keys include `language`, `language_hint`, `smart_format`, `punctuate`, `diarize`, `detect_language`, `base_url`, and `timeout`. Set `DEEPGRAM_STT_BASE_URL` or `stt.deepgram.base_url` only if you need a proxy/custom endpoint.
 
 **OpenAI API** — Accepts `VOICE_TOOLS_OPENAI_KEY` first and falls back to `OPENAI_API_KEY`. Supports `whisper-1`, `gpt-4o-mini-transcribe`, and `gpt-4o-transcribe`.
 
@@ -449,10 +463,10 @@ Hermes writes the incoming voice message to `{input_path}`, runs the command, an
 
 ### Fallback Behavior
 
-If your configured provider isn't available, Hermes automatically falls back:
+When `stt.provider` is set explicitly, Hermes respects that choice and returns an error if the provider key or dependency is missing. When no provider is configured, Hermes auto-detects:
 - **Local faster-whisper unavailable** → Tries a local `whisper` CLI or `HERMES_LOCAL_STT_COMMAND` before cloud providers
-- **Groq key not set** → Falls back to local transcription, then OpenAI
-- **OpenAI key not set** → Falls back to local transcription, then Groq
+- **Cloud auto-detect order** → `groq` → `deepgram` → `openai` → `mistral` → `xai` → `elevenlabs`
+- **Deepgram key not set** → Skipped in auto-detect; explicit `stt.provider: deepgram` returns a `DEEPGRAM_API_KEY not set` style error
 - **Mistral key/SDK not set** → Skipped in auto-detect; falls through to next available provider
 - **Nothing available** → Voice messages pass through with an accurate note to the user
 
@@ -534,7 +548,7 @@ The shell command runs under the same user as Hermes with full filesystem access
 
 ### Python plugin providers (STT)
 
-For STT engines that aren't built-in AND can't be expressed as a shell command (need a Python SDK, OAuth-refreshing auth, streaming chunks, etc.), register a Python plugin via `ctx.register_transcription_provider()`. The plugin **coexists with** the 6 built-in providers (`local`, `local_command`, `groq`, `openai`, `mistral`, `xai`) and the `stt.providers.<name>: type: command` registry — built-ins keep their native implementations and always win on name collision; command providers win over plugins of the same name (config is more local than plugin install).
+For STT engines that aren't built-in AND can't be expressed as a shell command (need a Python SDK, OAuth-refreshing auth, streaming chunks, etc.), register a Python plugin via `ctx.register_transcription_provider()`. The plugin **coexists with** the built-in providers (`local`, `local_command`, `groq`, `deepgram`, `openai`, `mistral`, `xai`, `elevenlabs`) and the `stt.providers.<name>: type: command` registry — built-ins keep their native implementations and always win on name collision; command providers win over plugin providers when both exist for the same custom name.
 
 #### When to pick which (STT)
 

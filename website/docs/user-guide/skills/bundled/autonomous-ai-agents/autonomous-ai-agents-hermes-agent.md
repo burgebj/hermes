@@ -382,7 +382,7 @@ Edit with `hermes config edit` or `hermes config set section.key value`.
 | `terminal` | `backend` (local/docker/ssh/modal), `cwd`, `timeout` (180) |
 | `compression` | `enabled`, `threshold` (0.50), `target_ratio` (0.20) |
 | `display` | `skin`, `tool_progress`, `show_reasoning`, `show_cost` |
-| `stt` | `enabled`, `provider` (local/groq/openai/mistral) |
+| `stt` | `enabled`, `provider` (local/groq/deepgram/openai/mistral/xai/elevenlabs) |
 | `tts` | `provider` (edge/elevenlabs/openai/minimax/mistral/neutts) |
 | `memory` | `memory_enabled`, `user_profile_enabled`, `provider` |
 | `security` | `tirith_enabled`, `website_blocklist` |
@@ -530,16 +530,24 @@ Voice messages from messaging platforms are auto-transcribed.
 Provider priority (auto-detected):
 1. **Local faster-whisper** — free, no API key: `pip install faster-whisper`
 2. **Groq Whisper** — free tier: set `GROQ_API_KEY`
-3. **OpenAI Whisper** — paid: set `VOICE_TOOLS_OPENAI_KEY`
-4. **Mistral Voxtral** — set `MISTRAL_API_KEY`
+3. **Deepgram Listen API** — set `DEEPGRAM_API_KEY`
+4. **OpenAI Whisper** — paid: set `VOICE_TOOLS_OPENAI_KEY`
+5. **Mistral Voxtral** — set `MISTRAL_API_KEY`
+6. **xAI / ElevenLabs** — set `XAI_API_KEY` or `ELEVENLABS_API_KEY`
 
 Config:
 ```yaml
 stt:
   enabled: true
-  provider: local        # local, groq, openai, mistral
+  provider: local        # local, groq, deepgram, openai, mistral, xai, elevenlabs
   local:
     model: base          # tiny, base, small, medium, large-v3
+  deepgram:
+    model: nova-3        # nova-3, nova-2, enhanced, base
+    language: ""         # auto-detect; set en/es/fr/etc. to force
+    language_hint: "pt"  # retry hint if auto-detect returns an empty transcript
+    smart_format: true
+    punctuate: true
 ```
 
 ### TTS (Text → Voice)

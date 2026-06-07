@@ -1338,11 +1338,23 @@ Hashes are deterministic — the same user always maps to the same hash, so the 
 
 ```yaml
 stt:
-  provider: "local"            # "local" | "groq" | "openai" | "mistral"
+  enabled: true
+  provider: "local"            # "local" | "local_command" | "groq" | "deepgram" | "openai" | "mistral" | "xai" | "elevenlabs"
   local:
     model: "base"              # tiny, base, small, medium, large-v3
+    language: ""               # auto-detect; set "en", "es", "fr", etc. to force
   openai:
     model: "whisper-1"         # whisper-1 | gpt-4o-mini-transcribe | gpt-4o-transcribe
+  deepgram:
+    model: "nova-3"            # nova-3 | nova-2 | enhanced | base
+    language: ""               # auto-detect; set "en", "es", "fr", etc. to force
+    language_hint: "pt"        # retry hint if auto-detect returns an empty transcript
+    smart_format: true          # format numbers, dates, punctuation-friendly text
+    punctuate: true
+    diarize: false
+    detect_language: true
+    # base_url: "https://api.deepgram.com/v1"  # optional override; env fallback: DEEPGRAM_STT_BASE_URL
+    # timeout: 120              # request timeout seconds
   # model: "whisper-1"         # Legacy fallback key still respected
 ```
 
@@ -1350,17 +1362,34 @@ Provider behavior:
 
 - `local` uses `faster-whisper` running on your machine. Install it separately with `pip install faster-whisper`.
 - `groq` uses Groq's Whisper-compatible endpoint and reads `GROQ_API_KEY`.
+- `deepgram` uses Deepgram's Listen API and reads `DEEPGRAM_API_KEY`. No Deepgram SDK is required; Hermes uses the existing `requests` dependency.
 - `openai` uses the OpenAI speech API and reads `VOICE_TOOLS_OPENAI_KEY`.
+- `mistral` uses Mistral Voxtral Transcribe and reads `MISTRAL_API_KEY`.
+- `xai` uses xAI STT and reads `XAI_API_KEY`.
+- `elevenlabs` uses ElevenLabs Scribe and reads `ELEVENLABS_API_KEY`.
 
-If the requested provider is unavailable, Hermes falls back automatically in this order: `local` → `groq` → `openai`.
+When `stt.provider` is set explicitly, Hermes respects that choice and returns an error if the required key or dependency is missing. When no provider is configured, Hermes auto-detects in this order: `local` → `groq` → `deepgram` → `openai` → `mistral` → `xai` → `elevenlabs`.
 
-Groq and OpenAI model overrides are environment-driven:
+Deepgram minimal setup:
+
+```bash
+# ~/.hermes/.env
+DEEPGRAM_API_KEY=your-deepgram-key
+
+hermes config set stt.enabled true
+hermes config set stt.provider deepgram
+hermes config set stt.deepgram.model nova-3
+```
+
+Provider model and endpoint overrides can also be environment-driven:
 
 ```bash
 STT_GROQ_MODEL=whisper-large-v3-turbo
 STT_OPENAI_MODEL=whisper-1
+STT_DEEPGRAM_MODEL=nova-3
 GROQ_BASE_URL=https://api.groq.com/openai/v1
 STT_OPENAI_BASE_URL=https://api.openai.com/v1
+DEEPGRAM_STT_BASE_URL=https://api.deepgram.com/v1
 ```
 
 ## Voice Mode (CLI)

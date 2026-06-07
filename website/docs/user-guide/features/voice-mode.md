@@ -94,7 +94,9 @@ Add to `~/.hermes/.env`:
 # Speech-to-Text — local provider needs NO key at all
 # pip install faster-whisper          # Free, runs locally, recommended
 GROQ_API_KEY=your-key                 # Groq Whisper — fast, free tier (cloud)
+DEEPGRAM_API_KEY=your-key             # Deepgram Listen API — cloud STT
 VOICE_TOOLS_OPENAI_KEY=your-key       # OpenAI Whisper — paid (cloud)
+MISTRAL_API_KEY=your-key              # Mistral Voxtral — cloud STT/TTS
 
 # Text-to-Speech (optional — Edge TTS and NeuTTS work without any key)
 ELEVENLABS_API_KEY=***           # ElevenLabs — premium quality
@@ -104,6 +106,43 @@ ELEVENLABS_API_KEY=***           # ElevenLabs — premium quality
 :::tip
 If `faster-whisper` is installed, voice mode works with **zero API keys** for STT. The model (~150 MB for `base`) downloads automatically on first use.
 :::
+
+### Deepgram STT
+
+Deepgram is a cloud speech-to-text provider. Hermes calls Deepgram's REST Listen API directly, so there is no Deepgram Python SDK to install. The only required setup is the API key plus `stt.provider: deepgram`:
+
+```bash
+# ~/.hermes/.env
+DEEPGRAM_API_KEY=your-deepgram-key
+
+hermes config set stt.enabled true
+hermes config set stt.provider deepgram
+```
+
+Optional Deepgram settings live under `stt.deepgram`:
+
+```yaml
+stt:
+  enabled: true
+  provider: "deepgram"
+  deepgram:
+    model: "nova-3"          # default; also supports nova-2, enhanced, base
+    language: ""             # auto-detect; set "en", "es", "fr", etc. to force
+    language_hint: "pt"      # retry hint if auto-detect returns an empty transcript
+    smart_format: true
+    punctuate: true
+    diarize: false
+    detect_language: true
+    # base_url: "https://api.deepgram.com/v1"
+    # timeout: 120
+```
+
+You can also override the model or endpoint from `~/.hermes/.env`:
+
+```bash
+STT_DEEPGRAM_MODEL=nova-3
+DEEPGRAM_STT_BASE_URL=https://api.deepgram.com/v1
+```
 
 ---
 

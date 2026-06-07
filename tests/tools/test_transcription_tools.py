@@ -1,8 +1,9 @@
-"""Tests for tools.transcription_tools — three-provider STT pipeline.
+"""Tests for tools.transcription_tools — built-in STT provider pipeline.
 
-Covers the full provider matrix (local, groq, openai), fallback chains,
-model auto-correction, config loading, validation edge cases, and
-end-to-end dispatch.  All external dependencies are mocked.
+Covers the provider matrix (local, groq, deepgram, openai, mistral, xai,
+elevenlabs), fallback chains, model auto-correction, config loading,
+validation edge cases, and end-to-end dispatch. All external dependencies
+are mocked.
 """
 
 import os
@@ -65,6 +66,8 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPGRAM_STT_BASE_URL", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_LANGUAGE", raising=False)
 
@@ -1120,6 +1123,298 @@ class TestTranscribeAudioMistralDispatch:
             transcribe_audio(sample_ogg, model="voxtral-mini-2602")
 
         assert mock_mistral.call_args[0][1] == "voxtral-mini-2602"
+
+
+# ============================================================================
+# _transcribe_deepgram
+# ============================================================================
+
+
+class TestTranscribeDeepgram:
+    def test_no_key(self, monkeypatch):
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        with patch("requests.post") as mock_post:
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram("/tmp/test.ogg", "nova-3")
+        assert result["success"] is False
+        assert "DEEPGRAM_API_KEY" in result["error"]
+        mock_post.assert_not_called()
+
+    def test_blank_key_is_treated_as_missing_without_network(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "   ")
+        with patch("requests.post") as mock_post:
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+        assert result == {"success": False, "transcript": "", "error": "DEEPGRAM_API_KEY not set"}
+        mock_post.assert_not_called()
+
+    def test_successful_transcription(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": {"channels": [{"alternatives": [{"transcript": "hello from deepgram"}]}]},
+        }
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", return_value=mock_response) as mock_post:
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result["success"] is True
+        assert result["transcript"] == "hello from deepgram"
+        assert result["provider"] == "deepgram"
+        call = mock_post.call_args
+        assert call.args[0] == "https://api.deepgram.com/v1/listen"
+        assert call.kwargs["headers"]["Authorization"] == "Token dg-test-key"
+        assert call.kwargs["params"]["model"] == "nova-3"
+        assert call.kwargs["params"]["smart_format"] == "true"
+        assert call.kwargs["params"]["detect_language"] == "true"
+
+    def test_mocked_listen_request_sends_audio_body_and_parses_response(self, monkeypatch, sample_ogg):
+        """Repeatable Deepgram coverage: request payload + response parsing, no live API."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        observed = {}
+
+        def fake_post(url, *, headers, params, data, timeout):
+            observed["url"] = url
+            observed["headers"] = dict(headers)
+            observed["params"] = dict(params)
+            observed["body"] = data.read()
+            observed["timeout"] = timeout
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {
+                "results": {"channels": [{"alternatives": [{"transcript": "mock deepgram transcript"}]}]},
+            }
+            return response
+
+        config = {"deepgram": {"timeout": 12, "punctuate": False}}
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("requests.post", side_effect=fake_post) as mock_post:
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result == {"success": True, "transcript": "mock deepgram transcript", "provider": "deepgram"}
+        assert mock_post.call_count == 1
+        assert observed["url"] == "https://api.deepgram.com/v1/listen"
+        assert observed["headers"] == {
+            "Authorization": "Token dg-test-key",
+            "Content-Type": "audio/ogg",
+        }
+        assert observed["params"] == {
+            "model": "nova-3",
+            "smart_format": "true",
+            "punctuate": "false",
+            "detect_language": "true",
+        }
+        assert observed["body"] == b"fake audio data"
+        assert observed["timeout"] == 12.0
+
+    def test_successful_transcription_normalizes_multichannel_response(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": {
+                "channels": [
+                    {"alternatives": [{"transcript": "  first channel  "}]},
+                    {"alternatives": [{"transcript": "second channel\n"}]},
+                    {"alternatives": [{"transcript": "   "}]},
+                ]
+            },
+        }
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", return_value=mock_response):
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result == {"success": True, "transcript": "first channel second channel", "provider": "deepgram"}
+
+    def test_config_params_and_custom_base_url(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        config = {
+            "deepgram": {
+                "base_url": "https://proxy.example/v1/",
+                "language": "pt-BR",
+                "diarize": True,
+                "detect_language": False,
+                "smart_format": False,
+            }
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": {"channels": [{"alternatives": [{"transcript": "oi"}]}]},
+        }
+
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("requests.post", return_value=mock_response) as mock_post:
+            from tools.transcription_tools import _transcribe_deepgram
+            _transcribe_deepgram(sample_ogg, "nova-2")
+
+        call = mock_post.call_args
+        assert call.args[0] == "https://proxy.example/v1/listen"
+        assert call.kwargs["params"]["language"] == "pt-BR"
+        assert "detect_language" not in call.kwargs["params"]
+        assert call.kwargs["params"]["diarize"] == "true"
+        assert call.kwargs["params"]["smart_format"] == "false"
+
+    def test_api_error_returns_failure(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.json.return_value = {"err_msg": "Invalid API key"}
+        mock_response.text = '{"err_msg":"Invalid API key"}'
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", return_value=mock_response):
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result["success"] is False
+        assert result["provider"] == "deepgram"
+        assert "HTTP 401" in result["error"]
+        assert "Invalid API key" in result["error"]
+
+    def test_api_error_uses_text_fallback_when_json_is_invalid(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.json.side_effect = ValueError("not json")
+        mock_response.text = "rate limit exceeded"
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", return_value=mock_response):
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result["success"] is False
+        assert result["provider"] == "deepgram"
+        assert "HTTP 429" in result["error"]
+        assert "rate limit exceeded" in result["error"]
+
+    def test_network_error_returns_failure(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", side_effect=ConnectionError("connection reset")):
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result["success"] is False
+        assert result["provider"] == "deepgram"
+        assert "connection reset" in result["error"]
+
+    def test_retries_empty_auto_detect_with_portuguese_language_hint(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        empty_response = MagicMock()
+        empty_response.status_code = 200
+        empty_response.json.return_value = {"results": {"channels": []}}
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.json.return_value = {
+            "results": {"channels": [{"alternatives": [{"transcript": "olá do deepgram"}]}]},
+        }
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", side_effect=[empty_response, success_response]) as mock_post:
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result == {"success": True, "transcript": "olá do deepgram", "provider": "deepgram"}
+        first_params = mock_post.call_args_list[0].kwargs["params"]
+        retry_params = mock_post.call_args_list[1].kwargs["params"]
+        assert first_params["detect_language"] == "true"
+        assert "language" not in first_params
+        assert retry_params["language"] == "pt"
+        assert "detect_language" not in retry_params
+
+    def test_empty_transcript_returns_failure(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"results": {"channels": []}}
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("requests.post", return_value=mock_response):
+            from tools.transcription_tools import _transcribe_deepgram
+            result = _transcribe_deepgram(sample_ogg, "nova-3")
+
+        assert result["success"] is False
+        assert "empty transcript" in result["error"]
+
+
+# ============================================================================
+# _get_provider — Deepgram
+# ============================================================================
+
+
+class TestGetProviderDeepgram:
+    def test_deepgram_when_key_set(self, monkeypatch):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "deepgram"}) == "deepgram"
+
+    def test_deepgram_explicit_no_key_returns_none(self, monkeypatch):
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "deepgram"}) == "none"
+
+    def test_deepgram_explicit_blank_key_returns_none(self, monkeypatch):
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "   ")
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "deepgram"}) == "none"
+
+    def test_auto_detect_deepgram_after_groq_before_openai(self, monkeypatch):
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", False), \
+             patch("tools.transcription_tools._has_local_command", return_value=False), \
+             patch("tools.transcription_tools._HAS_OPENAI", True):
+            from tools.transcription_tools import _get_provider
+            assert _get_provider({}) == "deepgram"
+
+
+# ============================================================================
+# transcribe_audio — Deepgram dispatch
+# ============================================================================
+
+
+class TestTranscribeAudioDeepgramDispatch:
+    def test_dispatches_to_deepgram(self, sample_ogg):
+        with patch("tools.transcription_tools._load_stt_config", return_value={"provider": "deepgram"}), \
+             patch("tools.transcription_tools._get_provider", return_value="deepgram"), \
+             patch("tools.transcription_tools._transcribe_deepgram",
+                   return_value={"success": True, "transcript": "hi", "provider": "deepgram"}) as mock_deepgram:
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(sample_ogg)
+
+        assert result["success"] is True
+        assert result["provider"] == "deepgram"
+        mock_deepgram.assert_called_once()
+
+    def test_config_deepgram_model_used(self, sample_ogg):
+        config = {"provider": "deepgram", "deepgram": {"model": "nova-2"}}
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("tools.transcription_tools._get_provider", return_value="deepgram"), \
+             patch("tools.transcription_tools._transcribe_deepgram",
+                   return_value={"success": True, "transcript": "hi"}) as mock_deepgram:
+            from tools.transcription_tools import transcribe_audio
+            transcribe_audio(sample_ogg, model=None)
+
+        assert mock_deepgram.call_args[0][1] == "nova-2"
+
+    def test_model_override_passed_to_deepgram(self, sample_ogg):
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("tools.transcription_tools._get_provider", return_value="deepgram"), \
+             patch("tools.transcription_tools._transcribe_deepgram",
+                   return_value={"success": True, "transcript": "hi"}) as mock_deepgram:
+            from tools.transcription_tools import transcribe_audio
+            transcribe_audio(sample_ogg, model="nova-3-medical")
+
+        assert mock_deepgram.call_args[0][1] == "nova-3-medical"
 
 
 # ============================================================================

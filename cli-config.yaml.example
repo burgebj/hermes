@@ -816,8 +816,8 @@ platform_toolsets:
 # Voice Transcription (Speech-to-Text)
 # =============================================================================
 # Automatically transcribe voice messages on messaging platforms.
-# Providers: local (free, faster-whisper) | groq (free tier) | openai (Whisper API) | mistral (Voxtral Transcribe)
-# Set the corresponding API key in .env: GROQ_API_KEY, OPENAI_API_KEY, or MISTRAL_API_KEY.
+# Providers: local (free, faster-whisper) | groq (free tier) | deepgram (Listen API) | openai (Whisper API) | mistral (Voxtral Transcribe)
+# Set the corresponding API key in .env: GROQ_API_KEY, DEEPGRAM_API_KEY, VOICE_TOOLS_OPENAI_KEY, or MISTRAL_API_KEY.
 stt:
   enabled: true
   # provider: "local"          # auto-detected if omitted
@@ -826,6 +826,16 @@ stt:
     # language: ""             # auto-detect; set to "en", "es", "fr", etc. to force
   openai:
     model: "whisper-1"         # whisper-1 | gpt-4o-mini-transcribe | gpt-4o-transcribe
+  # deepgram:
+  #   model: "nova-3"          # nova-3 | nova-2 | enhanced | base
+  #   language: ""             # auto-detect (detect_language=true); set to "en", "es", "fr", etc. to force
+  #   language_hint: "pt"      # retry hint if auto-detect returns an empty transcript
+  #   smart_format: true        # format numbers, dates, punctuation-friendly text
+  #   punctuate: true
+  #   diarize: false
+  #   detect_language: true
+  #   # base_url: "https://api.deepgram.com/v1"  # optional; env fallback: DEEPGRAM_STT_BASE_URL
+  #   # timeout: 120
   # mistral:
   #   model: "voxtral-mini-latest"  # voxtral-mini-latest | voxtral-mini-2602
 
