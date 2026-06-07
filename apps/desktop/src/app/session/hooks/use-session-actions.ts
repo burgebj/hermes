@@ -22,6 +22,7 @@ import {
   getRememberedWorkspaceCwd,
   sessionPinId,
   setActiveSessionId,
+  setAttentionSessionIds,
   setAwaitingResponse,
   setBusy,
   setCurrentBranch,
@@ -41,6 +42,7 @@ import {
   setSessionStartedAt,
   setSessionsTotal,
   setTurnStartedAt,
+  setWorkingSessionIds,
   setYoloActive
 } from '@/store/session'
 import { reportBackendContract } from '@/store/updates'
@@ -303,6 +305,11 @@ export function useSessionActions({
       setSelectedStoredSessionId(null)
       selectedStoredSessionIdRef.current = null
       setMessages([])
+      // Clear stale session busy/attention indicators so background sessions
+      // that were still working when we navigated away don't visually persist
+      // as running rows or "needs input" dots in the sidebar of the new chat.
+      setWorkingSessionIds([])
+      setAttentionSessionIds([])
       setCurrentUsage({
         calls: 0,
         input: 0,

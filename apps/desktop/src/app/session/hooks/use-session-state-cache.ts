@@ -157,22 +157,31 @@ export function useSessionStateCache({
         setSessionAttention(previous.storedSessionId, false)
       }
 
-      setSessionWorking(next.storedSessionId, next.busy)
-      setSessionAttention(next.storedSessionId, next.needsInput)
+      // Only update the global working/attention atoms when this session is
+      // the one the user is currently viewing. Background sessions still
+      // update their own cache entry but must not re-add themselves to the
+      // global sidebar indicators after the user has started a new chat and
+      // startFreshSessionDraft cleared them — otherwise late gateway events
+      // from a still-busy old session make it appear as if the new chat is
+      // still working or waiting for input.
+      if (sessionId === activeSessionIdRef.current) {
+        setSessionWorking(next.storedSessionId, next.busy)
+        setSessionAttention(next.storedSessionId, next.needsInput)
 
-      // Every state update is effectively a "still alive" heartbeat for
-      // streaming events. The session-store watchdog uses this to keep the
-      // working flag alive during long-running turns and to clear it once
-      // the stream goes silent.
-      if (next.busy) {
-        noteSessionActivity(next.storedSessionId)
+        // Every state update is effectively a "still alive" heartbeat for
+        // streaming events. The session-store watchdog uses this to keep the
+        // working flag alive during long-running turns and to clear it once
+        // the stream goes silent.
+        if (next.busy) {
+          noteSessionActivity(next.storedSessionId)
+        }
       }
 
       syncSessionStateToView(sessionId, next)
 
       return next
     },
-    [ensureSessionState, syncSessionStateToView]
+    [activeSessionIdRef, ensureSessionState, syncSessionStateToView]
   )
 
   return {
