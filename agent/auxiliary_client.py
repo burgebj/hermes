@@ -1837,7 +1837,8 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
 
 
 def _current_custom_base_url() -> str:
-    custom_base, _, _, _ = _resolve_custom_runtime()
+    runtime = _resolve_custom_runtime()
+    custom_base = runtime[0] if runtime else None
     return custom_base or ""
 
 

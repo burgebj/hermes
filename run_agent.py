@@ -1023,14 +1023,16 @@ class AIAgent:
         default_headers = dict(getattr(self, "_user_default_headers", {}) or {})
         if not default_headers:
             default_headers = dict(getattr(self, "_client_kwargs", {}).get("default_headers") or {})
-        return {
+        runtime = {
             "model": getattr(self, "model", "") or "",
             "provider": getattr(self, "provider", "") or "",
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
-            "default_headers": default_headers,
         }
+        if default_headers:
+            runtime["default_headers"] = default_headers
+        return runtime
 
     def _check_compression_model_feasibility(self) -> None:
         """Forwarder — see ``agent.conversation_compression.check_compression_model_feasibility``."""
