@@ -53,14 +53,14 @@ def main() -> None:
     old_pid = intent.get("target_pid", 0)
     origin = intent.get("origin", "worker")
 
+    nonce = intent.get("nonce", "")
+
     try:
         _run_restart_transaction(intent)
     except Exception as exc:
         # P0-8: Write failed status on ANY unhandled exception
         from hermes_cli.gateway_restart_state import (
-            RestartLock,
             append_restart_log,
-            cleanup_intent,
             write_status,
         )
         write_status(profile, "failed", request_id=request_id, error=str(exc))
@@ -70,7 +70,9 @@ def main() -> None:
         )
         sys.exit(1)
     finally:
-        # P0-8: Cleanup in finally — but only OUR resources
+        # P0-8: Cleanup in finally — but only OUR resources.
+        # P0-4: Pass request_id + nonce so stale workers don't delete
+        # a newer transaction's intent.
         from hermes_cli.gateway_restart_state import (
             RestartLock,
             cleanup_intent,
@@ -81,7 +83,7 @@ def main() -> None:
         except Exception:
             pass
         try:
-            cleanup_intent(profile)
+            cleanup_intent(profile, request_id=request_id, nonce=nonce)
         except Exception:
             pass
 
@@ -105,6 +107,7 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
     origin = intent.get("origin", "worker")
     hermes_home = intent.get("hermes_home", "")
     task_name = intent.get("task_name", "")
+    nonce = intent.get("nonce", "")
 
     # Validate intent TTL
     expires = intent.get("expires_at", 0)
@@ -115,7 +118,7 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error="Intent expired",
         )
-        cleanup_intent(profile)
+        cleanup_intent(profile, request_id=request_id, nonce=nonce)
         sys.exit(1)
 
     # P0-5: Full intent validation before ANY destructive action
@@ -155,7 +158,7 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error="lease claim failed",
         )
-        cleanup_intent(profile)
+        cleanup_intent(profile, request_id=request_id, nonce=nonce)
         sys.exit(1)
 
     # Restore HERMES_HOME if needed
@@ -195,7 +198,7 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
     finally:
         # Cleanup: release lease and intent
         lock.release()
-        cleanup_intent(profile)
+        cleanup_intent(profile, request_id=request_id, nonce=nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -439,13 +442,15 @@ def _wait_for_port_release(
         if _is_ancestor(pid):
             continue  # Never kill ancestors
 
-        if _is_hermes_gateway_pid(pid):
-            # Listener is a Hermes Gateway — terminate it
+        # P1-5: Only terminate if PID matches the old gateway PID we are
+        # restarting.  Any other process — even another Hermes instance —
+        # must NOT be killed.  Fail closed instead.
+        if pid == old_pid:
             append_restart_log(
                 request_id=request_id, profile=profile, old_pid=old_pid,
                 origin=origin, state="waiting_port_release",
                 port=port, listener_pid=pid,
-                reason="cleaning_hermes_listener",
+                reason="cleaning_old_gateway_listener",
             )
             try:
                 from gateway.status import terminate_pid
@@ -453,16 +458,17 @@ def _wait_for_port_release(
             except Exception:
                 pass
         else:
-            # Listener is NOT Hermes — do NOT kill, fail closed
+            # PID != old_pid — could be another Hermes instance or an
+            # unrelated process.  Either way, do NOT kill.
             append_restart_log(
                 request_id=request_id, profile=profile, old_pid=old_pid,
                 origin=origin, state="failed",
                 port=port, listener_pid=pid,
-                error=f"Port {port} occupied by unrelated process PID {pid}",
+                error=f"Port {port} occupied by PID {pid} (not old gateway {old_pid})",
             )
             raise RuntimeError(
-                f"Port {port} is occupied by an unrelated process (PID {pid}). "
-                "Cannot safely restart.  Will NOT kill unrelated processes."
+                f"Port {port} is occupied by PID {pid} (not the old gateway {old_pid}). "
+                "Cannot safely restart.  Will NOT kill."
             )
 
     # Step 4: Re-verify port release after killing Hermes listeners
@@ -558,11 +564,26 @@ def _start_new_gateway(
     )
 
     new_pid = _direct_spawn_gateway()
-    if new_pid > 0:
-        # Wait for launch evidence
-        verified_pid = _wait_for_launch_evidence(old_pid, timeout=15.0)
-        if verified_pid > 0:
-            new_pid = verified_pid
+    if new_pid <= 0:
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            new_pid=0, origin=origin, state="starting_direct_fallback",
+            launcher="direct_spawn", error="direct spawn failed (no PID)",
+        )
+        raise RuntimeError("Direct spawn failed: no PID returned")
+
+    # P0-5: MUST obtain launch evidence — a Popen PID alone is not enough
+    verified_pid = _wait_for_launch_evidence(old_pid, timeout=15.0)
+    if verified_pid <= 0:
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            new_pid=new_pid, origin=origin, state="starting_direct_fallback",
+            launcher="direct_spawn", error="no launch evidence after direct spawn",
+        )
+        raise RuntimeError(
+            f"Direct-spawned gateway (PID {new_pid}) did not produce launch evidence"
+        )
+    new_pid = verified_pid
 
     append_restart_log(
         request_id=request_id, profile=profile, old_pid=old_pid,
@@ -804,7 +825,7 @@ def _fail_closed(
         request_id=request_id, profile=profile, old_pid=old_pid,
         origin=origin, state="failed", error=f"{error_code}: {detail}",
     )
-    cleanup_intent(profile)
+    cleanup_intent(profile, request_id=request_id)
     sys.exit(1)
 
 

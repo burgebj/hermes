@@ -79,6 +79,7 @@ def jsonl_log_path() -> Path:
 
 def create_intent(
     *,
+    request_id: str | None = None,
     profile: str = "default",
     hermes_home: str | None = None,
     target_pid: int = 0,
@@ -86,12 +87,17 @@ def create_intent(
     origin: str = "external-cli",
     ttl_s: int = _DEFAULT_TTL_S,
 ) -> dict[str, Any]:
-    """Create and atomically write a restart intent.  Returns the intent dict."""
+    """Create and atomically write a restart intent.  Returns the intent dict.
+
+    If *request_id* is provided, it is used as-is (the coordinator generates
+    one UUID and shares it between lock and intent).  Otherwise a new UUID
+    is generated internally.
+    """
     from hermes_cli.config import get_hermes_home
     now = datetime.now(timezone.utc)
     intent = {
         "schema_version": _SCHEMA_VERSION,
-        "request_id": str(uuid.uuid4()),
+        "request_id": request_id or str(uuid.uuid4()),
         "nonce": secrets.token_urlsafe(32),
         "profile": profile,
         "hermes_home": hermes_home or str(Path(get_hermes_home()).resolve()),
@@ -123,10 +129,10 @@ def read_intent(profile: str = "default") -> Optional[dict[str, Any]]:
     # Schema check
     if data.get("schema_version") != _SCHEMA_VERSION:
         return None
-    # TTL check
+    # TTL check — return None if expired, but do NOT delete here.
+    # Deletion is the caller's responsibility via cleanup_intent().
     expires = data.get("expires_at", 0)
     if isinstance(expires, (int, float)) and time.time() > expires:
-        cleanup_intent(profile)
         return None
     # Required fields
     for key in ("request_id", "nonce", "profile", "hermes_home", "target_pid"):
@@ -154,10 +160,33 @@ def update_intent_state(profile: str, state: str) -> None:
         pass
 
 
-def cleanup_intent(profile: str = "default") -> None:
-    """Remove the intent file."""
+def cleanup_intent(
+    profile: str = "default",
+    request_id: str = "",
+    nonce: str = "",
+) -> None:
+    """Remove the intent file ONLY if request_id and nonce match.
+
+    P0-4: Compare-and-delete — a stale worker must not delete a newer
+    transaction's intent.  If *request_id* or *nonce* are empty, the
+    caller is a coordinator (not a worker) and deletion is unconditional.
+    """
     try:
-        intent_path(profile).unlink(missing_ok=True)
+        path = intent_path(profile)
+        if not path.exists():
+            return
+        # If request_id/nonce provided, verify they match before deleting
+        if request_id or nonce:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    if request_id and data.get("request_id") != request_id:
+                        return  # Different transaction — do NOT delete
+                    if nonce and data.get("nonce") != nonce:
+                        return  # Different nonce — do NOT delete
+            except (OSError, json.JSONDecodeError):
+                return  # Can't read — don't delete
+        path.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -216,7 +245,7 @@ class RestartLock:
                 if owner_pid > 0 and _pid_exists(owner_pid):
                     # Owner still alive — do NOT take over
                     return False
-                self._force_release()
+                self._force_release(expected=existing)
             else:
                 # Active lock by another request
                 return False
@@ -273,13 +302,19 @@ class RestartLock:
         """Atomically claim the lock from a different process (worker).
 
         The worker calls this after reading the intent.  It verifies the
-        ``request_id`` matches, then rewrites the lock with the worker's
-        ``owner_token`` so the original coordinator can no longer release it.
+        ``request_id`` matches and the lock has NOT already been claimed,
+        then rewrites the lock with the worker's ``owner_token``.
+
+        P0-2: One-time-only — if ``claimed_at`` already exists, a second
+        worker is attempting to claim the same transaction.  Reject it.
 
         Returns True on success.
         """
         existing = self._read_lock()
         if not existing or existing.get("request_id") != request_id:
+            return False
+        # P0-2: Reject if already claimed by another worker
+        if existing.get("claimed_at"):
             return False
         self._owner_token = secrets.token_urlsafe(32)
         self._owner_request_id = request_id
@@ -304,9 +339,24 @@ class RestartLock:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _force_release(self) -> None:
-        """Force-release an expired lock whose owner is confirmed dead."""
+    def _force_release(self, expected: dict[str, Any] | None = None) -> None:
+        """Force-release an expired lock whose owner is confirmed dead.
+
+        P1-3: TOCTOU protection — if *expected* is provided, re-read the
+        lock file and verify it still matches before deleting.  This
+        prevents a scenario where another request replaced the lock
+        between our first read and this delete.
+        """
         self._release_os_lock()
+        if expected:
+            # Re-read and compare — only delete if unchanged
+            current = self._read_lock()
+            if not current:
+                return  # Already gone
+            if (current.get("request_id") != expected.get("request_id")
+                    or current.get("created_at") != expected.get("created_at")
+                    or current.get("owner_token") != expected.get("owner_token")):
+                return  # Lock was replaced — do NOT delete the new one
         try:
             self._path.unlink(missing_ok=True)
         except OSError:
@@ -392,9 +442,28 @@ def read_status(profile: str = "default") -> Optional[dict[str, Any]]:
         return None
 
 
-def cleanup_status(profile: str = "default") -> None:
+def cleanup_status(
+    profile: str = "default",
+    request_id: str = "",
+) -> None:
+    """Remove the status file ONLY if request_id matches.
+
+    P0-4: Compare-and-delete — a stale worker must not delete a newer
+    transaction's status.  If *request_id* is empty, deletion is
+    unconditional (coordinator cleanup on spawn failure).
+    """
     try:
-        status_path(profile).unlink(missing_ok=True)
+        path = status_path(profile)
+        if not path.exists():
+            return
+        if request_id:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("request_id") != request_id:
+                    return  # Different transaction — do NOT delete
+            except (OSError, json.JSONDecodeError):
+                return  # Can't read — don't delete
+        path.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -446,9 +515,13 @@ def append_restart_log(
 # ---------------------------------------------------------------------------
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write JSON atomically (tmpfile + rename)."""
+    """Write JSON atomically (tmpfile + rename).
+
+    P1-4: Uses a unique tmp filename to prevent concurrent writes
+    from overwriting each other's temporary files.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)

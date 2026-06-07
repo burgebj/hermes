@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
+import signal
 import sys
 import time
 import uuid
@@ -168,8 +168,11 @@ def schedule_restart_handoff(
             "detail": f"Preflight failed: {detail}",
         }
 
-    # P0-1: Acquire lock FIRST, before writing intent
+    # P0-1: Generate ONE request_id for the entire transaction.
+    # Lock, intent, status, and lease all share this same ID.
     request_id = str(uuid.uuid4())
+
+    # P0-1: Acquire lock FIRST, before writing intent
     lock = RestartLock(profile)
     if not lock.try_acquire(request_id):
         append_restart_log(
@@ -182,17 +185,14 @@ def schedule_restart_handoff(
             "detail": "Another restart is already in progress",
         }
 
-    # Lock acquired — now safe to write intent
+    # Lock acquired — now safe to write intent (same request_id)
     intent = create_intent(
+        request_id=request_id,
         profile=profile,
         target_pid=old_pid,
         task_name=task_name,
         origin=origin,
     )
-    # Use the request_id from intent (it generates its own UUID)
-    request_id = intent["request_id"]
-    # Update lock to match intent's request_id
-    lock._owner_request_id = request_id
 
     write_status(profile, "scheduled", request_id=request_id, old_pid=old_pid)
     append_restart_log(
@@ -205,8 +205,8 @@ def schedule_restart_handoff(
         worker_pid = _spawn_worker(intent, profile)
     except Exception as e:
         lock.release()
-        cleanup_intent(profile)
-        cleanup_status(profile)
+        cleanup_intent(profile, request_id=request_id, nonce=intent.get("nonce", ""))
+        cleanup_status(profile, request_id=request_id)
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error=f"worker spawn: {e}",
@@ -217,20 +217,21 @@ def schedule_restart_handoff(
             "detail": f"Failed to spawn worker: {e}",
         }
 
-    # P0-4: Wait for worker to claim lease before releasing coordinator hold
+    # P0-3: Wait for worker to claim lease before releasing coordinator hold
     claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
-    if not claimed:
-        # Worker failed to claim within timeout — the worker may have
-        # crashed before reaching claim_lease().  Do NOT release the lock
-        # yet; let the worker's finally block or TTL expiry handle cleanup.
+    if claimed:
+        # Worker successfully claimed — coordinator can release its reference.
+        # The worker now owns the lock (its owner_token differs from ours).
+        lock.release()
+    else:
+        # P0-3: Worker failed to claim within timeout.  Do NOT release the
+        # lock — the worker may still be running and will claim later.
+        # The lock's TTL will eventually expire if the worker never comes.
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="scheduled",
             reason="worker_claim_timeout",
         )
-    # Coordinator releases its reference — worker now owns the lock
-    # (or lock will expire via TTL if worker never claimed)
-    lock.release()
 
     result: dict[str, Any] = {
         "request_id": request_id,
@@ -269,7 +270,11 @@ def _wait_for_worker_claim(
     while time.monotonic() < deadline:
         try:
             data = json.loads(lp.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("claimed_at"):
+            # P1-1: Verify request_id matches — stale claimed lock from
+            # an old transaction must not satisfy a new coordinator.
+            if (isinstance(data, dict)
+                    and data.get("request_id") == request_id
+                    and data.get("claimed_at")):
                 return True
         except (OSError, json.JSONDecodeError):
             pass
