@@ -110,6 +110,14 @@ _MODEL_CACHE_TTL = 3600
 _endpoint_model_metadata_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _endpoint_model_metadata_cache_time: Dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
+_ollama_context_cache: Dict[str, Optional[int]] = {}
+_ollama_context_cache_time: Dict[str, float] = {}
+_OLLAMA_CONTEXT_CACHE_TTL = 3600
+
+# Cache for detect_local_server_type — server type never changes during runtime
+_local_server_type_cache: Dict[str, Optional[str]] = {}
+_local_server_type_cache_time: Dict[str, float] = {}
+_LOCAL_SERVER_TYPE_CACHE_TTL = 3600
 
 # Descending tiers for context length probing when the model is unknown.
 # We start at 256K (covers GPT-5.x, many current large-context models) and
@@ -481,11 +489,23 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     import httpx
 
     normalized = _normalize_base_url(base_url)
+
+    # Check in-memory cache first — server type never changes during a single run
+    cache_key = normalized
+    now = time.time()
+    cached = _local_server_type_cache.get(cache_key)
+    if cached is not None and (now - _local_server_type_cache_time.get(cache_key, 0)) < _LOCAL_SERVER_TYPE_CACHE_TTL:
+        return cached
+    # Negative cache: if we recently detected None, don't re-probe
+    if cache_key in _local_server_type_cache and (now - _local_server_type_cache_time.get(cache_key, 0)) < _LOCAL_SERVER_TYPE_CACHE_TTL:
+        return _local_server_type_cache[cache_key]
+
     server_url = normalized
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
     headers = _auth_headers(api_key)
+    result: Optional[str] = None
 
     try:
         with httpx.Client(timeout=2.0, headers=headers) as client:
@@ -493,45 +513,50 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
             try:
                 r = client.get(f"{server_url}/api/v1/models")
                 if r.status_code == 200:
-                    return "lm-studio"
+                    result = "lm-studio"
             except Exception:
                 pass
             # Ollama exposes /api/tags and responds with {"models": [...]}
             # LM Studio returns {"error": "Unexpected endpoint"} with status 200
             # on this path, so we must verify the response contains "models".
-            try:
-                r = client.get(f"{server_url}/api/tags")
-                if r.status_code == 200:
-                    try:
-                        data = r.json()
-                        if "models" in data:
-                            return "ollama"
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            if result is None:
+                try:
+                    r = client.get(f"{server_url}/api/tags")
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                            if "models" in data:
+                                result = "ollama"
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             # llama.cpp exposes /v1/props (older builds used /props without the /v1 prefix)
-            try:
-                r = client.get(f"{server_url}/v1/props")
-                if r.status_code != 200:
-                    r = client.get(f"{server_url}/props")  # fallback for older builds
-                if r.status_code == 200 and "default_generation_settings" in r.text:
-                    return "llamacpp"
-            except Exception:
-                pass
+            if result is None:
+                try:
+                    r = client.get(f"{server_url}/v1/props")
+                    if r.status_code != 200:
+                        r = client.get(f"{server_url}/props")  # fallback for older builds
+                    if r.status_code == 200 and "default_generation_settings" in r.text:
+                        result = "llamacpp"
+                except Exception:
+                    pass
             # vLLM: /version
-            try:
-                r = client.get(f"{server_url}/version")
-                if r.status_code == 200:
-                    data = r.json()
-                    if "version" in data:
-                        return "vllm"
-            except Exception:
-                pass
+            if result is None:
+                try:
+                    r = client.get(f"{server_url}/version")
+                    if r.status_code == 200:
+                        data = r.json()
+                        if "version" in data:
+                            result = "vllm"
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    return None
+    _local_server_type_cache[cache_key] = result
+    _local_server_type_cache_time[cache_key] = time.time()
+    return result
 
 
 def _iter_nested_dicts(value: Any):
@@ -835,10 +860,24 @@ def _load_context_cache() -> Dict[str, int]:
     try:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        return data.get("context_lengths", {})
+        raw = data.get("context_lengths", {})
+        # Normalize keys: strip trailing slashes so http://host/v1 and
+        # http://host/v1/ share the same cache entry.
+        return {
+            f"{model}@{_normalize_cache_base_url(url)}": length
+            for key, length in raw.items()
+            if "@" in key
+            for model, url in [key.split("@", 1)]
+            if isinstance(length, int)
+        }
     except Exception as e:
         logger.debug("Failed to load context length cache: %s", e)
         return {}
+
+
+def _normalize_cache_base_url(base_url: str) -> str:
+    """Strip trailing slashes so http://host/v1 and http://host/v1/ share a cache key."""
+    return base_url.rstrip("/") if base_url else base_url
 
 
 def save_context_length(model: str, base_url: str, length: int) -> None:
@@ -847,7 +886,7 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
     Cache key is ``model@base_url`` so the same model name served from
     different providers can have different limits.
     """
-    key = f"{model}@{base_url}"
+    key = f"{model}@{_normalize_cache_base_url(base_url)}"
     cache = _load_context_cache()
     if cache.get(key) == length:
         return  # already stored
@@ -864,14 +903,14 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
 
 def get_cached_context_length(model: str, base_url: str) -> Optional[int]:
     """Look up a previously discovered context length for model+provider."""
-    key = f"{model}@{base_url}"
+    key = f"{model}@{_normalize_cache_base_url(base_url)}"
     cache = _load_context_cache()
     return cache.get(key)
 
 
 def _invalidate_cached_context_length(model: str, base_url: str) -> None:
     """Drop a stale cache entry so it gets re-resolved on the next lookup."""
-    key = f"{model}@{base_url}"
+    key = f"{model}@{_normalize_cache_base_url(base_url)}"
     cache = _load_context_cache()
     if key not in cache:
         return
@@ -1080,6 +1119,15 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     """
     import httpx
 
+    # In-memory TTL cache: per model+base_url, avoids repeated disk reads and
+    # network calls within the same process lifetime.
+    global _ollama_context_cache, _ollama_context_cache_time
+    cache_key = f"{model}@{_normalize_cache_base_url(base_url)}"
+    now = time.time()
+    cached_at = _ollama_context_cache_time.get(cache_key, 0)
+    if cache_key in _ollama_context_cache and (now - cached_at) < _OLLAMA_CONTEXT_CACHE_TTL:
+        return _ollama_context_cache[cache_key]
+
     server_url = base_url.rstrip("/")
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
@@ -1090,6 +1138,8 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
         with httpx.Client(timeout=5.0, headers=headers) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": model})
             if resp.status_code != 200:
+                _ollama_context_cache[cache_key] = None
+                _ollama_context_cache_time[cache_key] = now
                 return None
             data = resp.json()
 
@@ -1100,6 +1150,8 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
                 if "context_length" in key and isinstance(value, (int, float)):
                     ctx = int(value)
                     if ctx >= 1024:
+                        _ollama_context_cache[cache_key] = ctx
+                        _ollama_context_cache_time[cache_key] = now
                         return ctx
 
             # Fall back to num_ctx from Modelfile parameters (rare on Cloud)
@@ -1112,11 +1164,16 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
                             try:
                                 ctx = int(parts[-1])
                                 if ctx >= 1024:
+                                    _ollama_context_cache[cache_key] = ctx
+                                    _ollama_context_cache_time[cache_key] = now
                                     return ctx
                             except ValueError:
                                 pass
     except Exception:
         pass
+
+    _ollama_context_cache[cache_key] = None
+    _ollama_context_cache_time[cache_key] = now
     return None
 
 
@@ -1610,6 +1667,17 @@ def get_model_context_length(
             else:
                 return cached
 
+    # 1a. Hardcoded defaults for known model families — run BEFORE any live
+    # network probe so common local models (llama, qwen, gemma, etc.) never
+    # hit Ollama or any other endpoint.  This is a fast substring match
+    # (longest key first for specificity).
+    model_lower = model.lower()
+    for default_model, length in sorted(
+        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if default_model in model_lower:
+            return length
+
     # 1b. AWS Bedrock — use static context length table.
     # Bedrock's ListFoundationModels API doesn't expose context window sizes,
     # so we maintain a curated table in bedrock_adapter.py that reflects
@@ -1773,16 +1841,7 @@ def get_model_context_length(
 
     # 7. (reserved)
 
-    # 8. Hardcoded defaults (fuzzy match — longest key first for specificity)
-    # Only check `default_model in model` (is the key a substring of the input).
-    # The reverse (`model in default_model`) causes shorter names like
-    # "claude-sonnet-4" to incorrectly match "claude-sonnet-4-6" and return 1M.
-    model_lower = model.lower()
-    for default_model, length in sorted(
-        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
-    ):
-        if default_model in model_lower:
-            return length
+    # 8. (moved to step 1a — hardcoded defaults now run before any live probe)
 
     # 9. Query local server as last resort
     if base_url and is_local_endpoint(base_url):
