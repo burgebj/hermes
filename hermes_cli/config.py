@@ -2996,6 +2996,14 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "tool",
     },
+    "CAMOFOX_API_KEY": {
+        "description": "API key for remote Camofox browser server authentication",
+        "prompt": "Camofox API key",
+        "url": "https://github.com/jo-inc/camofox-browser",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": True,
+        "category": "tool",
+    },
     "FAL_KEY": {
         "description": "FAL API key for image and video generation",
         "prompt": "FAL API key",

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 
 from tools.browser_camofox import (
+    _camofox_headers,
     camofox_back,
     camofox_click,
     camofox_close,
@@ -399,6 +400,58 @@ class TestCamofoxVisionConfig:
         assert result["analysis"] == "Default camofox screenshot analysis"
         assert mock_llm.call_args.kwargs["temperature"] == 0.1
         assert mock_llm.call_args.kwargs["timeout"] == 120.0
+
+
+# ---------------------------------------------------------------------------
+# API key header
+# ---------------------------------------------------------------------------
+
+
+class TestCamofoxApiKeyHeader:
+    def test_headers_return_bearer_when_key_set(self, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_API_KEY", "test-secret-key")
+        headers = _camofox_headers()
+        assert headers == {"Authorization": "Bearer test-secret-key"}
+
+    def test_headers_empty_when_key_unset(self, monkeypatch):
+        monkeypatch.delenv("CAMOFOX_API_KEY", raising=False)
+        assert _camofox_headers() == {}
+
+    def test_headers_empty_when_key_blank(self, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_API_KEY", "   ")
+        assert _camofox_headers() == {}
+
+    def test_post_request_includes_auth_header(self, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        monkeypatch.setenv("CAMOFOX_API_KEY", "my-api-key")
+
+        captured = {}
+
+        def _capture_post(url, json=None, timeout=None, headers=None):
+            captured["headers"] = headers
+            return _mock_response(json_data={"ok": True, "url": "https://example.com"})
+
+        with patch("tools.browser_camofox.requests.post", side_effect=_capture_post):
+            from tools.browser_camofox import _post
+            _post("/tabs/test1/navigate", {"userId": "u1", "url": "https://example.com"})
+
+        assert captured.get("headers") == {"Authorization": "Bearer my-api-key"}
+
+    def test_get_request_includes_auth_header(self, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        monkeypatch.setenv("CAMOFOX_API_KEY", "my-api-key")
+
+        captured = {}
+
+        def _capture_get(url, params=None, timeout=None, headers=None):
+            captured["headers"] = headers
+            return _mock_response(json_data={"snapshot": "", "refsCount": 0})
+
+        with patch("tools.browser_camofox.requests.get", side_effect=_capture_get):
+            from tools.browser_camofox import _get
+            _get("/tabs/test2/snapshot", params={"userId": "u2"})
+
+        assert captured.get("headers") == {"Authorization": "Bearer my-api-key"}
 
 
 # ---------------------------------------------------------------------------
