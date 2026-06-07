@@ -378,6 +378,81 @@ class TestBlueBubblesWebhookParsing:
                 chat_guid = _chats[0].get("guid") or _chats[0].get("chatGuid")
         assert chat_guid == "any;+;chat-uuid-abc123"
 
+    @pytest.mark.asyncio
+    async def test_webhook_deduplicates_replayed_message_guid(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        adapter.send_read_receipts = False
+        dispatched = []
+
+        async def fake_handle_message(event):
+            dispatched.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "MSG-GUID-1",
+                "text": "hello",
+                "handle": {"address": "user@example.com"},
+                "isFromMe": False,
+                "chats": [
+                    {
+                        "guid": "iMessage;-;user@example.com",
+                        "chatIdentifier": "user@example.com",
+                    }
+                ],
+            },
+        }
+
+        first = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        second = await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        await asyncio.sleep(0)
+
+        assert first.status == 200
+        assert second.status == 200
+        assert [event.message_id for event in dispatched] == ["MSG-GUID-1"]
+
+    @pytest.mark.asyncio
+    async def test_webhook_allows_distinct_message_guids(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        adapter.send_read_receipts = False
+        dispatched = []
+
+        async def fake_handle_message(event):
+            dispatched.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+
+        def payload(guid, text):
+            return {
+                "type": "new-message",
+                "data": {
+                    "guid": guid,
+                    "text": text,
+                    "handle": {"address": "user@example.com"},
+                    "isFromMe": False,
+                    "chats": [
+                        {
+                            "guid": "iMessage;-;user@example.com",
+                            "chatIdentifier": "user@example.com",
+                        }
+                    ],
+                },
+            }
+
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(payload("MSG-GUID-1", "hello"))
+        )
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(payload("MSG-GUID-2", "again"))
+        )
+        await asyncio.sleep(0)
+
+        assert [event.message_id for event in dispatched] == [
+            "MSG-GUID-1",
+            "MSG-GUID-2",
+        ]
+
     def test_extract_payload_record_accepts_list_data(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
         payload = {
