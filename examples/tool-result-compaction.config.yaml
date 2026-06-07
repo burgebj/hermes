@@ -1,0 +1,21 @@
+# Example Hermes config section for opt-in tool result compaction.
+# Copy this into ~/.hermes/config.yaml and change enabled to true to activate.
+
+tool_result_compaction:
+  # Disabled by default. Set true only after reviewing the storage path and quota.
+  enabled: false
+
+  # Compact string tool results at or above this estimated token count.
+  # Estimate is dependency-free and intentionally approximate: len(content) / 4.
+  threshold_tokens: 5000
+
+  # Empty means ~/.hermes/raw_results. Supports ~ and environment variables.
+  raw_result_dir: ""
+
+  # Raw result storage quota. Oldest JSON files are deleted when the quota is exceeded.
+  # Set 0 to disable quota cleanup.
+  max_disk_mb: 500
+
+  # Keep this many characters from both the start and end of the tool result.
+  # Effective preview can be up to preview_chars * 2 plus an omitted marker.
+  preview_chars: 1000

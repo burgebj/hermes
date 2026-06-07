@@ -44,6 +44,7 @@ from tools.tool_result_storage import (
     maybe_persist_tool_result,
     enforce_turn_budget,
 )
+from agent.tool_result_compaction import compact_tool_content_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -745,6 +746,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # image tool result never poisons canonical session history.
         # String results pass through unchanged.
         _tool_content = agent._tool_result_content_for_active_model(name, function_result)
+        # Only applies to string content (skips multimodal list/dict).
+        if isinstance(_tool_content, str):
+            _tool_content, _ = compact_tool_content_if_needed(
+                name, tc.id, _tool_content, agent,
+            )
         messages.append(make_tool_result_message(name, _tool_content, tc.id))
 
         # ── Per-tool /steer drain ───────────────────────────────────
@@ -1357,6 +1363,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Unwrap _multimodal dicts to an OpenAI-style content list
         # (see parallel path for rationale). String results pass through.
         _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
+        # Only compact string content; multimodal content has already been converted/skipped.
+        if isinstance(_tool_content, str):
+            _tool_content, _ = compact_tool_content_if_needed(
+                function_name, tool_call.id, _tool_content, agent,
+            )
         messages.append(make_tool_result_message(function_name, _tool_content, tool_call.id))
 
         # ── Per-tool /steer drain ───────────────────────────────────
