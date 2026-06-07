@@ -165,6 +165,9 @@ class ContextEngine(ABC):
         self.last_total_tokens = 0
         self.compression_count = 0
 
+    def reset_no_progress_guard(self) -> None:
+        """Reset any no-progress guard state when new user content arrives. No-op by default."""
+
     # -- Optional: tools ---------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:

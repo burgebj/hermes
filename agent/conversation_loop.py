@@ -579,7 +579,11 @@ def run_conversation(
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
-    
+
+    # Reset the no-progress guard when real new content arrives
+    if hasattr(agent, 'context_compressor') and agent.context_compressor is not None:
+        agent.context_compressor.reset_no_progress_guard()
+
     if not agent.quiet_mode:
         _print_preview = _summarize_user_message_for_log(user_message)
         agent._safe_print(f"💬 Starting conversation: '{_print_preview[:60]}{'...' if len(_print_preview) > 60 else ''}'")
