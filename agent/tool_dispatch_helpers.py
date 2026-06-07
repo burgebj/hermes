@@ -317,23 +317,68 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
+def _coerce_tool_result_content(content: Any) -> Any:
+    """Normalize tool-result ``content`` to a wire-valid shape.
+
+    The OpenAI Chat Completions spec requires ``role: "tool"`` message
+    ``content`` to be a string (or, for multimodal-capable providers, a
+    content-part list). Plugin tool handlers that return a ``Dict[str, Any]``
+    otherwise get persisted as a raw dict, which strict upstreams reject with
+    HTTP 400 (e.g. Z.ai 1210, Manifest fallback_exhausted). Strings and
+    multimodal results pass through unchanged; any other non-string value is
+    JSON-encoded with the same idiom already used elsewhere in this module.
+
+    ``None`` (a handler returning no output / silent success) maps to an empty
+    string rather than the literal ``"null"`` — strict providers reject a null
+    content field the same way they reject a dict, and ``"null"`` would be a
+    misleading tool result."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if _is_multimodal_tool_result(content):
+        return content
+    # An OpenAI-style content-part list (e.g. ``[{"type": "text", ...},
+    # {"type": "image_url", ...}]``) is already a wire-valid shape for
+    # multimodal-capable providers — pass it through unchanged rather than
+    # JSON-encoding it into a string. A list that is NOT a content-part array
+    # (e.g. a plugin returning ``[1, 2, 3]``) is not wire-valid and still gets
+    # stringified for #31435.
+    if isinstance(content, list) and content and all(
+        isinstance(p, dict) and "type" in p for p in content
+    ):
+        return content
+    try:
+        return json.dumps(content, default=str)
+    except Exception:
+        return str(content)
+
+
 def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:
     """Build a tool-result message dict with both the OpenAI-format ``name``
     field (required by the wire format and provider adapters) and the internal
     ``tool_name`` field (written to the session DB messages table).
 
-    Content from high-risk tools (``web_extract``, ``web_search``, ``browser_*``,
-    ``mcp_*``) gets wrapped in semantic delimiters telling the model the content
-    is untrusted data, not instructions.  This is the architectural defense
-    against indirect prompt injection from poisoned web pages, GitHub issues,
-    and MCP responses — it changes how the model interprets the content rather
-    than relying on regex pattern matching catching every payload.
+    ``content`` is first normalized to a wire-valid shape (string, or a
+    multimodal content-part list) so plugin tools returning a dict cannot
+    poison the next request with a non-string ``content`` field (#31435).
+
+    The normalized content from high-risk tools (``web_extract``, ``web_search``,
+    ``browser_*``, ``mcp_*``) is then wrapped in semantic delimiters telling the
+    model the content is untrusted data, not instructions.  This is the
+    architectural defense against indirect prompt injection from poisoned web
+    pages, GitHub issues, and MCP responses — it changes how the model
+    interprets the content rather than relying on regex pattern matching
+    catching every payload.
 
     Wrapping only happens for plain string content.  Multimodal results
     (content lists with image_url parts) pass through unwrapped so the
     list structure stays valid for vision-capable adapters.
     """
-    wrapped = _maybe_wrap_untrusted(name, content)
+    # Coerce non-string content (dict/None/etc.) to a wire-valid shape first,
+    # then apply untrusted-content wrapping on the resulting string so both the
+    # #31435 stringify fix and the promptware defense compose correctly.
+    wrapped = _maybe_wrap_untrusted(name, _coerce_tool_result_content(content))
     return {
         "role": "tool",
         "name": name,
@@ -413,5 +458,6 @@ __all__ = [
     "_extract_file_mutation_targets",
     "_extract_error_preview",
     "_trajectory_normalize_msg",
+    "_coerce_tool_result_content",
     "make_tool_result_message",
 ]
