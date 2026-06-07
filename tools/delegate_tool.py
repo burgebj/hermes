@@ -31,6 +31,7 @@ from concurrent.futures import (
 from typing import Any, Dict, List, Optional
 
 from toolsets import TOOLSETS
+from tools.thread_context import propagate_context_to_thread
 
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
@@ -1559,7 +1560,9 @@ def _run_single_child(
                 task_id=child_task_id,
             )
 
-        _child_future = _timeout_executor.submit(_run_with_thread_capture)
+        _child_future = _timeout_executor.submit(
+            propagate_context_to_thread(_run_with_thread_capture)
+        )
         try:
             result = _child_future.result(timeout=child_timeout)
         except Exception as _timeout_exc:
@@ -2153,7 +2156,7 @@ def delegate_task(
             futures = {}
             for i, t, child in children:
                 future = executor.submit(
-                    _run_single_child,
+                    propagate_context_to_thread(_run_single_child),
                     task_index=i,
                     goal=t["goal"],
                     child=child,

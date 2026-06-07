@@ -2680,6 +2680,80 @@ class TestSubagentApprovalCallback(unittest.TestCase):
         # Parent's callback slot is still empty (TLS isolates threads).
         self.assertIsNone(_get_approval_callback())
 
+    def test_run_single_child_propagates_approval_session_contextvar(self):
+        """The single-child timeout executor must preserve gateway approval context."""
+        from tools.approval import (
+            get_current_session_key,
+            reset_current_session_key,
+            set_current_session_key,
+        )
+        from tools.delegate_tool import _run_single_child
+
+        class Child:
+            _current_task_id = "child-task"
+
+            def run_conversation(self, user_message, task_id):
+                session_key = get_current_session_key(default="missing")
+                return {
+                    "completed": True,
+                    "final_response": session_key,
+                    "message": user_message,
+                    "task_id": task_id,
+                    "api_calls": 1,
+                    "messages": [],
+                }
+
+        parent = _make_mock_parent()
+        token = set_current_session_key("gateway-session-A")
+        try:
+            result = _run_single_child(0, "needs approval", Child(), parent)
+        finally:
+            reset_current_session_key(token)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"], "gateway-session-A")
+
+    def test_batch_executor_wraps_run_single_child_with_thread_context(self):
+        """Source-level guard for the batch ThreadPoolExecutor submit call site."""
+        import ast
+        import inspect
+
+        import tools.delegate_tool as delegate_tool_module
+
+        source = inspect.getsource(delegate_tool_module)
+        tree = ast.parse(source)
+        fixed_submit_found = False
+        unfixed_submit_found = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "submit"):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Name) and first.id == "_run_single_child":
+                unfixed_submit_found = True
+            if (
+                isinstance(first, ast.Call)
+                and isinstance(first.func, ast.Name)
+                and first.func.id == "propagate_context_to_thread"
+                and first.args
+                and isinstance(first.args[0], ast.Name)
+                and first.args[0].id == "_run_single_child"
+            ):
+                fixed_submit_found = True
+
+        self.assertTrue(
+            fixed_submit_found,
+            "batch delegate executor must submit propagate_context_to_thread(_run_single_child)",
+        )
+        self.assertFalse(
+            unfixed_submit_found,
+            "batch delegate executor still has a bare executor.submit(_run_single_child, ...) call",
+        )
+
 
 class TestFallbackModelInheritance(unittest.TestCase):
     """Subagents must inherit the parent's fallback provider chain."""
