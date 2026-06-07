@@ -31,6 +31,12 @@ _SLACK_TARGET_RE = re.compile(r"^\s*([CGDU][A-Z0-9]{8,})\s*$")
 _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+_DINGTALK_TARGET_RE = re.compile(r"^\s*(cid[A-Za-z0-9+/=_-]+)\s*$")
+# DingTalk userid (staffId) — used by batchSend for proactive DM.
+# Formats observed: manager7827 (admin), 0408316842-168558536 (employee id),
+# 495324591270477016 (pure numeric), 281359695147 (short numeric).
+# Must NOT match cid format (checked separately above).
+_DINGTALK_USERID_RE = re.compile(r"^\s*([A-Za-z0-9][-A-Za-z0-9_]{4,50})\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -131,7 +137,12 @@ SEND_MESSAGE_SCHEMA = {
         "(not just a bare platform name), call send_message(action='list') FIRST to see "
         "available targets, then send to the correct one.\n"
         "If the user just says a platform name like 'send to telegram', send directly "
-        "to the home channel without listing first."
+        "to the home channel without listing first.\n\n"
+        "For DingTalk: targets can be channel names, cid (open_conversation_id), "
+        "or userid (staffId) from the address book. The address book is loaded "
+        "automatically from the organization's DingTalk API and includes all employees "
+        "with their name, userid, and department info. Use send_message(action='list') "
+        "to see all available contacts including address book entries."
     ),
     "parameters": {
         "type": "object",
@@ -143,7 +154,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', 'platform:userid', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'dingtalk:manager7827' (userid from address book), 'dingtalk:cidXXX' (cid for DM/group), 'matrix:!roomid:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
             },
             "message": {
                 "type": "string",
@@ -202,12 +213,13 @@ def _handle_send(args):
             else:
                 return json.dumps({
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
-                    f"Use send_message(action='list') to see available targets."
+                    f"Use send_message(action='list') to see available targets, "
+                    f"or provide a DingTalk userid directly (e.g. dingtalk:<userid>)."
                 })
         except Exception:
             return json.dumps({
                 "error": f"Could not resolve '{target_ref}' on {platform_name}. "
-                f"Try using a numeric channel ID instead."
+                f"Try using a numeric channel ID or DingTalk userid instead."
             })
 
     from tools.interrupt import is_interrupted
@@ -395,10 +407,18 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
-    if platform_name == "ntfy":
-        topic = target_ref.strip()
-        if topic:
-            return topic, None, True
+    if platform_name == "dingtalk":
+        # DingTalk open_conversation_id (cid format) — base64-like strings
+        # starting with "cid". Primary addressing format for both DM and group.
+        match = _DINGTALK_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), None, True
+        # DingTalk userid (staffId) — for proactive DM send via batchSend.
+        # When the target is a userid (not a cid), the send_message tool
+        # routes it to _proactive_send which uses userIds parameter directly.
+        match = _DINGTALK_USERID_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), None, True
     if platform_name == "email":
         match = _EMAIL_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -506,7 +526,6 @@ async def _send_via_adapter(
          the runner weakref is ``None``).
       3. A descriptive error explaining both options.
     """
-    platform_name = platform.value if hasattr(platform, "value") else str(platform)
     runner = None
     try:
         from gateway.run import _gateway_runner_ref
@@ -521,13 +540,7 @@ async def _send_via_adapter(
             adapter = None
         if adapter is not None:
             try:
-                metadata = {}
-                if thread_id:
-                    metadata["thread_id"] = thread_id
-                if platform_name == "ntfy" and chat_id:
-                    metadata["publish_topic"] = chat_id
-                if not metadata:
-                    metadata = None
+                metadata = {"thread_id": thread_id} if thread_id else None
                 result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
             except asyncio.CancelledError:
                 raise
@@ -537,6 +550,7 @@ async def _send_via_adapter(
                 return {"success": True, "message_id": result.message_id}
             return {"error": f"Adapter send failed: {result.error}"}
 
+    platform_name = platform.value if hasattr(platform, "value") else str(platform)
     entry = None
     try:
         from gateway.platform_registry import platform_registry
@@ -788,8 +802,22 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_sms(pconfig.api_key, chat_id, chunk)
         elif platform == Platform.MATRIX:
             result = await _send_matrix(pconfig.token, pconfig.extra, chat_id, chunk)
+        elif platform == Platform.HOMEASSISTANT:
+            result = await _send_homeassistant(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.DINGTALK:
-            result = await _send_dingtalk(pconfig.extra, chat_id, chunk)
+            # Route DingTalk through gateway live adapter when available.
+            # The adapter supports proactive send (batchSend + groupMessages/send)
+            # and session_webhook replies — both more capable than the standalone
+            # static-webhook path (_send_dingtalk).
+            result = await _send_via_adapter(
+                platform, pconfig, chat_id, chunk,
+                thread_id=thread_id,
+                media_files=media_files,
+                force_document=force_document,
+            )
+            # Fallback to static webhook if adapter is unavailable
+            if isinstance(result, dict) and result.get("error") and "adapter" in result.get("error", "").lower():
+                result = await _send_dingtalk(pconfig.extra, chat_id, chunk)
         elif platform == Platform.FEISHU:
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
@@ -1482,6 +1510,29 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
             await adapter.disconnect()
         except Exception:
             pass
+
+
+async def _send_homeassistant(token, extra, chat_id, message):
+    """Send via Home Assistant notify service."""
+    try:
+        import aiohttp
+    except ImportError:
+        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
+    try:
+        hass_url = (extra.get("url") or os.getenv("HASS_URL", "")).rstrip("/")
+        token = token or os.getenv("HASS_TOKEN", "")
+        if not hass_url or not token:
+            return {"error": "Home Assistant not configured (HASS_URL, HASS_TOKEN required)"}
+        url = f"{hass_url}/api/services/notify/notify"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(url, headers=headers, json={"message": message, "target": chat_id}) as resp:
+                if resp.status not in {200, 201}:
+                    body = await resp.text()
+                    return _error(f"Home Assistant API error ({resp.status}): {body}")
+        return {"success": True, "platform": "homeassistant", "chat_id": chat_id}
+    except Exception as e:
+        return _error(f"Home Assistant send failed: {e}")
 
 
 async def _send_dingtalk(extra, chat_id, message):

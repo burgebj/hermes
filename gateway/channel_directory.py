@@ -65,6 +65,13 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     """
     from gateway.config import Platform
 
+    # Load existing directory to preserve manually-enriched fields (e.g. user_id)
+    existing_dir = load_directory()
+    existing_entries: Dict[str, Dict[str, str]] = {}
+    for plat_name, plat_list in existing_dir.get("platforms", {}).items():
+        for entry in plat_list:
+            existing_entries[entry.get("id", "")] = entry
+
     platforms: Dict[str, List[Dict[str, str]]] = {}
 
     for platform, adapter in adapters.items():
@@ -237,6 +244,27 @@ def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
     except Exception as e:
         logger.debug("Channel directory: failed to read sessions for %s: %s", platform_name, e)
 
+    # Enrich DingTalk entries with user_id (sender_staff_id) from
+    # the adapter's cached inbound message contexts. This is essential
+    # for proactive DM send (batchSend requires userIds/staffId).
+    if platform_name == "dingtalk" and entries:
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+            if runner:
+                from gateway.config import Platform
+                adapter = runner.adapters.get(Platform.DINGTALK)
+                if adapter and hasattr(adapter, "_message_contexts"):
+                    for entry in entries:
+                        chat_id = entry.get("id", "")
+                        ctx = adapter._message_contexts.get(chat_id)
+                        if ctx:
+                            staff_id = getattr(ctx, "sender_staff_id", "") or getattr(ctx, "sender_id", "")
+                            if staff_id:
+                                entry["user_id"] = staff_id
+        except Exception:
+            pass  # Non-critical enrichment; _proactive_send has fallback
+
     return entries
 
 
@@ -272,16 +300,17 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     - Discord: "bot-home", "#bot-home", "GuildName/bot-home"
     - Telegram: display name or group name
     - Slack: "engineering", "#engineering"
+    - DingTalk: userid or display name (from session history only)
     """
     directory = load_directory()
     channels = directory.get("platforms", {}).get(platform_name, [])
     if not channels:
         return None
 
-    # 0. Exact ID match — case-sensitive, no normalization. Lets callers pass
-    # raw platform IDs (e.g. Slack "C0B0QV5434G") even when the format guard
-    # in _parse_target_ref hasn't recognized them as explicit.
     raw = name.strip()
+
+    # 0. Exact ID match — case-sensitive, no normalization. Lets callers pass
+    # raw platform IDs (e.g. Slack "C0B0QV5434G") or DingTalk userids.
     for ch in channels:
         if ch.get("id") == raw:
             return ch["id"]
@@ -303,12 +332,23 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
             if guild == guild_part and _normalize_channel_query(ch["name"]) == ch_part:
                 return ch["id"]
 
-    # 3. Partial prefix match (only if unambiguous)
-    matches = [ch for ch in channels if _normalize_channel_query(ch["name"]).startswith(query)]
+    # 3. Partial name match (prefix or substring)
+    matches = []
+    for ch in channels:
+        ch_name = _normalize_channel_query(ch["name"])
+        if ch_name.startswith(query):
+            matches.append(ch)
+        elif query in ch_name:
+            matches.append(ch)
     if len(matches) == 1:
+        return matches[0]["id"]
+    if len(matches) > 1:
+        matches.sort(key=lambda m: len(m.get("name", "")))
         return matches[0]["id"]
 
     return None
+
+
 
 
 def format_directory_for_display() -> str:
@@ -317,7 +357,8 @@ def format_directory_for_display() -> str:
     platforms = directory.get("platforms", {})
 
     if not any(platforms.values()):
-        return "No messaging platforms connected or no channels discovered yet."
+        return ("No messaging platforms connected or no channels discovered yet. "
+                "Use send_message(action='list') again after a moment.")
 
     lines = ["Available messaging targets:\n"]
 
@@ -348,7 +389,8 @@ def format_directory_for_display() -> str:
         else:
             lines.append(f"{plat_name.title()}:")
             for ch in channels:
-                lines.append(f"  {plat_name}:{_channel_target_name(plat_name, ch)}")
+                label = _channel_target_name(plat_name, ch)
+                lines.append(f"  {plat_name}:{label}")
             lines.append("")
 
     lines.append('Use these as the "target" parameter when sending.')
