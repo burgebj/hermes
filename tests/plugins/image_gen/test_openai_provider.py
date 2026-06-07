@@ -80,6 +80,28 @@ class TestAvailability:
         monkeypatch.setenv("OPENAI_API_KEY", "test")
         assert openai_plugin.OpenAIImageGenProvider().is_available() is True
 
+    def test_key_env_config_makes_provider_available(self, monkeypatch, tmp_path):
+        import yaml
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CUSTOM_IMAGE_KEY", "custom-key")
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"key_env": "CUSTOM_IMAGE_KEY"}}})
+        )
+
+        assert openai_plugin.OpenAIImageGenProvider().is_available() is True
+
+    def test_unset_key_env_falls_back_to_openai_api_key(self, monkeypatch, tmp_path):
+        import yaml
+
+        monkeypatch.setenv("OPENAI_API_KEY", "fallback-key")
+        monkeypatch.delenv("CUSTOM_IMAGE_KEY", raising=False)
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"key_env": "CUSTOM_IMAGE_KEY"}}})
+        )
+
+        assert openai_plugin.OpenAIImageGenProvider().is_available() is True
+
 
 # ── Model resolution ────────────────────────────────────────────────────────
 
@@ -162,6 +184,67 @@ class TestGenerate:
         assert call_kwargs["size"] == "1536x1024"
         # gpt-image-2 rejects response_format — we must NOT send it.
         assert "response_format" not in call_kwargs
+        assert fake_client.images.generate.call_args.kwargs["model"] == "gpt-image-2"
+
+    def test_config_key_env_is_passed_to_openai_client(self, provider, monkeypatch, tmp_path):
+        import yaml
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CUSTOM_IMAGE_KEY", "custom-image-key")
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"key_env": "CUSTOM_IMAGE_KEY"}}})
+        )
+
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value = fake_client
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            result = provider.generate("a cat")
+
+        assert result["success"] is True
+        assert fake_openai.OpenAI.call_args.kwargs["api_key"] == "custom-image-key"
+
+    def test_config_api_key_env_alias_is_passed_to_openai_client(self, provider, monkeypatch, tmp_path):
+        import yaml
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CUSTOM_IMAGE_ALIAS_KEY", "alias-image-key")
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"api_key_env": "CUSTOM_IMAGE_ALIAS_KEY"}}})
+        )
+
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value = fake_client
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            result = provider.generate("a cat")
+
+        assert result["success"] is True
+        assert fake_openai.OpenAI.call_args.kwargs["api_key"] == "alias-image-key"
+
+    def test_key_env_takes_priority_over_openai_api_key(self, provider, monkeypatch, tmp_path):
+        import yaml
+
+        monkeypatch.setenv("OPENAI_API_KEY", "global-key")
+        monkeypatch.setenv("CUSTOM_IMAGE_KEY", "custom-image-key")
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"key_env": "CUSTOM_IMAGE_KEY"}}})
+        )
+
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value = fake_client
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            result = provider.generate("a cat")
+
+        assert result["success"] is True
+        assert fake_openai.OpenAI.call_args.kwargs["api_key"] == "custom-image-key"
 
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),
