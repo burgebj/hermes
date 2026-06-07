@@ -190,6 +190,18 @@ def _extract_attachments(msg: dict) -> List[dict]:
 
 QUEUE_LIMIT = 1000
 POLL_INTERVAL = 0.2  # seconds between DB polls (200ms)
+_MAX_LIST_LIMIT = 200
+_MAX_MESSAGES_LIMIT = 200
+_MAX_EVENTS_LIMIT = 100
+
+
+def _clamp_limit(value: int, *, default: int, maximum: int) -> int:
+    """Clamp MCP list/read limits to a safe positive range."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(maximum, parsed))
 
 
 @dataclass

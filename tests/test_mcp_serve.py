@@ -271,6 +271,20 @@ class TestImports:
         assert isinstance(mcp_serve._MCP_SERVER_AVAILABLE, bool)
 
 
+class TestClampLimit:
+    def test_invalid_value_uses_default(self):
+        from mcp_serve import _clamp_limit
+        assert _clamp_limit("bad", default=50, maximum=200) == 50
+
+    def test_zero_uses_minimum_one(self):
+        from mcp_serve import _clamp_limit
+        assert _clamp_limit(0, default=50, maximum=200) == 1
+
+    def test_excessive_value_is_capped(self):
+        from mcp_serve import _clamp_limit
+        assert _clamp_limit(9999, default=50, maximum=200) == 200
+
+
 class TestHelpers:
     def test_get_sessions_dir(self, tmp_path):
         from mcp_serve import _get_sessions_dir
@@ -569,6 +583,16 @@ class TestE2EConversationsList:
         server, _ = mcp_server_e2e
         result = _run_tool(server, "conversations_list", {"limit": 2})
         assert result["count"] == 2
+
+    def test_limit_zero_clamped_to_one(self, mcp_server_e2e, _event_loop):
+        server, _ = mcp_server_e2e
+        result = _run_tool(server, "conversations_list", {"limit": 0})
+        assert result["count"] == 1
+
+    def test_limit_excessive_is_capped(self, mcp_server_e2e, _event_loop):
+        server, _ = mcp_server_e2e
+        result = _run_tool(server, "conversations_list", {"limit": 9999})
+        assert result["count"] == 3
 
 
 class TestE2EConversationGet:
