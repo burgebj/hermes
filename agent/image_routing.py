@@ -232,7 +232,20 @@ def _coerce_mode(raw: Any) -> str:
     return "auto"
 
 
-def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
+def _normalized_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalized_provider(value: Any) -> str:
+    return _normalized_text(value).lower()
+
+
+def _explicit_aux_vision_override(
+    cfg: Optional[Dict[str, Any]],
+    *,
+    active_provider: str = "",
+    active_model: str = "",
+) -> bool:
     """True when the user configured a specific auxiliary vision backend.
 
     An explicit override means the user *wants* the text pipeline (they're
@@ -247,12 +260,31 @@ def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(vision, dict):
         return False
 
-    provider = str(vision.get("provider") or "").strip().lower()
-    model = str(vision.get("model") or "").strip()
-    base_url = str(vision.get("base_url") or "").strip()
+    provider = _normalized_provider(vision.get("provider"))
+    model = _normalized_text(vision.get("model"))
+    base_url = _normalized_text(vision.get("base_url"))
+    api_key = _normalized_text(vision.get("api_key"))
+    extra_body = vision.get("extra_body")
+    active_provider = _normalized_provider(active_provider)
+    active_model = _normalized_text(active_model)
 
     # "auto" / "" / blank = not explicit
     if provider in {"", "auto"} and not model and not base_url:
+        return False
+
+    # When auxiliary vision simply mirrors the active main model and does not
+    # carry its own transport/auth overrides, treat it as the same backend.
+    # This keeps "all auxiliaries use the main Codex model" configs on the
+    # native image path instead of needlessly forcing text pre-analysis.
+    if (
+        provider not in {"", "auto"}
+        and provider == active_provider
+        and model
+        and model == active_model
+        and not base_url
+        and not api_key
+        and not extra_body
+    ):
         return False
     return True
 
@@ -308,7 +340,7 @@ def decide_image_input_mode(
         return "text"
 
     # auto
-    if _explicit_aux_vision_override(cfg):
+    if _explicit_aux_vision_override(cfg, active_provider=provider, active_model=model):
         return "text"
 
     supports = _lookup_supports_vision(provider, model, cfg)
