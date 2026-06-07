@@ -3543,6 +3543,68 @@ class FeishuAdapter(BasePlatformAdapter):
             key,
             len(event.text or ""),
         )
+
+        # --- Text-batch interrupt gap fix ---
+        #
+        # When a user types "stop" or "等一下" while an agent is running, the
+        # Feishu adapter debounces rapid text chunks via a 0.6 s asyncio.sleep
+        # before flushing.  By the time _flush_text_batch_now fires, the
+        # base adapter's _active_sessions guard may already have been released
+        # (the previous turn finished), but the gateway runner's
+        # _running_agents entry for the session may still be alive (the next
+        # turn hasn't started yet).
+        #
+        # Without this bypass, the text-batch event enters
+        # BaseAdapter.handle_message() at line 3506 which checks
+        # ``session_key in self._active_sessions``.  Since the guard is gone,
+        # it takes the cold-start branch (_start_session_processing → new
+        # _process_message_background → _message_handler → _handle_message).
+        # But _handle_message finds the old _running_agents entry, routes
+        # the event to `PRIORITY queue/interrupt` — which returns without
+        # processing — and the user's interrupt text is silently dropped in
+        # the turn-boundary gap.
+        #
+        # Fix: when the adapter-level guard is absent for this session key,
+        # route directly to the gateway runner's _message_handler instead of
+        # going through BaseAdapter.handle_message().  The runner's own
+        # _running_agents check handles the interrupt correctly.
+        from gateway.platforms.base import (
+            coerce_plaintext_gateway_command,
+            _reply_anchor_for_event,
+            _thread_metadata_for_source,
+        )
+        session_key = self._text_batch_key(event)
+        if session_key not in self._active_sessions and self._message_handler is not None:
+            logger.debug(
+                "[Feishu] Text-batch flush arrived after session guard released "
+                "for %s — routing directly to runner for interrupt detection",
+                session_key,
+            )
+            coerce_plaintext_gateway_command(event)
+            self._apply_topic_recovery(event)
+            try:
+                response = await self._message_handler(event)
+            except Exception as e:
+                logger.error(
+                    "[Feishu] Direct dispatch from text-batch flush failed: %s",
+                    e, exc_info=True,
+                )
+                return
+            # Send non-empty response back to the user
+            if response:
+                _text, _eph_ttl = self._unwrap_ephemeral(response)
+                if _text:
+                    _thread_meta = _thread_metadata_for_source(
+                        event.source, _reply_anchor_for_event(event)
+                    )
+                    await self._send_with_retry(
+                        chat_id=event.source.chat_id,
+                        content=_text,
+                        reply_to=_reply_anchor_for_event(event),
+                        metadata=_thread_meta,
+                    )
+            return
+
         await self._handle_message_with_guards(event)
 
     # =========================================================================
