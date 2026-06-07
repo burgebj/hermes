@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,70 @@ def test_registry_add_get_roundtrip_persists(tmp_path):
     assert entry["url"] == "ws://mac.local:18789"
     assert entry["token"] == "deadbeef"
     assert "added_at" in entry
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits only")
+def test_registry_add_stores_token_file_owner_only(tmp_path):
+    from plugins.google_meet.node.registry import NodeRegistry
+
+    p = tmp_path / "nodes.json"
+    r = NodeRegistry(path=p)
+
+    old_umask = os.umask(0o022)
+    try:
+        r.add("mac", "ws://mac.local:18789", "deadbeef")
+    finally:
+        os.umask(old_umask)
+
+    assert p.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits only")
+def test_registry_update_preserves_owner_only_token_file(tmp_path):
+    from plugins.google_meet.node.registry import NodeRegistry
+
+    p = tmp_path / "nodes.json"
+    r = NodeRegistry(path=p)
+    r.add("mac", "ws://mac.local:18789", "deadbeef")
+    p.chmod(0o600)
+
+    old_umask = os.umask(0o022)
+    try:
+        r.add("mac", "ws://mac.local:18789", "cafebabe")
+    finally:
+        os.umask(old_umask)
+
+    assert p.stat().st_mode & 0o777 == 0o600
+    assert json.loads(p.read_text(encoding="utf-8"))["nodes"]["mac"]["token"] == "cafebabe"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits only")
+def test_registry_restricts_stale_temp_file_before_replacement(tmp_path):
+    from plugins.google_meet.node.registry import NodeRegistry
+
+    p = tmp_path / "nodes.json"
+    stale_tmp = p.with_suffix(".json.tmp")
+    stale_tmp.write_text("stale", encoding="utf-8")
+    stale_tmp.chmod(0o644)
+
+    r = NodeRegistry(path=p)
+    r.add("mac", "ws://mac.local:18789", "deadbeef")
+
+    assert p.stat().st_mode & 0o777 == 0o600
+    assert json.loads(p.read_text(encoding="utf-8"))["nodes"]["mac"]["token"] == "deadbeef"
+
+
+def test_registry_save_works_without_fchmod(tmp_path, monkeypatch):
+    from plugins.google_meet.node.registry import NodeRegistry
+    from plugins.google_meet.node import registry
+
+    monkeypatch.delattr(registry.os, "fchmod", raising=False)
+
+    p = tmp_path / "nodes.json"
+    r = NodeRegistry(path=p)
+    r.add("mac", "ws://mac.local:18789", "deadbeef")
+
+    assert json.loads(p.read_text(encoding="utf-8"))["nodes"]["mac"]["token"] == "deadbeef"
 
 
 def test_registry_get_returns_none_when_missing(tmp_path):
