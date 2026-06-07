@@ -16882,69 +16882,111 @@ class GatewayRunner:
         _start = time.time()
 
         try:
-            _timeout = ClientTimeout(total=0, sock_read=1800)
-            async with _AioClientSession(timeout=_timeout) as session:
-                async with session.post(
-                    f"{proxy_url}/v1/chat/completions",
-                    json=body,
-                    headers=headers,
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
+            from gateway.outbound_proxy import (
+                gateway_relay_disable_proxy_fallback,
+                gateway_relay_sock_read_seconds,
+                relay_client_session_proxy_bundle,
+            )
+
+            _sock_read = gateway_relay_sock_read_seconds()
+            _timeout = ClientTimeout(total=0, sock_read=_sock_read)
+            _base_bundle = relay_client_session_proxy_bundle()
+            _direct_bundle = (False, {}, {})
+            if gateway_relay_disable_proxy_fallback() or _base_bundle == _direct_bundle:
+                _relay_bundles = [_base_bundle]
+            else:
+                _relay_bundles = [_base_bundle, _direct_bundle]
+
+            for _attempt_no, (_trust_env, _sess_kw, _req_kw) in enumerate(_relay_bundles):
+                full_response = ""
+                try:
+                    async with _AioClientSession(
+                        timeout=_timeout, trust_env=_trust_env, **_sess_kw
+                    ) as session:
+                        async with session.post(
+                            f"{proxy_url}/v1/chat/completions",
+                            json=body,
+                            headers=headers,
+                            **_req_kw,
+                        ) as resp:
+                            if resp.status != 200:
+                                error_text = await resp.text()
+                                logger.warning(
+                                    "Proxy error (%d) from %s: %s",
+                                    resp.status, proxy_url, error_text[:500],
+                                )
+                                return {
+                                    "final_response": f"⚠️ Proxy error ({resp.status}): {error_text[:300]}",
+                                    "messages": [],
+                                    "api_calls": 0,
+                                    "tools": [],
+                                }
+
+                            # Parse SSE stream
+                            buffer = ""
+                            async for chunk in resp.content.iter_any():
+                                if not _run_still_current():
+                                    logger.info(
+                                        "Discarding stale proxy stream for %s — generation %d is no longer current",
+                                        session_key or "?",
+                                        run_generation or 0,
+                                    )
+                                    return {
+                                        "final_response": "",
+                                        "messages": [],
+                                        "api_calls": 0,
+                                        "tools": [],
+                                        "history_offset": len(history),
+                                        "session_id": session_id,
+                                        "response_previewed": False,
+                                    }
+                                text = chunk.decode("utf-8", errors="replace")
+                                buffer += text
+
+                                # Process complete SSE lines
+                                while "\n" in buffer:
+                                    line, buffer = buffer.split("\n", 1)
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    if line.startswith("data: "):
+                                        data = line[6:]
+                                        if data.strip() == "[DONE]":
+                                            break
+                                        try:
+                                            obj = json.loads(data)
+                                            choices = obj.get("choices", [])
+                                            if choices:
+                                                delta = choices[0].get("delta", {})
+                                                content = delta.get("content", "")
+                                                if content:
+                                                    full_response += content
+                                                    if _stream_consumer:
+                                                        _stream_consumer.on_delta(content)
+                                        except json.JSONDecodeError:
+                                            pass
+                except asyncio.CancelledError:
+                    raise
+                except Exception as _attempt_exc:
+                    if _attempt_no + 1 < len(_relay_bundles):
                         logger.warning(
-                            "Proxy error (%d) from %s: %s",
-                            resp.status, proxy_url, error_text[:500],
+                            "Gateway relay aiohttp attempt %d failed (%s); "
+                            "retrying without env proxy / outbound proxy kwargs",
+                            _attempt_no + 1,
+                            _attempt_exc,
                         )
+                        continue
+                    logger.error("Proxy connection error to %s: %s", proxy_url, _attempt_exc)
+                    if not full_response:
                         return {
-                            "final_response": f"⚠️ Proxy error ({resp.status}): {error_text[:300]}",
+                            "final_response": f"⚠️ Proxy connection error: {_attempt_exc}",
                             "messages": [],
                             "api_calls": 0,
                             "tools": [],
                         }
-
-                    # Parse SSE stream
-                    buffer = ""
-                    async for chunk in resp.content.iter_any():
-                        if not _run_still_current():
-                            logger.info(
-                                "Discarding stale proxy stream for %s — generation %d is no longer current",
-                                session_key or "?",
-                                run_generation or 0,
-                            )
-                            return {
-                                "final_response": "",
-                                "messages": [],
-                                "api_calls": 0,
-                                "tools": [],
-                                "history_offset": len(history),
-                                "session_id": session_id,
-                                "response_previewed": False,
-                            }
-                        text = chunk.decode("utf-8", errors="replace")
-                        buffer += text
-
-                        # Process complete SSE lines
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if line.startswith("data: "):
-                                data = line[6:]
-                                if data.strip() == "[DONE]":
-                                    break
-                                try:
-                                    obj = json.loads(data)
-                                    choices = obj.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        content = delta.get("content", "")
-                                        if content:
-                                            full_response += content
-                                            if _stream_consumer:
-                                                _stream_consumer.on_delta(content)
-                                except json.JSONDecodeError:
-                                    pass
+                    break
+                else:
+                    break
 
         except asyncio.CancelledError:
             raise
