@@ -341,6 +341,71 @@ def _recoverable_oneshot_run_at(
     return None
 
 
+def _is_tz_migration_phantom(
+    stored_next_run: str,
+    schedule: Dict[str, Any],
+    now: datetime,
+) -> bool:
+    """Return True when a cron next_run_at is due only because of a TZ migration.
+
+    A cron job persists ``next_run_at`` with the offset that was active when
+    the previous run computed it. If the Hermes/system timezone later moves to
+    a different offset, the same absolute instant maps to an *earlier* local
+    wall-clock time than the cron expression intended. ``_ensure_aware()`` then
+    converts the stored instant into the current zone and ``next_run_dt <= now``
+    fires the job early — and the post-run ``compute_next_run()`` then schedules
+    the same logical occurrence again at the correct wall-clock time, producing
+    a double-fire. See issue #28934.
+
+    We treat the next_run as a TZ-migration phantom when:
+
+    - the schedule is a cron expression (only cron carries wall-clock intent;
+      interval / once jobs are absolute and should not be "repaired"),
+    - the stored UTC offset differs from the current Hermes timezone offset,
+      or the legacy stored timestamp is naive and was interpreted as due via
+      the old system-local timezone,
+    - the stored *wall-clock time* (the naive part, reinterpreted in the
+      current Hermes zone) is still in the future relative to ``now``.
+
+    When the stored wall-clock time has already passed in the current zone,
+    the existing stale-run fast-forward branch handles it correctly, so this
+    helper returns False and the job stays on the normal due path.
+    """
+    if schedule.get("kind") != "cron":
+        return False
+
+    try:
+        stored_dt = datetime.fromisoformat(stored_next_run)
+    except (TypeError, ValueError):
+        return False
+    target_tz = now.tzinfo
+    if target_tz is None:
+        return False
+
+    if stored_dt.tzinfo is None:
+        # Legacy naive values have no explicit offset, but _ensure_aware()
+        # still interprets them as old system-local wall time. On the due path,
+        # a naive cron wall-clock that is still future in the current Hermes
+        # zone is the same early-fire phantom as an aware timestamp carrying an
+        # old offset.
+        wall_in_current_tz = stored_dt.replace(tzinfo=target_tz)
+        return wall_in_current_tz > now
+
+    stored_offset = stored_dt.utcoffset()
+    current_offset = now.utcoffset()
+    if stored_offset is None or current_offset is None:
+        return False
+    if stored_offset == current_offset:
+        return False
+
+    # Reinterpret the stored wall-clock time in the *current* Hermes timezone.
+    # If that wall-clock instant is still in the future, the cron expression's
+    # intended occurrence has not arrived yet — firing now would be the early
+    # half of a double-fire pair.
+    wall_in_current_tz = stored_dt.replace(tzinfo=target_tz)
+    return wall_in_current_tz > now
+
+
 def _compute_grace_seconds(schedule: dict) -> int:
     """Compute how late a job can be and still catch up instead of fast-forwarding.
 
@@ -1077,6 +1142,31 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
         if next_run_dt <= now:
             schedule = job.get("schedule", {})
             kind = schedule.get("kind")
+
+            # Detect cron jobs whose persisted next_run_at carries an old
+            # UTC offset from before a Hermes/system timezone migration.
+            # In that case the same absolute instant maps to an earlier
+            # wall-clock time in the new zone, so the job appears due
+            # before its cron expression intended.  Recompute next_run_at
+            # from the current zone and skip dispatch this tick — see
+            # issue #28934.
+            if _is_tz_migration_phantom(next_run, schedule, now):
+                new_next = compute_next_run(schedule, now.isoformat())
+                if new_next:
+                    logger.info(
+                        "Job '%s' next_run_at %s carries a pre-migration "
+                        "UTC offset; rescheduling to %s in current Hermes "
+                        "timezone instead of firing early.",
+                        job.get("name", job["id"]),
+                        next_run,
+                        new_next,
+                    )
+                    for rj in raw_jobs:
+                        if rj["id"] == job["id"]:
+                            rj["next_run_at"] = new_next
+                            needs_save = True
+                            break
+                    continue  # Skip this run
 
             # For recurring jobs, check if the scheduled time is stale
             # (gateway was down and missed the window). Fast-forward to
