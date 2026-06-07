@@ -4536,6 +4536,22 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     else:
                         print("  ✓ Removed unused compression.summary_* keys")
 
+    # ── Version 17 → 18: add per-channel Discord prompts map ──
+    # Keep the migration narrowly scoped to the existing discord section so
+    # version bumps do not re-expand compact configs into the full defaults
+    # tree (#40821), while still backfilling the new nested field that the
+    # runtime and tests expect.
+    if current_ver < 18:
+        config = read_raw_config()
+        discord = config.get("discord", {})
+        if isinstance(discord, dict) and "channel_prompts" not in discord:
+            discord["channel_prompts"] = {}
+            config["discord"] = discord
+            save_config(config)
+            results["config_added"].append("discord.channel_prompts={} (default)")
+            if not quiet:
+                print("  ✓ Added discord.channel_prompts={}")
+
     # ── Version 20 → 21: plugins are now opt-in; grandfather existing user plugins ──
     # The loader now requires plugins to appear in ``plugins.enabled`` before
     # loading. Existing installs had all discovered plugins loading by default
