@@ -1267,36 +1267,40 @@ def build_skills_system_prompt(
             else:
                 index_lines.append(f"  {category}:")
             # Deduplicate and sort skills within each category
+            # NOTE: descriptions are intentionally omitted from the index to keep
+            # the system prompt small.  The agent must call skill_view(name) to
+            # load full instructions for any skill it thinks might match.
             seen = set()
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+            for name, _desc in sorted(skills_by_category[category], key=lambda x: x[0]):
                 if name in seen:
                     continue
                 seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
+                index_lines.append(f"    - {name}")
 
         result = (
             "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
-            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
+            "Before replying, follow this workflow:\n"
+            "  1. Classify the user's task (what domain? file type? system?).\n"
+            "  2. Check if a skill exists for this domain from the list below.\n"
+            "  3. If a skill matches, load it with skill_view(name) BEFORE taking any action.\n"
+            "  4. Follow the loaded skill's instructions exactly.\n"
+            "  5. Only use raw tools if genuinely no skill matches.\n"
+            "The list below contains skill names only — full instructions are loaded on-demand\n"
+            "via skill_view(). Do NOT skip skill loading and jump straight to raw tools.\n"
+            "Skills contain specialized knowledge — API endpoints, tool-specific commands,\n"
+            "and proven workflows that outperform general-purpose approaches. Load the skill\n"
+            "even if you think you could handle the task with basic tools like web_search or terminal.\n"
+            "Skills also encode the user's preferred approach, conventions, and quality standards\n"
+            "for tasks like code review, planning, and testing — load them even for tasks you\n"
             "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
+            "Whenever the user asks you to configure, set up, install, enable, disable, modify,\n"
+            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools,\n"
+            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill\n"
+            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`,\n"
             "`hermes setup`) so you don't have to guess or invent workarounds.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
+            "After difficult/iterative tasks, offer to save as a skill.\n"
+            "If a skill you loaded was missing steps, had wrong commands, or needed\n"
             "pitfalls you discovered, update it before finishing.\n"
             "\n"
             "<available_skills>\n"
