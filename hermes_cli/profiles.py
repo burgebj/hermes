@@ -1311,11 +1311,116 @@ def get_active_profile_name() -> str:
 # Export / Import
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Sensitive-file detection (shared by every export path)
+# ---------------------------------------------------------------------------
+#
+# Profile archives are meant to be shared.  They must never carry API keys,
+# OAuth tokens, credential-pool data, or the timestamped *backups* Hermes
+# writes during normal operation:
+#
+#   hermes_cli/setup.py          → config.yaml.bak.<YYYYmmdd_HHMMSS>
+#   hermes_cli/xai_retirement.py → config.yaml.bak-pre-migrate-xai-<ts>
+#   (and other config rewrites)  → config.yaml.bak-<reason>-<ts>, .env.bak-<...>
+#
+# The historical exclusion lists only caught the *exact* names ``.env`` and
+# ``auth.json``, so every ``config.yaml.bak*`` / ``.env.bak*`` slipped into the
+# archive.  ``_is_sensitive_export_name`` is the single source of truth used by
+# both the default-profile and named-profile export paths, matched at ANY
+# directory depth (backups can live in subdirs too).
+
+# Exact basenames that always hold credentials.
+_EXPORT_SENSITIVE_BASENAMES = frozenset({
+    ".env",
+    "auth.json",
+    "auth.lock",
+    # SSH private keys (extensionless) — the per-profile ``home/`` isolates
+    # ssh/gh/git configs and can hold these under ``.ssh/``.
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "credentials",
+})
+
+# dotenv templates are conventionally secret-free — safe to ship.
+_EXPORT_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+# Backups of config / auth files, matched on a leading prefix so any
+# timestamp/reason suffix is covered.
+_EXPORT_SENSITIVE_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"config\.ya?ml\.bak"   # config.yaml.bak.<ts>, config.yml.bak-<reason>-<ts>
+    r"|auth\.json\."        # auth.json.bak, auth.json.<ts>
+    r"|auth\.lock\."        # stray auth.lock backups
+    r")",
+    re.IGNORECASE,
+)
+
+# Private key / keystore extensions — credential material regardless of name.
+_EXPORT_SENSITIVE_SUFFIXES = (
+    ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks",
+)
+
+# Credential-/token-looking names. The keyword must be a whole token bounded by
+# start/end or a separator, so ``tokenizer.json`` and ``token_count.md`` are NOT
+# matched while ``client_secret.json``, ``credentials.json``, ``access_token``,
+# and ``api-key.txt`` are. Restricted to credential-container extensions (or no
+# extension) so ordinary docs/skills like ``secret-santa.md`` still export.
+_EXPORT_CREDENTIAL_KEYWORD_RE = re.compile(
+    r"(?:^|[._-])"
+    r"(?:credentials?|secrets?|api[_-]?keys?|access[_-]?tokens?"
+    r"|refresh[_-]?tokens?|client[_-]?secrets?)"
+    r"(?:$|[._-])",
+    re.IGNORECASE,
+)
+_EXPORT_CREDENTIAL_CONTAINER_SUFFIXES = (
+    ".json", ".txt", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".env", ".secret",
+)
+
+
+def _is_sensitive_export_name(name: str) -> bool:
+    """Return True if *name* (a single path component) is a credential, secret,
+    or credential-backup file that must be kept out of profile exports.
+
+    Matched case-insensitively. Callers apply this at every directory depth so
+    backups nested in subdirectories are caught too.
+    """
+    lowered = name.lower()
+
+    if lowered in _EXPORT_SENSITIVE_BASENAMES:
+        return True
+
+    # dotenv files: .env.local / .env.production / .env.bak-<...> are sensitive,
+    # but .env.example / .env.sample / .env.template / .env.dist are safe.
+    if lowered.startswith(".env."):
+        if lowered.endswith(_EXPORT_ENV_TEMPLATE_SUFFIXES):
+            return False
+        return True
+
+    if _EXPORT_SENSITIVE_PREFIX_RE.match(lowered):
+        return True
+
+    if lowered.endswith(_EXPORT_SENSITIVE_SUFFIXES):
+        return True
+
+    if _EXPORT_CREDENTIAL_KEYWORD_RE.search(lowered):
+        # Only treat as sensitive when it looks like a credential container
+        # (or has no extension, e.g. ``id_rsa`` / ``credentials``).
+        suffix = Path(lowered).suffix
+        if not suffix or lowered.endswith(_EXPORT_CREDENTIAL_CONTAINER_SUFFIXES):
+            return True
+
+    return False
+
+
 def _default_export_ignore(root_dir: Path):
     """Return an *ignore* callable for :func:`shutil.copytree`.
 
     At the root level it excludes everything in ``_DEFAULT_EXPORT_EXCLUDE_ROOT``.
-    At all levels it excludes ``__pycache__``, sockets, and temp files.
+    At all levels it excludes ``__pycache__``, sockets, temp files, and any
+    credential / credential-backup file flagged by
+    :func:`_is_sensitive_export_name`.
     """
 
     def _ignore(directory: str, contents: list) -> set:
@@ -1326,6 +1431,9 @@ def _default_export_ignore(root_dir: Path):
                 ignored.add(entry)
             # npm lockfiles can appear at root
             elif entry in {"package.json", "package-lock.json"}:
+                ignored.add(entry)
+            # Credentials / secrets / credential backups (any depth)
+            elif _is_sensitive_export_name(entry):
                 ignored.add(entry)
         # Root-level exclusions
         if Path(directory) == root_dir:
@@ -1366,14 +1474,26 @@ def export_profile(name: str, output_path: str) -> Path:
             result = shutil.make_archive(base, "gztar", tmpdir, "default")
             return Path(result)
 
-    # Named profiles — stage a filtered copy to exclude credentials
+    # Named profiles — stage a filtered copy that drops credentials,
+    # secrets, and credential backups (config.yaml.bak*, .env.bak*, …).
+    # Uses the same _is_sensitive_export_name() rules as the default path so
+    # the two export modes can't drift apart.
     with tempfile.TemporaryDirectory() as tmpdir:
         staged = Path(tmpdir) / canon
-        _CREDENTIAL_FILES = {"auth.json", ".env"}
+
+        def _named_ignore(directory: str, contents: list) -> set:
+            ignored: set = set()
+            for entry in contents:
+                if entry == "__pycache__" or entry.endswith((".sock", ".tmp")):
+                    ignored.add(entry)
+                elif _is_sensitive_export_name(entry):
+                    ignored.add(entry)
+            return ignored
+
         shutil.copytree(
             profile_dir,
             staged,
-            ignore=lambda d, contents: _CREDENTIAL_FILES & set(contents),
+            ignore=_named_ignore,
         )
         result = shutil.make_archive(base, "gztar", tmpdir, canon)
         return Path(result)
