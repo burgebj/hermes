@@ -17,16 +17,12 @@ import signal
 import time
 import traceback
 
+from hermes_cli.mcp_startup import start_background_mcp_discovery, wait_for_mcp_discovery
 from tui_gateway import server
 from tui_gateway.server import _CRASH_LOG, dispatch, resolve_skin, write_json
 from tui_gateway.transport import TeeTransport
 
 logger = logging.getLogger(__name__)
-
-# Handle for the background MCP tool-discovery thread (see main()).  The first
-# agent build briefly joins this so already-spawning fast servers land before
-# the agent snapshots its tool list (see wait_for_mcp_discovery).
-_mcp_discovery_thread = None
 
 
 def _install_sidecar_publisher() -> None:
@@ -192,24 +188,6 @@ def _log_exit(reason: str) -> None:
     print(f"[gateway-exit] {reason}", file=sys.stderr, flush=True)
 
 
-def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
-    """Briefly block until background MCP discovery finishes, up to ``timeout``.
-
-    MCP discovery runs in a daemon thread spawned at startup (see main()) so a
-    slow/dead server can't freeze ``gateway.ready``.  But the agent snapshots
-    its tool list ONCE at build time and never re-reads it, so a reachable-but-
-    slow server that finishes connecting *after* the first prompt would be
-    invisible for the whole session.  Joining with a short bounded timeout
-    before the first agent build lets already-spawning fast servers land
-    without re-introducing the startup hang: a dead server simply isn't waited
-    on beyond ``timeout``.  No-op when no discovery thread was started.
-    """
-    thread = _mcp_discovery_thread
-    if thread is None or not thread.is_alive():
-        return
-    thread.join(timeout=timeout)
-
-
 def main():
     _install_sidecar_publisher()
 
@@ -233,35 +211,10 @@ def main():
     # wasted.  Check the config first (cheap) and only spawn the discovery
     # thread when there's actually MCP work to do, so the import cost stays
     # off the path entirely for the common case.
-    try:
-        from hermes_cli.config import read_raw_config
-        _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
-        _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
-    except Exception:
-        # Be conservative: if we can't decide, fall back to attempting
-        # discovery (still backgrounded, so it can't block startup).
-        _has_mcp_servers = True
-    if _has_mcp_servers:
-        def _discover_mcp_background() -> None:
-            try:
-                from tools.mcp_tool import discover_mcp_tools
-                discover_mcp_tools()
-            except Exception:
-                logger.warning(
-                    "Background MCP tool discovery failed", exc_info=True
-                )
-
-        import threading as _mcp_threading
-        _mcp_thread = _mcp_threading.Thread(
-            target=_discover_mcp_background,
-            name="tui-mcp-discovery",
-            daemon=True,
-        )
-        _mcp_thread.start()
-        # Publish the handle so the first agent build can briefly wait for
-        # already-spawning fast servers to land (see wait_for_mcp_discovery).
-        global _mcp_discovery_thread
-        _mcp_discovery_thread = _mcp_thread
+    start_background_mcp_discovery(
+        logger=logger,
+        thread_name="tui-mcp-discovery",
+    )
 
     if not write_json({
         "jsonrpc": "2.0",

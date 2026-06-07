@@ -175,6 +175,12 @@ async def handle_ws(ws: Any) -> None:
         _log.info("ws accepted peer=%s", peer)
 
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
+        from hermes_cli.mcp_startup import start_background_mcp_discovery
+
+        start_background_mcp_discovery(
+            logger=_log,
+            thread_name="tui-ws-mcp-discovery",
+        )
 
         ready_ok = await transport.write_async(
             {

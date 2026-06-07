@@ -5363,6 +5363,24 @@ def test_make_agent_reads_nested_max_turns(monkeypatch):
     assert mock_agent.call_args.kwargs["max_iterations"] == 200
 
 
+def test_make_agent_waits_for_shared_mcp_discovery_before_tool_snapshot(monkeypatch):
+    _setup_make_agent_mocks(monkeypatch, {})
+    waited = {"done": False}
+
+    monkeypatch.setattr(
+        "hermes_cli.mcp_startup.wait_for_mcp_discovery",
+        lambda timeout=0.75: waited.__setitem__("done", True),
+    )
+
+    def _fake_agent(*_args, **_kwargs):
+        assert waited["done"] is True
+        return types.SimpleNamespace()
+
+    monkeypatch.setattr("run_agent.AIAgent", _fake_agent)
+
+    server._make_agent("sid1", "key1")
+
+
 def test_make_agent_nested_max_turns_takes_priority(monkeypatch):
     _setup_make_agent_mocks(
         monkeypatch, {"agent": {"max_turns": 500}, "max_turns": 100}

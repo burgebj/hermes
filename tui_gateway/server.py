@@ -2597,7 +2597,7 @@ def _make_agent(
     # server still can't block.  No-op once discovery has finished (every build
     # after the first during a slow startup).
     try:
-        from tui_gateway.entry import wait_for_mcp_discovery
+        from hermes_cli.mcp_startup import wait_for_mcp_discovery
 
         wait_for_mcp_discovery()
     except Exception:
