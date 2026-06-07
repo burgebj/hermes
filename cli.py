@@ -1426,6 +1426,153 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         logger.debug("state.db auto-maintenance skipped: %s", exc)
 
 
+def _commit_orphaned_openviking_sessions(
+    session_db,
+    current_session_id: str = "",
+) -> None:
+    """Commit orphaned sessions to OpenViking at Hermes startup.
+
+    Scenarios handled:
+
+    1. A previous Hermes CLI process was killed (SIGKILL, terminal close)
+       while running a session — that session remains ``ended_at IS NULL``
+       in state.db and will never receive its ``POST /commit``.
+
+    2. A previous Hermes process rotated via ``/new`` but crashed before
+       the OpenViking commit completed — that session has
+       ``end_reason='new_session'`` and the commit was never sent.
+
+    This function finds such orphans and issues a ``POST /commit`` to the
+    OpenViking API, finalizing the session's memory extraction.
+
+    Designed to be called from ``HermesCLI.__init__`` right after
+    ``_run_state_db_auto_maintenance``.  Never raises — orphan recovery
+    must never block interactive startup.
+    """
+    if session_db is None:
+        return
+    try:
+        # Read config once and cache in module scope so repeated calls
+        # within the same process don't re-read env vars.
+        from urllib.request import Request, urlopen
+        from urllib.error import HTTPError
+
+        endpoint = os.environ.get(
+            "OPENVIKING_ENDPOINT",
+            "http://127.0.0.1:1933",
+        )
+        api_key = os.environ.get("OPENVIKING_API_KEY", "")
+
+        # Quick health check — if OpenViking is unreachable (not installed,
+        # not running, different machine), skip silently.  We can't commit
+        # sessions without a backend.
+        try:
+            health_req = Request(f"{endpoint}/health", method="GET")
+            with urlopen(health_req, timeout=2) as _resp:
+                pass
+        except Exception:
+            return  # OpenViking not available — nothing we can do.
+
+        now = time.time()
+
+        # Read orphan candidates with the session_db lock.
+        with session_db._lock:  # type: ignore[union-attr]
+            rows = session_db._conn.execute(  # type: ignore[union-attr]
+                """
+                SELECT id, started_at, ended_at, end_reason, message_count, source
+                FROM sessions
+                WHERE (
+                    (ended_at IS NULL AND started_at < ? AND message_count > 0)
+                    OR
+                    (end_reason = 'new_session' AND ended_at > ? AND message_count > 0)
+                )
+                AND source != 'gateway'
+                ORDER BY started_at DESC
+                """,
+                (now - 60, now - 120),
+            ).fetchall()
+
+        if not rows:
+            return
+
+        # Build auth header.
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        committed = 0
+        ended = 0
+        for row in rows:
+            sid = row["id"]
+            msg_count = row["message_count"]
+
+            if sid == current_session_id:
+                continue
+
+            # Attempt the OpenViking commit.
+            req = Request(
+                f"{endpoint}/api/v1/sessions/{sid}/commit",
+                method="POST",
+                headers=headers,
+            )
+            try:
+                with urlopen(req, timeout=10) as _resp:
+                    committed += 1
+                    logger.info(
+                        "Committed orphaned OpenViking session %s (%d msgs)",
+                        sid,
+                        msg_count,
+                    )
+            except HTTPError as exc:
+                if exc.code == 404:
+                    # Session never created in OpenViking (no sync_turn ran).
+                    # This is expected for sessions that were created but
+                    # never received any messages on the OpenViking side.
+                    logger.debug(
+                        "OpenViking session %s not found (no messages synced): %s",
+                        sid,
+                        exc,
+                    )
+                else:
+                    logger.debug(
+                        "OpenViking commit HTTP %d for %s: %s",
+                        exc.code,
+                        sid,
+                        exc,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "OpenViking commit failed for %s: %s",
+                    sid,
+                    exc,
+                )
+
+        # Close any still-open abandoned active CLI sessions in state.db so
+        # future maintenance runs don't re-process them.  Only close
+        # ``source='cli'`` sessions — gateway sessions (telegram, discord,
+        # etc.) have their own lifecycle managed by the gateway process and
+        # must not be touched here.
+        with session_db._lock:  # type: ignore[union-attr]
+            cursor = session_db._conn.execute(  # type: ignore[union-attr]
+                """
+                UPDATE sessions
+                SET ended_at = ?, end_reason = 'orphaned_restart'
+                WHERE ended_at IS NULL AND started_at < ? AND message_count > 0
+                  AND source = 'cli'
+                """,
+                (now, now - 60),
+            )
+            ended = cursor.rowcount
+            session_db._conn.commit()  # type: ignore[union-attr]
+            logger.info(
+                "Orphan recovery: %d committed to OpenViking, %d closed in state.db",
+                committed,
+                ended,
+            )
+    except Exception as exc:
+        logger.debug("Orphaned OpenViking session commit skipped: %s", exc)
+
+
 def _run_checkpoint_auto_maintenance() -> None:
     """Call ``checkpoint_manager.maybe_auto_prune_checkpoints`` using current config.
 
@@ -3106,6 +3253,11 @@ class HermesCLI:
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
         """
+        # session_id MUST be initialized before any startup-side-effect
+        # helper that references it.  Safe default prevents AttributeError
+        # if a helper runs before the formal assignment below.
+        self.session_id = ""
+
         # Initialize Rich console
         self.console = Console()
         self.config = CLI_CONFIG
@@ -3391,7 +3543,18 @@ class HermesCLI:
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
-        
+
+        # Opportunistic OpenViking commit for orphaned sessions — must
+        # run after self.session_id is assigned.  If it fails (e.g.
+        # OpenViking is down), log a warning and continue startup.
+        try:
+            _commit_orphaned_openviking_sessions(
+                self._session_db,
+                current_session_id=getattr(self, "session_id", ""),
+            )
+        except Exception as exc:
+            logger.warning("OpenViking orphan recovery skipped: %s", exc)
+
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"
         self._last_invalidate: float = 0.0  # throttle UI repaints
