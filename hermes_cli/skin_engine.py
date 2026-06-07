@@ -775,8 +775,17 @@ def get_active_skin() -> SkinConfig:
 
 
 def set_active_skin(name: str) -> SkinConfig:
-    """Switch the active skin. Returns the new SkinConfig."""
+    """Switch the active skin. Returns the new SkinConfig.
+
+    Passing ``name='auto'`` detects the OS light/dark mode and selects
+    an appropriate skin automatically.
+    """
     global _active_skin, _active_skin_name
+    if name == "auto":
+        # Lazy import to avoid forward-reference — _resolve_auto_skin is
+        # defined later in this module (after _detect_os_light_mode).
+        from hermes_cli.skin_engine import _resolve_auto_skin as _ras
+        name = _ras()
     _active_skin_name = name
     _active_skin = load_skin(name)
     return _active_skin
@@ -787,17 +796,81 @@ def get_active_skin_name() -> str:
     return _active_skin_name
 
 
+def _detect_os_light_mode() -> bool:
+    """Return True if the OS is currently in light mode, False for dark/unknown.
+
+    Supports:
+    - macOS: reads AppleInterfaceStyle via `defaults read`
+    - Linux/GNOME: reads color-scheme via gsettings
+    - Windows: reads SystemUsesLightTheme registry key
+    - Termux/Android: always returns False (dark default)
+    """
+    import sys
+    import subprocess
+
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True, text=True, timeout=2,
+            )
+            # If AppleInterfaceStyle is not set (key not found), it means Light mode
+            return result.returncode != 0 or result.stdout.strip().lower() != "dark"
+
+        if sys.platform.startswith("linux"):
+            result = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                return "light" in result.stdout.lower()
+            return False
+
+        if sys.platform == "win32":
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+            value, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+            winreg.CloseKey(key)
+            return bool(value)
+    except Exception:
+        pass
+    return False
+
+
+# Skins that are designed for light terminal backgrounds.
+# When auto-detection is enabled and the OS is in light mode,
+# the first available skin from this list is used as the default.
+_LIGHT_MODE_SKINS = ["daylight", "warm-lightmode", "light"]
+
+
+def _resolve_auto_skin() -> str:
+    """Resolve the skin name for 'auto' mode based on OS appearance."""
+    if _detect_os_light_mode():
+        available = list_skins()
+        for skin_name in _LIGHT_MODE_SKINS:
+            if skin_name in available:
+                return skin_name
+    return "default"
+
+
 def init_skin_from_config(config: dict) -> None:
     """Initialize the active skin from CLI config at startup.
 
     Call this once during CLI init with the loaded config dict.
+    Supports ``display.skin: auto`` to auto-detect OS light/dark mode.
     """
     display = config.get("display") or {}
     if not isinstance(display, dict):
         display = {}
     skin_name = display.get("skin", "default")
     if isinstance(skin_name, str) and skin_name.strip():
-        set_active_skin(skin_name.strip())
+        skin_name = skin_name.strip()
+        if skin_name == "auto":
+            skin_name = _resolve_auto_skin()
+        set_active_skin(skin_name)
     else:
         set_active_skin("default")
 
