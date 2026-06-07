@@ -154,6 +154,8 @@ class Platform(Enum):
             pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
             cls._value2member_map_[value] = pseudo
             cls._member_map_[pseudo._name_] = pseudo
+            if pseudo._name_ not in cls._member_names_:
+                cls._member_names_.append(pseudo._name_)
             return pseudo
 
         # Runtime-registered plugins (e.g. user-installed, discovered after
@@ -166,6 +168,8 @@ class Platform(Enum):
                 pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
                 cls._value2member_map_[value] = pseudo
                 cls._member_map_[pseudo._name_] = pseudo
+                if pseudo._name_ not in cls._member_names_:
+                    cls._member_names_.append(pseudo._name_)
                 return pseudo
         except Exception:
             pass
