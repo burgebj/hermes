@@ -673,18 +673,26 @@ def _send_media_via_adapter(
     loop,
     job: dict,
     platform=None,
+    text_content: str = "",
 ) -> None:
     """Send extracted MEDIA files as native platform attachments via a live adapter.
 
     Routes each file to the appropriate adapter method (send_voice, send_image_file,
     send_video, send_document) based on file extension — mirroring the routing logic
     in ``BasePlatformAdapter._process_message_background``.
+
+    When sending images, the first 1024 characters of *text_content* are passed as
+    the caption so Telegram (and other platforms that support captions) render the
+    photo inline with context rather than as a bare attachment.
     """
     from pathlib import Path
 
     from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
 
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+
+    # Use first ~1024 chars of text as caption for image attachments
+    image_caption = text_content.strip()[:1020] if text_content else None
 
     for media_path, _is_voice in media_files:
         try:
@@ -695,7 +703,7 @@ def _send_media_via_adapter(
             elif ext in _VIDEO_EXTS:
                 coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
             elif ext in _IMAGE_EXTS:
-                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=metadata)
+                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, caption=image_caption, metadata=metadata)
             else:
                 coro = adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
 
@@ -824,46 +832,24 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
             send_metadata = {"thread_id": thread_id} if thread_id else None
             try:
-                # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
-                if text_to_send:
-                    from agent.async_utils import safe_schedule_threadsafe
-                    future = safe_schedule_threadsafe(
-                        runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
-                        loop,
-                    )
-                    if future is None:
-                        adapter_ok = False
-                    else:
-                        try:
-                            send_result = future.result(timeout=60)
-                        except TimeoutError:
-                            future.cancel()
-                            raise
-                        if send_result and not getattr(send_result, "success", True):
-                            err = getattr(send_result, "error", "unknown")
-                            logger.warning(
-                                "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
-                                job["id"], platform_name, chat_id, err,
-                            )
-                            adapter_ok = False  # fall through to standalone path
-                        elif (
-                            send_result
-                            and thread_id
-                            and getattr(send_result, "raw_response", None)
-                            and send_result.raw_response.get("thread_fallback")
-                        ):
-                            requested_thread_id = send_result.raw_response.get("requested_thread_id") or thread_id
-                            msg = (
-                                f"configured thread_id {requested_thread_id} for "
-                                f"{platform_name}:{chat_id} was not found; delivered without thread_id"
-                            )
-                            logger.warning("Job '%s': %s", job["id"], msg)
-                            delivery_errors.append(msg)
 
-                # Send extracted media files as native attachments via the live adapter
-                if adapter_ok and media_files:
+                from pathlib import Path
+                has_image_media = bool(media_files) and any(
+                    Path(mp).suffix.lower() in _IMAGE_EXTS
+                    for mp, _ in media_files
+                )
+
+                if has_image_media:
+                    # ── Image-first delivery ──────────────────────────────
+                    # When images are present, avoid duplicating text:
+                    # 1. Send image(s) with caption = first ~1020 chars
+                    # 2. Send the REMAINING text as a follow-up body message
+                    # This gives Telegram users a "header card + body" UX.
+                    caption_text = text_to_send[:1020].strip()
+                    body_text = text_to_send[1020:].strip()
+
                     _send_media_via_adapter(
                         runtime_adapter,
                         chat_id,
@@ -872,7 +858,92 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         loop,
                         job,
                         platform=platform,
+                        text_content=caption_text,
                     )
+
+                    if body_text:
+                        from agent.async_utils import safe_schedule_threadsafe
+                        future = safe_schedule_threadsafe(
+                            runtime_adapter.send(chat_id, body_text, metadata=send_metadata),
+                            loop,
+                        )
+                        if future is None:
+                            adapter_ok = False
+                        else:
+                            try:
+                                send_result = future.result(timeout=60)
+                            except TimeoutError:
+                                future.cancel()
+                                raise
+                            if send_result and not getattr(send_result, "success", True):
+                                err = getattr(send_result, "error", "unknown")
+                                logger.warning(
+                                    "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
+                                    job["id"], platform_name, chat_id, err,
+                                )
+                                adapter_ok = False
+                            elif (
+                                send_result
+                                and thread_id
+                                and getattr(send_result, "raw_response", None)
+                                and send_result.raw_response.get("thread_fallback")
+                            ):
+                                requested_thread_id = send_result.raw_response.get("requested_thread_id") or thread_id
+                                msg = (
+                                    f"configured thread_id {requested_thread_id} for "
+                                    f"{platform_name}:{chat_id} was not found; delivered without thread_id"
+                                )
+                                logger.warning("Job '%s': %s", job["id"], msg)
+                                delivery_errors.append(msg)
+                else:
+                    # ── Plain delivery (no image media) ───────────────────
+                    # Send full text, then non-image media files
+                    if text_to_send:
+                        from agent.async_utils import safe_schedule_threadsafe
+                        future = safe_schedule_threadsafe(
+                            runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
+                            loop,
+                        )
+                        if future is None:
+                            adapter_ok = False
+                        else:
+                            try:
+                                send_result = future.result(timeout=60)
+                            except TimeoutError:
+                                future.cancel()
+                                raise
+                            if send_result and not getattr(send_result, "success", True):
+                                err = getattr(send_result, "error", "unknown")
+                                logger.warning(
+                                    "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
+                                    job["id"], platform_name, chat_id, err,
+                                )
+                                adapter_ok = False
+                            elif (
+                                send_result
+                                and thread_id
+                                and getattr(send_result, "raw_response", None)
+                                and send_result.raw_response.get("thread_fallback")
+                            ):
+                                requested_thread_id = send_result.raw_response.get("requested_thread_id") or thread_id
+                                msg = (
+                                    f"configured thread_id {requested_thread_id} for "
+                                    f"{platform_name}:{chat_id} was not found; delivered without thread_id"
+                                )
+                                logger.warning("Job '%s': %s", job["id"], msg)
+                                delivery_errors.append(msg)
+
+                    if adapter_ok and media_files:
+                        _send_media_via_adapter(
+                            runtime_adapter,
+                            chat_id,
+                            media_files,
+                            send_metadata,
+                            loop,
+                            job,
+                            platform=platform,
+                            text_content=cleaned_delivery_content,
+                        )
 
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
