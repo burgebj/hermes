@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shlex
 import socket
 import subprocess
@@ -1060,6 +1061,68 @@ def _execute_remote(
 
 
 # ---------------------------------------------------------------------------
+# HERMES_WRITE_SAFE_ROOT heuristic guard for Python code
+# ---------------------------------------------------------------------------
+
+# open() with a write-or-create mode ('w', 'a', 'x', or any combination
+# containing those characters, e.g. 'wb', 'r+', 'ab').
+_CODE_OPEN_RE = re.compile(
+    r"open\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]*)['\"]"
+)
+# pathlib Path(...).write_text / write_bytes / open (always writes).
+_CODE_PATHLIB_RE = re.compile(
+    r"Path\s*\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\.(?:write_text|write_bytes|open)\s*\("
+)
+
+
+def _check_write_safe_root_code(code: str) -> str | None:
+    """Heuristic guard: block Python code that writes outside HERMES_WRITE_SAFE_ROOT.
+
+    Returns an error message string when a write-target path is denied, or
+    None when safe (including when HERMES_WRITE_SAFE_ROOT is unset).
+
+    This is defense-in-depth, NOT a security boundary — code can bypass the
+    check via dynamic path construction, exec(), or any construct the regexes
+    don't match.  The guard catches the most common literal-path write patterns
+    so clear-text accidental writes to restricted paths surface an actionable
+    error rather than silently succeeding.
+    """
+    from agent.file_safety import get_safe_write_root, is_write_denied
+
+    safe_root = get_safe_write_root()
+    if not safe_root:
+        return None
+
+    for m in _CODE_OPEN_RE.finditer(code):
+        path, mode = m.group(1), m.group(2)
+        # Only check if the mode contains a write/create/append character.
+        if any(c in mode for c in ("w", "x", "a")):
+            expanded = os.path.expanduser(path)
+            if is_write_denied(expanded):
+                return (
+                    f"Blocked: code attempts to write to {path!r}, which is "
+                    f"outside HERMES_WRITE_SAFE_ROOT ({safe_root!r}). "
+                    "Writes must stay inside the configured safe root. "
+                    "(Defense-in-depth — not a security boundary; regex matching "
+                    "may miss dynamically constructed paths.)"
+                )
+
+    for m in _CODE_PATHLIB_RE.finditer(code):
+        path = m.group(1)
+        expanded = os.path.expanduser(path)
+        if is_write_denied(expanded):
+            return (
+                f"Blocked: code attempts to write to {path!r}, which is "
+                f"outside HERMES_WRITE_SAFE_ROOT ({safe_root!r}). "
+                "Writes must stay inside the configured safe root. "
+                "(Defense-in-depth — not a security boundary; regex matching "
+                "may miss dynamically constructed paths.)"
+            )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1107,6 +1170,16 @@ def execute_code(
         return json.dumps({
             "status": "error",
             "error": _guard.get("message") or "execute_code blocked by approval guard.",
+            "tool_calls_made": 0,
+            "duration_seconds": 0,
+        }, ensure_ascii=False)
+
+    # Heuristic guard: block code that writes outside HERMES_WRITE_SAFE_ROOT
+    _safe_root_error = _check_write_safe_root_code(code)
+    if _safe_root_error:
+        return json.dumps({
+            "status": "error",
+            "error": _safe_root_error,
             "tool_calls_made": 0,
             "duration_seconds": 0,
         }, ensure_ascii=False)
