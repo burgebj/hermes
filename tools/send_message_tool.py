@@ -1314,11 +1314,22 @@ async def _send_email(extra, chat_id, message):
         msg["Subject"] = "Hermes Agent"
         msg["Date"] = formatdate(localtime=True)
 
-        server = smtplib.SMTP(smtp_host, smtp_port)
-        server.starttls(context=ssl.create_default_context())
-        server.login(address, password)
-        server.send_message(msg)
-        server.quit()
+        context = ssl.create_default_context()
+        if smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30, context=context)
+            try:
+                server.login(address, password)
+                server.send_message(msg)
+            finally:
+                server.quit()
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+            try:
+                server.starttls(context=context)
+                server.login(address, password)
+                server.send_message(msg)
+            finally:
+                server.quit()
         return {"success": True, "platform": "email", "chat_id": chat_id}
     except Exception as e:
         return _error(f"Email send failed: {e}")

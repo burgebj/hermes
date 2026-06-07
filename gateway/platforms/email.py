@@ -315,11 +315,22 @@ class EmailAdapter(BasePlatformAdapter):
             return False
 
         try:
-            # Test SMTP connection
-            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
-            smtp.quit()
+            # Test SMTP connection. Port 465 is implicit TLS (SMTPS), while
+            # port 587 and similar use STARTTLS after a plaintext connect.
+            context = ssl.create_default_context()
+            if self._smtp_port == 465:
+                smtp = smtplib.SMTP_SSL(self._smtp_host, self._smtp_port, timeout=30, context=context)
+                try:
+                    smtp.login(self._address, self._password)
+                finally:
+                    smtp.quit()
+            else:
+                smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+                try:
+                    smtp.starttls(context=context)
+                    smtp.login(self._address, self._password)
+                finally:
+                    smtp.quit()
             logger.info("[Email] SMTP connection test passed.")
         except Exception as e:
             logger.error("[Email] SMTP connection failed: %s", e)
@@ -548,16 +559,30 @@ class EmailAdapter(BasePlatformAdapter):
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
-        try:
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(self._address, self._password)
-            smtp.send_message(msg)
-        finally:
+        context = ssl.create_default_context()
+        if self._smtp_port == 465:
+            # Port 465 is implicit TLS (SMTPS), used by providers such as AgentMail.
+            smtp = smtplib.SMTP_SSL(self._smtp_host, self._smtp_port, timeout=30, context=context)
             try:
-                smtp.quit()
-            except Exception:
-                smtp.close()
+                smtp.login(self._address, self._password)
+                smtp.send_message(msg)
+            finally:
+                try:
+                    smtp.quit()
+                except Exception:
+                    smtp.close()
+        else:
+            # Port 587 and similar use STARTTLS after connecting in plaintext.
+            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+            try:
+                smtp.starttls(context=context)
+                smtp.login(self._address, self._password)
+                smtp.send_message(msg)
+            finally:
+                try:
+                    smtp.quit()
+                except Exception:
+                    smtp.close()
 
         logger.info("[Email] Sent reply to %s (subject: %s)", to_addr, subject)
         return msg_id
@@ -670,9 +695,14 @@ class EmailAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Email] Failed to attach %s: %s", file_path, e)
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        context = ssl.create_default_context()
+        if self._smtp_port == 465:
+            smtp = smtplib.SMTP_SSL(self._smtp_host, self._smtp_port, timeout=30, context=context)
+        else:
+            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
         try:
-            smtp.starttls(context=ssl.create_default_context())
+            if self._smtp_port != 465:
+                smtp.starttls(context=context)
             smtp.login(self._address, self._password)
             smtp.send_message(msg)
         finally:
@@ -749,9 +779,14 @@ class EmailAdapter(BasePlatformAdapter):
             part.add_header("Content-Disposition", f"attachment; filename={fname}")
             msg.attach(part)
 
-        smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
+        context = ssl.create_default_context()
+        if self._smtp_port == 465:
+            smtp = smtplib.SMTP_SSL(self._smtp_host, self._smtp_port, timeout=30, context=context)
+        else:
+            smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
         try:
-            smtp.starttls(context=ssl.create_default_context())
+            if self._smtp_port != 465:
+                smtp.starttls(context=context)
             smtp.login(self._address, self._password)
             smtp.send_message(msg)
         finally:

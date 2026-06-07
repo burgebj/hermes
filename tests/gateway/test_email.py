@@ -22,6 +22,11 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from gateway.platforms.base import SendResult
 
+# Keep this test module hermetic when run from a live Hermes environment whose
+# .env may set EMAIL_SMTP_PORT=465 for AgentMail. Individual tests opt into
+# the port they need via patch.dict.
+os.environ.pop("EMAIL_SMTP_PORT", None)
+
 
 class TestConfigEnvOverrides(unittest.TestCase):
     """Verify email config is loaded from environment variables."""
@@ -787,6 +792,41 @@ class TestConnectDisconnect(unittest.TestCase):
             result = asyncio.run(adapter.connect())
             self.assertFalse(result)
 
+    def test_connect_uses_smtp_ssl_for_port_465(self):
+        """Port 465 is implicit TLS and must not use STARTTLS."""
+        import asyncio
+        import ssl
+        from gateway.config import PlatformConfig
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_SMTP_PORT": "465",
+        }):
+            from gateway.platforms.email import EmailAdapter
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+        mock_server = MagicMock()
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
+             patch("smtplib.SMTP") as mock_starttls_smtp, \
+             patch("smtplib.SMTP_SSL", return_value=mock_server) as mock_smtp_ssl:
+            result = asyncio.run(adapter.connect())
+
+        self.assertTrue(result)
+        mock_starttls_smtp.assert_not_called()
+        _, _, kwargs = mock_smtp_ssl.mock_calls[0]
+        self.assertEqual(mock_smtp_ssl.call_args.args[:2], ("smtp.test.com", 465))
+        self.assertIsInstance(kwargs["context"], ssl.SSLContext)
+        mock_server.login.assert_called_once_with("hermes@test.com", "secret")
+        mock_server.quit.assert_called_once()
+        adapter._running = False
+        if adapter._poll_task:
+            adapter._poll_task.cancel()
+
     def test_disconnect_cancels_poll(self):
         """disconnect() should cancel the polling task."""
         import asyncio
@@ -978,6 +1018,36 @@ class TestSendEmailStandalone(unittest.TestCase):
             self.assertIn("Date", send_call)
             self.assertEqual(send_call["To"], "user@test.com")
             self.assertEqual(send_call["From"], "hermes@test.com")
+
+    @patch.dict(os.environ, {
+        "EMAIL_ADDRESS": "hermes@test.com",
+        "EMAIL_PASSWORD": "secret",
+        "EMAIL_SMTP_HOST": "smtp.test.com",
+        "EMAIL_SMTP_PORT": "465",
+    })
+    def test_send_email_tool_uses_smtp_ssl_for_port_465(self):
+        """_send_email should use implicit TLS for SMTPS port 465."""
+        import asyncio
+        import ssl
+        from tools.send_message_tool import _send_email
+
+        with patch("smtplib.SMTP") as mock_starttls_smtp, \
+             patch("smtplib.SMTP_SSL") as mock_smtp_ssl:
+            mock_server = MagicMock()
+            mock_smtp_ssl.return_value = mock_server
+
+            result = asyncio.run(
+                _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
+            )
+
+        self.assertTrue(result["success"])
+        mock_starttls_smtp.assert_not_called()
+        self.assertEqual(mock_smtp_ssl.call_args.args[:2], ("smtp.test.com", 465))
+        self.assertIsInstance(mock_smtp_ssl.call_args.kwargs["context"], ssl.SSLContext)
+        mock_server.starttls.assert_not_called()
+        mock_server.login.assert_called_once_with("hermes@test.com", "secret")
+        mock_server.send_message.assert_called_once()
+        mock_server.quit.assert_called_once()
 
     @patch.dict(os.environ, {
         "EMAIL_ADDRESS": "hermes@test.com",
