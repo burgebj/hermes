@@ -319,7 +319,7 @@ def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
 
 
 class _ACPChatCompletions:
-    def __init__(self, client: "CopilotACPClient"):
+    def __init__(self, client: "ACPSubprocessClient"):
         self._client = client
 
     def create(self, **kwargs: Any) -> Any:
@@ -327,12 +327,58 @@ class _ACPChatCompletions:
 
 
 class _ACPChatNamespace:
-    def __init__(self, client: "CopilotACPClient"):
+    def __init__(self, client: "ACPSubprocessClient"):
         self.completions = _ACPChatCompletions(client)
 
 
-class CopilotACPClient:
-    """Minimal OpenAI-client-compatible facade for Copilot ACP."""
+class ACPSubprocessClient:
+    """OpenAI-client-compatible facade for an external ACP subprocess agent.
+
+    Speaks the Agent Client Protocol (JSON-RPC over stdio: ``initialize`` →
+    ``session/new`` → ``session/prompt``) to any local agent binary, and
+    converts the result into the minimal shape Hermes expects from an OpenAI
+    client. Provider-specific behaviour (which binary to spawn, display label,
+    startup/early-exit error hints) is supplied by subclasses via the class
+    attributes and ``_resolve_command`` / ``_resolve_args`` / ``*_error``
+    hooks below.
+    """
+
+    # --- Provider-specific surface (override in subclasses) ----------------
+    PROVIDER_LABEL = "ACP"
+    MARKER_BASE_URL = "acp://agent"
+    DEFAULT_API_KEY = "acp"
+    DEFAULT_MODEL = "acp"
+    # Env vars consulted (in order) for the command, then the fallback binary.
+    COMMAND_ENV_VARS: tuple[str, ...] = ()
+    DEFAULT_COMMAND = ""
+    # Env var holding shlex-split args, then the fallback args.
+    ARGS_ENV_VAR = ""
+    DEFAULT_ARGS: tuple[str, ...] = ()
+
+    def _resolve_command(self) -> str:
+        for env_var in self.COMMAND_ENV_VARS:
+            value = os.getenv(env_var, "").strip()
+            if value:
+                return value
+        return self.DEFAULT_COMMAND
+
+    def _resolve_args(self) -> list[str]:
+        raw = os.getenv(self.ARGS_ENV_VAR, "").strip() if self.ARGS_ENV_VAR else ""
+        if raw:
+            return shlex.split(raw)
+        return list(self.DEFAULT_ARGS)
+
+    def _startup_error_message(self, command: str) -> str:
+        """Error raised when the ACP binary cannot be spawned."""
+        return (
+            f"Could not start {self.PROVIDER_LABEL} command '{command}'. "
+            "Install the agent CLI or set its command via the provider's "
+            "HERMES_*_ACP_COMMAND environment variable."
+        )
+
+    def _early_exit_message(self, stderr_text: str) -> str:
+        """Error raised when the ACP process exits before responding."""
+        return f"{self.PROVIDER_LABEL} process exited early: {stderr_text}"
 
     def __init__(
         self,
@@ -347,11 +393,11 @@ class CopilotACPClient:
         args: list[str] | None = None,
         **_: Any,
     ):
-        self.api_key = api_key or "copilot-acp"
-        self.base_url = base_url or ACP_MARKER_BASE_URL
+        self.api_key = api_key or self.DEFAULT_API_KEY
+        self.base_url = base_url or self.MARKER_BASE_URL
         self._default_headers = dict(default_headers or {})
-        self._acp_command = acp_command or command or _resolve_command()
-        self._acp_args = list(acp_args or args or _resolve_args())
+        self._acp_command = acp_command or command or self._resolve_command()
+        self._acp_args = list(acp_args or args or self._resolve_args())
         self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
         self.chat = _ACPChatNamespace(self)
         self.is_closed = False
@@ -432,7 +478,7 @@ class CopilotACPClient:
         return SimpleNamespace(
             choices=[choice],
             usage=usage,
-            model=model or "copilot-acp",
+            model=model or self.DEFAULT_MODEL,
         )
 
     def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
@@ -448,14 +494,13 @@ class CopilotACPClient:
                 env=_build_subprocess_env(),
             )
         except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"Could not start Copilot ACP command '{self._acp_command}'. "
-                "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
-            ) from exc
+            raise RuntimeError(self._startup_error_message(self._acp_command)) from exc
 
         if proc.stdin is None or proc.stdout is None:
             proc.kill()
-            raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
+            raise RuntimeError(
+                f"{self.PROVIDER_LABEL} process did not expose stdin/stdout pipes."
+            )
 
         self.is_closed = False
         with self._active_process_lock:
@@ -522,29 +567,16 @@ class CopilotACPClient:
                 if "error" in msg:
                     err = msg.get("error") or {}
                     raise RuntimeError(
-                        f"Copilot ACP {method} failed: {err.get('message') or err}"
+                        f"{self.PROVIDER_LABEL} {method} failed: {err.get('message') or err}"
                     )
                 return msg.get("result")
 
             stderr_text = "\n".join(stderr_tail).strip()
             if proc.poll() is not None and stderr_text:
-                if _is_gh_copilot_deprecation_message(stderr_text):
-                    raise RuntimeError(
-                        "Hermes ACP mode requires the NEW GitHub Copilot CLI "
-                        "(github.com/github/copilot-cli), but the binary it just "
-                        "spawned is the deprecated `gh copilot` extension.\n\n"
-                        "Install the new CLI:\n"
-                        "  npm install -g @github/copilot\n"
-                        "  # then verify with: copilot --help\n\n"
-                        "If `copilot` already resolves to the new CLI but you still see this,\n"
-                        "point Hermes at it explicitly:\n"
-                        "  export HERMES_COPILOT_ACP_COMMAND=/path/to/new/copilot\n\n"
-                        "Alternative: use the `copilot` provider (no ACP, hits the Copilot API\n"
-                        "directly with a Copilot subscription token) via `hermes setup`.\n\n"
-                        f"Original error:\n{stderr_text}"
-                    )
-                raise RuntimeError(f"Copilot ACP process exited early: {stderr_text}")
-            raise TimeoutError(f"Timed out waiting for Copilot ACP response to {method}.")
+                raise RuntimeError(self._early_exit_message(stderr_text))
+            raise TimeoutError(
+                f"Timed out waiting for {self.PROVIDER_LABEL} response to {method}."
+            )
 
         try:
             _request(
@@ -684,3 +716,40 @@ class CopilotACPClient:
         process.stdin.write(json.dumps(response) + "\n")
         process.stdin.flush()
         return True
+
+
+class CopilotACPClient(ACPSubprocessClient):
+    """ACP subprocess client for the GitHub Copilot CLI (`copilot --acp`)."""
+
+    PROVIDER_LABEL = "Copilot ACP"
+    MARKER_BASE_URL = ACP_MARKER_BASE_URL
+    DEFAULT_API_KEY = "copilot-acp"
+    DEFAULT_MODEL = "copilot-acp"
+    COMMAND_ENV_VARS = ("HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH")
+    DEFAULT_COMMAND = "copilot"
+    ARGS_ENV_VAR = "HERMES_COPILOT_ACP_ARGS"
+    DEFAULT_ARGS = ("--acp", "--stdio")
+
+    def _startup_error_message(self, command: str) -> str:
+        return (
+            f"Could not start Copilot ACP command '{command}'. "
+            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+        )
+
+    def _early_exit_message(self, stderr_text: str) -> str:
+        if _is_gh_copilot_deprecation_message(stderr_text):
+            return (
+                "Hermes ACP mode requires the NEW GitHub Copilot CLI "
+                "(github.com/github/copilot-cli), but the binary it just "
+                "spawned is the deprecated `gh copilot` extension.\n\n"
+                "Install the new CLI:\n"
+                "  npm install -g @github/copilot\n"
+                "  # then verify with: copilot --help\n\n"
+                "If `copilot` already resolves to the new CLI but you still see this,\n"
+                "point Hermes at it explicitly:\n"
+                "  export HERMES_COPILOT_ACP_COMMAND=/path/to/new/copilot\n\n"
+                "Alternative: use the `copilot` provider (no ACP, hits the Copilot API\n"
+                "directly with a Copilot subscription token) via `hermes setup`.\n\n"
+                f"Original error:\n{stderr_text}"
+            )
+        return f"Copilot ACP process exited early: {stderr_text}"

@@ -90,6 +90,7 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CLAUDE_CODE_ACP_BASE_URL = "acp://claude-code"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
@@ -162,6 +163,13 @@ class ProviderConfig:
     api_key_env_vars: tuple = ()
     # Optional env var for base URL override
     base_url_env_var: str = ""
+    # For external-process (ACP subprocess) providers: how to find/launch the
+    # local agent binary, and the synthetic api_key marker the client uses.
+    process_command_env_vars: tuple = ()
+    process_default_command: str = ""
+    process_args_env_var: str = ""
+    process_default_args: tuple = ()
+    process_api_key: str = ""
 
 
 PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
@@ -228,6 +236,23 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+        process_command_env_vars=("HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH"),
+        process_default_command="copilot",
+        process_args_env_var="HERMES_COPILOT_ACP_ARGS",
+        process_default_args=("--acp", "--stdio"),
+        process_api_key="copilot-acp",
+    ),
+    "claude-code-acp": ProviderConfig(
+        id="claude-code-acp",
+        name="Claude Code ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CLAUDE_CODE_ACP_BASE_URL,
+        base_url_env_var="CLAUDE_CODE_ACP_BASE_URL",
+        process_command_env_vars=("HERMES_CLAUDE_CODE_ACP_COMMAND",),
+        process_default_command="claude-code-acp",
+        process_args_env_var="HERMES_CLAUDE_CODE_ACP_ARGS",
+        process_default_args=(),
+        process_api_key="claude-code-acp",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -1499,6 +1524,8 @@ def resolve_provider(
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
+        "claude-acp": "claude-code-acp", "claude-code-acp-agent": "claude-code-acp",
+        "zed-claude-acp": "claude-code-acp",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
@@ -5709,19 +5736,39 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def _resolve_external_process_command(pconfig: "ProviderConfig") -> tuple:
+    """Resolve ``(command, args)`` for an external-process provider.
+
+    Reads the provider's configured command/args env vars (in priority order),
+    falling back to its defaults. Backwards-compatible with the original
+    Copilot-only behaviour because ``copilot-acp`` declares the same env vars
+    and defaults it used before.
+    """
+    command = ""
+    for env_var in pconfig.process_command_env_vars:
+        value = os.getenv(env_var, "").strip()
+        if value:
+            command = value
+            break
+    if not command:
+        command = pconfig.process_default_command
+
+    raw_args = (
+        os.getenv(pconfig.process_args_env_var, "").strip()
+        if pconfig.process_args_env_var
+        else ""
+    )
+    args = shlex.split(raw_args) if raw_args else list(pconfig.process_default_args)
+    return command, args
+
+
 def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     """Status snapshot for providers that run a local subprocess."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         return {"configured": False}
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    command, args = _resolve_external_process_command(pconfig)
     base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
@@ -5758,7 +5805,7 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_gemini_oauth_auth_status()
     if target == "minimax-oauth":
         return get_minimax_oauth_auth_status()
-    if target == "copilot-acp":
+    if target in ("copilot-acp", "claude-code-acp"):
         return get_external_process_provider_status(target)
     if target == "azure-foundry":
         return _get_azure_foundry_auth_status()
@@ -5912,25 +5959,20 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    command, args = _resolve_external_process_command(pconfig)
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
+        env_hint = " / ".join(pconfig.process_command_env_vars) or "the provider command env var"
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            f"Could not find the {pconfig.name} command '{command}'. "
+            f"Install the agent CLI or set {env_hint}.",
             provider=provider_id,
-            code="missing_copilot_cli",
+            code="missing_acp_command",
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": pconfig.process_api_key or provider_id,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

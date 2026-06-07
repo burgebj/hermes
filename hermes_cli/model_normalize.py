@@ -86,6 +86,8 @@ _STRIP_VENDOR_ONLY_PROVIDERS: frozenset[str] = frozenset({
 _AUTHORITATIVE_NATIVE_PROVIDERS: frozenset[str] = frozenset({
     "gemini",
     "huggingface",
+    # Claude Code ACP forwards the model hint to the bridge as-is.
+    "claude-code-acp",
 })
 
 # Direct providers that accept bare native names but should repair a matching

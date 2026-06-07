@@ -155,6 +155,9 @@ _PROVIDER_ALIASES = {
     "github-models": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "claude-acp": "claude-code-acp",
+    "claude-code-acp-agent": "claude-code-acp",
+    "zed-claude-acp": "claude-code-acp",
     "tencent": "tencent-tokenhub",
     "tokenhub": "tencent-tokenhub",
     "tencent-cloud": "tencent-tokenhub",
@@ -1227,8 +1230,9 @@ def _maybe_wrap_anthropic(
     except ImportError:
         pass
     try:
-        from agent.copilot_acp_client import CopilotACPClient
-        if _safe_isinstance(client_obj, CopilotACPClient):
+        # Base class covers both Copilot and Claude Code ACP subprocess clients.
+        from agent.copilot_acp_client import ACPSubprocessClient
+        if _safe_isinstance(client_obj, ACPSubprocessClient):
             return client_obj
     except ImportError:
         pass
@@ -3296,8 +3300,9 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     except ImportError:
         pass
     try:
-        from agent.copilot_acp_client import CopilotACPClient
-        if isinstance(sync_client, CopilotACPClient):
+        # Base class covers both Copilot and Claude Code ACP subprocess clients.
+        from agent.copilot_acp_client import ACPSubprocessClient
+        if isinstance(sync_client, ACPSubprocessClient):
             return sync_client, model
     except ImportError:
         pass
@@ -3920,26 +3925,29 @@ def resolve_provider_client(
             or _read_main_model(),
             provider,
         )
-        if provider == "copilot-acp":
+        if provider in ("copilot-acp", "claude-code-acp"):
             api_key = str(creds.get("api_key", "")).strip()
             base_url = str(creds.get("base_url", "")).strip()
             command = str(creds.get("command", "")).strip() or None
             args = list(creds.get("args") or [])
             if not final_model:
                 logger.warning(
-                    "resolve_provider_client: copilot-acp requested but no model "
-                    "was provided or configured"
+                    "resolve_provider_client: %s requested but no model "
+                    "was provided or configured", provider
                 )
                 return None, None
             if not api_key or not base_url:
                 logger.warning(
-                    "resolve_provider_client: copilot-acp requested but external "
-                    "process credentials are incomplete"
+                    "resolve_provider_client: %s requested but external "
+                    "process credentials are incomplete", provider
                 )
                 return None, None
-            from agent.copilot_acp_client import CopilotACPClient
+            if provider == "claude-code-acp":
+                from agent.claude_code_acp_client import ClaudeCodeACPClient as _ACPClient
+            else:
+                from agent.copilot_acp_client import CopilotACPClient as _ACPClient
 
-            client = CopilotACPClient(
+            client = _ACPClient(
                 api_key=api_key,
                 base_url=base_url,
                 command=command,
