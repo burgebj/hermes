@@ -1510,6 +1510,70 @@ class HindsightMemoryProvider(MemoryProvider):
         self._register_atexit()
         self._retain_queue.put(_do_retain)
 
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Archive removed built-in memory entries to Hindsight.
+
+        Only handles ``action == "remove"`` — add/replace are the built-in
+        store's own concern and already populate Hindsight via normal
+        conversation retention.
+        """
+        if action != "remove":
+            return
+        content = (content or "").strip()
+        if not content:
+            return
+        if self._shutting_down.is_set():
+            return
+
+        # Snapshot state for the async writer
+        metadata_snapshot = self._build_metadata(
+            message_count=len(self._session_turns) * 2,
+            turn_index=self._turn_index,
+        )
+        if metadata:
+            metadata_snapshot.update(metadata)
+        metadata_snapshot.setdefault("memory_action", action)
+        metadata_snapshot.setdefault("memory_target", target)
+
+        context = f"archived Hermes built-in {target} memory removed from active store"
+        bank_id = self._bank_id
+        document_id, update_mode = self._resolve_retain_target(self._document_id)
+        retain_async_flag = self._retain_async
+        tags = _normalize_retain_tags(
+            ["builtin-memory", "removed-entry", f"target:{target}"]
+        )
+
+        def _do_archival() -> None:
+            kwargs = self._build_retain_kwargs(
+                content,
+                context=context,
+                metadata=metadata_snapshot,
+                tags=tags,
+                retain_async=retain_async_flag,
+            )
+            kwargs.pop("bank_id", None)
+            kwargs.pop("retain_async", None)
+            if update_mode is not None:
+                kwargs["update_mode"] = update_mode
+            self._run_hindsight_operation(
+                lambda client: client.aretain_batch(
+                    bank_id=bank_id,
+                    items=[kwargs],
+                    document_id=document_id,
+                    retain_async=retain_async_flag,
+                )
+            )
+
+        self._ensure_writer()
+        self._register_atexit()
+        self._retain_queue.put(_do_archival)
+
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         if self._memory_mode == "context":
             return []

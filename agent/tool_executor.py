@@ -1021,17 +1021,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     store=agent._memory_store,
                 )
                 # Bridge: notify external memory provider of built-in memory writes
-                if agent._memory_manager and next_args.get("action") in {"add", "replace"}:
+                action = next_args.get("action", "")
+                if agent._memory_manager and action in {"add", "replace", "remove"}:
                     try:
-                        agent._memory_manager.on_memory_write(
-                            next_args.get("action", ""),
-                            target,
-                            next_args.get("content", ""),
-                            metadata=agent._build_memory_write_metadata(
-                                task_id=effective_task_id,
-                                tool_call_id=getattr(tool_call, "id", None),
-                            ),
-                        )
+                        import json as _json
+                        parsed = _json.loads(result) if isinstance(result, str) else result
+                        if isinstance(parsed, dict) and parsed.get("success"):
+                            mutated = parsed.get("mutated", action != "remove")
+                            if mutated:
+                                if action == "remove":
+                                    content = parsed.get("removed_content", "")
+                                else:
+                                    content = parsed.get("bridge_content") or next_args.get("content", "")
+                                agent._memory_manager.on_memory_write(
+                                    action,
+                                    target,
+                                    content,
+                                    metadata=agent._build_memory_write_metadata(
+                                        task_id=effective_task_id,
+                                        tool_call_id=getattr(tool_call, "id", None),
+                                    ),
+                                )
                     except Exception:
                         pass
                 return result
