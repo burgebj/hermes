@@ -30,6 +30,149 @@ from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
+_PREFETCH_STOP_PHRASES = (
+    "是什么",
+    "是啥",
+    "什么意思",
+    "对应的",
+    "告诉我",
+    "请问",
+    "帮我查一下",
+    "帮我查",
+    "查一下",
+    "看一下",
+    "看下",
+    "查看一下",
+    "查看",
+    "当前的",
+    "当前",
+    "现在的",
+    "现在",
+    "这个",
+    "那个",
+    "有哪些",
+    "哪些",
+    "多少",
+    "哪个",
+    "怎么",
+    "如何",
+    "什么状态",
+    "状态怎么样",
+    "什么情况",
+    "情况怎么样",
+    "有影响",
+    "影响吗",
+    "改的是",
+    "改的",
+    "改得",
+    "what is",
+    "what's",
+    "tell me",
+    "show me",
+    "lookup",
+    "check",
+    "current",
+)
+_PREFETCH_STOP_WORDS = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "to",
+    "of",
+    "for",
+    "about",
+    "please",
+    "answer",
+    "value",
+    "me",
+    "current",
+    "status",
+    "state",
+    "local",
+    "check",
+    "show",
+    "lookup",
+    "一下",
+    "状态",
+    "情况",
+    "影响",
+}
+
+
+def _normalize_prefetch_query(query: str) -> str:
+    """Reduce natural-language questions to memory-bearing tokens.
+
+    Holographic prefetch is best-effort context recall. Raw FTS5 MATCH is
+    brittle with mixed Chinese/English questions and punctuation such as
+    hyphens, so strip common question scaffolding before fallback searches.
+    """
+    if not query:
+        return ""
+    normalized = query.strip()
+    # Strip longer scaffolding first so phrases such as “当前的” are removed
+    # before their shorter substring “当前”.
+    for phrase in sorted(_PREFETCH_STOP_PHRASES, key=len, reverse=True):
+        normalized = re.sub(re.escape(phrase), " ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"[-/\\|:：,，。.!！?？;；()\[\]{}<>《》\"'`~]+", " ", normalized)
+    # Chinese particles frequently glue otherwise useful terms into one FTS
+    # token, e.g. “课程平台的支付链路” or “项目补丁情况”. Split the particles,
+    # then drop common trailing question nouns when they stand alone.
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])[的了呢吗吧啊呀](?=[\u4e00-\u9fff]|$)", " ", normalized)
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])(情况|状态|影响)(?=\s|$)", " ", normalized)
+    normalized = re.sub(r"(^|\s)(情况|状态|影响)(?=\s|$)", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _prefetch_query_tokens(query: str) -> list[str]:
+    """Extract high-signal tokens for FTS OR fallback."""
+    normalized = _normalize_prefetch_query(query)
+    if not normalized:
+        return []
+    tokens = []
+    seen_tokens: set[str] = set()
+    for token in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", normalized):
+        lowered = token.lower()
+        if lowered in _PREFETCH_STOP_WORDS:
+            continue
+        if len(lowered) < 2 and not lowered.isdigit():
+            continue
+        if lowered not in seen_tokens:
+            seen_tokens.add(lowered)
+            tokens.append(token)
+    return tokens
+
+
+def _fts_quote(token: str) -> str:
+    return '"' + token.replace('"', '""') + '"'
+
+
+def _prefetch_candidate_queries(query: str) -> list[tuple[str, str]]:
+    """Return (mode, query) attempts from strictest to broadest."""
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(mode: str, candidate: str) -> None:
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            return
+        seen.add(candidate)
+        candidates.append((mode, candidate))
+
+    add("raw", query)
+    cleaned = _normalize_prefetch_query(query)
+    add("cleaned", cleaned)
+    tokens = _prefetch_query_tokens(query)
+    if len(tokens) >= 2:
+        add("or", " OR ".join(_fts_quote(token) for token in tokens[:8]))
+    elif len(tokens) == 1:
+        add("token", _fts_quote(tokens[0]))
+    return candidates
+
 
 # ---------------------------------------------------------------------------
 # Tool schemas (unchanged from original PR)
@@ -207,9 +350,21 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
+            results = []
+            hit_mode = ""
+            for mode, candidate in _prefetch_candidate_queries(query):
+                results = self._retriever.search(candidate, min_trust=self._min_trust, limit=5)
+                if results:
+                    hit_mode = mode
+                    break
             if not results:
                 return ""
+            logger.debug(
+                "Holographic prefetch hit mode=%s raw_query=%r result_count=%d",
+                hit_mode,
+                query,
+                len(results),
+            )
             lines = []
             for r in results:
                 trust = r.get("trust_score", r.get("trust", 0))
