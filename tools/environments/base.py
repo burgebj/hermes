@@ -319,6 +319,7 @@ class BaseEnvironment(ABC):
         self._cwd_file = f"{temp_dir}/hermes-cwd-{self._session_id}.txt"
         self._cwd_marker = _cwd_marker(self._session_id)
         self._snapshot_ready = False
+        self._execute_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Abstract methods
@@ -836,43 +837,44 @@ class BaseEnvironment(ABC):
         rewrite_compound_background: bool = True,
     ) -> dict:
         """Execute a command, return {"output": str, "returncode": int}."""
-        self._before_execute()
+        with self._execute_lock:
+            self._before_execute()
 
-        exec_command, sudo_stdin = self._prepare_command(command)
-        # Guard against the `A && B &` subshell-wait trap by default.
-        # Some callers (spawn_via_env) already produce shell-safe wrappers and
-        # pass rewrite_compound_background=False.
-        if rewrite_compound_background:
-            from tools.terminal_tool import _rewrite_compound_background
-            exec_command = _rewrite_compound_background(exec_command)
-        effective_timeout = timeout or self.timeout
-        effective_cwd = cwd or self.cwd
+            exec_command, sudo_stdin = self._prepare_command(command)
+            # Guard against the `A && B &` subshell-wait trap by default.
+            # Some callers (spawn_via_env) already produce shell-safe wrappers and
+            # pass rewrite_compound_background=False.
+            if rewrite_compound_background:
+                from tools.terminal_tool import _rewrite_compound_background
+                exec_command = _rewrite_compound_background(exec_command)
+            effective_timeout = timeout or self.timeout
+            effective_cwd = cwd or self.cwd
 
-        # Merge sudo stdin with caller stdin
-        if sudo_stdin is not None and stdin_data is not None:
-            effective_stdin = sudo_stdin + stdin_data
-        elif sudo_stdin is not None:
-            effective_stdin = sudo_stdin
-        else:
-            effective_stdin = stdin_data
+            # Merge sudo stdin with caller stdin
+            if sudo_stdin is not None and stdin_data is not None:
+                effective_stdin = sudo_stdin + stdin_data
+            elif sudo_stdin is not None:
+                effective_stdin = sudo_stdin
+            else:
+                effective_stdin = stdin_data
 
-        # Embed stdin as heredoc for backends that need it
-        if effective_stdin and self._stdin_mode == "heredoc":
-            exec_command = self._embed_stdin_heredoc(exec_command, effective_stdin)
-            effective_stdin = None
+            # Embed stdin as heredoc for backends that need it
+            if effective_stdin and self._stdin_mode == "heredoc":
+                exec_command = self._embed_stdin_heredoc(exec_command, effective_stdin)
+                effective_stdin = None
 
-        wrapped = self._wrap_command(exec_command, effective_cwd)
+            wrapped = self._wrap_command(exec_command, effective_cwd)
 
-        # Use login shell if snapshot failed (so user's profile still loads)
-        login = not self._snapshot_ready
+            # Use login shell if snapshot failed (so user's profile still loads)
+            login = not self._snapshot_ready
 
-        proc = self._run_bash(
-            wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin
-        )
-        result = self._wait_for_process(proc, timeout=effective_timeout)
-        self._update_cwd(result)
+            proc = self._run_bash(
+                wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin
+            )
+            result = self._wait_for_process(proc, timeout=effective_timeout)
+            self._update_cwd(result)
 
-        return result
+            return result
 
     # ------------------------------------------------------------------
     # Shared helpers

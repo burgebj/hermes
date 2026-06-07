@@ -4,6 +4,8 @@ Tests _wrap_command(), _extract_cwd_from_output(), _embed_stdin_heredoc(),
 init_session() failure handling, and the CWD marker contract.
 """
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 from tools.environments.base import BaseEnvironment
@@ -19,6 +21,11 @@ class _TestableEnv(BaseEnvironment):
         raise NotImplementedError("Use mock")
 
     def cleanup(self):
+        pass
+
+
+class _FakeProcess:
+    def kill(self):
         pass
 
 
@@ -88,6 +95,45 @@ class TestWrapCommand:
         wrapped = env._wrap_command("ls", "/nonexistent")
 
         assert "exit 126" in wrapped
+
+
+class TestExecuteSerialization:
+    def test_execute_serializes_same_environment_instance(self):
+        env = _TestableEnv()
+        env._snapshot_ready = True
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+        start = threading.Barrier(2)
+
+        def fake_run_bash(*_args, **_kwargs):
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            return _FakeProcess()
+
+        def fake_wait(*_args, **_kwargs):
+            nonlocal active
+            time.sleep(0.05)
+            with active_lock:
+                active -= 1
+            return {"output": "ok", "returncode": 0}
+
+        env._run_bash = fake_run_bash
+        env._wait_for_process = fake_wait
+
+        def run():
+            start.wait(timeout=2)
+            env.execute("echo ok")
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert max_active == 1
 
 
 class TestExtractCwdFromOutput:
