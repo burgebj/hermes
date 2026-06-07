@@ -281,6 +281,30 @@ class TestMemoryStoreAdd:
         result = store.add("memory", "  ")
         assert result["success"] is False
 
+
+class TestMemoryStoreLimitCoercion:
+    """Regression: YAML-quoted limits (e.g. memory_char_limit: '2200') used to
+    crash on the int>str comparison inside MemoryStore.add(). The constructor
+    now coerces both limits via int(), so the comparison stays type-clean
+    regardless of how the value entered the system (config.yaml YAML quoting,
+    env-var override, hand-edited int-as-string, etc.).
+    """
+
+    @pytest.mark.parametrize("limit", [2200, "2200"])
+    def test_memory_store_accepts_int_or_string_limit(self, tmp_path, monkeypatch, limit):
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        s = MemoryStore(memory_char_limit=limit, user_char_limit=limit)
+        s.load_from_disk()
+        result = s.add("memory", "x" * 10)
+        assert result["success"] is True
+        assert isinstance(s.memory_char_limit, int)
+        assert isinstance(s.user_char_limit, int)
+
+    def test_memory_store_rejects_non_numeric_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        with pytest.raises(ValueError):
+            MemoryStore(memory_char_limit="not_a_number", user_char_limit=1375)  # type: ignore[arg-type]
+
     def test_add_duplicate_rejected(self, store):
         store.add("memory", "fact A")
         result = store.add("memory", "fact A")

@@ -196,3 +196,96 @@ class TestCompressionToolResultPreservation:
             if msg.get("role") == "tool":
                 assert msg["content"] != "[Result from earlier conversation — see context summary above]", \
                     f"Stub result found for {msg.get('tool_call_id')} — real result was lost"
+
+
+class TestSanitizeToolPairsCharacterization:
+    """Characterization tests for _sanitize_tool_pairs — regression baseline."""
+
+    STUB_CONTENT = "[Result from earlier conversation — see context summary above]"
+
+    def test_remove_orphaned_result_no_call(self):
+        """A lone tool-result with no assistant tool_call is removed."""
+        comp = _make_compressor()
+        messages = [
+            {"role": "user", "content": "hi"},
+            _tool_result("orphan_id"),
+        ]
+        result = comp._sanitize_tool_pairs(messages)
+        assert len(result) == 1
+        assert result[0]["role"] == "user"
+
+    def test_remove_multiple_orphaned_results(self):
+        """Multiple orphaned tool results are all removed."""
+        comp = _make_compressor()
+        messages = [
+            {"role": "user", "content": "hi"},
+            _tool_result("T1"),
+            _tool_result("T2"),
+            {"role": "assistant", "content": "done", "tool_calls": []},
+        ]
+        result = comp._sanitize_tool_pairs(messages)
+        roles = [m["role"] for m in result]
+        assert "tool" not in roles
+        assert len(result) == 2  # user + assistant
+
+    def test_add_stub_for_missing_result(self):
+        """Missing tool result gets a stub inserted after the assistant."""
+        comp = _make_compressor()
+        messages = [
+            {"role": "user", "content": "hi"},
+            _assistant_with_tools("T1"),
+        ]
+        result = comp._sanitize_tool_pairs(messages)
+        assert len(result) == 3
+        stub = result[2]
+        assert stub["role"] == "tool"
+        assert stub["tool_call_id"] == "T1"
+        assert stub["content"] == self.STUB_CONTENT
+
+    def test_add_stub_for_multiple_missing_results(self):
+        """Three tool_calls with no results each get a stub after the assistant."""
+        comp = _make_compressor()
+        messages = [
+            {"role": "user", "content": "hi"},
+            _assistant_with_tools("T1", "T2", "T3"),
+            {"role": "user", "content": "continue"},
+        ]
+        result = comp._sanitize_tool_pairs(messages)
+        assert len(result) == 6
+        stubs = result[2:5]
+        assert all(s["role"] == "tool" for s in stubs)
+        assert all(s["content"] == self.STUB_CONTENT for s in stubs)
+        assert {s["tool_call_id"] for s in stubs} == {"T1", "T2", "T3"}
+        assert result[5]["role"] == "user"
+        assert result[5]["content"] == "continue"
+
+    def test_clean_list_unchanged(self):
+        """Well-formed assistant+result pair passes through unmodified."""
+        comp = _make_compressor()
+        messages = [
+            {"role": "user", "content": "hi"},
+            _assistant_with_tools("T1"),
+            _tool_result("T1", "real result"),
+        ]
+        result = comp._sanitize_tool_pairs(messages)
+        assert len(result) == 3
+        assert result[2]["content"] == "real result"
+        assert result[2]["role"] == "tool"
+        assert result[2]["tool_call_id"] == "T1"
+
+    def test_partial_results_adds_stub_for_missing_only(self):
+        """T1 present, T2 missing — stub added only for T2."""
+        comp = _make_compressor()
+        messages = [
+            {"role": "user", "content": "hi"},
+            _assistant_with_tools("T1", "T2"),
+            _tool_result("T1", "real result for T1"),
+        ]
+        result = comp._sanitize_tool_pairs(messages)
+        assert len(result) == 4
+        tool_msgs = [m for m in result if m["role"] == "tool"]
+        assert len(tool_msgs) == 2
+        t1_msg = next(m for m in tool_msgs if m["tool_call_id"] == "T1")
+        assert t1_msg["content"] == "real result for T1"
+        t2_msg = next(m for m in tool_msgs if m["tool_call_id"] == "T2")
+        assert t2_msg["content"] == self.STUB_CONTENT

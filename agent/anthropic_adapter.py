@@ -1875,6 +1875,116 @@ def _merge_consecutive_roles(result: List[Dict[str, Any]]) -> List[Dict[str, Any
     return fixed
 
 
+def _repair_tool_pairs(result: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Relocate tool_results to sit immediately after their tool_use.
+
+    Context compression can separate a ``tool_use`` block in an assistant
+    message from its matching ``tool_result`` block in a non-adjacent user
+    message.  Anthropic's Messages API requires immediate adjacency, so this
+    surfaces as HTTP 400: "tool_use ids were found without tool_result
+    blocks immediately after".
+
+    For each orphaned tool_use, search forward for the matching tool_result,
+    relocate it into the immediately-following user message, merge adjacent
+    user messages to preserve the role alternation invariant, and stub if
+    truly missing.
+    """
+    def _find_tool_result(blocks_owner_idx_start: int, uid: str):
+        for mi in range(blocks_owner_idx_start, len(result)):
+            mm = result[mi]
+            if mm["role"] != "user" or not isinstance(mm["content"], list):
+                continue
+            for bi, b in enumerate(mm["content"]):
+                if (
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") == uid
+                ):
+                    return mi, bi
+        return None, None
+
+    i = 0
+    while i < len(result):
+        msg = result[i]
+        if msg["role"] != "assistant" or not isinstance(msg["content"], list):
+            i += 1
+            continue
+        tool_use_ids = [
+            b["id"]
+            for b in msg["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")
+        ]
+        if not tool_use_ids:
+            i += 1
+            continue
+
+        satisfied = set()
+        follower = result[i + 1] if i + 1 < len(result) else None
+        if (
+            follower
+            and follower["role"] == "user"
+            and isinstance(follower["content"], list)
+        ):
+            satisfied = {
+                b.get("tool_use_id")
+                for b in follower["content"]
+                if isinstance(b, dict) and b.get("type") == "tool_result"
+            }
+
+        relocated_blocks = []
+        for uid in tool_use_ids:
+            if uid in satisfied:
+                continue
+            search_start = i + 2 if (follower and follower["role"] == "user") else i + 1
+            mi, bi = _find_tool_result(search_start, uid)
+            if mi is None:
+                relocated_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": uid,
+                    "content": "[Result unavailable — removed by compression]",
+                })
+                logger.debug(
+                    "Adapter: synthesised stub tool_result for orphaned tool_use %s",
+                    uid,
+                )
+                continue
+            block = result[mi]["content"].pop(bi)
+            relocated_blocks.append(block)
+            logger.debug(
+                "Adapter: relocated tool_result %s to immediately after tool_use",
+                uid,
+            )
+            if not result[mi]["content"]:
+                result[mi]["content"] = [
+                    {"type": "text", "text": "(tool result moved earlier)"}
+                ]
+
+        if relocated_blocks:
+            if (
+                follower
+                and follower["role"] == "user"
+                and isinstance(follower["content"], list)
+            ):
+                follower["content"] = relocated_blocks + follower["content"]
+            else:
+                result.insert(i + 1, {"role": "user", "content": relocated_blocks})
+        i += 1
+
+    # Relocation can leave adjacent user messages — re-merge to alternate.
+    merged: List[Dict[str, Any]] = []
+    for m in result:
+        if (
+            merged
+            and merged[-1]["role"] == m["role"] == "user"
+            and isinstance(merged[-1]["content"], list)
+            and isinstance(m["content"], list)
+        ):
+            merged[-1]["content"] = merged[-1]["content"] + m["content"]
+        else:
+            merged.append(m)
+    return merged
+
+
 def _manage_thinking_signatures(
     result: List[Dict[str, Any]], base_url: str | None, model: str | None
 ) -> None:
@@ -2074,6 +2184,7 @@ def convert_messages_to_anthropic(
 
     _strip_orphaned_tool_blocks(result)
     result = _merge_consecutive_roles(result)
+    result = _repair_tool_pairs(result)
     _manage_thinking_signatures(result, base_url, model)
     _evict_old_screenshots(result)
 
