@@ -1690,6 +1690,19 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "host": os.getenv("WECOM_CALLBACK_HOST", "0.0.0.0"),
             "port": int(os.getenv("WECOM_CALLBACK_PORT", "8645")),
         })
+        wecom_callback_allowed_cidrs = os.getenv(
+            "WECOM_CALLBACK_ALLOWED_SOURCE_CIDRS", ""
+        )
+        if wecom_callback_allowed_cidrs:
+            cidrs = [
+                cidr.strip()
+                for cidr in wecom_callback_allowed_cidrs.split(",")
+                if cidr.strip()
+            ]
+            if cidrs:
+                config.platforms[Platform.WECOM_CALLBACK].extra[
+                    "allowed_source_cidrs"
+                ] = cidrs
 
     # Weixin (personal WeChat via iLink Bot API)
     weixin_token = os.getenv("WEIXIN_TOKEN")

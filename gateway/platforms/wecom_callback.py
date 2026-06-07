@@ -13,6 +13,7 @@ Supports multiple self-built apps under one gateway instance, scoped by
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import socket as _socket
 import time
@@ -46,7 +47,13 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+    is_network_accessible,
+)
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt, WeComCryptoError
 
 logger = logging.getLogger(__name__)
@@ -69,6 +76,9 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self._host = str(extra.get("host") or DEFAULT_HOST)
         self._port = int(extra.get("port") or DEFAULT_PORT)
         self._path = str(extra.get("path") or DEFAULT_PATH)
+        self._allowed_source_networks: List[ipaddress._BaseNetwork] = (
+            self._parse_allowed_source_cidrs(extra.get("allowed_source_cidrs"))
+        )
         self._apps: List[Dict[str, Any]] = self._normalize_apps(extra)
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
@@ -87,6 +97,65 @@ class WecomCallbackAdapter(BasePlatformAdapter):
     @staticmethod
     def _user_app_key(corp_id: str, user_id: str) -> str:
         return f"{corp_id}:{user_id}" if corp_id else user_id
+
+    @staticmethod
+    def _parse_allowed_source_cidrs(
+        raw: Any,
+    ) -> List[ipaddress._BaseNetwork]:
+        """Parse an optional list of CIDR ranges allowed to POST to the callback.
+
+        An empty or missing value means "allow everything" (preserves
+        behavior for loopback binds behind a tunnel / reverse proxy).
+        When populated, requests from source IPs outside every listed
+        CIDR are rejected with 403 before the body is parsed. Use this
+        to restrict the endpoint to WeCom's published webhook source
+        ranges in production deployments where the listener is bound to
+        a network-accessible interface.
+        """
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            candidates = [chunk.strip() for chunk in raw.split(",")]
+        elif isinstance(raw, (list, tuple, set)):
+            candidates = [str(chunk).strip() for chunk in raw]
+        else:
+            return []
+
+        networks: List[ipaddress._BaseNetwork] = []
+        for chunk in candidates:
+            if not chunk:
+                continue
+            try:
+                networks.append(ipaddress.ip_network(chunk, strict=False))
+            except ValueError:
+                logger.warning(
+                    "[WecomCallback] Ignoring invalid allowed_source_cidrs entry: %r",
+                    chunk,
+                )
+        return networks
+
+    def _source_allowlist_required_but_missing(self) -> bool:
+        return is_network_accessible(self._host) and not self._allowed_source_networks
+
+    def _source_ip_allowed(self, request: "web.Request") -> bool:
+        """Return True if the request's source IP is in the configured allowlist.
+
+        Loopback-only binds may omit ``allowed_source_cidrs`` for local reverse
+        proxies and dev tunnels. Network-accessible binds fail closed until an
+        explicit CIDR allowlist is configured.
+        """
+        if self._source_allowlist_required_but_missing():
+            return False
+        if not self._allowed_source_networks:
+            return True
+        peer = request.remote or ""
+        if not peer:
+            return False
+        try:
+            peer_addr = ipaddress.ip_address(peer)
+        except ValueError:
+            return False
+        return any(peer_addr in network for network in self._allowed_source_networks)
 
     @staticmethod
     def _normalize_apps(extra: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -116,6 +185,15 @@ class WecomCallbackAdapter(BasePlatformAdapter):
             return False
         if not check_wecom_callback_requirements():
             logger.warning("[WecomCallback] aiohttp/httpx not installed")
+            return False
+        if self._source_allowlist_required_but_missing():
+            logger.error(
+                "[WecomCallback] Refusing to start: binding to %s requires "
+                "extra.allowed_source_cidrs. Configure WeCom's source CIDRs "
+                "or bind to loopback (127.0.0.1/::1) behind a tunnel or "
+                "reverse proxy.",
+                self._host,
+            )
             return False
 
         # Quick port-in-use check.
@@ -251,10 +329,14 @@ class WecomCallbackAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _handle_health(self, request: web.Request) -> web.Response:
+        if not self._source_ip_allowed(request):
+            return web.Response(status=403)
         return web.json_response({"status": "ok", "platform": "wecom_callback"})
 
     async def _handle_verify(self, request: web.Request) -> web.Response:
         """GET endpoint — WeCom URL verification handshake."""
+        if not self._source_ip_allowed(request):
+            return web.Response(status=403)
         msg_signature = request.query.get("msg_signature", "")
         timestamp = request.query.get("timestamp", "")
         nonce = request.query.get("nonce", "")
@@ -270,6 +352,8 @@ class WecomCallbackAdapter(BasePlatformAdapter):
 
     async def _handle_callback(self, request: web.Request) -> web.Response:
         """POST endpoint — receive an encrypted message callback."""
+        if not self._source_ip_allowed(request):
+            return web.Response(status=403)
         msg_signature = request.query.get("msg_signature", "")
         timestamp = request.query.get("timestamp", "")
         nonce = request.query.get("nonce", "")

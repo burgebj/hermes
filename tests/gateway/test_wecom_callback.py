@@ -6,8 +6,21 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from gateway.config import PlatformConfig
-from gateway.platforms.wecom_callback import WecomCallbackAdapter
+from gateway.platforms.wecom_callback import (
+    AIOHTTP_AVAILABLE,
+    WecomCallbackAdapter,
+)
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt
+
+
+class _FakeRequest:
+    def __init__(self, *, query=None, remote="127.0.0.1", body=""):
+        self.query = query or {}
+        self.remote = remote
+        self._body = body
+
+    async def text(self):
+        return self._body
 
 
 def _app(name="test-app", corp_id="ww1234567890", agent_id="1000002"):
@@ -307,3 +320,159 @@ class TestWecomCallbackPollLoop:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert calls == ["test"]
+
+
+def _config_with(host="127.0.0.1", port=0, allowed_source_cidrs=None, apps=None):
+    extra = {
+        "mode": "callback",
+        "host": host,
+        "port": port,
+        "apps": apps or [_app()],
+    }
+    if allowed_source_cidrs is not None:
+        extra["allowed_source_cidrs"] = allowed_source_cidrs
+    return PlatformConfig(enabled=True, extra=extra)
+
+
+class TestWecomCallbackSourceIPAllowlist:
+    @pytest.mark.asyncio
+    async def test_connect_refuses_public_bind_without_allowlist(self):
+        """Binding 0.0.0.0 without allowed_source_cidrs must fail closed."""
+        if not AIOHTTP_AVAILABLE:
+            pytest.skip("aiohttp not installed")
+        adapter = WecomCallbackAdapter(
+            _config_with(host="0.0.0.0", allowed_source_cidrs=[])
+        )
+        connected = await adapter.connect()
+        assert connected is False
+        assert adapter.is_connected is False
+
+    @pytest.mark.asyncio
+    async def test_connect_allows_loopback_without_allowlist(self):
+        """Loopback binds may omit allowed_source_cidrs (tunnel / reverse-proxy)."""
+        if not AIOHTTP_AVAILABLE:
+            pytest.skip("aiohttp not installed")
+        adapter = WecomCallbackAdapter(
+            _config_with(host="127.0.0.1", port=0, allowed_source_cidrs=[])
+        )
+        try:
+            connected = await adapter.connect()
+            assert connected is True
+            assert adapter.is_connected is True
+        finally:
+            await adapter.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_callback_from_disallowed_ip_rejected(self):
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs=["10.0.0.0/8"])
+        )
+        resp = await adapter._handle_callback(
+            _FakeRequest(remote="203.0.113.99", body="<xml/>")
+        )
+        assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_callback_from_allowed_ip_passes_source_check(self):
+        """Allowed source IPs reach the signature-verify path (no 403)."""
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs=["10.0.0.0/8", "203.0.113.0/24"])
+        )
+        resp = await adapter._handle_callback(
+            _FakeRequest(remote="203.0.113.5", body="<xml/>")
+        )
+        # IP check passes; signature decryption then fails and the
+        # handler returns 400, NOT 403. This proves the allowlist
+        # admitted the request — distinguishing it from the rejected
+        # 203.0.113.99 case above.
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_verify_handshake_respects_allowlist(self):
+        """URL verification handshake must not bypass the allowlist."""
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs=["10.0.0.0/8"])
+        )
+        resp = await adapter._handle_verify(
+            _FakeRequest(
+                query={
+                    "msg_signature": "x",
+                    "timestamp": "0",
+                    "nonce": "n",
+                    "echostr": "probe",
+                },
+                remote="203.0.113.99",
+            )
+        )
+        assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_respects_allowlist(self):
+        """The health endpoint must not leak status to arbitrary sources."""
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs=["10.0.0.0/8"])
+        )
+        resp = await adapter._handle_health(_FakeRequest(remote="203.0.113.99"))
+        assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_public_bind_without_allowlist_rejects_inbound(self):
+        """Even at request time, a public bind with no allowlist fails closed."""
+        adapter = WecomCallbackAdapter(
+            _config_with(host="0.0.0.0", allowed_source_cidrs=[])
+        )
+        resp = await adapter._handle_callback(
+            _FakeRequest(remote="127.0.0.1", body="<xml/>")
+        )
+        assert resp.status == 403
+
+    def test_invalid_cidr_entries_are_ignored_at_init(self):
+        """Malformed CIDR strings should log a warning and be ignored, not crash."""
+        adapter = WecomCallbackAdapter(
+            _config_with(
+                allowed_source_cidrs=["10.0.0.0/8", "not-a-cidr", "", "203.0.113.0/24"]
+            )
+        )
+        assert len(adapter._allowed_source_networks) == 2
+
+    def test_cidr_list_accepts_comma_string(self):
+        """Env-var-style 'cidr1, cidr2' strings parse as a list."""
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs="10.0.0.0/8, 203.0.113.0/24")
+        )
+        assert len(adapter._allowed_source_networks) == 2
+
+    def test_missing_remote_address_is_rejected(self):
+        """A request with no remote attribute should fail closed, not error."""
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs=["10.0.0.0/8"])
+        )
+        assert adapter._source_ip_allowed(_FakeRequest(remote="")) is False
+
+    def test_unparseable_remote_address_is_rejected(self):
+        """A non-IP remote (e.g. a UNIX socket peer) should fail closed."""
+        adapter = WecomCallbackAdapter(
+            _config_with(allowed_source_cidrs=["10.0.0.0/8"])
+        )
+        assert adapter._source_ip_allowed(_FakeRequest(remote="not-an-ip")) is False
+
+
+class TestWecomCallbackEnvOverrides:
+    def test_env_override_populates_allowed_source_cidrs(self, monkeypatch):
+        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+
+        config = GatewayConfig()
+        monkeypatch.setenv("WECOM_CALLBACK_CORP_ID", "ww123")
+        monkeypatch.setenv("WECOM_CALLBACK_CORP_SECRET", "secret")
+        monkeypatch.setenv(
+            "WECOM_CALLBACK_ALLOWED_SOURCE_CIDRS",
+            "10.0.0.0/8, 203.0.113.0/24",
+        )
+
+        _apply_env_overrides(config)
+
+        extra = config.platforms[Platform.WECOM_CALLBACK].extra
+        assert extra["allowed_source_cidrs"] == [
+            "10.0.0.0/8",
+            "203.0.113.0/24",
+        ]

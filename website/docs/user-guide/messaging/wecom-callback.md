@@ -59,6 +59,8 @@ WECOM_CALLBACK_ENCODING_AES_KEY=your-43-char-aes-key
 WECOM_CALLBACK_HOST=0.0.0.0
 WECOM_CALLBACK_PORT=8645
 WECOM_CALLBACK_ALLOWED_USERS=user1,user2
+# Required when WECOM_CALLBACK_HOST is non-loopback. Comma-separated CIDRs.
+WECOM_CALLBACK_ALLOWED_SOURCE_CIDRS=203.0.113.0/24,198.51.100.0/24
 ```
 
 ### 3. Start the Gateway
@@ -82,9 +84,10 @@ Set these in `config.yaml` under `platforms.wecom_callback.extra`, or use enviro
 | `agent_id` | — | Agent ID of the self-built app (required) |
 | `token` | — | Callback verification token (required) |
 | `encoding_aes_key` | — | 43-character AES key for callback encryption (required) |
-| `host` | `0.0.0.0` | Bind address for the HTTP callback server |
+| `host` | `0.0.0.0` | Bind address for the HTTP callback server. Non-loopback binds require `allowed_source_cidrs`; loopback (`127.0.0.1` / `::1`) is the easiest dev-tunnel / reverse-proxy setup. |
 | `port` | `8645` | Port for the HTTP callback server |
 | `path` | `/wecom/callback` | URL path for the callback endpoint |
+| `allowed_source_cidrs` | `[]` | Required for non-loopback binds. Source CIDR ranges allowed to reach the callback / verify / health endpoints; everything else returns 403. Leave empty only when the listener is bound to loopback and fronted by a local tunnel / reverse proxy. |
 
 ## Multi-App Routing
 
@@ -176,3 +179,17 @@ Check `hermes gateway run` logs for the bound host/port. If the adapter bound to
 can't reach loopback. Set `extra.host: 0.0.0.0` in `config.yaml` (plus
 `allowed_source_cidrs` if exposing directly) or keep loopback and use a tunnel
 such as Cloudflare Tunnel / nginx.
+
+**Listener refuses to start on `0.0.0.0`.**
+The adapter fails closed when bound to a non-loopback host without
+`extra.allowed_source_cidrs`. Set the allowlist to WeCom's current callback
+egress ranges (publish on your WeCom admin console), or bind Hermes to
+`127.0.0.1` / `::1` behind your tunnel or reverse proxy. The
+`WECOM_CALLBACK_ALLOWED_SOURCE_CIDRS` env var accepts a comma-separated list
+(`10.0.0.0/8, 203.0.113.0/24`). Invalid CIDR strings log a warning and are
+ignored.
+
+**Real WeCom requests get 403'd.**
+Source IP allowlist is too narrow. Widen the list to include WeCom's current
+egress ranges. If you're still validating the tunnel path, bind Hermes to
+loopback and let the tunnel handle public exposure.
