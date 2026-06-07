@@ -27,6 +27,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlink
 import { randomBytes } from 'crypto';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
+import { fileURLToPath } from 'url';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
 
@@ -67,7 +68,15 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
+function sendWithTimeout(chatId, payload, optionsOrTimeout, maybeTimeout) {
+  let options = {};
+  let timeoutMs = SEND_TIMEOUT_MS;
+  if (typeof optionsOrTimeout === 'number') {
+    timeoutMs = optionsOrTimeout;
+  } else if (optionsOrTimeout && typeof optionsOrTimeout === 'object') {
+    options = optionsOrTimeout;
+    if (typeof maybeTimeout === 'number') timeoutMs = maybeTimeout;
+  }
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
@@ -75,7 +84,7 @@ function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
       timeoutMs,
     );
   });
-  return Promise.race([sock.sendMessage(chatId, payload), timeoutPromise])
+  return Promise.race([sock.sendMessage(chatId, payload, options), timeoutPromise])
     .finally(() => clearTimeout(timer));
 }
 
@@ -146,6 +155,33 @@ function getContextInfo(messageContent) {
   return {};
 }
 
+export function extractMessageText(messageContent) {
+  if (!messageContent || typeof messageContent !== 'object') return '';
+  if (messageContent.conversation) return messageContent.conversation;
+  if (messageContent.extendedTextMessage?.text) return messageContent.extendedTextMessage.text;
+  if (messageContent.imageMessage?.caption) return messageContent.imageMessage.caption;
+  if (messageContent.videoMessage?.caption) return messageContent.videoMessage.caption;
+  if (messageContent.documentMessage?.caption) return messageContent.documentMessage.caption;
+  if (messageContent.buttonsMessage?.contentText) return messageContent.buttonsMessage.contentText;
+  if (messageContent.listMessage?.description) return messageContent.listMessage.description;
+  if (messageContent.templateMessage?.hydratedTemplate?.hydratedContentText) {
+    return messageContent.templateMessage.hydratedTemplate.hydratedContentText;
+  }
+  return '';
+}
+
+export function extractQuoteContext(messageContent) {
+  const contextInfo = getContextInfo(messageContent);
+  if (!contextInfo || Object.keys(contextInfo).length === 0) return {};
+  const quotedMessage = contextInfo.quotedMessage || {};
+  return {
+    quotedMessageId: contextInfo.stanzaId || '',
+    quotedParticipant: normalizeWhatsAppId(contextInfo.participant || contextInfo.remoteJid || ''),
+    quotedRemoteJid: normalizeWhatsAppId(contextInfo.remoteJid || ''),
+    quotedText: extractMessageText(quotedMessage),
+  };
+}
+
 mkdirSync(SESSION_DIR, { recursive: true });
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
@@ -169,6 +205,59 @@ const logger = pino({ level: 'warn' });
 // Message queue for polling
 const messageQueue = [];
 const MAX_QUEUE_SIZE = 100;
+
+// Full WAMessage cache used for native WhatsApp quotes/replies/reactions.
+// Baileys needs the original WAMessage object for `{ quoted }` and reactions.
+export const messageStore = new Map();
+const MAX_STORED_MESSAGES = parseInt(process.env.WHATSAPP_MESSAGE_STORE_MAX || '5000', 10);
+const MESSAGE_STORE_TTL_MS = parseInt(process.env.WHATSAPP_MESSAGE_STORE_TTL_MS || String(24 * 60 * 60 * 1000), 10);
+
+function messageStoreKey(chatId, messageId) {
+  if (!chatId || !messageId) return '';
+  return `${normalizeWhatsAppId(chatId)}|${messageId}`;
+}
+
+function pruneMessageStore(now = Date.now()) {
+  for (const [key, value] of messageStore.entries()) {
+    if (now - value.seenAt > MESSAGE_STORE_TTL_MS) {
+      messageStore.delete(key);
+    }
+  }
+  while (messageStore.size > MAX_STORED_MESSAGES) {
+    messageStore.delete(messageStore.keys().next().value);
+  }
+}
+
+export function rememberMessage(msg, now = Date.now()) {
+  const chatId = normalizeWhatsAppId(msg?.key?.remoteJid || '');
+  const messageId = msg?.key?.id || '';
+  const key = messageStoreKey(chatId, messageId);
+  if (!key) return;
+  messageStore.set(key, { message: msg, seenAt: now });
+  pruneMessageStore(now);
+}
+
+export function resolveStoredMessage(chatId, messageId) {
+  const key = messageStoreKey(chatId, messageId);
+  const entry = messageStore.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.seenAt > MESSAGE_STORE_TTL_MS) {
+    messageStore.delete(key);
+    return undefined;
+  }
+  return entry.message;
+}
+
+export function buildQuotedSendOptions(chatId, replyTo) {
+  const quoted = resolveStoredMessage(chatId, replyTo);
+  return quoted ? { quoted } : {};
+}
+
+function getStatusAuthor(statusMsg, fallback) {
+  return normalizeWhatsAppId(
+    fallback || statusMsg?.key?.participant || statusMsg?.participant || ''
+  );
+}
 
 // Track recently sent message IDs to prevent echo-back loops with media
 const recentlySentIds = new Set();
@@ -314,16 +403,19 @@ async function startSocket() {
         }
       }
 
+      rememberMessage(msg);
+
       const messageContent = getMessageContent(msg);
       const contextInfo = getContextInfo(messageContent);
+      const quoteContext = extractQuoteContext(messageContent);
       const mentionedIds = Array.from(new Set((contextInfo?.mentionedJid || []).map(normalizeWhatsAppId).filter(Boolean)));
       const quotedMessageId = contextInfo?.stanzaId || null;
-      const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
+      const quotedParticipant = quoteContext.quotedParticipant || normalizeWhatsAppId(contextInfo?.participant || '') || null;
       const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
       const hasQuotedMessage = !!contextInfo?.quotedMessage;
 
       // Extract message body
-      let body = '';
+      let body = extractMessageText(messageContent);
       let hasMedia = false;
       let mediaType = '';
       const mediaUrls = [];
@@ -434,8 +526,11 @@ async function startSocket() {
         mentionedIds,
         quotedMessageId,
         quotedParticipant,
-        quotedRemoteJid,
+        quotedRemoteJid: quotedRemoteJid || quoteContext.quotedRemoteJid || '',
         hasQuotedMessage,
+        quotedText: quoteContext.quotedText || '',
+        isStatus: chatId === 'status@broadcast' || chatId === 'status@s.whatsapp.net',
+        statusAuthorJid: (chatId === 'status@broadcast' || chatId === 'status@s.whatsapp.net') ? senderId : '',
         botIds,
         timestamp: msg.messageTimestamp,
       };
@@ -503,8 +598,12 @@ app.post('/send', async (req, res) => {
   try {
     const chunks = splitLongMessage(formatOutgoingMessage(message));
     const messageIds = [];
+    let quoted = false;
     for (let i = 0; i < chunks.length; i += 1) {
-      const sent = await sendWithTimeout(chatId, { text: chunks[i] });
+      const options = i === 0 && replyTo ? buildQuotedSendOptions(chatId, replyTo) : {};
+      quoted = quoted || Boolean(options.quoted);
+      const sent = await sendWithTimeout(chatId, { text: chunks[i] }, options);
+      rememberMessage(sent);
       trackSentMessageId(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
       if (chunks.length > 1 && i < chunks.length - 1) {
@@ -516,6 +615,7 @@ app.post('/send', async (req, res) => {
       success: true,
       messageId: messageIds[messageIds.length - 1],
       messageIds,
+      quoted,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -581,7 +681,7 @@ app.post('/send-media', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, filePath, mediaType, caption, fileName } = req.body;
+  const { chatId, filePath, mediaType, caption, fileName, replyTo } = req.body;
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
@@ -642,11 +742,109 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
-    const sent = await sendWithTimeout(chatId, msgPayload);
+    const options = replyTo ? buildQuotedSendOptions(chatId, replyTo) : {};
+    const sent = await sendWithTimeout(chatId, msgPayload, options);
 
+    rememberMessage(sent);
     trackSentMessageId(sent);
 
+    res.json({ success: true, messageId: sent?.key?.id, quoted: Boolean(options.quoted) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// React to a normal WhatsApp message cached by the bridge
+app.post('/react', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { chatId, messageId, emoji } = req.body;
+  if (!chatId || !messageId || emoji === undefined) {
+    return res.status(400).json({ error: 'chatId, messageId, and emoji are required' });
+  }
+  const target = resolveStoredMessage(chatId, messageId);
+  if (!target) return res.status(404).json({ error: 'Referenced message not found in bridge cache' });
+  try {
+    const sent = await sock.sendMessage(chatId, { react: { text: emoji, key: target.key } });
+    trackSentMessageId(sent);
     res.json({ success: true, messageId: sent?.key?.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a private DM reply to a cached WhatsApp status/story.
+app.post('/status-reply', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { statusMessageId, statusAuthorJid, message } = req.body;
+  if (!statusMessageId || !message) {
+    return res.status(400).json({ error: 'statusMessageId and message are required' });
+  }
+  const statusMsg = resolveStoredMessage('status@broadcast', statusMessageId)
+    || resolveStoredMessage('status@s.whatsapp.net', statusMessageId);
+  if (!statusMsg) return res.status(404).json({ error: 'Referenced status not found in bridge cache' });
+  const authorJid = getStatusAuthor(statusMsg, statusAuthorJid);
+  if (!authorJid) return res.status(400).json({ error: 'Could not determine status author JID' });
+  try {
+    const sent = await sock.sendMessage(authorJid, { text: formatOutgoingMessage(message) }, { quoted: statusMsg });
+    rememberMessage(sent);
+    trackSentMessageId(sent);
+    res.json({ success: true, messageId: sent?.key?.id, chatId: authorJid, quoted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// React to a cached WhatsApp status/story.
+app.post('/status-react', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { statusMessageId, statusAuthorJid, emoji } = req.body;
+  if (!statusMessageId || emoji === undefined) {
+    return res.status(400).json({ error: 'statusMessageId and emoji are required' });
+  }
+  const statusMsg = resolveStoredMessage('status@broadcast', statusMessageId)
+    || resolveStoredMessage('status@s.whatsapp.net', statusMessageId);
+  if (!statusMsg) return res.status(404).json({ error: 'Referenced status not found in bridge cache' });
+  const authorJid = getStatusAuthor(statusMsg, statusAuthorJid);
+  if (!authorJid) return res.status(400).json({ error: 'Could not determine status author JID' });
+  try {
+    const ownJid = normalizeWhatsAppId(sock.user?.id || '');
+    const statusJidList = Array.from(new Set([authorJid, ownJid].filter(Boolean)));
+    const sent = await sock.sendMessage(
+      'status@broadcast',
+      { react: { text: emoji, key: statusMsg.key } },
+      { statusJidList }
+    );
+    trackSentMessageId(sent);
+    res.json({ success: true, messageId: sent?.key?.id, statusJidList });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Post a text status/story to an explicit recipient list.
+app.post('/post-status', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { text, backgroundColor, font, statusJidList } = req.body;
+  if (!text || !Array.isArray(statusJidList) || statusJidList.length === 0) {
+    return res.status(400).json({ error: 'text and a non-empty explicit statusJidList are required' });
+  }
+  try {
+    const recipients = Array.from(new Set(statusJidList.map(normalizeWhatsAppId).filter(Boolean)));
+    const sent = await sock.sendMessage(
+      'status@broadcast',
+      { text },
+      { statusJidList: recipients, backgroundColor, font }
+    );
+    rememberMessage(sent);
+    res.json({ success: true, messageId: sent?.key?.id, statusJidList: recipients });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -703,14 +901,16 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Start
-if (PAIR_ONLY) {
+// Start when executed directly. Keep imports side-effect-light for node:test.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+
+if (isMain && PAIR_ONLY) {
   // Pair-only mode: just connect, show QR, save creds, exit. No HTTP server.
   console.log('📱 WhatsApp pairing mode');
   console.log(`📁 Session: ${SESSION_DIR}`);
   console.log();
   startSocket();
-} else {
+} else if (isMain) {
   app.listen(PORT, '127.0.0.1', () => {
     console.log(`🌉 WhatsApp bridge listening on port ${PORT} (mode: ${WHATSAPP_MODE})`);
     console.log(`📁 Session stored in: ${SESSION_DIR}`);

@@ -154,6 +154,32 @@ def test_dm_passes_with_default_open_policy():
     assert adapter._should_process_message(dm) is True
 
 
+def test_whatsapp_status_broadcast_is_not_processed_as_dm():
+    adapter = _make_adapter(require_mention=True)
+
+    status = _dm_message(
+        "viewed your status",
+        senderId="144492044791824@lid",
+        chatId="status@broadcast",
+        **{"from": "status@broadcast"},
+    )
+
+    assert adapter._should_process_message(status) is False
+
+
+def test_whatsapp_status_s_whatsapp_net_is_not_processed_as_dm():
+    adapter = _make_adapter(require_mention=True)
+
+    status = _dm_message(
+        "viewed your status",
+        senderId="144492044791824@lid",
+        chatId="status@s.whatsapp.net",
+        **{"from": "status@s.whatsapp.net"},
+    )
+
+    assert adapter._should_process_message(status) is False
+
+
 def test_mention_stripping_removes_bot_phone_from_body():
     adapter = _make_adapter(require_mention=True)
 
