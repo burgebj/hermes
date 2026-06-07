@@ -2476,6 +2476,17 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
             coro_or_factory.close()
         raise RuntimeError("MCP event loop is not running")
 
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is loop:
+        if asyncio.iscoroutine(coro_or_factory):
+            coro_or_factory.close()
+        raise RuntimeError(
+            "Cannot synchronously wait on the MCP event loop from its own thread"
+        )
+
     coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
     future = safe_schedule_threadsafe(
         coro, loop,
