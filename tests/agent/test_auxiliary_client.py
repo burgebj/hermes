@@ -1612,6 +1612,63 @@ class TestAuxiliaryFallbackLayering:
         exc.status_code = 402
         return exc
 
+    def test_resolve_single_provider_passes_explicit_overrides(self):
+        """fallback_chain endpoint fields must map to resolve_provider_client explicit_* kwargs."""
+        from agent.auxiliary_client import _resolve_single_provider
+
+        fake_client = MagicMock()
+        with patch("agent.auxiliary_client.resolve_provider_client",
+                   return_value=(fake_client, "fallback-model")) as resolver:
+            client = _resolve_single_provider(
+                "custom",
+                model="fallback-model",
+                base_url="https://fallback.example/v1",
+                api_key="fallback-key",
+            )
+
+        assert client is fake_client
+        resolver.assert_called_once_with(
+            provider="custom",
+            model="fallback-model",
+            explicit_base_url="https://fallback.example/v1",
+            explicit_api_key="fallback-key",
+        )
+
+    def test_configured_fallback_chain_uses_base_url_api_key_entry(self, monkeypatch):
+        """A fallback_chain entry with endpoint overrides resolves and is returned."""
+        from agent.auxiliary_client import _try_configured_fallback_chain
+
+        fake_client = MagicMock()
+        monkeypatch.setattr(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            lambda task: {
+                "fallback_chain": [{
+                    "provider": "custom",
+                    "model": "fallback-model",
+                    "base_url": "https://fallback.example/v1",
+                    "api_key": "fallback-key",
+                }]
+            },
+        )
+
+        with patch("agent.auxiliary_client.resolve_provider_client",
+                   return_value=(fake_client, "fallback-model")) as resolver:
+            client, model, label = _try_configured_fallback_chain(
+                "compression",
+                failed_provider="primary-provider",
+                reason="rate limit",
+            )
+
+        assert client is fake_client
+        assert model == "fallback-model"
+        assert label == "fallback_chain[0](custom)"
+        resolver.assert_called_once_with(
+            provider="custom",
+            model="fallback-model",
+            explicit_base_url="https://fallback.example/v1",
+            explicit_api_key="fallback-key",
+        )
+
     def test_explicit_provider_uses_configured_chain_first(self, monkeypatch, caplog):
         """When a user has fallback_chain configured, it's tried BEFORE the main agent model."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
