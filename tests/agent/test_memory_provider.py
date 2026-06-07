@@ -1251,13 +1251,17 @@ class TestMemoryToolToolsetGate:
     """
 
     @staticmethod
-    def _run_memory_injection(enabled_toolsets, memory_manager):
+    def _run_memory_injection(
+        enabled_toolsets, memory_manager, disabled_toolsets=None
+    ):
         """Simulate the gated memory-tool injection block from agent_init.py."""
         tools = []
         valid_tool_names = set()
+        _disabled = set(disabled_toolsets or [])
 
         if memory_manager and tools is not None and (
-            enabled_toolsets is None or "memory" in enabled_toolsets
+            (enabled_toolsets is None or "memory" in enabled_toolsets)
+            and "memory" not in _disabled
         ):
             _existing = {
                 t.get("function", {}).get("name")
@@ -1305,6 +1309,24 @@ class TestMemoryToolToolsetGate:
         assert tools == []
         assert names == set()
 
+    def test_disabled_toolsets_blocks_injection_when_enabled_is_none(self):
+        """disabled_toolsets must suppress memory tools even with enabled_toolsets=None."""
+        mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(
+            None, mgr, disabled_toolsets=["memory"]
+        )
+        assert tools == []
+        assert names == set()
+
+    def test_disabled_toolsets_overrides_enabled_memory(self):
+        """disabled_toolsets must win even if enabled_toolsets includes memory."""
+        mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(
+            ["terminal", "memory"], mgr, disabled_toolsets=["memory"]
+        )
+        assert tools == []
+        assert names == set()
+
     def test_toolsets_without_memory_blocks_injection(self):
         """Toolset list that doesn't name 'memory' must suppress injection."""
         mgr = self._mgr_with_tools("fact_store")
@@ -1341,18 +1363,21 @@ class TestContextEngineToolsetGate:
     """
 
     @staticmethod
-    def _run_context_engine_injection(enabled_toolsets, compressor):
+    def _run_context_engine_injection(
+        enabled_toolsets, compressor, disabled_toolsets=None
+    ):
         """Simulate the gated context-engine injection block from agent_init.py."""
         tools = []
         valid_tool_names = set()
         engine_tool_names = set()
+        _disabled = set(disabled_toolsets or [])
 
         if (
             compressor is not None
             and tools is not None
             and (
-                enabled_toolsets is None
-                or "context_engine" in enabled_toolsets
+                (enabled_toolsets is None or "context_engine" in enabled_toolsets)
+                and "context_engine" not in _disabled
             )
         ):
             _existing = {
@@ -1402,6 +1427,26 @@ class TestContextEngineToolsetGate:
         """`platform_toolsets: telegram: []` must suppress context-engine tools."""
         c = self._compressor_with("lcm_grep")
         tools, names, engine_names = self._run_context_engine_injection([], c)
+        assert tools == []
+        assert engine_names == set()
+
+    def test_disabled_toolsets_blocks_injection_when_enabled_is_none(self):
+        """disabled_toolsets must suppress context-engine tools with no enabled filter."""
+        c = self._compressor_with("lcm_grep")
+        tools, names, engine_names = self._run_context_engine_injection(
+            None, c, disabled_toolsets=["context_engine"]
+        )
+        assert tools == []
+        assert engine_names == set()
+
+    def test_disabled_toolsets_overrides_enabled_context_engine(self):
+        """disabled_toolsets must win over enabled_toolsets for context-engine."""
+        c = self._compressor_with("lcm_grep")
+        tools, names, engine_names = self._run_context_engine_injection(
+            ["terminal", "context_engine"],
+            c,
+            disabled_toolsets=["context_engine"],
+        )
         assert tools == []
         assert engine_names == set()
 

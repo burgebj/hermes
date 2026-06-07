@@ -1170,16 +1170,19 @@ def init_agent(
     # 400 errors on providers that enforce unique names (e.g. Xiaomi
     # MiMo via Nous Portal).
     #
-    # Respect the platform's enabled_toolsets configuration (#5544):
+    # Respect toolset policy:
     #   enabled_toolsets is None        → no filter, inject (backward compat)
     #   "memory" in enabled_toolsets    → user opted in, inject
     #   otherwise (incl. [])            → user excluded memory, skip injection
+    #   "memory" in disabled_toolsets   → force skip (disabled wins)
     #
     # Without this gate, `platform_toolsets: telegram: []` still leaks memory
     # provider tools (fact_store, etc.) into the tool surface — a 10x latency
     # penalty on local models and a frequent trigger of tool-call loops.
+    _disabled_toolsets = set(agent.disabled_toolsets or [])
     if agent._memory_manager and agent.tools is not None and (
-        agent.enabled_toolsets is None or "memory" in agent.enabled_toolsets
+        (agent.enabled_toolsets is None or "memory" in agent.enabled_toolsets)
+        and "memory" not in _disabled_toolsets
     ):
         _existing_tool_names = {
             t.get("function", {}).get("name")
@@ -1503,9 +1506,9 @@ def init_agent(
     # against plugin paths that may register the same schemas via
     # ctx.register_tool(). Mirrors the memory tools dedup above.
     #
-    # Respect the platform's enabled_toolsets configuration (#5544):
+    # Respect toolset policy:
     # context engine tools follow the same gating pattern as memory
-    # provider tools — without the gate, `platform_toolsets: telegram: []`
+    # provider tools (including disabled_toolsets override) — without the gate, `platform_toolsets: telegram: []`
     # would still leak lcm_* tools into the tool surface and incur the
     # same local-model latency penalty.
     agent._context_engine_tool_names: set = set()
@@ -1514,8 +1517,8 @@ def init_agent(
         and agent.context_compressor
         and agent.tools is not None
         and (
-            agent.enabled_toolsets is None
-            or "context_engine" in agent.enabled_toolsets
+            (agent.enabled_toolsets is None or "context_engine" in agent.enabled_toolsets)
+            and "context_engine" not in _disabled_toolsets
         )
     ):
         _existing_tool_names = {
