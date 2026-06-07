@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+
 
 def _assert_windows() -> None:
     if sys.platform != "win32":
@@ -84,15 +84,15 @@ def preflight_check(
     except Exception as e:
         errors.append(f"Task name resolution failed: {e}")
 
-    # 6. Status directory writable
+    # 6. Restart base directory writable
     try:
-        from hermes_cli.gateway_restart_state import _get_run_dir
-        run_dir = _get_run_dir()
-        test_file = run_dir / ".preflight-test"
+        from hermes_cli.gateway_restart_state import _get_restart_base
+        base = _get_restart_base()
+        test_file = base / ".preflight-test"
         test_file.write_text("ok", encoding="utf-8")
         test_file.unlink(missing_ok=True)
     except (OSError, Exception) as e:
-        errors.append(f"Run directory not writable: {e}")
+        errors.append(f"Restart directory not writable: {e}")
 
     # 7. Logs directory writable
     try:
@@ -139,7 +139,6 @@ def schedule_restart_handoff(
         RestartLock,
         append_restart_log,
         cleanup_intent,
-        cleanup_status,
         create_intent,
         write_status,
     )
@@ -168,12 +167,12 @@ def schedule_restart_handoff(
             "detail": f"Preflight failed: {detail}",
         }
 
-    # P0-1: Generate ONE request_id for the entire transaction.
-    # Lock, intent, status, and lease all share this same ID.
+    # Generate ONE request_id for the entire transaction
     request_id = str(uuid.uuid4())
 
-    # P0-1: Acquire lock FIRST, before writing intent
+    # Acquire lock FIRST (P1-1: record worker_pid for claim timeout recovery)
     lock = RestartLock(profile)
+    # We don't know worker_pid yet — acquire without it, update after spawn
     if not lock.try_acquire(request_id):
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
@@ -185,7 +184,7 @@ def schedule_restart_handoff(
             "detail": "Another restart is already in progress",
         }
 
-    # Lock acquired — now safe to write intent (same request_id)
+    # Lock acquired — write intent to per-request directory
     intent = create_intent(
         request_id=request_id,
         profile=profile,
@@ -202,11 +201,10 @@ def schedule_restart_handoff(
 
     # Spawn detached worker
     try:
-        worker_pid = _spawn_worker(intent, profile)
+        worker_pid = _spawn_worker(intent, profile, request_id)
     except Exception as e:
         lock.release()
-        cleanup_intent(profile, request_id=request_id, nonce=intent.get("nonce", ""))
-        cleanup_status(profile, request_id=request_id)
+        cleanup_intent(profile, request_id)
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error=f"worker spawn: {e}",
@@ -217,16 +215,15 @@ def schedule_restart_handoff(
             "detail": f"Failed to spawn worker: {e}",
         }
 
-    # P0-3: Wait for worker to claim lease before releasing coordinator hold
+    # P1-1: Update lock with worker_pid and claim_deadline for recovery
+    lock.mark_phase("awaiting_claim")
+
+    # Wait for worker to claim lease
     claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
     if claimed:
-        # Worker successfully claimed — coordinator can release its reference.
-        # The worker now owns the lock (its owner_token differs from ours).
         lock.release()
     else:
-        # P0-3: Worker failed to claim within timeout.  Do NOT release the
-        # lock — the worker may still be running and will claim later.
-        # The lock's TTL will eventually expire if the worker never comes.
+        # Worker failed to claim — lock stays (P1-1 recovery will handle it)
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="scheduled",
@@ -242,16 +239,20 @@ def schedule_restart_handoff(
 
     # If external CLI with wait, poll for completion
     if wait:
-        completed = _wait_for_completion(profile, timeout_s, request_id=request_id)
+        completed, final_state = _wait_for_completion(
+            profile, timeout_s, request_id)
         result["completed"] = completed
-        final_status = _read_final_status(profile)
-        if final_status and final_status.get("request_id") == request_id:
+        final_status = _read_final_status(profile, request_id)
+        if final_status:
             result["new_pid"] = final_status.get("new_pid", 0)
             result["launcher"] = final_status.get("launcher", "")
             if final_status.get("state") == "failed":
                 result["detail"] = f"Restart failed: {final_status.get('error', 'unknown')}"
-            else:
+            elif final_status.get("state") == "completed":
                 result["detail"] = "Restart completed successfully"
+            else:
+                result["completed"] = False
+                result["detail"] = f"Restart timed out in state: {final_state}"
         else:
             result["detail"] = "Restart timed out waiting for completion"
 
@@ -263,21 +264,13 @@ def _wait_for_worker_claim(
     request_id: str,
     timeout_s: float = 10.0,
 ) -> bool:
-    """Poll the lock file until the worker claims the lease."""
-    from hermes_cli.gateway_restart_state import lock_path
-    lp = lock_path(profile)
+    """Poll the lease file until the worker claims it."""
+    from hermes_cli.gateway_restart_state import lease_path
+    lp = lease_path(profile, request_id)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        try:
-            data = json.loads(lp.read_text(encoding="utf-8"))
-            # P1-1: Verify request_id matches — stale claimed lock from
-            # an old transaction must not satisfy a new coordinator.
-            if (isinstance(data, dict)
-                    and data.get("request_id") == request_id
-                    and data.get("claimed_at")):
-                return True
-        except (OSError, json.JSONDecodeError):
-            pass
+        if lp.exists():
+            return True
         time.sleep(0.5)
     return False
 
@@ -286,61 +279,55 @@ def _wait_for_completion(
     profile: str,
     timeout_s: float,
     request_id: str = "",
-) -> bool:
+) -> tuple[bool, str]:
     """Poll status file until completion or timeout.
 
-    P1-1: Must verify status belongs to the current request_id.
-    A stale ``completed`` from an old transaction must not be misread
-    as success for the current one.
+    Returns (completed, last_seen_state).
+    P1-2: Only returns completed=True when state == "completed".
     """
     from hermes_cli.gateway_restart_state import read_status
 
     deadline = time.monotonic() + timeout_s
+    last_state = ""
     while time.monotonic() < deadline:
-        status = read_status(profile)
-        if status and status.get("request_id") == request_id:
-            if status.get("state") in ("completed", "failed"):
-                return status["state"] == "completed"
+        status = read_status(profile, request_id)
+        if status:
+            last_state = status.get("state", "")
+            if last_state == "completed":
+                return True, last_state
+            if last_state == "failed":
+                return False, last_state
         time.sleep(1.0)
-    return False
+    return False, last_state
 
 
-def _read_final_status(profile: str) -> Optional[dict[str, Any]]:
+def _read_final_status(profile: str, request_id: str) -> Optional[dict[str, Any]]:
     from hermes_cli.gateway_restart_state import read_status
-    return read_status(profile)
+    return read_status(profile, request_id)
 
 
 # ---------------------------------------------------------------------------
 # Worker spawning
 # ---------------------------------------------------------------------------
 
-def _spawn_worker(intent: dict[str, Any], profile: str) -> int:
+def _spawn_worker(intent: dict[str, Any], profile: str, request_id: str) -> int:
     """Spawn the restart worker as a fully detached process.
 
-    Returns the worker PID.
-
-    The worker does NOT inherit _HERMES_GATEWAY=1.
-    The intent is written to a temp file (not passed via CLI) to avoid
-    leaking the nonce in the process table.
+    Returns the worker PID.  The worker does NOT inherit _HERMES_GATEWAY=1.
+    Worker reads intent from the per-request directory (no CLI arg exposure).
     """
     import subprocess
-    import tempfile
     from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
     from hermes_cli.gateway_windows import _build_gateway_argv, _derive_venv_pythonw
 
     python_exe = sys.executable
     pythonw = _derive_venv_pythonw(python_exe) or python_exe
 
-    # Write intent to a temp file (nonce-safe: not visible in process table)
-    from hermes_cli.config import get_hermes_home
-    intent_dir = Path(get_hermes_home()) / "run"
-    intent_dir.mkdir(parents=True, exist_ok=True)
-    intent_file = intent_dir / f".worker-intent-{uuid.uuid4().hex}.json"
-    intent_file.write_text(json.dumps(intent, ensure_ascii=False), encoding="utf-8")
-
-    # Build worker command
+    # Worker reads intent from per-request directory via request_id
     worker_module = "hermes_cli.gateway_windows_restart_worker"
-    argv = [pythonw, "-m", worker_module, "--intent-file", str(intent_file)]
+    argv = [pythonw, "-m", worker_module,
+            "--profile", profile,
+            "--request-id", request_id]
 
     # Clean environment: remove _HERMES_GATEWAY
     env = os.environ.copy()

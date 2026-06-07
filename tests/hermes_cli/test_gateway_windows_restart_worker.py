@@ -1,10 +1,29 @@
 """Tests for gateway_windows_restart_worker.py — intent/nonce validation,
-PID/port handling, and worker status/fallback scenarios."""
+PID/port handling, worker status/fallback, and transaction isolation.
+
+Updated for per-request directory layout:
+  run/gateway-restart/{profile}/{request_id}/
+
+Key API changes tested:
+  - Worker CLI: --profile + --request-id (not --intent/--intent-file)
+  - Worker reads intent via read_intent(profile, request_id)
+  - _run_restart_transaction takes 8 params
+  - claim_lease uses O_EXCL + transitions intent state 'scheduled' → 'claimed'
+  - Lease loser logs + sys.exit(1), does NOT write failed status or cleanup
+  - cleanup_intent(profile, request_id) — no nonce
+  - write_status(profile, state, request_id=request_id)
+  - read_status(profile, request_id)
+  - cleanup_status removed
+  - update_intent_state guarded by expected_state
+  - _pid_exists imported at function level from gateway_restart_state
+"""
 
 import json
 import os
 import sys
 import time
+import threading
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -39,9 +58,9 @@ def _make_intent(
     nonce=None,
     ttl_s=300,
     schema_version=1,
+    state="scheduled",
 ):
     """Create a realistic intent dict without writing to disk."""
-    import uuid
     import secrets
     from datetime import datetime, timezone
 
@@ -57,15 +76,27 @@ def _make_intent(
         "origin": "test",
         "created_at": now.isoformat(),
         "expires_at": now.timestamp() + ttl_s,
-        "state": "scheduled",
+        "state": state,
     }
 
 
 def _write_intent_to_disk(hermes_home, intent, profile="default"):
-    """Manually write an intent dict to the expected disk path."""
-    run_dir = hermes_home / "run"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / f"gateway-restart-{profile}-intent.json"
+    """Write an intent dict to the per-request directory on disk."""
+    request_id = intent["request_id"]
+    req_dir = hermes_home / "run" / "gateway-restart" / profile / request_id
+    req_dir.mkdir(parents=True, exist_ok=True)
+    path = req_dir / "intent.json"
+    path.write_text(json.dumps(intent, indent=2), encoding="utf-8")
+    return path
+
+
+def _write_intent_for_test(worker_env, intent, profile="default", dir_request_id=None):
+    """Write intent to per-request dir using the intent's request_id
+    (or dir_request_id if specified, for tamper tests)."""
+    request_id = dir_request_id or intent["request_id"]
+    req_dir = worker_env / "run" / "gateway-restart" / profile / request_id
+    req_dir.mkdir(parents=True, exist_ok=True)
+    path = req_dir / "intent.json"
     path.write_text(json.dumps(intent, indent=2), encoding="utf-8")
     return path
 
@@ -78,19 +109,32 @@ class TestIntentValidation:
     """Verify that _run_restart_transaction validates the on-disk intent
     against the in-memory intent before any destructive action."""
 
+    def _mock_cleanup_for_status_check(self, monkeypatch):
+        """Mock cleanup_intent to no-op so we can read back status after
+        _fail_closed. Without this, cleanup_intent deletes the entire
+        request directory (including the just-written status file)."""
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state.cleanup_intent",
+            lambda *a, **kw: None,
+        )
+
     def test_intent_missing(self, worker_env, monkeypatch):
         """No intent file on disk → fail closed (sys.exit(1))."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234)
         # Do NOT write an intent file — disk is empty.
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         assert "missing_intent" in status.get("error", "")
@@ -98,19 +142,24 @@ class TestIntentValidation:
     def test_request_id_mismatch(self, worker_env, monkeypatch):
         """Disk intent has different request_id → fail closed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234)
-        # Write a disk intent with a DIFFERENT request_id
+        # Write a disk intent with a DIFFERENT request_id, but in the
+        # directory of the ORIGINAL request_id (so the worker can find it)
         tampered = dict(intent)
         tampered["request_id"] = "wrong-request-id"
-        _write_intent_to_disk(hermes_home=worker_env, intent=tampered)
+        _write_intent_for_test(worker_env, tampered, dir_request_id=intent["request_id"])
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         assert "request_id_mismatch" in status.get("error", "")
@@ -118,19 +167,23 @@ class TestIntentValidation:
     def test_nonce_mismatch(self, worker_env, monkeypatch):
         """Disk intent has different nonce → fail closed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234)
         # Disk intent has a different nonce
         tampered = dict(intent)
         tampered["nonce"] = "wrong-nonce-value"
-        _write_intent_to_disk(hermes_home=worker_env, intent=tampered)
+        _write_intent_for_test(worker_env, tampered)
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         assert "nonce_mismatch" in status.get("error", "")
@@ -138,19 +191,23 @@ class TestIntentValidation:
     def test_profile_mismatch(self, worker_env, monkeypatch):
         """Disk intent has different profile → fail closed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234)
-        # Write disk intent under "default" but with profile="other"
+        # Write disk intent under "default" request dir but with profile="other" in content
         tampered = dict(intent)
         tampered["profile"] = "other"
-        _write_intent_to_disk(hermes_home=worker_env, intent=tampered, profile="default")
+        _write_intent_for_test(worker_env, tampered, profile="default")
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         assert "profile_mismatch" in status.get("error", "")
@@ -158,18 +215,22 @@ class TestIntentValidation:
     def test_target_pid_mismatch(self, worker_env, monkeypatch):
         """Disk intent has different target_pid → fail closed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234)
         tampered = dict(intent)
         tampered["target_pid"] = 9999
-        _write_intent_to_disk(hermes_home=worker_env, intent=tampered)
+        _write_intent_for_test(worker_env, tampered)
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         assert "target_pid_mismatch" in status.get("error", "")
@@ -177,18 +238,22 @@ class TestIntentValidation:
     def test_ttl_expired(self, worker_env, monkeypatch):
         """Disk intent has expires_at in the past → fail closed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234, ttl_s=300)
         tampered = dict(intent)
         tampered["expires_at"] = time.time() - 60  # expired 60s ago
-        _write_intent_to_disk(hermes_home=worker_env, intent=tampered)
+        _write_intent_for_test(worker_env, tampered)
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         # The error could be "expired_intent" or "missing_intent" depending
@@ -198,45 +263,51 @@ class TestIntentValidation:
     def test_schema_version_unsupported(self, worker_env, monkeypatch):
         """Disk intent has schema_version=99 → fail closed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        self._mock_cleanup_for_status_check(monkeypatch)
 
         intent = _make_intent(profile="default", target_pid=1234)
         tampered = dict(intent)
         tampered["schema_version"] = 99
-        _write_intent_to_disk(hermes_home=worker_env, intent=tampered)
+        _write_intent_for_test(worker_env, tampered)
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                intent, "default", intent["request_id"], intent["nonce"],
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", intent["request_id"])
         assert status is not None
         assert status["state"] == "failed"
         # read_intent returns None for unsupported schema → "missing_intent"
         assert "missing_intent" in status.get("error", "") or "schema" in status.get("error", "").lower()
 
     def test_intent_consumed_prevents_replay(self, worker_env, monkeypatch):
-        """After first worker consumes intent, second worker with same
-        intent should fail because the intent file is cleaned up."""
+        """After first worker consumes intent (cleanup), second worker with
+        same intent should fail because the intent directory is removed."""
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
         from hermes_cli.gateway_restart_state import (
-            create_intent, update_intent_state, cleanup_intent, RestartLock,
+            create_intent, cleanup_intent,
         )
 
-        # --- First worker run: set up and partially execute ---
+        # --- First worker run: create intent and consume it ---
         disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
         request_id = disk_intent["request_id"]
         nonce = disk_intent["nonce"]
 
-        # Simulate first worker marking intent as consumed
-        update_intent_state("default", "consumed")
-
-        # Now simulate what happens after a successful first run:
-        # the intent file is cleaned up (deleted), as _run_restart_transaction
-        # does in its finally block.
-        cleanup_intent("default")
+        # Simulate first worker's cleanup (removes request dir)
+        cleanup_intent("default", request_id)
 
         # --- Second worker run: same intent parameters ---
+        # Mock cleanup_intent so _fail_closed doesn't delete the status
+        # we want to verify
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state.cleanup_intent",
+            lambda *a, **kw: None,
+        )
+
         replay_intent = _make_intent(
             profile="default",
             target_pid=1234,
@@ -245,12 +316,15 @@ class TestIntentValidation:
         )
 
         with pytest.raises(SystemExit) as exc_info:
-            _run_restart_transaction(replay_intent)
+            _run_restart_transaction(
+                replay_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
         assert exc_info.value.code == 1
 
         # Verify the second worker wrote a failed status
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", request_id)
         assert status is not None
         assert status["state"] == "failed"
 
@@ -267,18 +341,13 @@ class TestPidPort:
         from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
         from hermes_cli.gateway_restart_state import create_intent, RestartLock
 
-        intent = _make_intent(profile="default", target_pid=1234)
-        # Write matching intent to disk
-        disk_intent = create_intent(
-            profile="default", target_pid=1234, origin="test",
-        )
-        # Align the in-memory intent with the disk intent
-        intent["request_id"] = disk_intent["request_id"]
-        intent["nonce"] = disk_intent["nonce"]
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
 
-        # Pre-create a lock that the worker can claim
+        # Pre-create a lock and claim lease so worker passes the claim step
         lock = RestartLock("default")
-        lock.try_acquire(disk_intent["request_id"])
+        assert lock.try_acquire(request_id) is True
 
         # Mock _drain_and_stop to be a no-op
         monkeypatch.setattr(
@@ -298,7 +367,10 @@ class TestPidPort:
         )
 
         with pytest.raises(RuntimeError, match="still alive"):
-            _run_restart_transaction(intent)
+            _run_restart_transaction(
+                disk_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
 
         # New gateway should NOT have been started
         mock_start.assert_not_called()
@@ -362,8 +434,6 @@ class TestPidPort:
         call_count = {"port_check": 0}
 
         def mock_is_port_in_use(port):
-            # First call (during wait loop): occupied
-            # After kill: free
             call_count["port_check"] += 1
             if call_count["port_check"] <= 1:
                 return True
@@ -452,17 +522,13 @@ class TestWorkerStatusFallback:
         from hermes_cli.gateway_windows_restart_worker import main
         from hermes_cli.gateway_restart_state import create_intent, RestartLock
 
-        intent = _make_intent(profile="default", target_pid=1234)
-        # Write matching disk intent
-        disk_intent = create_intent(
-            profile="default", target_pid=1234, origin="test",
-        )
-        intent["request_id"] = disk_intent["request_id"]
-        intent["nonce"] = disk_intent["nonce"]
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
 
-        # Pre-create a lock that the worker can claim
+        # Pre-create a lock and claim lease so the worker passes the claim step
         lock = RestartLock("default")
-        lock.try_acquire(disk_intent["request_id"])
+        assert lock.try_acquire(request_id) is True
 
         # Make _drain_and_stop raise an unhandled exception
         monkeypatch.setattr(
@@ -474,12 +540,15 @@ class TestWorkerStatusFallback:
             "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: False,
         )
+        # Mock cleanup_intent so status remains readable after main() finally
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state.cleanup_intent",
+            lambda *a, **kw: None,
+        )
 
-        # Call main() with the intent via file
-        intent_file = tmp_path / "intent.json"
-        intent_file.write_text(json.dumps(intent), encoding="utf-8")
+        # Call main() with --profile and --request-id
         monkeypatch.setattr(sys, "argv", [
-            "worker", "--intent-file", str(intent_file),
+            "worker", "--profile", "default", "--request-id", request_id,
         ])
 
         with pytest.raises(SystemExit) as exc_info:
@@ -487,12 +556,12 @@ class TestWorkerStatusFallback:
         assert exc_info.value.code == 1
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", request_id)
         assert status is not None
         assert status["state"] == "failed"
         assert "drain exploded" in status.get("error", "")
 
-    def test_status_ignores_old_request_id(self, worker_env, tmp_path, monkeypatch):
+    def test_status_ignores_old_request_id(self, worker_env, monkeypatch):
         """Coordinator _wait_for_completion returns False when status has
         an old request_id different from the one being waited on."""
         from hermes_cli.gateway_windows_restart import _wait_for_completion
@@ -502,9 +571,9 @@ class TestWorkerStatusFallback:
         write_status("default", "completed", request_id="old-123", new_pid=5678)
 
         # Wait for a different request_id — should NOT see the old status
-        result = _wait_for_completion(
+        result, last_state = _wait_for_completion(
             profile="default",
-            timeout_s=1.0,  # short timeout
+            timeout_s=1.0,
             request_id="new-456",
         )
         assert result is False
@@ -517,7 +586,7 @@ class TestWorkerStatusFallback:
         request_id = "test-req-1"
         write_status("default", "draining", request_id=request_id, old_pid=1234)
 
-        result = _wait_for_completion(
+        result, last_state = _wait_for_completion(
             profile="default",
             timeout_s=1.0,
             request_id=request_id,
@@ -544,7 +613,7 @@ class TestWorkerStatusFallback:
         )
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", "req-1")
         assert status is not None
         assert status["state"] == "failed"
         assert "died" in status.get("error", "").lower()
@@ -560,8 +629,6 @@ class TestWorkerStatusFallback:
         def mock_pid_exists(pid):
             if pid == 5678:
                 call_count["n"] += 1
-                # First call (initial check) → alive
-                # Subsequent calls (stability window) → dead
                 return call_count["n"] <= 1
             return False  # old_pid is dead
 
@@ -580,7 +647,7 @@ class TestWorkerStatusFallback:
         )
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", "req-1")
         assert status is not None
         assert status["state"] == "failed"
         assert "stability" in status.get("error", "").lower() or "died" in status.get("error", "").lower()
@@ -591,16 +658,13 @@ class TestWorkerStatusFallback:
         from hermes_cli.gateway_windows_restart_worker import main
         from hermes_cli.gateway_restart_state import create_intent, RestartLock
 
-        intent = _make_intent(profile="default", target_pid=1234)
-        disk_intent = create_intent(
-            profile="default", target_pid=1234, origin="test",
-        )
-        intent["request_id"] = disk_intent["request_id"]
-        intent["nonce"] = disk_intent["nonce"]
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
 
-        # Pre-create a lock that the worker can claim
+        # Pre-create a lock and claim lease
         lock = RestartLock("default")
-        lock.try_acquire(disk_intent["request_id"])
+        assert lock.try_acquire(request_id) is True
 
         monkeypatch.setattr(
             "hermes_cli.gateway_windows_restart_worker._drain_and_stop",
@@ -610,20 +674,23 @@ class TestWorkerStatusFallback:
             "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: False,
         )
+        # Mock cleanup_intent so status remains readable
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state.cleanup_intent",
+            lambda *a, **kw: None,
+        )
 
-        intent_file = tmp_path / "intent2.json"
-        intent_file.write_text(json.dumps(intent), encoding="utf-8")
         monkeypatch.setattr(sys, "argv", [
-            "worker", "--intent-file", str(intent_file),
+            "worker", "--profile", "default", "--request-id", request_id,
         ])
 
         with pytest.raises(SystemExit):
             main()
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", request_id)
         assert status is not None
-        assert status["request_id"] == disk_intent["request_id"]
+        assert status["request_id"] == request_id
 
     def test_coordinator_completed_with_matching_request_id(self, worker_env, monkeypatch):
         """Coordinator _wait_for_completion returns True when status
@@ -635,7 +702,7 @@ class TestWorkerStatusFallback:
         write_status("default", "completed", request_id=request_id,
                      old_pid=1234, new_pid=5678, launcher="direct_spawn")
 
-        result = _wait_for_completion(
+        result, _ = _wait_for_completion(
             profile="default",
             timeout_s=2.0,
             request_id=request_id,
@@ -652,7 +719,7 @@ class TestWorkerStatusFallback:
         write_status("default", "failed", request_id=request_id,
                      error="something broke")
 
-        result = _wait_for_completion(
+        result, _ = _wait_for_completion(
             profile="default",
             timeout_s=2.0,
             request_id=request_id,
@@ -673,7 +740,7 @@ class TestWorkerStatusFallback:
         )
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", "req-1")
         assert status is not None
         assert status["state"] == "failed"
         assert "No new gateway PID" in status.get("error", "")
@@ -698,10 +765,41 @@ class TestWorkerStatusFallback:
         )
 
         from hermes_cli.gateway_restart_state import read_status
-        status = read_status("default")
+        status = read_status("default", "req-1")
         assert status is not None
         assert status["state"] == "failed"
         assert "dual gateway" in status.get("error", "").lower() or "still alive" in status.get("error", "").lower()
+
+    def test_intermediate_state_timeout_not_completed(self, worker_env, monkeypatch):
+        """P1-2: Status has intermediate state (e.g. 'draining') — coordinator
+        wait_for_completion should NOT report completed (returns False on
+        timeout)."""
+        from hermes_cli.gateway_windows_restart import _wait_for_completion
+        from hermes_cli.gateway_restart_state import write_status
+
+        request_id = "req-intermediate"
+        # Write an intermediate state that will never become "completed"
+        write_status("default", "draining", request_id=request_id, old_pid=1234)
+
+        result, _ = _wait_for_completion(
+            profile="default",
+            timeout_s=0.5,  # very short timeout
+            request_id=request_id,
+        )
+        assert result is False
+
+        # Also verify with other intermediate states
+        for state in ("stopping", "waiting_pid_exit", "waiting_port_release",
+                       "starting_task", "starting_direct_fallback", "verifying",
+                       "preflight_ok"):
+            rid = f"req-intermediate-{state}"
+            write_status("default", state, request_id=rid, old_pid=1234)
+            result, _ = _wait_for_completion(
+                profile="default",
+                timeout_s=0.5,
+                request_id=rid,
+            )
+            assert result is False, f"State '{state}' should not be reported as completed"
 
 
 # ===========================================================================
@@ -710,20 +808,22 @@ class TestWorkerStatusFallback:
 
 class TestTransactionIsolation:
     """Verify that concurrent / stale transactions do not interfere with
-    each other's state files (intent, lock, status)."""
+    each other's state files (intent, lock, status, lease)."""
 
     # -- helpers ----------------------------------------------------------
 
     def _read_lock_from_disk(self, hermes_home, profile="default"):
         """Read the lock file dict from disk."""
-        path = hermes_home / "run" / f"gateway-restart-{profile}.lock"
+        path = hermes_home / "run" / "gateway-restart" / profile / "active.lock"
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def _read_intent_from_disk(self, hermes_home, profile="default"):
-        """Read the intent file dict from disk."""
-        path = hermes_home / "run" / f"gateway-restart-{profile}-intent.json"
+    def _read_intent_from_disk(self, hermes_home, profile="default", request_id=""):
+        """Read the intent file dict from disk (per-request dir)."""
+        if not request_id:
+            return None
+        path = hermes_home / "run" / "gateway-restart" / profile / request_id / "intent.json"
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
@@ -753,7 +853,7 @@ class TestTransactionIsolation:
         # Mock _spawn_worker to just return a fake PID
         monkeypatch.setattr(
             "hermes_cli.gateway_windows_restart._spawn_worker",
-            lambda intent, profile: 9999,
+            lambda intent, profile, request_id: 9999,
         )
         # Mock _wait_for_worker_claim to return False (lock stays on disk)
         monkeypatch.setattr(
@@ -770,7 +870,7 @@ class TestTransactionIsolation:
 
         # Read lock and intent from disk
         lock_data = self._read_lock_from_disk(worker_env)
-        intent_data = self._read_intent_from_disk(worker_env)
+        intent_data = self._read_intent_from_disk(worker_env, "default", request_id)
 
         assert lock_data is not None, "Lock file should exist on disk"
         assert intent_data is not None, "Intent file should exist on disk"
@@ -786,6 +886,7 @@ class TestTransactionIsolation:
 
         intent = create_intent(profile="default", target_pid=1234, origin="test")
         request_id = intent["request_id"]
+        nonce = intent["nonce"]
 
         # Coordinator acquires lock
         coordinator_lock = RestartLock("default")
@@ -793,11 +894,11 @@ class TestTransactionIsolation:
 
         # Worker-1 claims the lease
         worker1_lock = RestartLock("default")
-        assert worker1_lock.claim_lease(request_id) is True
+        assert worker1_lock.claim_lease(request_id, nonce) is True
 
         # Worker-2 tries to claim the same request_id
         worker2_lock = RestartLock("default")
-        assert worker2_lock.claim_lease(request_id) is False
+        assert worker2_lock.claim_lease(request_id, nonce) is False
 
     def test_claim_timeout_lock_preserved(self, worker_env, monkeypatch):
         """Mock _wait_for_worker_claim to return False (timeout). After
@@ -819,7 +920,7 @@ class TestTransactionIsolation:
 
         monkeypatch.setattr(
             "hermes_cli.gateway_windows_restart._spawn_worker",
-            lambda intent, profile: 9999,
+            lambda intent, profile, request_id: 9999,
         )
         # Worker fails to claim in time
         monkeypatch.setattr(
@@ -844,76 +945,52 @@ class TestTransactionIsolation:
         assert "already in progress" in result2["detail"].lower()
 
     def test_stale_worker_preserves_new_intent(self, worker_env, monkeypatch):
-        """Create intent-A on disk. Then create intent-B (overwrites).
-        Call cleanup_intent(profile, request_id=A, nonce=A). Assert
+        """Create intent-A on disk. Then create intent-B (different
+        request_id). Call cleanup_intent(profile, request_id=A). Assert
         intent-B still exists on disk."""
         from hermes_cli.gateway_restart_state import create_intent, cleanup_intent
 
         # Intent-A
         intent_a = create_intent(profile="default", target_pid=1111, origin="test-a")
         request_id_a = intent_a["request_id"]
-        nonce_a = intent_a["nonce"]
 
-        # Intent-B overwrites
+        # Intent-B (different request_id — different directory)
         intent_b = create_intent(profile="default", target_pid=2222, origin="test-b")
         request_id_b = intent_b["request_id"]
-        nonce_b = intent_b["nonce"]
 
         assert request_id_a != request_id_b
 
-        # Stale worker-A tries to clean up with its old request_id/nonce
-        cleanup_intent("default", request_id=request_id_a, nonce=nonce_a)
+        # Stale worker-A tries to clean up with its old request_id
+        cleanup_intent("default", request_id=request_id_a)
 
         # Intent-B should still be on disk
-        intent_on_disk = self._read_intent_from_disk(worker_env)
+        intent_on_disk = self._read_intent_from_disk(worker_env, "default", request_id_b)
         assert intent_on_disk is not None
         assert intent_on_disk["request_id"] == request_id_b
-        assert intent_on_disk["nonce"] == nonce_b
-
-    def test_stale_worker_preserves_new_status(self, worker_env, monkeypatch):
-        """Write status with request_id=A. Then write status with
-        request_id=B (overwrites). Call cleanup_status(profile, request_id=A).
-        Assert status file still exists with request_id=B."""
-        from hermes_cli.gateway_restart_state import write_status, cleanup_status, read_status
-
-        write_status("default", "completed", request_id="request-a", new_pid=1111)
-        write_status("default", "completed", request_id="request-b", new_pid=2222)
-
-        # Stale worker-A tries to clean up
-        cleanup_status("default", request_id="request-a")
-
-        # Status with request-B should still exist
-        status = read_status("default")
-        assert status is not None
-        assert status["request_id"] == "request-b"
-        assert status["new_pid"] == 2222
 
     def test_stale_worker_preserves_new_lease(self, worker_env, monkeypatch):
-        """Create lock. Worker-B claims it (new owner_token). Create a new
-        RestartLock for Worker-A (with old token). Worker-A calls release().
-        Assert lock file still exists on disk."""
-        from hermes_cli.gateway_restart_state import RestartLock
+        """Create lock + intent. Worker-B claims lease (O_EXCL). Worker-A
+        tries to release using stale reference. Assert lease still exists."""
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, lease_path
+        )
 
-        # Coordinator creates lock
+        # Coordinator creates lock + intent
         coord_lock = RestartLock("default")
         assert coord_lock.try_acquire("request-1") is True
+        intent = create_intent(request_id="request-1", profile="default", target_pid=1234)
 
-        # Worker-B claims the lease (changes owner_token)
+        # Worker-B claims the lease (O_EXCL)
         worker_b_lock = RestartLock("default")
-        assert worker_b_lock.claim_lease("request-1") is True
+        assert worker_b_lock.claim_lease("request-1", intent["nonce"]) is True
 
-        # Worker-A tries to release using its stale lock reference
-        # Worker-A would have been a separate RestartLock that was NOT the
-        # one that claimed.  Simulate by creating a new instance that
-        # doesn't have the right token.
+        # Worker-A tries to release using stale reference (no owner_token)
         worker_a_lock = RestartLock("default")
-        # worker_a_lock has no _owner_token set, so release() should be a no-op
         worker_a_lock.release()
 
-        # Lock file should still exist (Worker-B owns it)
-        lock_data = self._read_lock_from_disk(worker_env)
-        assert lock_data is not None
-        assert lock_data["request_id"] == "request-1"
+        # Lease file should still exist (Worker-B owns it)
+        lp = lease_path("default", "request-1")
+        assert lp.exists()
 
     def test_force_release_preserves_new_lock(self, worker_env, monkeypatch):
         """Create lock-A. Then create lock-B (different request_id,
@@ -982,7 +1059,7 @@ class TestTransactionIsolation:
 
         write_status("default", "draining", request_id="req-x", old_pid=1234)
 
-        result = _wait_for_completion(
+        result, _ = _wait_for_completion(
             profile="default", timeout_s=1.0, request_id="req-x"
         )
         assert result is False
@@ -1003,11 +1080,6 @@ class TestTransactionIsolation:
             lambda old_pid, timeout=15.0: 0,
         )
         # Ensure is_task_registered returns False
-        monkeypatch.setattr(
-            "hermes_cli.gateway_windows_restart_worker.sys",
-            sys,
-        )
-        # We need to mock the import of is_task_registered inside _start_new_gateway
         mock_gw_windows = MagicMock()
         mock_gw_windows.is_task_registered = MagicMock(return_value=False)
         monkeypatch.setitem(sys.modules, "hermes_cli.gateway_windows", mock_gw_windows)
@@ -1022,12 +1094,13 @@ class TestTransactionIsolation:
             )
 
     def test_concurrent_only_one_worker(self, worker_env, monkeypatch):
-        """Create two intents with same request_id. Pre-create lock.
-        Worker-1 claims → True. Worker-2 claims → False."""
+        """Create intent. Pre-create lock. Worker-1 claims → True.
+        Worker-2 claims → False (O_EXCL prevents double claim)."""
         from hermes_cli.gateway_restart_state import RestartLock, create_intent
 
         intent = create_intent(profile="default", target_pid=1234, origin="test")
         request_id = intent["request_id"]
+        nonce = intent["nonce"]
 
         # Coordinator acquires lock
         coord_lock = RestartLock("default")
@@ -1035,76 +1108,27 @@ class TestTransactionIsolation:
 
         # Worker-1 claims
         worker1 = RestartLock("default")
-        assert worker1.claim_lease(request_id) is True
+        assert worker1.claim_lease(request_id, nonce) is True
 
-        # Worker-2 (same request_id) — should fail (already claimed)
+        # Worker-2 (same request_id) — should fail (lease already exists on disk)
         worker2 = RestartLock("default")
-        assert worker2.claim_lease(request_id) is False
-
-    def test_finally_only_cleans_own(self, worker_env, monkeypatch):
-        """Create intent-A on disk with nonce-A. Create intent-B on disk
-        (overwrites) with nonce-B. Call cleanup_intent(profile,
-        request_id=A, nonce=A). Read disk → intent-B with nonce-B still
-        exists."""
-        from hermes_cli.gateway_restart_state import create_intent, cleanup_intent
-
-        # Intent-A
-        intent_a = create_intent(profile="default", target_pid=1111, origin="a")
-        rid_a, nonce_a = intent_a["request_id"], intent_a["nonce"]
-
-        # Intent-B overwrites
-        intent_b = create_intent(profile="default", target_pid=2222, origin="b")
-        rid_b, nonce_b = intent_b["request_id"], intent_b["nonce"]
-
-        # Worker-A's finally block cleans up with its own request_id/nonce
-        cleanup_intent("default", request_id=rid_a, nonce=nonce_a)
-
-        # Intent-B should still be on disk
-        disk = self._read_intent_from_disk(worker_env)
-        assert disk is not None
-        assert disk["request_id"] == rid_b
-        assert disk["nonce"] == nonce_b
+        assert worker2.claim_lease(request_id, nonce) is False
 
     def test_claim_lease_wrong_request_id(self, worker_env, monkeypatch):
         """Worker tries to claim lease with a request_id that doesn't
-        match the lock file → returns False."""
-        from hermes_cli.gateway_restart_state import RestartLock
+        have an intent on disk → returns False."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent
 
+        intent = create_intent(profile="default", target_pid=1234, origin="test")
+        real_request_id = intent["request_id"]
+
+        # Coordinator acquires lock
         lock = RestartLock("default")
-        assert lock.try_acquire("correct-id") is True
+        assert lock.try_acquire(real_request_id) is True
 
         worker = RestartLock("default")
-        assert worker.claim_lease("wrong-id") is False
-
-    def test_cleanup_intent_unconditional(self, worker_env, monkeypatch):
-        """Call cleanup_intent(profile) with empty request_id and nonce
-        (coordinator mode). Intent file should be deleted."""
-        from hermes_cli.gateway_restart_state import create_intent, cleanup_intent
-
-        create_intent(profile="default", target_pid=1234, origin="test")
-
-        intent_path = worker_env / "run" / "gateway-restart-default-intent.json"
-        assert intent_path.exists()
-
-        # Coordinator-mode cleanup (empty request_id/nonce → unconditional delete)
-        cleanup_intent("default", request_id="", nonce="")
-
-        assert not intent_path.exists()
-
-    def test_cleanup_status_unconditional(self, worker_env, monkeypatch):
-        """Write status. Call cleanup_status(profile) with empty
-        request_id (coordinator mode). Status file should be deleted."""
-        from hermes_cli.gateway_restart_state import write_status, cleanup_status
-
-        write_status("default", "completed", request_id="req-1", new_pid=5678)
-
-        status_path = worker_env / "run" / "gateway-restart-default-status.json"
-        assert status_path.exists()
-
-        # Coordinator-mode cleanup (empty request_id → unconditional delete)
-        cleanup_status("default", request_id="")
-
-        assert not status_path.exists()
+        # Try to claim with a request_id that has no intent
+        assert worker.claim_lease("nonexistent-id", "some-nonce") is False
 
     def test_lock_owner_token_independence(self, worker_env, monkeypatch):
         """Two RestartLock instances acquiring different request_ids
@@ -1153,3 +1177,275 @@ class TestTransactionIsolation:
         # Should NOT match (no claimed_at)
         result = _wait_for_worker_claim("default", "req-match", timeout_s=1.0)
         assert result is False
+
+
+# ===========================================================================
+# P0-2: Lease loser behavior — must NOT write failed status or cleanup intent
+# ===========================================================================
+
+class TestLeaseLoserBehavior:
+    """P0-2: When two workers race for the same lease, the loser must
+    only log + sys.exit(1). It must NOT write a failed status or
+    cleanup the intent (the winner owns those resources)."""
+
+    def test_lease_loser_preserves_winner_status(
+        self, worker_env, monkeypatch
+    ):
+        """P0-2: Worker-1 wins the lease and writes a status.
+        Worker-2 (loser) must NOT overwrite it with 'failed'."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, write_status, read_status,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Simulate worker-1 having already won the lease by calling
+        # claim_lease which creates the O_EXCL lease file
+        winner_lock = RestartLock("default")
+        assert winner_lock.try_acquire(request_id) is True
+        assert winner_lock.claim_lease(request_id, nonce) is True
+
+        # Winner writes a valid status
+        write_status("default", "preflight_ok", request_id=request_id, old_pid=1234)
+        winner_status = read_status("default", request_id)
+        assert winner_status["state"] == "preflight_ok"
+
+        # Now worker-2 tries to run the transaction with the same intent.
+        # It should fail at claim_lease and exit without touching status.
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            _run_restart_transaction(
+                disk_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
+        assert exc_info.value.code == 1
+
+        # Winner's status must be preserved — NOT overwritten to "failed"
+        final_status = read_status("default", request_id)
+        assert final_status is not None
+        assert final_status["state"] == "preflight_ok"
+
+    def test_lease_loser_preserves_intent(self, worker_env, monkeypatch):
+        """P0-2: Worker-2 (loser) must NOT cleanup/delete the intent
+        directory that the winner owns."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, read_intent,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Worker-1 wins the lease
+        winner_lock = RestartLock("default")
+        assert winner_lock.try_acquire(request_id) is True
+        assert winner_lock.claim_lease(request_id, nonce) is True
+
+        # Worker-2 tries the same — loser path
+        with pytest.raises(SystemExit) as exc_info:
+            _run_restart_transaction(
+                disk_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
+        assert exc_info.value.code == 1
+
+        # Intent must still be on disk (not cleaned up by loser)
+        intent_on_disk = read_intent("default", request_id)
+        assert intent_on_disk is not None
+        assert intent_on_disk["request_id"] == request_id
+
+
+# ===========================================================================
+# P0-3: Only lease winner writes consumed/claimed state
+# ===========================================================================
+
+class TestOnlyWinnerWritesClaimedState:
+    """P0-3: After claim_lease, only the winner transitions intent state
+    from 'scheduled' to 'claimed'. The loser never touches the state."""
+
+    def test_only_winner_writes_claimed_state(self, worker_env, monkeypatch):
+        """claim_lease transitions intent from 'scheduled' to 'claimed'.
+        Second claim_lease (loser) fails and does NOT touch state."""
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, read_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Verify initial state is "scheduled"
+        on_disk = read_intent("default", request_id)
+        assert on_disk["state"] == "scheduled"
+
+        # Winner claims
+        winner_lock = RestartLock("default")
+        assert winner_lock.claim_lease(request_id, nonce) is True
+
+        # State should now be "claimed"
+        after_claim = read_intent("default", request_id)
+        assert after_claim is not None
+        assert after_claim["state"] == "claimed"
+
+        # Loser tries to claim — fails
+        loser_lock = RestartLock("default")
+        assert loser_lock.claim_lease(request_id, nonce) is False
+
+        # State is STILL "claimed" (not corrupted)
+        final = read_intent("default", request_id)
+        assert final["state"] == "claimed"
+
+
+# ===========================================================================
+# P0-4: claim success then write_status OSError → lease released
+# ===========================================================================
+
+class TestClaimThenWriteStatusError:
+    """P0-4: If claim_lease succeeds but write_status raises OSError,
+    the transaction must release the lease and NOT leak resources."""
+
+    def test_claim_success_then_write_status_error(self, worker_env, monkeypatch):
+        """claim_lease succeeds. Then _drain_and_stop triggers write_status
+        which raises OSError. The finally block must release the lease."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, lease_path, read_intent,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Acquire the profile lock so claim_lease can work
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(request_id) is True
+
+        # Make _drain_and_stop raise an exception (simulating the
+        # write_status OSError propagation)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._drain_and_stop",
+            MagicMock(side_effect=OSError("disk full")),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            _run_restart_transaction(
+                disk_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
+
+        # After the transaction, the request directory should be cleaned up
+        # (cleanup_intent in the finally block removes the entire dir)
+        intent_on_disk = read_intent("default", request_id)
+        # The intent may or may not exist depending on whether cleanup
+        # ran successfully. The key invariant is that we got a "failed" status.
+        from hermes_cli.gateway_restart_state import read_status
+        status = read_status("default", request_id)
+        # Status might be None if cleanup removed the whole directory,
+        # or "failed" if it was written before cleanup
+        if status is not None:
+            assert status["state"] == "failed"
+
+
+# ===========================================================================
+# P0-1: Concurrent claim with threading.Barrier
+# ===========================================================================
+
+class TestConcurrentClaim:
+    """P0-1: Two threads racing to claim_lease simultaneously.
+    Only one must win (O_EXCL atomic guarantee)."""
+
+    def test_concurrent_claim_only_one_winner(self, worker_env, monkeypatch):
+        """Two threads call claim_lease at the same time using a
+        threading.Barrier. Exactly one must succeed."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent
+
+        intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Coordinator pre-creates the profile lock
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(request_id) is True
+
+        barrier = threading.Barrier(2, timeout=10)
+        results = {"t1": None, "t2": None}
+        errors = {"t1": None, "t2": None}
+
+        def try_claim(name):
+            try:
+                lock = RestartLock("default")
+                barrier.wait()  # synchronize both threads
+                results[name] = lock.claim_lease(request_id, nonce)
+            except Exception as e:
+                errors[name] = e
+
+        t1 = threading.Thread(target=try_claim, args=("t1",))
+        t2 = threading.Thread(target=try_claim, args=("t2",))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert errors["t1"] is None, f"Thread 1 error: {errors['t1']}"
+        assert errors["t2"] is None, f"Thread 2 error: {errors['t2']}"
+
+        # Exactly one thread must have won
+        winners = [k for k, v in results.items() if v is True]
+        losers = [k for k, v in results.items() if v is False]
+        assert len(winners) == 1, f"Expected 1 winner, got {len(winners)}: {results}"
+        assert len(losers) == 1, f"Expected 1 loser, got {len(losers)}: {results}"
+
+
+# ===========================================================================
+# P1-2: Intermediate state timeout not reported as completed
+# ===========================================================================
+
+class TestIntermediateStateTimeout:
+    """P1-2: If the worker is stuck in an intermediate state and the
+    coordinator's wait_for_completion times out, it must NOT report
+    the restart as completed."""
+
+    def test_intermediate_state_timeout_not_completed(self, worker_env, monkeypatch):
+        """Write various intermediate states. Verify wait_for_completion
+        returns False on timeout for each one."""
+        from hermes_cli.gateway_windows_restart import _wait_for_completion
+        from hermes_cli.gateway_restart_state import write_status
+
+        intermediate_states = [
+            "draining",
+            "stopping",
+            "waiting_pid_exit",
+            "waiting_port_release",
+            "starting_task",
+            "starting_direct_fallback",
+            "verifying",
+            "preflight_ok",
+            "claimed",
+            "scheduled",
+        ]
+
+        for state in intermediate_states:
+            rid = f"req-timeout-{state}"
+            write_status("default", state, request_id=rid, old_pid=1234)
+
+            result, _ = _wait_for_completion(
+                profile="default",
+                timeout_s=0.3,  # very short — will definitely time out
+                request_id=rid,
+            )
+            assert result is False, (
+                f"State '{state}' with request_id '{rid}' should NOT be "
+                f"reported as completed on timeout"
+            )

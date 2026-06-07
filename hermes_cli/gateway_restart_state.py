@@ -1,12 +1,14 @@
 """Gateway restart state management — intent, locks, status, and JSONL logging.
 
 Provides the durable state layer for the Windows transactional restart
-coordinator.  All paths are profile-scoped under ``{HERMES_HOME}/run/``.
+coordinator.  Each restart transaction gets its own request-scoped directory
+under ``{HERMES_HOME}/run/gateway-restart/{profile}/{request_id}/``.
 
 Design invariants:
-- Intent files use atomic write (tmpfile + rename).
-- Profile locks use OS-level file locking with TTL.
-- Status files are JSON, overwritten on each state transition.
+- Profile-level ``active.lock`` prevents concurrent coordinators.
+- Per-request directories eliminate TOCTOU on intent/status cleanup.
+- Lease files use ``O_EXCL`` for atomic one-time-only worker claim.
+- Intent state transitions require request_id + nonce verification.
 - JSONL log is append-only, one record per state change.
 """
 
@@ -29,15 +31,37 @@ _LOCK_TTL_S = 120     # 2 minutes
 
 
 # ---------------------------------------------------------------------------
-# Paths
+# Directory layout
+# ---------------------------------------------------------------------------
+# run/gateway-restart/
+#   {profile}/
+#     active.lock                    ← profile-level lock (prevents concurrent coordinators)
+#     {request_id}/
+#       intent.json                  ← restart intent (signed with nonce)
+#       status.json                  ← current state
+#       lease.lock                   ← O_EXCL worker lease (atomic claim)
 # ---------------------------------------------------------------------------
 
-def _get_run_dir() -> Path:
-    """Return ``{HERMES_HOME}/run/``, creating it if needed."""
+def _get_restart_base() -> Path:
+    """Return ``{HERMES_HOME}/run/gateway-restart/``, creating if needed."""
     from hermes_cli.config import get_hermes_home
-    run_dir = Path(get_hermes_home()) / "run"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    base = Path(get_hermes_home()) / "run" / "gateway-restart"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _get_profile_dir(profile: str = "default") -> Path:
+    """Return ``{HERMES_HOME}/run/gateway-restart/{profile}/``."""
+    d = _get_restart_base() / profile
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _get_request_dir(profile: str, request_id: str) -> Path:
+    """Return ``{HERMES_HOME}/run/gateway-restart/{profile}/{request_id}/``."""
+    d = _get_profile_dir(profile) / request_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _get_logs_dir() -> Path:
@@ -47,16 +71,33 @@ def _get_logs_dir() -> Path:
     return logs_dir
 
 
-def intent_path(profile: str = "default") -> Path:
-    return _get_run_dir() / f"gateway-restart-{profile}-intent.json"
+def intent_path(profile: str = "default", request_id: str = "") -> Path:
+    """Path to intent file.  If request_id given, uses per-request dir."""
+    if request_id:
+        return _get_request_dir(profile, request_id) / "intent.json"
+    return _get_profile_dir(profile) / "active-intent.json"
 
 
 def lock_path(profile: str = "default") -> Path:
-    return _get_run_dir() / f"gateway-restart-{profile}.lock"
+    """Path to profile-level active lock."""
+    return _get_profile_dir(profile) / "active.lock"
 
 
-def status_path(profile: str = "default") -> Path:
-    return _get_run_dir() / f"gateway-restart-{profile}-status.json"
+def lease_path(profile: str, request_id: str) -> Path:
+    """Path to request-scoped lease file (O_EXCL atomic claim)."""
+    return _get_request_dir(profile, request_id) / "lease.lock"
+
+
+def status_path(profile: str = "default", request_id: str = "") -> Path:
+    """Path to status file.  If request_id given, uses per-request dir."""
+    if request_id:
+        return _get_request_dir(profile, request_id) / "status.json"
+    return _get_profile_dir(profile) / "active-status.json"
+
+
+def request_dir_path(profile: str, request_id: str) -> Path:
+    """Public accessor for the request directory."""
+    return _get_request_dir(profile, request_id)
 
 
 def jsonl_log_path() -> Path:
@@ -79,15 +120,14 @@ def create_intent(
 ) -> dict[str, Any]:
     """Create and atomically write a restart intent.  Returns the intent dict.
 
-    If *request_id* is provided, it is used as-is (the coordinator generates
-    one UUID and shares it between lock and intent).  Otherwise a new UUID
-    is generated internally.
+    Intent is written to the per-request directory.
     """
     from hermes_cli.config import get_hermes_home
+    rid = request_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     intent = {
         "schema_version": _SCHEMA_VERSION,
-        "request_id": request_id or str(uuid.uuid4()),
+        "request_id": rid,
         "nonce": secrets.token_urlsafe(32),
         "profile": profile,
         "hermes_home": hermes_home or str(Path(get_hermes_home()).resolve()),
@@ -98,13 +138,13 @@ def create_intent(
         "expires_at": now.timestamp() + ttl_s,
         "state": "scheduled",
     }
-    _atomic_write_json(intent_path(profile), intent)
+    _atomic_write_json(intent_path(profile, rid), intent)
     return intent
 
 
-def read_intent(profile: str = "default") -> Optional[dict[str, Any]]:
+def read_intent(profile: str = "default", request_id: str = "") -> Optional[dict[str, Any]]:
     """Read and validate the intent file.  Returns None if missing/expired/malformed."""
-    path = intent_path(profile)
+    path = intent_path(profile, request_id)
     if not path.exists():
         return None
     try:
@@ -116,19 +156,20 @@ def read_intent(profile: str = "default") -> Optional[dict[str, Any]]:
         return None
     if not isinstance(data, dict):
         return None
-    # Schema check
     if data.get("schema_version") != _SCHEMA_VERSION:
         return None
-    # TTL check — return None if expired, but do NOT delete here.
-    # Deletion is the caller's responsibility via cleanup_intent().
     expires = data.get("expires_at", 0)
     if isinstance(expires, (int, float)) and time.time() > expires:
         return None
-    # Required fields
     for key in ("request_id", "nonce", "profile", "hermes_home", "target_pid"):
         if key not in data:
             return None
     return data
+
+
+def read_intent_by_profile(profile: str = "default") -> Optional[dict[str, Any]]:
+    """Read intent from the profile-level fallback path (backward compat)."""
+    return read_intent(profile, request_id="")
 
 
 def validate_intent_nonce(intent: dict[str, Any], nonce: str) -> bool:
@@ -139,66 +180,59 @@ def validate_intent_nonce(intent: dict[str, Any], nonce: str) -> bool:
     return secrets.compare_digest(expected, nonce)
 
 
-def update_intent_state(profile: str, state: str) -> None:
-    """Update just the state field of an existing intent."""
-    path = intent_path(profile)
+def update_intent_state(profile: str, request_id: str, state: str,
+                        expected_state: str = "") -> bool:
+    """Update intent state with optional expected_state guard.
+
+    P0-3: Only updates if current state matches expected_state (when provided).
+    Returns True on success.
+    """
+    path = intent_path(profile, request_id)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        if expected_state and data.get("state") != expected_state:
+            return False
         data["state"] = state
         _atomic_write_json(path, data)
+        return True
     except (OSError, json.JSONDecodeError):
-        pass
+        return False
 
 
-def cleanup_intent(
-    profile: str = "default",
-    request_id: str = "",
-    nonce: str = "",
-) -> None:
-    """Remove the intent file ONLY if request_id and nonce match.
+def cleanup_intent(profile: str = "default", request_id: str = "") -> None:
+    """Remove the request directory (intent + status + lease).
 
-    P0-4: Compare-and-delete — a stale worker must not delete a newer
-    transaction's intent.  If *request_id* or *nonce* are empty, the
-    caller is a coordinator (not a worker) and deletion is unconditional.
+    With per-request directories, cleanup only affects the specific request.
+    No compare-and-delete needed — each request_id has its own directory.
     """
+    if not request_id:
+        return
     try:
-        path = intent_path(profile)
-        if not path.exists():
-            return
-        # If request_id/nonce provided, verify they match before deleting
-        if request_id or nonce:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    if request_id and data.get("request_id") != request_id:
-                        return  # Different transaction — do NOT delete
-                    if nonce and data.get("nonce") != nonce:
-                        return  # Different nonce — do NOT delete
-            except (OSError, json.JSONDecodeError):
-                return  # Can't read — don't delete
-        path.unlink(missing_ok=True)
+        d = _get_request_dir(profile, request_id)
+        if d.exists():
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
     except OSError:
         pass
 
 
 # ---------------------------------------------------------------------------
-# Profile lock (atomic creation + TTL + coalesce)
+# Profile lock (prevents concurrent coordinators)
 # ---------------------------------------------------------------------------
 
 class RestartLock:
-    """Profile-scoped restart lock with ownership, TTL, and coalesce support.
+    """Profile-scoped restart lock with ownership, TTL, and stale recovery.
 
-    Lock is created exclusively on the final ``.lock`` path (``O_EXCL``),
-    not via a tmp+rename pattern.  The lock file stores an ``owner_token``
-    that must match on release — a non-owner cannot delete or modify the lock.
+    Lock is created with ``O_EXCL`` on the final path.  Stores owner_token,
+    owner_pid, worker_pid, and claim_deadline for stale recovery.
 
-    Usage::
+    P1-1: If the lock records a worker_pid and claim_deadline, and both
+    conditions are met (deadline expired + worker PID dead), the lock
+    can be safely reclaimed even if the coordinator PID is still alive.
 
-        lock = RestartLock(profile)
-        if lock.try_acquire(request_id):
-            # we won the race
-            ...
-            lock.release()
+    P1-4: No coalesce — same request_id does NOT reuse an existing lock.
     """
 
     _LOCK_SCHEMA_VERSION = 1
@@ -208,31 +242,39 @@ class RestartLock:
         self._owner_token: str = ""
         self._owner_request_id: str = ""
 
-    def try_acquire(self, request_id: str, ttl_s: int = _LOCK_TTL_S) -> bool:
+    def try_acquire(self, request_id: str, ttl_s: int = _LOCK_TTL_S,
+                    worker_pid: int = 0) -> bool:
         """Try to acquire the lock.  Returns True on success.
 
-        Lock is created with ``O_EXCL`` directly on the final path.
-        If the lock file exists but is expired (TTL) **and** the owner PID
-        is no longer alive, it is force-released first.
-        If the lock file exists and the request_id matches (coalesce),
-        returns True.
+        No coalesce — each request_id gets a fresh lock.
+        Stale recovery considers worker_pid + claim_deadline (P1-1).
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Check existing lock
         existing = self._read_lock()
         if existing:
             age = time.time() - existing.get("created_at", 0)
-            if existing.get("request_id") == request_id:
-                # Coalesce — same request
-                self._owner_token = existing.get("owner_token", "")
-                self._owner_request_id = request_id
-                return True
-            if age > ttl_s:
-                # Expired — verify owner is dead before force-release
+
+            # P1-1: Check claim_deadline-based recovery
+            phase = existing.get("phase", "")
+            claim_deadline = existing.get("claim_deadline", 0)
+            existing_worker_pid = existing.get("worker_pid", 0)
+
+            if phase == "awaiting_claim" and claim_deadline > 0 and time.time() > claim_deadline:
+                # Claim deadline expired — check if worker is dead
+                if existing_worker_pid > 0 and not _pid_exists(existing_worker_pid):
+                    # Worker dead and never claimed — safe to reclaim
+                    self._force_release(expected=existing)
+                elif existing_worker_pid <= 0:
+                    # No worker PID recorded — safe to reclaim
+                    self._force_release(expected=existing)
+                else:
+                    # Worker still alive — wait
+                    return False
+            elif age > ttl_s:
+                # Standard TTL expiry — verify owner is dead
                 owner_pid = existing.get("owner_pid", 0)
                 if owner_pid > 0 and _pid_exists(owner_pid):
-                    # Owner still alive — do NOT take over
                     return False
                 self._force_release(expected=existing)
             else:
@@ -243,13 +285,15 @@ class RestartLock:
         self._owner_token = secrets.token_urlsafe(32)
         self._owner_request_id = request_id
 
-        # Atomic create on FINAL path (O_EXCL prevents overwrite)
         lock_data = {
             "schema_version": self._LOCK_SCHEMA_VERSION,
             "request_id": request_id,
             "owner_token": self._owner_token,
             "owner_pid": os.getpid(),
-            "profile": self._path.stem.replace("gateway-restart-", "").replace(".lock", ""),
+            "worker_pid": worker_pid,
+            "claim_deadline": time.time() + 30 if worker_pid else 0,
+            "phase": "awaiting_claim" if worker_pid else "acquired",
+            "profile": self._profile(),
             "created_at": time.time(),
             "expires_at": time.time() + ttl_s,
         }
@@ -260,8 +304,6 @@ class RestartLock:
                 f.flush()
                 os.fsync(f.fileno())
         except FileExistsError:
-            # Race lost — another process created the lock between our
-            # _read_lock check and this O_EXCL call.
             return False
         except OSError:
             return False
@@ -269,54 +311,94 @@ class RestartLock:
         return True
 
     def release(self) -> None:
-        """Release the lock ONLY if we are the owner.
-
-        Reads the lock file and verifies ``owner_token`` and ``request_id``
-        match before deleting.  Non-owner callers are silently rejected.
-        """
+        """Release the lock ONLY if we are the owner."""
         existing = self._read_lock()
         if not existing:
             return
         if (existing.get("owner_token") != self._owner_token
                 or existing.get("request_id") != self._owner_request_id):
-            # Not our lock — do NOT delete
             return
         try:
             self._path.unlink(missing_ok=True)
         except OSError:
             pass
 
-    def claim_lease(self, request_id: str) -> bool:
-        """Atomically claim the lock from a different process (worker).
-
-        The worker calls this after reading the intent.  It verifies the
-        ``request_id`` matches and the lock has NOT already been claimed,
-        then rewrites the lock with the worker's ``owner_token``.
-
-        P0-2: One-time-only — if ``claimed_at`` already exists, a second
-        worker is attempting to claim the same transaction.  Reject it.
-
-        Returns True on success.
-        """
+    def mark_phase(self, phase: str) -> None:
+        """Update the lock's phase field (must be owner)."""
         existing = self._read_lock()
-        if not existing or existing.get("request_id") != request_id:
+        if not existing:
+            return
+        if existing.get("owner_token") != self._owner_token:
+            return
+        existing["phase"] = phase
+        try:
+            _atomic_write_json(self._path, existing)
+        except OSError:
+            pass
+
+    def claim_lease(self, request_id: str, nonce: str,
+                    expected_state: str = "scheduled") -> bool:
+        """Atomically claim the lease for a request using O_EXCL.
+
+        P0-1: Uses independent lease file with O_EXCL — truly one-time-only.
+        P0-3: After successful claim, transitions intent state from
+        expected_state to "claimed" with request_id + nonce verification.
+
+        Returns True on success (caller is the lease winner).
+        """
+        lp = lease_path(self._profile(), request_id)
+
+        # Verify intent exists and is in expected state
+        ip = intent_path(self._profile(), request_id)
+        try:
+            intent_data = json.loads(ip.read_text(encoding="utf-8"))
+            if not isinstance(intent_data, dict):
+                return False
+            if intent_data.get("request_id") != request_id:
+                return False
+            if not validate_intent_nonce(intent_data, nonce):
+                return False
+            if expected_state and intent_data.get("state") != expected_state:
+                return False
+        except (OSError, json.JSONDecodeError):
             return False
-        # P0-2: Reject if already claimed by another worker
-        if existing.get("claimed_at"):
-            return False
-        self._owner_token = secrets.token_urlsafe(32)
-        self._owner_request_id = request_id
-        claimed_data = {
-            **existing,
-            "owner_token": self._owner_token,
-            "owner_pid": os.getpid(),
+
+        # Atomic lease claim via O_EXCL
+        lease_data = {
+            "request_id": request_id,
+            "owner_token": secrets.token_urlsafe(32),
+            "worker_pid": os.getpid(),
             "claimed_at": time.time(),
         }
         try:
-            _atomic_write_json(self._path, claimed_data)
-            return True
+            fd = os.open(str(lp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(lease_data, f)
+                f.flush()
+                os.fsync(f.fileno())
+        except FileExistsError:
+            return False  # Another worker already claimed
         except OSError:
             return False
+
+        # P0-3: Update intent state to "claimed" (only winner does this)
+        self._owner_token = lease_data["owner_token"]
+        self._owner_request_id = request_id
+        update_intent_state(self._profile(), request_id, "claimed",
+                            expected_state=expected_state)
+        return True
+
+    def release_lease(self, profile: str, request_id: str) -> None:
+        """Release the request-scoped lease file."""
+        try:
+            lp = lease_path(profile, request_id)
+            lp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _profile(self) -> str:
+        """Extract profile name from lock path."""
+        return self._path.parent.name
 
     def _read_lock(self) -> Optional[dict[str, Any]]:
         if not self._path.exists():
@@ -330,20 +412,16 @@ class RestartLock:
     def _force_release(self, expected: dict[str, Any] | None = None) -> None:
         """Force-release an expired lock whose owner is confirmed dead.
 
-        P1-3: TOCTOU protection — if *expected* is provided, re-read the
-        lock file and verify it still matches before deleting.  This
-        prevents a scenario where another request replaced the lock
-        between our first read and this delete.
+        Re-reads and compares before deleting (TOCTOU protection).
         """
         if expected:
-            # Re-read and compare — only delete if unchanged
             current = self._read_lock()
             if not current:
-                return  # Already gone
+                return
             if (current.get("request_id") != expected.get("request_id")
                     or current.get("created_at") != expected.get("created_at")
                     or current.get("owner_token") != expected.get("owner_token")):
-                return  # Lock was replaced — do NOT delete the new one
+                return
         try:
             self._path.unlink(missing_ok=True)
         except OSError:
@@ -356,6 +434,7 @@ class RestartLock:
 
 _VALID_STATES = frozenset({
     "scheduled",
+    "claimed",
     "preflight_ok",
     "draining",
     "stopping",
@@ -369,20 +448,22 @@ _VALID_STATES = frozenset({
 })
 
 
-def write_status(profile: str, state: str, **extra: Any) -> None:
-    """Write the status file.  Only overwrites, does not append."""
+def write_status(profile: str, state: str, request_id: str = "",
+                 **extra: Any) -> None:
+    """Write the status file to the per-request directory."""
     if state not in _VALID_STATES:
         raise ValueError(f"Invalid state: {state!r}")
     payload = {
         "state": state,
+        "request_id": request_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         **extra,
     }
-    _atomic_write_json(status_path(profile), payload)
+    _atomic_write_json(status_path(profile, request_id), payload)
 
 
-def read_status(profile: str = "default") -> Optional[dict[str, Any]]:
-    path = status_path(profile)
+def read_status(profile: str = "default", request_id: str = "") -> Optional[dict[str, Any]]:
+    path = status_path(profile, request_id)
     if not path.exists():
         return None
     try:
@@ -392,30 +473,32 @@ def read_status(profile: str = "default") -> Optional[dict[str, Any]]:
         return None
 
 
-def cleanup_status(
-    profile: str = "default",
-    request_id: str = "",
-) -> None:
-    """Remove the status file ONLY if request_id matches.
+def read_latest_status(profile: str = "default") -> Optional[dict[str, Any]]:
+    """Read the most recent status for this profile.
 
-    P0-4: Compare-and-delete — a stale worker must not delete a newer
-    transaction's status.  If *request_id* is empty, deletion is
-    unconditional (coordinator cleanup on spawn failure).
+    Scans per-request directories for the latest status.json.
     """
+    profile_dir = _get_profile_dir(profile)
+    best = None
+    best_time = ""
     try:
-        path = status_path(profile)
-        if not path.exists():
-            return
-        if request_id:
+        for d in profile_dir.iterdir():
+            if not d.is_dir():
+                continue
+            sp = d / "status.json"
+            if not sp.exists():
+                continue
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("request_id") != request_id:
-                    return  # Different transaction — do NOT delete
+                data = json.loads(sp.read_text(encoding="utf-8"))
+                ts = data.get("updated_at", "")
+                if ts > best_time:
+                    best_time = ts
+                    best = data
             except (OSError, json.JSONDecodeError):
-                return  # Can't read — don't delete
-        path.unlink(missing_ok=True)
+                continue
     except OSError:
         pass
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -465,11 +548,7 @@ def append_restart_log(
 # ---------------------------------------------------------------------------
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write JSON atomically (tmpfile + rename).
-
-    P1-4: Uses a unique tmp filename to prevent concurrent writes
-    from overwriting each other's temporary files.
-    """
+    """Write JSON atomically (tmpfile + rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
