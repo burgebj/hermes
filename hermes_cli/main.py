@@ -2469,16 +2469,19 @@ def select_provider_and_model(args=None):
     provider picker, credential prompting, model selection, and config
     persistence.
     """
+
     from hermes_cli.auth import (
         resolve_provider,
         AuthError,
         format_auth_error,
     )
+
     from hermes_cli.config import (
         get_compatible_custom_providers,
         load_config,
         get_env_value,
     )
+
     from hermes_cli.providers import resolve_provider_full
 
     config = load_config()

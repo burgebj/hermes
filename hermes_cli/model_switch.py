@@ -1180,12 +1180,20 @@ def list_authenticated_providers(
     custom_providers: list | None = None,
     max_models: int = 8,
     current_model: str = "",
+    *,
+    lazy_probing: bool = False,
 ) -> List[dict]:
     """Detect which providers have credentials and list their curated models.
 
     Uses the curated model lists from hermes_cli/models.py (OPENROUTER_MODELS,
     _PROVIDER_MODELS) — NOT the full models.dev catalog.  These are hand-picked
     agentic models that work well as agent backends.
+
+    When ``lazy_probing=True``, skips live /models probes for custom provider
+    endpoints (Sections 3/4).  The picker instead shows skeleton entries with
+    whatever models were declared in config; the caller is expected to use
+    ``fetch_custom_provider_models()`` to resolve the full list on demand
+    (e.g. when the user selects a specific provider in Stage 2).
 
     Returns a list of dicts, each with:
       - slug: str — the --provider value to use
@@ -1715,7 +1723,7 @@ def list_authenticated_providers(
             discover = ep_cfg.get("discover_models", True)
             if isinstance(discover, str):
                 discover = discover.lower() not in {"false", "no", "0"}
-            if api_url and api_key and discover:
+            if api_url and api_key and discover and not lazy_probing:
                 try:
                     from hermes_cli.models import fetch_api_models
                     live_models = fetch_api_models(api_key, api_url)
@@ -1924,11 +1932,11 @@ def list_authenticated_providers(
                 and (bool(api_key) or not grp["models"])
                 and grp.get("discover_models", True)
             )
-            if should_probe:
+            if should_probe and not lazy_probing:
                 try:
-                    from hermes_cli.models import fetch_api_models
+                    from hermes_cli.models import cached_fetch_api_models
 
-                    live_models = fetch_api_models(api_key, api_url)
+                    live_models = cached_fetch_api_models(api_key, api_url)
                     if live_models:
                         grp["models"] = live_models
                         grp["total_models"] = len(live_models)
@@ -1956,6 +1964,105 @@ def list_authenticated_providers(
     results.sort(key=lambda r: (not r["is_current"], -r["total_models"]))
 
     return results
+
+
+def fetch_custom_provider_models(
+    slug: str,
+    custom_providers: list | None = None,
+    user_providers: dict = None,
+) -> Optional[dict]:
+    """Fetch the live /models list for a single custom provider slug.
+
+    Intended for lazy-loading in the TUI /model picker: the caller resolves
+    the provider entry from ``custom_providers`` / ``user_providers``, probes
+    the ``/models`` endpoint, and returns the result keyed by ``slug``.
+
+    Returns ``None`` if the slug is not found or the endpoint could not be
+    reached.  On success returns::
+
+        {
+            "slug": slug,
+            "models": [...],
+            "total_models": <int>,
+        }
+    """
+    import os
+
+    # Slug from the picker may carry a "custom:" prefix (Section 4 grouped
+    # slugs) or be a bare name (Section 3 user_providers dict keys).
+    # Normalise by stripping the prefix so we can compare against the
+    # provider's display name directly.
+    slug_lower = slug.lower().removeprefix("custom:")
+
+    def _find_entry(providers, slug_lower):
+        if not providers:
+            return None
+        if isinstance(providers, dict):
+            # For user_providers dict, check both the dict key (ep_name)
+            # and the entry's name/slug field.
+            for key, entry in providers.items():
+                if not isinstance(entry, dict):
+                    continue
+                # Match against dict key (Section 3 ep_name)
+                if key.strip().lower() == slug_lower:
+                    return entry
+                # Match against entry name/slug (Section 3 display_name)
+                name = (entry.get("name") or entry.get("slug") or "").strip().lower()
+                for sep in ("—", " - "):
+                    if sep in name:
+                        name = name.split(sep)[0].strip()
+                        break
+                if name == slug_lower:
+                    return entry
+            return None
+        else:
+            # For custom_providers list, match against entry name.
+            for entry in providers:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get("name") or entry.get("slug") or "").strip().lower()
+                # Strip model suffix for custom_providers grouping
+                for sep in ("—", " - "):
+                    if sep in name:
+                        name = name.split(sep)[0].strip()
+                        break
+                if name == slug_lower:
+                    return entry
+            return None
+
+    # Search custom_providers (list)
+    entry = _find_entry(custom_providers, slug_lower)
+    # Search user_providers (dict)
+    if entry is None:
+        entry = _find_entry(user_providers, slug_lower)
+
+    if entry is None:
+        return None
+
+    api_url = (
+        entry.get("base_url", "")
+        or entry.get("url", "")
+        or entry.get("api", "")
+        or ""
+    ).strip().rstrip("/")
+    if not api_url:
+        return None
+
+    api_key = (entry.get("api_key") or "").strip()
+    if not api_key:
+        key_env = (entry.get("key_env") or "").strip()
+        api_key = os.environ.get(key_env, "").strip() if key_env else ""
+
+    api_mode = str(entry.get("api_mode") or entry.get("transport") or "").strip().lower()
+
+    from hermes_cli.models import cached_fetch_api_models
+
+    models = cached_fetch_api_models(
+        api_key, api_url, api_mode=api_mode or None
+    )
+    if models:
+        return {"slug": slug, "models": models, "total_models": len(models)}
+    return None
 
 
 def list_picker_providers(

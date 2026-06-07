@@ -3277,7 +3277,7 @@ def probe_api_models(
 def fetch_api_models(
     api_key: Optional[str],
     base_url: Optional[str],
-    timeout: float = 5.0,
+    timeout: float = 3.0,
     api_mode: Optional[str] = None,
 ) -> Optional[list[str]]:
     """Fetch the list of available model IDs from the provider's ``/models`` endpoint.
@@ -3286,6 +3286,115 @@ def fetch_api_models(
     be reached (network error, timeout, auth failure, etc.).
     """
     return probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode).get("models")
+
+
+# ---------------------------------------------------------------------------
+# Custom provider model cache — disk-cached wrapper for endpoints not
+# covered by cached_provider_model_ids (i.e. custom_providers entries and
+# user ``providers:`` entries that probe live /models).
+# ---------------------------------------------------------------------------
+
+_CUSTOM_API_MODELS_CACHE_TTL = 600  # 10 minutes
+
+
+def _custom_api_models_cache_path() -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "custom_api_models_cache.json"
+
+
+def _custom_api_models_key(api_key: Optional[str], base_url: str) -> str:
+    """Cache key: normalised base_url + fingerprint of api_key.
+
+    Uses ``::`` as separator because ``:`` appears in URLs
+    (e.g. ``http://host:8080/v1``) and would break ``split(\":\", 1)``.
+    """
+    import hashlib
+    normalised = (base_url or "").strip().rstrip("/")
+    fp = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+    return f"{normalised}::{fp}"
+
+
+def _load_custom_api_models_cache() -> dict:
+    try:
+        path = _custom_api_models_cache_path()
+        if path.exists():
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_custom_api_models_cache(data: dict) -> None:
+    try:
+        from utils import atomic_json_write
+        path = _custom_api_models_cache_path()
+        atomic_json_write(path, data, indent=None, separators=(",", ":"))
+    except Exception:
+        pass
+
+
+def cached_fetch_api_models(
+    api_key: Optional[str],
+    base_url: Optional[str],
+    *,
+    ttl_seconds: int = _CUSTOM_API_MODELS_CACHE_TTL,
+    timeout: float = 3.0,
+    api_mode: Optional[str] = None,
+) -> Optional[list[str]]:
+    """Disk-cached wrapper around :func:`fetch_api_models` for custom
+    provider endpoints.
+
+    Cache key is ``<normalised_base_url>::<api_key_fingerprint>`` so that
+    rotating the api_key automatically invalidates the cached entry.
+    TTL defaults to 10 minutes — model lists on user endpoints change
+    rarely, and the /model picker values snappiness over freshness.
+
+    On cache miss or expiry, calls the live function and persists the
+    result.  If the live call returns nothing but a stale entry with the
+    same fingerprint exists, the stale data is returned (stale beats
+    empty for picker UX).
+    """
+    if not base_url:
+        return None
+
+    cache_key = _custom_api_models_key(api_key, base_url)
+    fp_part = cache_key.split("::", 1)[-1]
+    cache = _load_custom_api_models_cache()
+    entry = cache.get(cache_key)
+    if not isinstance(entry, dict):
+        entry = {}
+    now = time.time()
+
+    # Fresh cache hit
+    if (
+        entry.get("fp") == fp_part
+        and isinstance(entry.get("models"), list)
+        and entry["models"]
+        and (now - float(entry.get("at", 0))) < ttl_seconds
+    ):
+        return list(entry["models"])
+
+    # Cache miss / stale — call live
+    live = fetch_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode)
+    if live:
+        cache[cache_key] = {
+            "fp": fp_part,
+            "at": now,
+            "models": list(live),
+        }
+        _save_custom_api_models_cache(cache)
+        return list(live)
+
+    # Live returned nothing. Return stale data if fingerprint matches.
+    if (
+        isinstance(entry, dict)
+        and entry.get("fp") == fp_part
+        and isinstance(entry.get("models"), list)
+        and entry["models"]
+    ):
+        return list(entry["models"])
+    return None
 
 
 # ---------------------------------------------------------------------------

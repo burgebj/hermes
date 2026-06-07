@@ -561,7 +561,7 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url):
+    def fake_fetch_api_models(api_key, base_url, **_kw):
         calls.append((api_key, base_url))
         return ["gateway-model-a", "gateway-model-b", "gateway-model-c"]
 
@@ -710,3 +710,85 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
     assert gateway_prov is not None
     assert calls == [], "string 'false' must disable live discovery"
     assert gateway_prov["models"] == ["only-model"]
+
+
+def test_lazy_probing_skips_custom_provider_probe(monkeypatch):
+    """When lazy_probing=True, Section 4 should NOT call fetch_api_models,
+    preserving only the static model list from config."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+
+    probe_called = []
+
+    def fake_fetch(*_a, **_kw):
+        probe_called.append(True)
+        return ["live-model"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch)
+
+    custom_providers = [
+        {
+            "name": "LazyProv",
+            "api_key": "***",
+            "base_url": "https://lazy.example.com/v1",
+            "model": "config-model",
+        }
+    ]
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=custom_providers,
+        max_models=50,
+        lazy_probing=True,
+    )
+
+    assert len(probe_called) == 0, "lazy_probing must skip /models probe"
+    lazy_prov = next((p for p in providers if p.get("is_user_defined")), None)
+    assert lazy_prov is not None
+    assert lazy_prov["models"] == ["config-model"]
+    assert lazy_prov["total_models"] == 1
+
+
+def test_fetch_custom_provider_models(monkeypatch):
+    """fetch_custom_provider_models resolves a slug and calls cached_fetch_api_models."""
+    from hermes_cli.model_switch import fetch_custom_provider_models
+
+    def fake_cached(*_a, **_kw):
+        return ["m1", "m2"]
+
+    monkeypatch.setattr(
+        "hermes_cli.models.cached_fetch_api_models", fake_cached
+    )
+
+    # Test with bare slug
+    result = fetch_custom_provider_models(
+        slug="my-endpoint",
+        custom_providers=[
+            {"name": "my-endpoint", "base_url": "http://x/v1", "api_key": "k"}
+        ],
+    )
+    assert result is not None
+    assert result["slug"] == "my-endpoint"
+    assert result["models"] == ["m1", "m2"]
+    assert result["total_models"] == 2
+
+    # Test with "custom:" prefix (Section 4 slug format)
+    result2 = fetch_custom_provider_models(
+        slug="custom:my-endpoint",
+        custom_providers=[
+            {"name": "my-endpoint", "base_url": "http://x/v1", "api_key": "k"}
+        ],
+    )
+    assert result2 is not None
+    assert result2["slug"] == "custom:my-endpoint"
+
+    # Test with user_providers dict (match by dict key)
+    result3 = fetch_custom_provider_models(
+        slug="myrelay",
+        user_providers={
+            "myrelay": {"base_url": "http://y/v1", "api_key": "k"}
+        },
+    )
+    assert result3 is not None
+    assert result3["slug"] == "myrelay"
