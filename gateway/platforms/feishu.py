@@ -228,7 +228,11 @@ _APPROVAL_LABEL_MAP: Dict[str, str] = {
     "deny": "Denied",
 }
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
-_FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+_FEISHU_REPLY_FALLBACK_CODES = frozenset({
+    230011,    # reply target withdrawn/missing
+    231003,    # reply target not found
+    99992402,  # field validation failed (e.g. stale reply_to_message_id after gateway restart)
+})
 
 # Feishu reactions render as prominent badges, unlike Discord/Telegram's
 # small footer emoji — a success badge on every message would add noise, so
@@ -609,6 +613,113 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     return rows or [[{"tag": "md", "text": content}]]
 
 
+def _parse_markdown_tables(content: str) -> List[Dict[str, Any]]:
+    """Split *content* into a list of text/table segments.
+
+    Each segment is ``{"type": "text", "content": "..."}`` or
+    ``{"type": "table", "headers": [...], "rows": [[...], ...]}``.
+    """
+    segments: List[Dict[str, Any]] = []
+    lines = content.split("\n")
+    current_text: List[str] = []
+    i = 0
+
+    while i < len(lines):
+        if (
+            i + 1 < len(lines)
+            and lines[i].strip().startswith("|")
+            and lines[i].strip().endswith("|")
+            and _MARKDOWN_TABLE_RE.match(lines[i] + "\n" + lines[i + 1])
+        ):
+            if current_text:
+                segments.append({"type": "text", "content": "\n".join(current_text)})
+                current_text = []
+            table_lines: List[str] = []
+            while (
+                i < len(lines)
+                and lines[i].strip().startswith("|")
+                and lines[i].strip().endswith("|")
+            ):
+                table_lines.append(lines[i])
+                i += 1
+            if len(table_lines) >= 3:
+                headers = [h.strip() for h in table_lines[0].split("|")[1:-1]]
+                rows = []
+                for row_line in table_lines[2:]:
+                    cells = [c.strip() for c in row_line.split("|")[1:-1]]
+                    rows.append(cells)
+                segments.append({"type": "table", "headers": headers, "rows": rows})
+            else:
+                current_text.extend(table_lines)
+        else:
+            current_text.append(lines[i])
+            i += 1
+
+    if current_text:
+        segments.append({"type": "text", "content": "\n".join(current_text)})
+
+    return segments
+
+
+def _build_table_card_payload(content: str) -> str:
+    """Build a Feishu interactive card containing a ``table`` element.
+
+    Non-table text segments become ``markdown`` elements in the same card.
+    """
+    segments = _parse_markdown_tables(content)
+    elements: List[Dict[str, Any]] = []
+
+    for seg in segments:
+        if seg["type"] == "text":
+            text = seg["content"].strip()
+            if text:
+                elements.append({"tag": "markdown", "content": text})
+        elif seg["type"] == "table":
+            headers = seg["headers"]
+            rows = seg["rows"]
+            columns = [
+                {
+                    "name": f"col_{idx}",
+                    "display_name": header,
+                    "data_type": "text",
+                    "width": "auto",
+                }
+                for idx, header in enumerate(headers)
+            ]
+            table_rows = []
+            for row in rows:
+                row_dict: Dict[str, str] = {}
+                for idx, cell in enumerate(row):
+                    if idx < len(headers):
+                        row_dict[f"col_{idx}"] = cell
+                table_rows.append(row_dict)
+
+            elements.append(
+                {
+                    "tag": "table",
+                    "page_size": min(len(table_rows), 10),
+                    "row_height": "low",
+                    "header_style": {
+                        "text_align": "left",
+                        "text_size": "normal",
+                        "background_style": "grey",
+                        "bold": True,
+                    },
+                    "columns": columns,
+                    "rows": table_rows,
+                }
+            )
+
+    if not elements:
+        elements.append({"tag": "markdown", "content": content})
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "elements": elements,
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
 def parse_feishu_post_payload(
     payload: Any,
     *,
@@ -875,7 +986,14 @@ def normalize_feishu_message(
     return FeishuNormalizedMessage(raw_type=normalized_type, text_content="")
 
 
+_CARD_TAG_RE = re.compile(r"^\s*<card>(.*)</card>\s*$", re.DOTALL | re.IGNORECASE)
+
+
 def _load_feishu_payload(raw_content: str) -> Dict[str, Any]:
+    if raw_content:
+        m = _CARD_TAG_RE.match(raw_content)
+        if m:
+            raw_content = m.group(1).strip()
     try:
         parsed = json.loads(raw_content) if raw_content else {}
     except json.JSONDecodeError:
@@ -1052,6 +1170,9 @@ def _collect_text_segments(value: Any, *, in_rich_block: bool) -> List[str]:
         "button",
         "select_static",
         "date_picker",
+        "text",
+        "markdown_text",
+        "rich_text",
     }
 
     segments: List[str] = []
@@ -1911,12 +2032,17 @@ class FeishuAdapter(BasePlatformAdapter):
             }
 
             payload = json.dumps(card, ensure_ascii=False)
+            # Interactive (approval) cards must be sent via chat_id, NOT
+            # thread_id.  Feishu rejects interactive card creation with
+            # receive_id_type="thread_id" (99992402 field validation failed).
+            # Strip thread_id from metadata so _send_raw_message uses chat_id routing.
+            card_metadata = {k: v for k, v in (metadata or {}).items() if k != "thread_id"}
             response = await self._feishu_send_with_retry(
                 chat_id=chat_id,
                 msg_type="interactive",
                 payload=payload,
                 reply_to=None,
-                metadata=metadata,
+                metadata=card_metadata or None,
             )
 
             result = self._finalize_send_result(response, "send_exec_approval failed")
@@ -2250,11 +2376,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
             data = getattr(response, "data", None)
             raw_chat_type = str(getattr(data, "chat_type", "") or "").strip().lower()
+            raw_chat_mode = str(getattr(data, "chat_mode", "") or "").strip().lower()
             info = {
                 "chat_id": chat_id,
                 "name": str(getattr(data, "name", None) or chat_id),
                 "type": self._map_chat_type(raw_chat_type),
                 "raw_type": raw_chat_type or None,
+                "chat_mode": raw_chat_mode or None,
             }
             self._chat_info_cache[chat_id] = info
             return dict(info)
@@ -3102,13 +3230,23 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = getattr(message, "chat_id", "") or ""
         chat_info = await self.get_chat_info(chat_id)
         sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
+        resolved_chat_type = self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type)
+
+        # Preserve thread_id ONLY for topic/forum chats (话题群) so each
+        # Feishu topic gets its own session and replies land inside the topic.
+        # Regular group chats (chat_mode != "topic") must NOT use thread_id
+        # for routing — ordinary group messages carry a thread_id/root_id but
+        # routing via receive_id_type="thread_id" would create unwanted topic
+        # replies instead of plain group messages.  DMs never use thread_id.
+        thread_id_for_source = thread_id if resolved_chat_type == "forum" else None
+
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type),
+            chat_type=resolved_chat_type,
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
-            thread_id=thread_id,
+            thread_id=thread_id_for_source,
             user_id_alt=sender_profile["user_id_alt"],
             is_bot=is_bot,
         )
@@ -3563,6 +3701,35 @@ class FeishuAdapter(BasePlatformAdapter):
             mentions=getattr(message, "mentions", None),
             bot=self._bot_identity(),
         )
+
+        # If the message is an interactive card and the normalized text is the
+        # Feishu downgrade placeholder, fetch the full card content via API.
+        if (
+            normalized.relation_kind == "interactive"
+            and normalized.text_content in {"", FALLBACK_INTERACTIVE_TEXT, "请升级至最新版本客户端，以查看内容"}
+            and message_id
+            and self._client
+        ):
+            try:
+                request = self._build_get_message_request(message_id)
+                response = await asyncio.to_thread(self._client.im.v1.message.get, request)
+                if response and getattr(response, "success", lambda: False)():
+                    items = getattr(getattr(response, "data", None), "items", None) or []
+                    msg_item = items[0] if items else None
+                    if msg_item:
+                        api_content = str(getattr(msg_item, "body", None) and getattr(msg_item.body, "content", "") or "")
+                        api_type = str(getattr(msg_item, "msg_type", "") or raw_type)
+                        if api_content and api_content != raw_content:
+                            logger.info("[Feishu] Refetched interactive card via API for message_id=%s", message_id)
+                            normalized = normalize_feishu_message(
+                                message_type=api_type,
+                                raw_content=api_content,
+                                mentions=getattr(message, "mentions", None),
+                                bot=self._bot_identity(),
+                            )
+            except Exception:
+                logger.debug("[Feishu] Failed to refetch interactive card content", exc_info=True)
+
         media_urls, media_types = await self._download_feishu_message_resources(
             message_id=message_id,
             normalized=normalized,
@@ -3838,6 +4005,12 @@ class FeishuAdapter(BasePlatformAdapter):
         resolved = str(chat_info.get("type") or "").strip().lower()
         if resolved in {"group", "forum"}:
             return resolved
+        # Feishu topic chats return chat_type="private" (mapped to "dm" by
+        # _map_chat_type) but chat_mode="topic".  Detect this and promote to
+        # "forum" so thread_id is preserved in the session key.
+        chat_mode = str(chat_info.get("chat_mode") or "").strip().lower()
+        if chat_mode in {"topic", "thread", "forum"}:
+            return "forum"
         if event_chat_type == "p2p":
             return "dm"
         return "group"
@@ -4326,10 +4499,9 @@ class FeishuAdapter(BasePlatformAdapter):
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
         # Feishu post-type 'md' elements do not render markdown tables; sending
         # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
+        # Convert markdown tables to an interactive card with a table component.
         if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
+            return "interactive", _build_table_card_payload(content)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
@@ -4425,8 +4597,12 @@ class FeishuAdapter(BasePlatformAdapter):
         # For topic/thread messages that fell back from reply→create, use
         # thread_id as receive_id so the message lands in the topic instead of
         # the main chat.
+        # Exception: interactive cards cannot be sent with receive_id_type="thread_id"
+        # (Feishu returns 99992402 field validation failed). For interactive cards,
+        # fall through to chat_id routing so they land in the chat (still visible
+        # in the topic context since the topic is part of the chat).
         _thread_id = (metadata or {}).get("thread_id")
-        if _thread_id:
+        if _thread_id and msg_type != "interactive":
             body = self._build_create_message_body(
                 receive_id=_thread_id,
                 msg_type=msg_type,
@@ -4594,13 +4770,16 @@ class FeishuAdapter(BasePlatformAdapter):
                         if (metadata or {}).get("thread_id"):
                             logger.warning(
                                 "[Feishu] Reply to %s failed in thread %s (code %s — message withdrawn/missing); "
-                                "skipping top-level fallback to avoid creating a new topic",
+                                "falling back to thread_id create (will land in same topic)",
                                 active_reply_to,
                                 (metadata or {}).get("thread_id"),
                                 code,
                             )
-                            return response
-                        logger.warning(
+                            # Do NOT return here — fall through to active_reply_to=None
+                            # so _send_raw_message uses receive_id_type="thread_id" which
+                            # posts directly into the existing topic without creating a new one.
+                        else:
+                            logger.warning(
                             "[Feishu] Reply to %s failed (code %s — message withdrawn/missing); "
                             "falling back to new message in chat %s",
                             active_reply_to,
@@ -4615,6 +4794,33 @@ class FeishuAdapter(BasePlatformAdapter):
                             reply_to=None,
                             metadata=metadata,
                         )
+                # If thread_id routing (receive_id_type="thread_id") failed with 99992402,
+                # fall back to chat_id routing. This covers the auto-resume path where
+                # reply_to=None but thread_id is present — Feishu rejects thread_id routing
+                # for certain msg_types (post, text) in some contexts (e.g. after restart).
+                elif (
+                    not active_reply_to
+                    and not self._response_succeeded(response)
+                    and (metadata or {}).get("thread_id")
+                    and getattr(response, "code", None) in _FEISHU_REPLY_FALLBACK_CODES
+                ):
+                    code = getattr(response, "code", None)
+                    logger.warning(
+                        "[Feishu] thread_id routing failed (code %s) for thread %s; "
+                        "falling back to chat_id routing for chat %s",
+                        code,
+                        (metadata or {}).get("thread_id"),
+                        chat_id,
+                    )
+                    # Strip thread_id from metadata so _send_raw_message uses chat_id path.
+                    fallback_metadata = {k: v for k, v in (metadata or {}).items() if k != "thread_id"}
+                    response = await self._send_raw_message(
+                        chat_id=chat_id,
+                        msg_type=msg_type,
+                        payload=payload,
+                        reply_to=None,
+                        metadata=fallback_metadata or None,
+                    )
                 return response
             except Exception as exc:
                 last_error = exc
