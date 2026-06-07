@@ -6546,38 +6546,127 @@ def _resolve_hermes_argv() -> list[str]:
 
 
 def _kanban_worker_skill_available(hermes_home: Optional[str]) -> bool:
-    """True if the bundled ``kanban-worker`` skill resolves for the home the
-    spawned worker will run under.
+    """True if the bundled ``kanban-worker`` skill *resolves to exactly one
+    skill* for the home the spawned worker will run under.
 
     The dispatcher injects ``--skills kanban-worker`` into every worker. When
-    the worker activates a profile (``hermes -p <name>``), its ``SKILLS_DIR``
-    becomes ``<profile_home>/skills`` — which on many profiles does NOT contain
-    the bundled skill (it ships in the *default* root home, not every
-    profile-scoped skills dir). Preloading a missing skill is fatal at CLI
-    startup (``ValueError: Unknown skill(s): kanban-worker``), aborting the
-    worker before the agent loop runs. Gate the flag on actual resolvability;
-    the kanban lifecycle contract is still injected via ``KANBAN_GUIDANCE``, so
-    omitting the flag only drops the supplementary pattern library.
+    the worker activates a profile (``hermes -p <name>``), it resolves the
+    skill *by name* through the same lookup ``skill_view`` uses: it scans the
+    profile-scoped ``<home>/skills`` dir plus every ``skills.external_dirs``
+    entry from the profile's ``config.yaml``. That lookup fails the worker in
+    two distinct ways, both fatal at CLI startup
+    (``ValueError: Unknown skill(s): kanban-worker``), aborting the worker
+    before the agent loop runs:
+
+    * **No candidate** — the bundled skill ships in the default root home, not
+      every profile-scoped skills dir, and no ``external_dirs`` entry supplies
+      it. ``skill_view`` returns "not found".
+    * **Ambiguous** — the skill resolves to *two or more distinct files* (e.g.
+      a per-profile copy under ``<home>/skills`` *and* a shared copy reachable
+      via an ``external_dirs`` entry). ``skill_view`` refuses to guess and
+      returns an "Ambiguous skill name" error.
+
+    The previous implementation only tested file *existence*, so it returned
+    True in the ambiguous case (a copy exists) even though the worker's
+    by-name resolver then refused to load it — the exact crash this guard is
+    meant to prevent. Mirror the resolver instead: count *distinct* resolved
+    ``kanban-worker/SKILL.md`` files across the same search roots and gate the
+    flag on there being exactly one. The kanban lifecycle contract is still
+    injected via ``KANBAN_GUIDANCE``, so omitting the flag only drops the
+    supplementary pattern library.
     """
     from pathlib import Path as _Path
 
     # An unset HERMES_HOME means the worker falls back to the default root
     # home (``~/.hermes``), which ships the bundled skill.
     base = _Path(hermes_home) if hermes_home else (_Path.home() / ".hermes")
+
+    # Build the same search roots the worker's by-name resolver uses: the
+    # profile-scoped skills dir first, then the profile's configured
+    # ``skills.external_dirs`` (read from this home's config.yaml, since the
+    # worker runs under this HERMES_HOME — not the dispatcher's).
+    search_roots: list[_Path] = []
     skills_root = base / "skills"
-    if not skills_root.is_dir():
-        return False
-    # Canonical bundled location first (cheap), then a bounded scan for
-    # profiles that have it nested elsewhere.
-    if (skills_root / "devops" / "kanban-worker" / "SKILL.md").is_file():
-        return True
+    if skills_root.is_dir():
+        search_roots.append(skills_root)
+    search_roots.extend(_kanban_worker_external_skill_dirs(base))
+
+    # Count *distinct* resolved SKILL.md files for the bare name, deduping by
+    # resolved path so a symlinked external dir pointing back at the local
+    # skills dir is not double-counted (matching ``skill_view``'s dedup).
+    seen: set = set()
+    for root in search_roots:
+        # Canonical bundled location first (cheap), then a bounded scan for
+        # profiles that nest it elsewhere — same strategies as ``skill_view``.
+        candidates = [root / "devops" / "kanban-worker" / "SKILL.md"]
+        try:
+            candidates.extend(root.rglob("kanban-worker/SKILL.md"))
+        except OSError:
+            pass
+        for skill_md in candidates:
+            try:
+                if not skill_md.is_file():
+                    continue
+                seen.add(skill_md.resolve())
+            except OSError:
+                continue
+
+    # Exactly one resolvable candidate → the worker's by-name lookup succeeds.
+    # Zero (not found) or two-plus (ambiguous) both crash the worker, so omit
+    # the flag in either case.
+    return len(seen) == 1
+
+
+def _kanban_worker_external_skill_dirs(hermes_home: "Path") -> "list[Path]":
+    """Return the ``skills.external_dirs`` entries from ``hermes_home``'s
+    ``config.yaml`` as existing absolute paths.
+
+    Mirrors ``agent.skill_utils.get_external_skills_dirs`` but reads the
+    *worker's* home rather than the dispatcher's process-global one (the
+    dispatcher resolves ``SKILLS_DIR`` from its own ``HERMES_HOME`` at import
+    time, which is not the profile-scoped home the worker will run under).
+    Best-effort: any parse/IO error yields an empty list so the caller falls
+    back to the local skills dir only.
+    """
+    from pathlib import Path as _Path
+
+    config_path = hermes_home / "config.yaml"
     try:
-        for skill_md in skills_root.rglob("kanban-worker/SKILL.md"):
-            if skill_md.is_file():
-                return True
-    except OSError:
-        pass
-    return False
+        if not config_path.is_file():
+            return []
+        import yaml
+
+        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    skills_cfg = parsed.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return []
+    raw_dirs = skills_cfg.get("external_dirs")
+    if not raw_dirs:
+        return []
+    if isinstance(raw_dirs, str):
+        raw_dirs = [raw_dirs]
+    if not isinstance(raw_dirs, list):
+        return []
+
+    out: list[_Path] = []
+    for entry in raw_dirs:
+        entry = str(entry).strip()
+        if not entry:
+            continue
+        expanded = os.path.expanduser(os.path.expandvars(entry))
+        p = _Path(expanded)
+        if not p.is_absolute():
+            p = (hermes_home / p)
+        try:
+            if p.is_dir():
+                out.append(p)
+        except OSError:
+            continue
+    return out
 
 
 def _worker_terminal_timeout_env(
