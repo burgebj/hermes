@@ -8891,6 +8891,119 @@ class GatewayRunner:
                 pass
         return source
 
+    async def _subscribe_chat_to_kanban_cards(
+        self,
+        source: Any,
+        messages: list[dict],
+        *,
+        turn_start: int = 0,
+    ) -> list[str]:
+        """Subscribe the originating gateway chat to Kanban cards the assistant
+        created via the ``kanban_create`` tool during the current turn.
+
+        Model-issued ``kanban_create`` calls otherwise notify nobody: the
+        ``/kanban create`` slash path subscribes the chat, but a tool call
+        leaves ``kanban_notify_subs`` empty, so the worker's terminal event is
+        delivered to no one. This registers the same subscription the slash
+        path would, using the live gateway ``source``.
+
+        Only messages at/after ``turn_start`` are scanned. Callers pass the
+        agent's ``history_offset`` so we inspect *this* turn's output only: the
+        gateway session transcript is long-lived, and scanning all of it would
+        re-subscribe every previously created card on each new create and
+        replay stale completion notifications.
+        """
+        platform = getattr(source, "platform", None)
+        platform_str = str(getattr(platform, "value", None) or platform or "").lower()
+        chat_id = str(getattr(source, "chat_id", "") or "")
+        if not platform_str or not chat_id:
+            return []
+
+        turn = (messages or [])[turn_start:] if turn_start > 0 else (messages or [])
+
+        # Map each kanban_create tool-call id to the board it targeted (if any).
+        create_boards: dict[str, Optional[str]] = {}
+        for message in turn:
+            if (message or {}).get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                call_id = call.get("id")
+                if function.get("name") != "kanban_create" or not call_id:
+                    continue
+                try:
+                    call_args = json.loads(function.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    call_args = {}
+                board = call_args.get("board") if isinstance(call_args, dict) else None
+                create_boards[call_id] = str(board) if board else None
+        if not create_boards:
+            return []
+
+        # Collect task ids from the matching successful tool results.
+        pending: list[tuple[str, Optional[str]]] = []
+        for message in turn:
+            if (message or {}).get("role") != "tool":
+                continue
+            call_id = message.get("tool_call_id")
+            if call_id not in create_boards:
+                continue
+            content = message.get("content")
+            try:
+                result = json.loads(content) if isinstance(content, str) else content
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(result, dict) or result.get("error"):
+                continue
+            if not (result.get("ok") is True or result.get("success") is True):
+                continue
+            task_id = result.get("task_id") or result.get("id")
+            if not isinstance(task_id, str) or not task_id.startswith("t_"):
+                continue
+            board = str(result["board"]) if result.get("board") else create_boards[call_id]
+            pending.append((task_id, board))
+
+        pending = list(dict.fromkeys(pending))
+        if not pending:
+            return []
+
+        thread_id = str(getattr(source, "thread_id", "") or "") or None
+        user_id = str(getattr(source, "user_id", "") or "") or None
+        notifier_profile = (
+            getattr(self, "_kanban_notifier_profile", None)
+            or self._active_profile_name()
+        )
+
+        def _persist() -> list[str]:
+            from hermes_cli import kanban_db as _kb
+
+            done: list[str] = []
+            for task_id, board in pending:
+                conn = _kb.connect(board=board)
+                try:
+                    _kb.add_notify_sub(
+                        conn,
+                        task_id=task_id,
+                        platform=platform_str,
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        notifier_profile=notifier_profile,
+                    )
+                    done.append(task_id)
+                finally:
+                    conn.close()
+            return done
+
+        subscribed = await asyncio.to_thread(_persist)
+        if subscribed:
+            logger.info(
+                "Auto-subscribed %s chat to %d Kanban card(s) created this "
+                "turn: %s",
+                platform_str, len(subscribed), ", ".join(subscribed),
+            )
+        return subscribed
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -9608,6 +9721,19 @@ class GatewayRunner:
                     "rephrase your question."
                 )
             agent_messages = agent_result.get("messages", [])
+            # Subscribe this chat to Kanban cards the model created THIS turn so
+            # the user is notified when the worker finishes. Scope to the new
+            # messages via history_offset; never re-scan the long-lived session
+            # transcript (that would re-subscribe past cards and replay stale
+            # completions).
+            try:
+                await self._subscribe_chat_to_kanban_cards(
+                    source,
+                    agent_messages,
+                    turn_start=agent_result.get("history_offset", len(history)),
+                )
+            except Exception as _kanban_sub_exc:
+                logger.debug("Kanban auto-subscribe failed: %s", _kanban_sub_exc)
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
             _resp_len = len(response)
