@@ -48,6 +48,10 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
+    # Digital brain — external semantic memory (gated on YOUSELF_GATEWAY_URL/
+    # _TOKEN via check_fn; only appears on provisioned youself bots). Pair with
+    # the `digital-brain` skill for search-first behavior.
+    "brain_search", "brain_get_note", "brain_graph",
     # Session history search
     "session_search",
     # Clarifying questions
