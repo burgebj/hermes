@@ -1974,6 +1974,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    model: Optional[Dict[str, str]] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1987,6 +1988,12 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'model' parameter ({"provider": ..., "model": ...}) is an optional
+    per-call override: when set, children run on that provider:model pair
+    instead of inheriting from the parent or delegation config. Either key
+    may be omitted to fall back to config. A per-task 'model' beats the
+    top-level one.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2038,15 +2045,10 @@ def delegate_task(
         )
     effective_max_iter = default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
-    try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
-    except ValueError as exc:
-        return tool_error(str(exc))
+    # Delegation credentials (provider:model pair) are resolved per task in
+    # the child-construction loop below, so each task can carry its own
+    # `model` override. Precedence: per-task model > top-level `model` arg >
+    # delegation config > parent inherit. See _resolve_delegation_credentials.
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -2109,6 +2111,18 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Per-task model beats top-level model: a task carrying its own
+            # `model` override resolves that pair; otherwise the top-level
+            # `model` arg applies, falling back to config.yaml and finally to
+            # parent inherit. `_resolve_delegation_credentials` folds the
+            # override into the config-based resolution.
+            task_model_override = t.get("model") if "model" in t else model
+            try:
+                creds = _resolve_delegation_credentials(
+                    cfg, parent_agent, override=task_model_override
+                )
+            except ValueError as exc:
+                return tool_error(f"Task {i}: {exc}")
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2401,7 +2415,9 @@ def _resolve_child_credential_pool(effective_provider: Optional[str], parent_age
     return None
 
 
-def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
+def _resolve_delegation_credentials(
+    cfg: dict, parent_agent, override: Optional[dict] = None
+) -> dict:
     """Resolve credentials for subagent delegation.
 
     If ``delegation.base_url`` is configured, subagents use that direct
@@ -2420,10 +2436,26 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     If neither base_url nor provider is configured, returns None values so the
     child inherits everything from the parent agent.
 
+    ``override`` is an optional per-call/per-task ``model`` override of the
+    form ``{"provider": ..., "model": ...}``. When present, its ``provider``
+    and ``model`` take precedence over ``delegation.provider`` /
+    ``delegation.model``; either key may be omitted to fall back to config (or,
+    for ``provider``, to parent inherit). The rest of the resolution proceeds
+    unchanged, so an override still benefits from the runtime provider system.
+
     Raises ValueError with a user-friendly message on credential failure.
     """
-    configured_model = str(cfg.get("model") or "").strip() or None
-    configured_provider = str(cfg.get("provider") or "").strip() or None
+    if override is not None:
+        configured_provider = (
+            str(override.get("provider") or cfg.get("provider") or "").strip()
+            or None
+        )
+        configured_model = (
+            str(override.get("model") or cfg.get("model") or "").strip() or None
+        )
+    else:
+        configured_model = str(cfg.get("model") or "").strip() or None
+        configured_provider = str(cfg.get("provider") or "").strip() or None
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
     configured_api_key = str(cfg.get("api_key") or "").strip() or None
     configured_api_mode = str(cfg.get("api_mode") or "").strip().lower() or None
@@ -2795,6 +2827,35 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "object",
+                            "description": (
+                                "Optional per-task model override. When set, "
+                                "subagents use this provider:model pair instead "
+                                "of inheriting from the parent or config. Takes "
+                                "precedence over the top-level 'model' for this "
+                                "task only."
+                            ),
+                            "properties": {
+                                "provider": {
+                                    "type": "string",
+                                    "description": (
+                                        "Provider name (e.g. 'openrouter', "
+                                        "'anthropic', 'kimi-coding'). Falls back "
+                                        "to delegation.provider from config or "
+                                        "parent's provider if omitted."
+                                    ),
+                                },
+                                "model": {
+                                    "type": "string",
+                                    "description": (
+                                        "Model identifier (e.g. "
+                                        "'anthropic/claude-opus-4')."
+                                    ),
+                                },
+                            },
+                            "required": ["model"],
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2807,6 +2868,31 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "model": {
+                "type": "object",
+                "description": (
+                    "Optional per-call model override. When set, subagents use "
+                    "this provider:model pair instead of inheriting from the "
+                    "parent or config."
+                ),
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": (
+                            "Provider name (e.g. 'openrouter', 'anthropic', "
+                            "'kimi-coding'). Falls back to delegation.provider "
+                            "from config or parent's provider if omitted."
+                        ),
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Model identifier (e.g. 'anthropic/claude-opus-4')."
+                        ),
+                    },
+                },
+                "required": ["model"],
             },
             "acp_command": {
                 "type": "string",
@@ -2852,6 +2938,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
