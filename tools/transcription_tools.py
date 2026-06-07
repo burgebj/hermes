@@ -825,6 +825,14 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "stepfun":
+            if get_env_value("STEPFUN_API_KEY"):
+                return "stepfun"
+            logger.warning(
+                "STT provider 'stepfun' configured but STEPFUN_API_KEY not set"
+            )
+            return "none"
+
         return provider  # Unknown — let it fail downstream
 
     # --- Auto-detect (no explicit provider): local > groq > openai > xai > elevenlabs -
@@ -1610,6 +1618,132 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
         logger.error("ElevenLabs STT transcription failed: %s", e, exc_info=True)
         return {"success": False, "transcript": "", "error": f"ElevenLabs STT transcription failed: {e}"}
 
+# ---------------------------------------------------------------------------
+# Provider: StepFun (StepAudio 2.5 ASR)
+# ---------------------------------------------------------------------------
+
+
+def _transcribe_stepfun(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using StepFun StepAudio 2.5 ASR API.
+
+    Uses ``POST /v1/audio/asr/sse`` with SSE streaming response.
+    Requires ``STEPFUN_API_KEY`` environment variable.
+    """
+    api_key = get_env_value("STEPFUN_API_KEY")
+    if not api_key:
+        return {"success": False, "transcript": "", "error": "STEPFUN_API_KEY not set"}
+
+    stt_config = _load_stt_config()
+    stepfun_cfg = stt_config.get("stepfun", {})
+    base_url = str(
+        stepfun_cfg.get("base_url")
+        or get_env_value("STEPFUN_BASE_URL")
+        or "https://api.stepfun.ai/v1"
+    ).strip().rstrip("/")
+    if "step_plan" in base_url:
+        base_url = "https://api.stepfun.ai/v1"
+    language = str(
+        stepfun_cfg.get("language")
+        or os.getenv("HERMES_LOCAL_STT_LANGUAGE")
+        or "ko"
+    ).strip()
+
+    audio_path = Path(file_path)
+    if audio_path.suffix.lower() == ".ogg":
+        audio_format = {"type": "ogg", "codec": "opus"}
+    else:
+        audio_format = {"type": "mp3", "codec": "mp3"}
+
+    payload = {
+        "audio": {
+            "data": _encode_audio_base64(file_path),
+            "input": {
+                "transcription": {
+                    "model": model_name,
+                    "language": language,
+                    "enable_itn": True,
+                },
+                "format": audio_format,
+            },
+        }
+    }
+
+    try:
+        import json
+        import urllib.request
+        import urllib.error
+
+        req = urllib.request.Request(
+            f"{base_url}/audio/asr/sse",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+
+        transcript_parts = []
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            for raw_line in resp:
+                try:
+                    line = raw_line.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data_str)
+                    event_type = event.get("type", "")
+                    if event_type == "transcript.text.delta":
+                        transcript_parts.append(event.get("delta", ""))
+                    elif event_type == "transcript.text.done":
+                        break
+                except Exception:
+                    continue
+
+        transcript = "".join(transcript_parts).strip()
+
+        if not transcript:
+            return {"success": False, "transcript": "", "error": "StepFun ASR returned empty transcript"}
+
+        logger.info(
+            "Transcribed %s via StepFun ASR (lang=%s, model=%s, %d chars)",
+            audio_path.name,
+            language,
+            model_name,
+            len(transcript),
+        )
+
+        return {"success": True, "transcript": transcript, "provider": "stepfun"}
+
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            detail = str(e)
+        return {"success": False, "transcript": "", "error": f"StepFun ASR API error (HTTP {e.code}): {detail}"}
+    except PermissionError:
+        return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        logger.error("StepFun ASR transcription failed: %s", e, exc_info=True)
+        return {"success": False, "transcript": "", "error": f"StepFun ASR transcription failed: {e}"}
+
+
+def _encode_audio_base64(file_path: str) -> str:
+    """Read an audio file and return base64-encoded bytes as a string."""
+    import base64
+
+    with open(file_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -1688,6 +1822,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         elevenlabs_cfg = stt_config.get("elevenlabs", {})
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
         return _transcribe_elevenlabs(file_path, model_name)
+
+    if provider == "stepfun":
+        stepfun_cfg = stt_config.get("stepfun", {})
+        model_name = model or stepfun_cfg.get("model", "stepaudio-2.5-asr")
+        return _transcribe_stepfun(file_path, model_name)
 
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
