@@ -78,6 +78,52 @@ class TestResolveDisplaySetting:
         assert resolve_display_setting(config, "slack", "tool_progress") == "off"
         assert resolve_display_setting(config, "telegram", "tool_progress") == "all"
 
+    def test_feishu_final_response_format_defaults_to_legacy(self):
+        """Feishu rich final replies are opt-in; defaults preserve legacy behavior."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "feishu", "final_response_format") == "legacy"
+        assert resolve_display_setting({}, "feishu", "markdown_tables") == "table"
+        assert resolve_display_setting({}, "feishu", "card_schema") == "2.0"
+
+    def test_final_response_format_platform_override_is_normalised(self):
+        """New rich-reply display knobs resolve through platform overrides."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "platforms": {
+                    "feishu": {
+                        "final_response_format": "CARD",
+                        "markdown_tables": "CODE",
+                        "card_schema": 2.0,
+                    }
+                }
+            }
+        }
+        assert resolve_display_setting(config, "feishu", "final_response_format") == "card"
+        assert resolve_display_setting(config, "feishu", "markdown_tables") == "code"
+        assert resolve_display_setting(config, "feishu", "card_schema") == "2.0"
+
+    def test_invalid_rich_reply_settings_fall_back_to_safe_defaults(self):
+        """Unknown values fall back instead of leaking arbitrary strings into adapters."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "platforms": {
+                    "feishu": {
+                        "final_response_format": "sparkles",
+                        "markdown_tables": "spreadsheet",
+                        "card_schema": "1.0",
+                    }
+                }
+            }
+        }
+        assert resolve_display_setting(config, "feishu", "final_response_format") == "legacy"
+        assert resolve_display_setting(config, "feishu", "markdown_tables") == "table"
+        assert resolve_display_setting(config, "feishu", "card_schema") == "2.0"
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: tool_progress_overrides

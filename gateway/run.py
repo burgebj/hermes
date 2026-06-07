@@ -6819,6 +6819,23 @@ class GatewayRunner:
         """Wait for shutdown signal."""
         await self._shutdown_event.wait()
 
+    def _apply_display_config_to_platform_extra(self, platform: Platform, config: Any) -> None:
+        """Expose resolved display settings to platform adapters via config.extra."""
+        extra = getattr(config, "extra", None)
+        if not isinstance(extra, dict):
+            return
+        try:
+            from gateway.display_config import OVERRIDEABLE_KEYS, resolve_display_setting
+
+            user_config = _load_gateway_config()
+            platform_key = _platform_config_key(platform)
+            for key in OVERRIDEABLE_KEYS:
+                value = resolve_display_setting(user_config, platform_key, key, None)
+                if value is not None:
+                    extra.setdefault(key, value)
+        except Exception as exc:
+            logger.debug("Failed to apply display config for %s: %s", platform, exc)
+
     def _create_adapter(
         self, 
         platform: Platform, 
@@ -6830,6 +6847,7 @@ class GatewayRunner:
         through to the built-in if/elif chain for core platforms.
         """
         if hasattr(config, "extra") and isinstance(config.extra, dict):
+            self._apply_display_config_to_platform_extra(platform, config)
             config.extra.setdefault(
                 "group_sessions_per_user",
                 self.config.group_sessions_per_user,
@@ -19179,7 +19197,7 @@ class GatewayRunner:
                             await adapter.send(
                                 source.chat_id,
                                 first_response,
-                                metadata=_status_thread_metadata,
+                                metadata={"notify": True, "hermes_final_response": True},
                             )
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)

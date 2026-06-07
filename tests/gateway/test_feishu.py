@@ -417,6 +417,165 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_final_response_card_mode_sends_interactive_v2_card(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = []
+
+        async def _fake_send(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_card"),
+            )
+
+        adapter._client = object()
+        adapter._feishu_send_with_retry = _fake_send
+        adapter.config.extra["final_response_format"] = "card"
+        adapter.config.extra["markdown_tables"] = "table"
+
+        result = asyncio.run(
+            adapter.send(
+                "oc_chat",
+                "| 名称 | 状态 |\n|---|---|\n| Parser | **完成** |",
+                metadata={"hermes_final_response": True},
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured[0]["msg_type"], "interactive")
+        payload = json.loads(captured[0]["payload"])
+        self.assertEqual(payload["schema"], "2.0")
+        self.assertEqual(payload["body"]["elements"][0]["tag"], "table")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_final_response_legacy_mode_preserves_existing_table_text_behavior(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = []
+
+        async def _fake_send(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_text"),
+            )
+
+        adapter._client = object()
+        adapter._feishu_send_with_retry = _fake_send
+
+        result = asyncio.run(
+            adapter.send(
+                "oc_chat",
+                "| A | B |\n|---|---|\n| 1 | 2 |",
+                metadata={"hermes_final_response": True},
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured[0]["msg_type"], "text")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_final_response_card_failure_falls_back_to_post_then_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = []
+
+        async def _fake_send(**kwargs):
+            captured.append(kwargs)
+            if kwargs["msg_type"] == "interactive":
+                return SimpleNamespace(success=lambda: False, code=230001, msg="invalid card")
+            if kwargs["msg_type"] == "post":
+                return SimpleNamespace(success=lambda: False, code=230001, msg="content format of the post type is incorrect")
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_text"),
+            )
+
+        adapter._client = object()
+        adapter._feishu_send_with_retry = _fake_send
+        adapter.config.extra["final_response_format"] = "card"
+
+        result = asyncio.run(
+            adapter.send(
+                "oc_chat",
+                "可以用 **粗体**。",
+                metadata={"hermes_final_response": True},
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual([call["msg_type"] for call in captured], ["interactive", "post", "text"])
+        self.assertEqual(captured[-1]["payload"], json.dumps({"text": "可以用 粗体。"}, ensure_ascii=False))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_final_response_text_mode_sends_plain_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = []
+
+        async def _fake_send(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_text"),
+            )
+
+        adapter._client = object()
+        adapter._feishu_send_with_retry = _fake_send
+        adapter.config.extra["final_response_format"] = "text"
+
+        result = asyncio.run(
+            adapter.send(
+                "oc_chat",
+                "可以用 **粗体**。",
+                metadata={"hermes_final_response": True},
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured[0]["msg_type"], "text")
+        self.assertEqual(captured[0]["payload"], json.dumps({"text": "可以用 **粗体**。"}, ensure_ascii=False))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_final_response_post_mode_sends_post_for_markdown_without_table(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = []
+
+        async def _fake_send(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(message_id="om_post"),
+            )
+
+        adapter._client = object()
+        adapter._feishu_send_with_retry = _fake_send
+        adapter.config.extra["final_response_format"] = "post"
+
+        result = asyncio.run(
+            adapter.send(
+                "oc_chat",
+                "可以用 **粗体**。",
+                metadata={"hermes_final_response": True},
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured[0]["msg_type"], "post")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_get_chat_info_uses_real_feishu_chat_api(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -648,7 +807,6 @@ class TestAdapterBehavior(unittest.TestCase):
                 "p2p_chat_entered",
                 "message_recalled",
                 "customized:drive.notice.comment_add_v1",
-                "customized:vc.bot.meeting_invited_v1",
                 "build",
             ],
         )

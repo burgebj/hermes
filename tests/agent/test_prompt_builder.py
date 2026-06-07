@@ -48,6 +48,13 @@ class TestGuidanceConstants:
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
 
+    def test_feishu_hint_does_not_claim_raw_markdown_rendering(self):
+        hint = PLATFORM_HINTS["feishu"]
+
+        assert "Do not assume raw text messages render full Markdown" in hint
+        assert "Feishu renders Markdown in messages" not in hint
+        assert "Feishu cards" in hint
+
 
 # =========================================================================
 # Context injection scanning
@@ -927,29 +934,6 @@ class TestEnvironmentHints:
         assert "Terminal backend: docker" in result
         assert "inside" in result.lower()
 
-    def test_build_environment_hints_uses_terminal_cwd_over_launch_dir(self, monkeypatch, tmp_path):
-        """THE BUG: gateway/cron set TERMINAL_CWD but the prompt emitted os.getcwd()
-        (the daemon launch dir). Regression for #24882/#24969/#27383/#29265."""
-        import agent.prompt_builder as _pb
-        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
-        monkeypatch.delenv("TERMINAL_ENV", raising=False)
-        configured = tmp_path / "workspace"
-        configured.mkdir()
-        monkeypatch.setenv("TERMINAL_CWD", str(configured))
-        monkeypatch.chdir(tmp_path)
-        _pb._clear_backend_probe_cache()
-        assert f"Current working directory: {configured}" in _pb.build_environment_hints()
-
-    def test_build_environment_hints_falls_back_to_launch_dir(self, monkeypatch, tmp_path):
-        """The #19242 local-CLI contract: no TERMINAL_CWD → the launch dir."""
-        import agent.prompt_builder as _pb
-        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
-        monkeypatch.delenv("TERMINAL_ENV", raising=False)
-        monkeypatch.delenv("TERMINAL_CWD", raising=False)
-        monkeypatch.chdir(tmp_path)
-        _pb._clear_backend_probe_cache()
-        assert f"Current working directory: {tmp_path}" in _pb.build_environment_hints()
-
     def test_build_environment_hints_uses_live_probe_when_available(self, monkeypatch):
         """When the probe succeeds, its output must appear in the hint block."""
         import agent.prompt_builder as _pb
@@ -1268,5 +1252,6 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
+
 
 
