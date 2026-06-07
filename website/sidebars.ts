@@ -149,6 +149,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-claude-code',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-codex',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-hermes-agent',
+                    'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-openclaw',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-opencode',
                   ],
                 },
