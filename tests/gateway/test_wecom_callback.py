@@ -307,3 +307,95 @@ class TestWecomCallbackPollLoop:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert calls == ["test"]
+
+
+class TestWecomCallbackAccessLogDisabled:
+    """The WeCom URL-verification handshake and inbound callbacks carry the
+    ``msg_signature`` HMAC (and ``echostr``) in the request *query string*
+    (see ``_handle_verify`` / ``_handle_callback``). aiohttp's default access
+    logger would write that full request target to agent.log verbatim, leaking
+    the signature. ``connect()`` must build the AppRunner with
+    ``access_log=None`` so it is never persisted -- mirroring the BlueBubbles
+    webhook fix in 514f5020c.
+    """
+
+    @pytest.mark.asyncio
+    async def test_connect_disables_aiohttp_access_log(self, monkeypatch):
+        from gateway.platforms import wecom_callback as mod
+
+        captured: dict = {}
+
+        class FakeRunner:
+            def __init__(self, app, **kwargs):
+                captured["kwargs"] = kwargs
+
+            async def setup(self):
+                return None
+
+            async def cleanup(self):
+                return None
+
+        class FakeSite:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def start(self):
+                return None
+
+            async def stop(self):
+                return None
+
+        class FakeHttpClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def aclose(self):
+                return None
+
+        # The port-in-use probe connects to 127.0.0.1:<port>; force the
+        # "port free" branch deterministically.
+        class FakeSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def settimeout(self, _):
+                return None
+
+            def connect(self, _):
+                raise ConnectionRefusedError
+
+        monkeypatch.setattr(mod.web, "AppRunner", FakeRunner)
+        monkeypatch.setattr(mod.web, "TCPSite", FakeSite)
+        monkeypatch.setattr(mod.httpx, "AsyncClient", FakeHttpClient)
+        monkeypatch.setattr(mod._socket, "socket", lambda *a, **k: FakeSocket())
+
+        adapter = WecomCallbackAdapter(_config())
+
+        # Avoid the real poll loop and token-refresh network calls.
+        async def _noop_refresh(app):
+            return "tok"
+
+        monkeypatch.setattr(adapter, "_refresh_access_token", _noop_refresh)
+
+        async def _noop_poll():
+            return None
+
+        monkeypatch.setattr(adapter, "_poll_loop", _noop_poll)
+
+        result = await adapter.connect()
+        await adapter.disconnect()
+
+        assert result is True
+        assert "access_log" in captured["kwargs"], (
+            "AppRunner must be constructed with an explicit access_log kwarg"
+        )
+        assert captured["kwargs"]["access_log"] is None, (
+            "WeCom callback AppRunner must set access_log=None so the "
+            "msg_signature query string is never written to agent.log"
+        )

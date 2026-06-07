@@ -136,7 +136,13 @@ class WecomCallbackAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get(self._path, self._handle_verify)
             self._app.router.add_post(self._path, self._handle_callback)
-            self._runner = web.AppRunner(self._app)
+            # The WeCom URL-verification handshake and every inbound callback
+            # carry the `msg_signature` HMAC (and `echostr`) in the request
+            # *query string*. aiohttp's default access logger would write that
+            # full request target to agent.log verbatim. Disable the access log
+            # so the signature is never persisted (mirrors the BlueBubbles
+            # webhook fix in 514f5020c).
+            self._runner = web.AppRunner(self._app, access_log=None)
             await self._runner.setup()
             self._site = web.TCPSite(self._runner, self._host, self._port)
             await self._site.start()
