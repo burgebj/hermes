@@ -278,6 +278,37 @@ _SLACK_PROXY_HOSTS = (
     "wss-primary.slack.com",
 )
 
+# Slack section block text objects are limited to 3,000 characters.
+# Keep approval prompts below that limit even when both the command and
+# explanation are long.
+_SLACK_SECTION_TEXT_LIMIT = 3000
+_SLACK_APPROVAL_REASON_TARGET = 700
+_TRUNCATION_SUFFIX = "\n... [truncated]"
+
+
+def _truncate_for_slack_text_limit(text: str, limit: int) -> str:
+    """Trim text to fit inside a Slack text object budget."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(_TRUNCATION_SUFFIX):
+        return text[:limit]
+    return text[: limit - len(_TRUNCATION_SUFFIX)].rstrip() + _TRUNCATION_SUFFIX
+
+
+def _build_slack_approval_section_text(command: str, description: str) -> str:
+    """Build the approval prompt section without exceeding Slack limits."""
+    header = ":warning: *Command Approval Required*\n```"
+    reason_prefix = "```\nReason: "
+    budget = _SLACK_SECTION_TEXT_LIMIT - len(header) - len(reason_prefix)
+    reason_target = min(len(description), _SLACK_APPROVAL_REASON_TARGET)
+    command_budget = max(0, budget - reason_target)
+    cmd_preview = _truncate_for_slack_text_limit(command, command_budget)
+    reason_budget = max(0, budget - len(cmd_preview))
+    description_preview = _truncate_for_slack_text_limit(description, reason_budget)
+    return f"{header}{cmd_preview}{reason_prefix}{description_preview}"
+
 
 def _resolve_slack_proxy_url() -> Optional[str]:
     """Resolve a proxy URL that Slack SDK clients can safely use."""
@@ -2660,7 +2691,8 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
+            section_text = _build_slack_approval_section_text(command, description)
+            cmd_preview = _truncate_for_slack_text_limit(command, 100)
             thread_ts = self._resolve_thread_ts(None, metadata)
 
             blocks = [
@@ -2668,11 +2700,7 @@ class SlackAdapter(BasePlatformAdapter):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": (
-                            f":warning: *Command Approval Required*\n"
-                            f"```{cmd_preview}```\n"
-                            f"Reason: {description}"
-                        ),
+                        "text": section_text,
                     },
                 },
                 {

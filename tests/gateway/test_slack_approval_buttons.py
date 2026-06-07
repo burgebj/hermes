@@ -160,7 +160,27 @@ class TestSlackExecApproval:
         kwargs = mock_client.chat_postMessage.call_args[1]
         section_text = kwargs["blocks"][0]["text"]["text"]
         assert "..." in section_text
-        assert len(section_text) < 5000
+        assert len(section_text) <= 3000
+
+    @pytest.mark.asyncio
+    async def test_bounds_combined_command_and_reason_block_text(self):
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "1.2"})
+
+        await adapter.send_exec_approval(
+            chat_id="C1",
+            command="x" * 5000,
+            session_key="s",
+            description="y" * 5000,
+        )
+
+        kwargs = mock_client.chat_postMessage.call_args[1]
+        section_text = kwargs["blocks"][0]["text"]["text"]
+        assert len(section_text) <= 3000
+        assert section_text.startswith(":warning: *Command Approval Required*")
+        assert "Reason: " in section_text
+        assert "... [truncated]" in section_text
 
 
 # ===========================================================================
