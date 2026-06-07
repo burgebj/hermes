@@ -774,45 +774,6 @@ def _split_markdown_blocks(content: str) -> List[str]:
     return [block for block in blocks if block]
 
 
-def _split_delivery_units_for_weixin(content: str) -> List[str]:
-    """Split formatted content into chat-friendly delivery units.
-
-    Weixin can render Markdown, but chat readability is better when top-level
-    line breaks become separate messages. Keep fenced code blocks intact and
-    attach indented continuation lines to the previous top-level line so nested
-    list items do not get torn apart.
-    """
-    units: List[str] = []
-
-    for block in _split_markdown_blocks(content):
-        if _FENCE_RE.match(block.splitlines()[0].strip()):
-            units.append(block)
-            continue
-
-        current: List[str] = []
-        for raw_line in block.splitlines():
-            line = raw_line.rstrip()
-            if not line.strip():
-                if current:
-                    units.append("\n".join(current).strip())
-                    current = []
-                continue
-
-            is_continuation = bool(current) and raw_line.startswith((" ", "\t"))
-            if is_continuation:
-                current.append(line)
-                continue
-
-            if current:
-                units.append("\n".join(current).strip())
-            current = [line]
-
-        if current:
-            units.append("\n".join(current).strip())
-
-    return [unit for unit in units if unit]
-
-
 def _looks_like_chatty_line_for_weixin(line: str) -> bool:
     """Return True when a line looks like a standalone chat utterance."""
     stripped = line.strip()
@@ -843,14 +804,25 @@ def _looks_like_heading_line_for_weixin(line: str) -> bool:
     return len(stripped) <= 24 and stripped.endswith((":", "："))
 
 
-def _should_split_short_chat_block_for_weixin(block: str) -> bool:
-    """Split only chat-like multiline blocks into separate bubbles."""
-    lines = [line for line in block.splitlines() if line.strip()]
-    if not 2 <= len(lines) <= 6:
+def _is_chatty_block(block: str, *, check_length: bool = True) -> bool:
+    """Return True when a block looks like a short chatty exchange.
+
+    When *check_length* is True (default for the compact path), also
+    require 2–6 non-empty lines and reject blocks whose first line
+    looks like a heading — this preserves the original
+    ``_should_split_short_chat_block_for_weixin`` guard rails.
+    When False (used in the per-line path), any non-empty all-chatty
+    block qualifies regardless of line count or heading.
+    """
+    lines = [l for l in block.splitlines() if l.strip()]
+    if not lines:
         return False
-    if _looks_like_heading_line_for_weixin(lines[0]):
-        return False
-    return all(_looks_like_chatty_line_for_weixin(line) for line in lines)
+    if check_length:
+        if not 2 <= len(lines) <= 6:
+            return False
+        if _looks_like_heading_line_for_weixin(lines[0]):
+            return False
+    return all(_looks_like_chatty_line_for_weixin(l) for l in lines)
 
 
 def _pack_markdown_blocks_for_weixin(content: str, max_length: int) -> List[str]:
@@ -897,11 +869,18 @@ def _split_text_for_weixin_delivery(
     if not content:
         return []
     if split_per_line:
-        # Legacy: one message per top-level delivery unit.
+        # Legacy: one top-level line → one bubble.
         if len(content) <= max_length and "\n" not in content:
             return [content]
         chunks: List[str] = []
-        for unit in _split_delivery_units_for_weixin(content):
+        for unit in _split_markdown_blocks(content):
+            # Short chatty blocks: split into individual lines.
+            if _is_chatty_block(unit, check_length=False):
+                for line in unit.splitlines():
+                    line = line.strip()
+                    if line:
+                        chunks.append(line)
+                continue
             if len(unit) <= max_length:
                 chunks.append(unit)
                 continue
@@ -912,11 +891,9 @@ def _split_text_for_weixin_delivery(
     # content looks like a short chatty exchange, in which case split into
     # separate bubbles for a more natural chat feel.
     if len(content) <= max_length:
-        return (
-            [u for u in _split_delivery_units_for_weixin(content) if u]
-            if _should_split_short_chat_block_for_weixin(content)
-            else [content]
-        )
+        if _is_chatty_block(content):
+            return [line.strip() for line in content.splitlines() if line.strip()]
+        return [content]
     return _pack_markdown_blocks_for_weixin(content, max_length) or [content]
 
 
