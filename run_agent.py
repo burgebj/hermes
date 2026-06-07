@@ -1810,6 +1810,25 @@ class AIAgent:
                 prefix = f"HTTP {status_code}: " if status_code else ""
                 return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
+        # SDK may leave body empty while httpx still has the payload (#36109).
+        response = getattr(error, "response", None)
+        if response is not None:
+            snippet = (getattr(response, "text", None) or "").strip()
+            if snippet:
+                status_code = getattr(error, "status_code", None)
+                prefix = f"HTTP {status_code}: " if status_code else ""
+                try:
+                    payload = json.loads(snippet)
+                except (json.JSONDecodeError, TypeError):
+                    payload = None
+                if isinstance(payload, dict):
+                    err = payload.get("error")
+                    if isinstance(err, dict) and err.get("message"):
+                        return f"{prefix}{str(err['message'])[:300]}"
+                    if payload.get("message"):
+                        return f"{prefix}{str(payload['message'])[:300]}"
+                return f"{prefix}{snippet[:300]}"
+
         # Fallback: truncate the raw string but give more room than 200 chars
         status_code = getattr(error, "status_code", None)
         prefix = f"HTTP {status_code}: " if status_code else ""
