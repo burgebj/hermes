@@ -1,9 +1,11 @@
 """Tests for agent/skill_utils.py."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 from agent.skill_utils import (
     extract_skill_conditions,
+    is_excluded_skill_path,
     iter_skill_index_files,
     skill_matches_platform,
 )
@@ -100,6 +102,75 @@ def test_iter_skill_index_files_prunes_dependency_dirs(tmp_path):
     found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
 
     assert found == [real / "SKILL.md"]
+
+
+def test_iter_skill_index_files_prunes_bak_dirs(tmp_path):
+    live = tmp_path / "hermes-profile"
+    live.mkdir()
+    (live / "SKILL.md").write_text("---\nname: hermes-profile\n---\n", encoding="utf-8")
+
+    backup = tmp_path / "hermes-profile.bak-20260510_233500"
+    backup.mkdir()
+    (backup / "SKILL.md").write_text(
+        "---\nname: hermes-profile-backup\n---\n", encoding="utf-8"
+    )
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == [live / "SKILL.md"]
+
+
+def test_iter_skill_index_files_prunes_dot_bak_dirs(tmp_path):
+    backup = tmp_path / ".bak-20260510_233500"
+    backup.mkdir()
+    (backup / "SKILL.md").write_text("---\nname: backup\n---\n", encoding="utf-8")
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == []
+
+
+def test_iter_skill_index_files_prunes_backup_dirs(tmp_path):
+    dot_backup = tmp_path / ".backup-old"
+    dot_backup.mkdir()
+    (dot_backup / "SKILL.md").write_text(
+        "---\nname: dot-backup\n---\n", encoding="utf-8"
+    )
+
+    named_backup = tmp_path / "my-skill.backup-20260510"
+    named_backup.mkdir()
+    (named_backup / "SKILL.md").write_text(
+        "---\nname: named-backup\n---\n", encoding="utf-8"
+    )
+
+    live = tmp_path / "live-skill"
+    live.mkdir()
+    (live / "SKILL.md").write_text("---\nname: live-skill\n---\n", encoding="utf-8")
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == [live / "SKILL.md"]
+
+
+def test_is_excluded_skill_path_matches_bak_pattern():
+    assert (
+        is_excluded_skill_path(
+            Path("skills/hermes-profile.bak-20260510_233500/SKILL.md")
+        )
+        is True
+    )
+
+
+def test_is_excluded_skill_path_does_not_exclude_live_skill():
+    assert is_excluded_skill_path(Path("skills/hermes-profile/SKILL.md")) is False
+
+
+def test_is_excluded_skill_path_matches_dot_backup_pattern():
+    assert is_excluded_skill_path(Path("skills/.backup-old/nested/SKILL.md")) is True
+
+
+def test_is_excluded_skill_path_allows_skill_with_bak_in_name():
+    assert is_excluded_skill_path(Path("skills/bak-manager/SKILL.md")) is False
 
 
 # ── skill_matches_platform on Termux ──────────────────────────────────────

@@ -44,13 +44,23 @@ EXCLUDED_SKILL_DIRS = frozenset(
 )
 
 
+_BACKUP_DIR_PATTERN = re.compile(
+    r"(^\.bak-|^\.backup-|\.bak-|\.backup-)",
+)
+
+
+def _is_backup_dir_name(name: str) -> bool:
+    """Return True when *name* matches a backup directory pattern."""
+    return bool(_BACKUP_DIR_PATTERN.search(name))
+
+
 def is_excluded_skill_path(path) -> bool:
-    """True if any component of *path* is in EXCLUDED_SKILL_DIRS.
+    """True if any component of *path* is excluded or matches a backup pattern.
 
     Use this on every SKILL.md path produced by ``rglob`` to prune
-    dependency, virtualenv, VCS, and cache directories. Centralising the
-    check here keeps every skill-scanning site in sync with the shared
-    exclusion set.
+    dependency, virtualenv, VCS, cache, and backup directories. Centralising
+    the check here keeps every skill-scanning site in sync with the shared
+    exclusion set and backup directory patterns.
 
     Accepts a Path or string.
     """
@@ -59,7 +69,10 @@ def is_excluded_skill_path(path) -> bool:
     except AttributeError:
         from pathlib import PurePath
         parts = PurePath(str(path)).parts
-    return any(part in EXCLUDED_SKILL_DIRS for part in parts)
+    return any(
+        part in EXCLUDED_SKILL_DIRS or _is_backup_dir_name(part)
+        for part in parts
+    )
 
 
 # ── Lazy YAML loader ─────────────────────────────────────────────────────
@@ -637,7 +650,10 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
     """
     matches = []
     for root, dirs, files in os.walk(skills_dir, followlinks=True):
-        dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS]
+        dirs[:] = [
+            d for d in dirs
+            if d not in EXCLUDED_SKILL_DIRS and not _is_backup_dir_name(d)
+        ]
         if filename in files:
             matches.append(Path(root) / filename)
     for path in sorted(matches, key=lambda p: str(p.relative_to(skills_dir))):
