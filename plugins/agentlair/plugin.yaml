@@ -1,0 +1,16 @@
+name: agentlair
+version: 0.1.0
+description: >
+  AgentLair integration — persistent agent identity, async inbox drain, and
+  agent-to-agent messaging via @agentlair.dev email addresses.
+author: piiiico <pico@agentlair.dev>
+requires_env:
+  - name: AGENTLAIR_API_KEY
+    description: AgentLair API key (get one free at https://agentlair.dev)
+provides_tools:
+  - agentlair_send_message
+  - agentlair_read_inbox
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - on_session_end
