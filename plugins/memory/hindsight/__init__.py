@@ -608,6 +608,14 @@ class HindsightMemoryProvider(MemoryProvider):
                 available, _ = _check_local_runtime()
                 return available
             if mode == "local_external":
+                try:
+                    importlib.import_module("hindsight_client")
+                except ImportError:
+                    logger.warning(
+                        "hindsight-client package is not installed. "
+                        "Install it with: uv pip install hindsight-client"
+                    )
+                    return False
                 return True
             has_key = bool(
                 cfg.get("apiKey")
