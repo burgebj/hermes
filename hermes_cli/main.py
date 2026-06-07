@@ -62,6 +62,7 @@ except ModuleNotFoundError:
     pass
 
 import os
+import shlex
 import sys
 
 
@@ -7672,7 +7673,13 @@ def cmd_gui(args: argparse.Namespace):
         sys.exit(1)
 
     print(f"→ Launching packaged Hermes Desktop: {packaged_executable}")
-    launch_result = subprocess.run([str(packaged_executable)], cwd=desktop_dir, env=env, check=False)
+    launch_args = [str(packaged_executable)]
+    extra_flags = os.environ.get("HERMES_DESKTOP_ELECTRON_FLAGS", "")
+    if extra_flags:
+        # Use Windows-compatible parsing when on Windows so backslashes
+        # and Windows-style quotes in flags aren't mangled.
+        launch_args.extend(shlex.split(extra_flags, posix=(os.name != "nt")))
+    launch_result = subprocess.run(launch_args, cwd=desktop_dir, env=env, check=False)
     sys.exit(launch_result.returncode)
 
 
