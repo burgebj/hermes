@@ -511,6 +511,15 @@ terminal(command="tmux new-session -d -s task3 -x 140 -y 40 && tmux send-keys -t
 terminal(command="sleep 30 && for s in task1 task2 task3; do echo '=== '$s' ==='; tmux capture-pane -t $s -p -S -5 2>/dev/null; done")
 ```
 
+### Subscription Sprint (many lanes on a short quota window)
+
+When the Pro/Max rate-limit window is partially burned and you want to land as
+many **independent** lanes as possible before it resets, follow the codified
+pattern — pre-flight quota check, per-lane worktree isolation, hard turn/budget
+caps, harvest-by-`subtype`, and the mandatory safety gates (no secrets, no
+deploy/merge without human approval):
+`skill_view(name="claude-code", file_path="references/subscription-sprint.md")`
+
 ## CLAUDE.md — Project Context File
 
 Claude Code auto-loads `CLAUDE.md` from the project root. Use it to persist project context:
