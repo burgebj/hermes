@@ -627,6 +627,63 @@ def _relative_time(ts) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
+def _clean_tsv_cell(value) -> str:
+    """Return a single TSV cell with tabs/newlines normalized to spaces."""
+    if value is None:
+        return ""
+    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+def _session_list_record(session: dict) -> dict:
+    """Return stable, non-sensitive fields for machine-readable list output."""
+    columns = ("id", "title", "preview", "last_active", "source")
+    return {col: session.get(col) for col in columns}
+
+
+def _format_sessions_list(sessions: list[dict], output_format: str = "table") -> str:
+    """Format rich session rows for ``hermes sessions list``.
+
+    ``table`` preserves the existing human-readable output. ``json`` and
+    ``tsv`` are stable machine-readable formats for wrappers and scripts.
+    """
+    if output_format == "json":
+        return json.dumps([_session_list_record(s) for s in sessions], ensure_ascii=False) + "\n"
+
+    if output_format == "tsv":
+        columns = ["id", "title", "preview", "last_active", "source"]
+        lines = ["\t".join(columns)]
+        for s in sessions:
+            record = _session_list_record(s)
+            lines.append("\t".join(_clean_tsv_cell(record.get(col)) for col in columns))
+        return "\n".join(lines) + "\n"
+
+    if output_format != "table":
+        raise ValueError(f"Unsupported sessions list format: {output_format}")
+
+    lines = []
+    has_titles = any(s.get("title") for s in sessions)
+    if has_titles:
+        lines.append(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
+        lines.append("─" * 110)
+    else:
+        lines.append(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
+        lines.append("─" * 95)
+    for s in sessions:
+        last_active = _relative_time(s.get("last_active"))
+        preview = (
+            s.get("preview", "")[:38]
+            if has_titles
+            else s.get("preview", "")[:48]
+        )
+        sid = s["id"]
+        if has_titles:
+            title = (s.get("title") or "—")[:30]
+            lines.append(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
+        else:
+            lines.append(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
+    return "\n".join(lines) + "\n"
+
+
 def _has_any_provider_configured() -> bool:
     """Check if at least one inference provider is usable."""
     from hermes_cli.config import get_env_path, get_hermes_home, load_config
@@ -15024,6 +15081,12 @@ Examples:
     sessions_list.add_argument(
         "--limit", type=int, default=20, help="Max sessions to show"
     )
+    sessions_list.add_argument(
+        "--format",
+        choices=("table", "json", "tsv"),
+        default="table",
+        help="Output format for sessions list (default: table)",
+    )
 
     sessions_export = sessions_subparsers.add_parser(
         "export", help="Export sessions to a JSONL file"
@@ -15109,27 +15172,7 @@ Examples:
             if not sessions:
                 print("No sessions found.")
                 return
-            has_titles = any(s.get("title") for s in sessions)
-            if has_titles:
-                print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-                print("─" * 110)
-            else:
-                print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
-                print("─" * 95)
-            for s in sessions:
-                last_active = _relative_time(s.get("last_active"))
-                preview = (
-                    s.get("preview", "")[:38]
-                    if has_titles
-                    else s.get("preview", "")[:48]
-                )
-                if has_titles:
-                    title = (s.get("title") or "—")[:30]
-                    sid = s["id"]
-                    print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
-                else:
-                    sid = s["id"]
-                    print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
+            sys.stdout.write(_format_sessions_list(sessions, args.format))
 
         elif action == "export":
             if args.session_id:
