@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
@@ -7,6 +8,7 @@ import type { ModelOptionProvider, ModelOptionsResponse, ModelPricing } from '@/
 import type { HermesGateway } from '../hermes'
 import { getGlobalModelOptions } from '../hermes'
 import { cn } from '../lib/utils'
+import { $customModels, addCustomModel } from '../store/custom-models'
 import { startManualOnboarding } from '../store/onboarding'
 
 import { InlineNotice } from './notifications'
@@ -14,6 +16,8 @@ import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './ui/command'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
+import { Input } from './ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Skeleton } from './ui/skeleton'
 
 interface ModelPickerDialogProps {
@@ -52,6 +56,10 @@ export function ModelPickerDialog({
   // it and do a plain substring filter that preserves array order — matching
   // the `hermes model` CLI picker, which shows the curated list verbatim.
   const [search, setSearch] = useState('')
+  const [showCustomInput, setShowCustomInput] = useState(false)
+  const [customModelId, setCustomModelId] = useState('')
+  const [customProvider, setCustomProvider] = useState('')
+  const customModels = useStore($customModels)
 
   const modelOptions = useQuery({
     queryKey: ['model-options', sessionId || 'global'],
@@ -68,6 +76,27 @@ export function ModelPickerDialog({
   })
 
   const providers = modelOptions.data?.providers ?? []
+
+  // Merge user-added custom models into each provider's model list so they
+  // appear in the picker alongside curated entries.
+  const providersWithCustom: ModelOptionProvider[] = providers.map(p => {
+    const custom = customModels.filter(cm => cm.provider === p.slug).map(cm => cm.model)
+
+    if (custom.length === 0) {
+      return p
+    }
+
+    const merged = [...(p.models ?? [])]
+
+    for (const m of custom) {
+      if (!merged.includes(m)) {
+        merged.push(m)
+      }
+    }
+
+    return { ...p, models: merged }
+  })
+
   const optionsModel = String(modelOptions.data?.model ?? currentModel ?? '')
   const optionsProvider = String(modelOptions.data?.provider ?? currentProvider ?? '')
   const loading = modelOptions.isPending && !modelOptions.data
@@ -108,44 +137,119 @@ export function ModelPickerDialog({
         </DialogHeader>
 
         <Command className="rounded-none bg-card" shouldFilter={false}>
-          <CommandInput
-            autoFocus
-            onValueChange={setSearch}
-            placeholder={copy.search}
-            value={search}
-          />
+          <CommandInput autoFocus onValueChange={setSearch} placeholder={copy.search} value={search} />
           <CommandList className="max-h-96">
             {!loading && !error && <CommandEmpty>{copy.noModels}</CommandEmpty>}
             <ModelResults
               currentModel={optionsModel || currentModel}
               currentProvider={optionsProvider || currentProvider}
+              customModels={customModels}
               error={error}
               loading={loading}
               onSelectModel={selectModel}
-              providers={providers}
+              providers={providersWithCustom}
               search={search}
             />
           </CommandList>
         </Command>
 
-        <DialogFooter className="flex-row items-center justify-between gap-3 bg-card p-3 sm:justify-between">
-          <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground">
-            <Checkbox
-              checked={persistGlobal || !sessionId}
-              disabled={!sessionId}
-              onCheckedChange={checked => setPersistGlobal(checked === true)}
-            />
-            {sessionId ? copy.persistGlobalSession : copy.persistGlobal}
-          </label>
+        <DialogFooter className="flex-col gap-3 bg-card p-3 sm:flex-col">
+          {showCustomInput ? (
+            <div className="flex w-full flex-wrap items-center gap-2">
+              <Select onValueChange={setCustomProvider} value={customProvider}>
+                <SelectTrigger className="min-w-32 text-xs">
+                  <SelectValue placeholder="Provider" />
+                </SelectTrigger>
+                <SelectContent>
+                  {providers
+                    .filter(p => (p.models ?? []).length > 0 || p.authenticated !== false)
+                    .map(p => (
+                      <SelectItem key={p.slug} value={p.slug}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <Input
+                autoComplete="off"
+                autoFocus
+                className="min-w-40 flex-1 text-xs"
+                onChange={e => setCustomModelId(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && customModelId.trim() && customProvider) {
+                    addCustomModel(customProvider, customModelId.trim())
+                    onSelect({
+                      provider: customProvider,
+                      model: customModelId.trim(),
+                      persistGlobal: persistGlobal || !sessionId
+                    })
+                    setCustomModelId('')
+                    setCustomProvider('')
+                    setShowCustomInput(false)
+                    onOpenChange(false)
+                  } else if (e.key === 'Escape') {
+                    setShowCustomInput(false)
+                    setCustomModelId('')
+                    setCustomProvider('')
+                  }
+                }}
+                placeholder={copy.customModelPlaceholder}
+                value={customModelId}
+              />
+              <Button
+                disabled={!customModelId.trim() || !customProvider}
+                onClick={() => {
+                  addCustomModel(customProvider, customModelId.trim())
+                  onSelect({
+                    provider: customProvider,
+                    model: customModelId.trim(),
+                    persistGlobal: persistGlobal || !sessionId
+                  })
+                  setCustomModelId('')
+                  setCustomProvider('')
+                  setShowCustomInput(false)
+                  onOpenChange(false)
+                }}
+                size="sm"
+              >
+                {copy.useCustomModel}
+              </Button>
+              <Button
+                onClick={() => {
+                  setShowCustomInput(false)
+                  setCustomModelId('')
+                  setCustomProvider('')
+                }}
+                size="sm"
+                variant="ghost"
+              >
+                {t.common.cancel}
+              </Button>
+            </div>
+          ) : (
+            <div className="flex w-full items-center justify-between gap-3">
+              <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground">
+                <Checkbox
+                  checked={persistGlobal || !sessionId}
+                  disabled={!sessionId}
+                  onCheckedChange={checked => setPersistGlobal(checked === true)}
+                />
+                {sessionId ? copy.persistGlobalSession : copy.persistGlobal}
+              </label>
 
-          <div className="flex items-center gap-2">
-            <Button onClick={addProvider} variant="ghost">
-              {copy.addProvider}
-            </Button>
-            <Button onClick={() => onOpenChange(false)} variant="outline">
-              {t.common.cancel}
-            </Button>
-          </div>
+              <div className="flex items-center gap-2">
+                <Button onClick={() => setShowCustomInput(true)} variant="ghost">
+                  {copy.customModel}
+                </Button>
+                <Button onClick={addProvider} variant="ghost">
+                  {copy.addProvider}
+                </Button>
+                <Button onClick={() => onOpenChange(false)} variant="outline">
+                  {t.common.cancel}
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -159,7 +263,8 @@ function ModelResults({
   currentModel,
   currentProvider,
   onSelectModel,
-  search
+  search,
+  customModels
 }: {
   loading: boolean
   error: string | null
@@ -168,6 +273,7 @@ function ModelResults({
   currentProvider: string
   onSelectModel: (provider: ModelOptionProvider, model: string) => void
   search: string
+  customModels: { provider: string; model: string }[]
 }) {
   const { t } = useI18n()
   const copy = t.modelPicker
@@ -228,6 +334,7 @@ function ModelResults({
               const isCurrent = model === currentModel && provider.slug === currentProvider
               const price = provider.pricing?.[model]
               const locked = unavailable.has(model)
+              const isCustom = customModels.some(cm => cm.provider === provider.slug && cm.model === model)
 
               return (
                 <CommandItem
@@ -247,7 +354,14 @@ function ModelResults({
                   value={`${provider.slug}:${model}`}
                 >
                   <span className="min-w-0 flex-1 truncate">{model}</span>
-                  {locked && <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">{copy.pro}</span>}
+                  {isCustom && (
+                    <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[0.6rem] text-muted-foreground">
+                      {copy.customModel.toLowerCase()}
+                    </span>
+                  )}
+                  {locked && (
+                    <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">{copy.pro}</span>
+                  )}
                   <ModelPrice isCurrent={isCurrent} price={price} />
                 </CommandItem>
               )

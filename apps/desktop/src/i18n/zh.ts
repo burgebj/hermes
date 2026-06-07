@@ -668,6 +668,11 @@ export const zh: Translations = {
       change: '更改',
       autoUseMain: '自动 · 使用主模型',
       providerDefault: '(提供方默认)',
+      customModelPlaceholder: 'Type a model ID...',
+      customModelHint: 'Type any model ID your provider supports, even if it\'s not listed.',
+      addModel: 'Add model',
+      customBadge: 'custom',
+      removeCustomModel: 'Remove custom model',
       tasks: {
         vision: { label: '视觉', hint: '图片分析' },
         web_extract: { label: '网页提取', hint: '页面总结' },
@@ -1563,7 +1568,10 @@ export const zh: Translations = {
     proNeedsSubscription: 'Pro 模型需要付费 Nous 订阅。',
     free: '免费',
     freeTier: '免费层',
-    priceTitle: '每百万 token 的输入/输出价格'
+    priceTitle: '每百万 token 的输入/输出价格',
+    customModel: 'Custom model',
+    customModelPlaceholder: 'provider/model-id or model-id',
+    useCustomModel: 'Use custom model',
   },
 
   modelVisibility: {

@@ -391,6 +391,11 @@ export interface Translations {
       change: string
       autoUseMain: string
       providerDefault: string
+      customModelPlaceholder: string
+      customModelHint: string
+      addModel: string
+      customBadge: string
+      removeCustomModel: string
       tasks: Record<string, AuxTaskCopy>
     }
     providers: {
@@ -1055,6 +1060,9 @@ export interface Translations {
     free: string
     freeTier: string
     priceTitle: string
+    customModel: string
+    customModelPlaceholder: string
+    useCustomModel: string
   }
 
   modelVisibility: {

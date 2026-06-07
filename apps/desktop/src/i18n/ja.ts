@@ -605,6 +605,11 @@ export const ja = defineLocale({
       change: '変更',
       autoUseMain: '自動 · メインモデルを使用',
       providerDefault: '(プロバイダーのデフォルト)',
+      customModelPlaceholder: 'Type a model ID...',
+      customModelHint: 'Type any model ID your provider supports, even if it\'s not listed.',
+      addModel: 'Add model',
+      customBadge: 'custom',
+      removeCustomModel: 'Remove custom model',
       tasks: {
         vision: { label: 'ビジョン', hint: '画像分析' },
         web_extract: { label: 'ウェブ抽出', hint: 'ページの要約' },
@@ -1525,7 +1530,10 @@ export const ja = defineLocale({
     proNeedsSubscription: 'Pro モデルには有料の Nous サブスクリプションが必要です。',
     free: '無料',
     freeTier: '無料プラン',
-    priceTitle: '100 万トークンあたりの入力/出力価格'
+    priceTitle: '100 万トークンあたりの入力/出力価格',
+    customModel: 'Custom model',
+    customModelPlaceholder: 'provider/model-id or model-id',
+    useCustomModel: 'Use custom model',
   },
 
   modelVisibility: {
