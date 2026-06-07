@@ -395,8 +395,18 @@ def cmd_mcp_add(args):
     print()
     print(color(f"  Connecting to '{name}'...", Colors.CYAN))
 
+    # Resolve ${VAR} placeholders for the probe so that header auth
+    # credentials are sent as real values.  The on-disk config keeps the
+    # template strings (e.g. "Bearer ${MCP_FOO_API_KEY}") so that the
+    # saved config remains portable across machines and profiles.
     try:
-        tools = _probe_single_server(name, server_config)
+        from tools.mcp_tool import _interpolate_env_vars
+        probe_config = _interpolate_env_vars(dict(server_config))
+    except Exception:
+        probe_config = server_config
+
+    try:
+        tools = _probe_single_server(name, probe_config)
     except Exception as exc:
         _error(f"Failed to connect: {exc}")
         if _confirm("Save config anyway (you can test later)?", default=False):
