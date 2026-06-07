@@ -3385,10 +3385,20 @@ class AIAgent:
             # from env vars (allow_env_proxies = trust_env and transport is None).
             # Explicitly read proxy settings while still honoring NO_PROXY for
             # loopback / local endpoints such as a locally hosted sub2api.
+            #
+            # Apply a connection timeout so stalled IPv6 connections don't
+            # hang the agent indefinitely (#37662).  httpx does not implement
+            # happy-eyeballs (RFC 8305) — when a hostname resolves to both
+            # IPv6 and IPv4, the first connection attempt (often IPv6) can
+            # stall without this timeout.
+            _timeout = _httpx.Timeout(10.0, connect=5.0)
             _proxy = _get_proxy_for_base_url(base_url)
             return _httpx.Client(
-                transport=_httpx.HTTPTransport(socket_options=_sock_opts),
+                transport=_httpx.HTTPTransport(
+                    socket_options=_sock_opts,
+                ),
                 proxy=_proxy,
+                timeout=_timeout,
             )
         except Exception:
             return None
