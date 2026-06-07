@@ -72,13 +72,19 @@ def _send_imap_id(imap: "imaplib.IMAP4") -> None:
     SEARCH/FETCH returns ``BYE Unsafe Login`` and disconnects.  Other
     IMAP servers either honor it silently or reject the unknown command;
     we swallow failures so non-supporting servers keep working.
+
+    Warning: some servers (e.g. Purelymail) return a tagged ``BAD`` to
+    the ID command.  ``imap.xatom()`` does not fully consume that
+    response, which desynchronizes imaplib's tag counter and causes
+    the next command (``SELECT``) to fail with "Unknown command".
+    We therefore use ``_simple_command()`` which keeps the state clean.
     """
     try:
         try:
             from hermes_cli import __version__ as _hermes_version
         except Exception:  # noqa: BLE001 — keep ID best-effort if import fails
             _hermes_version = "0"
-        imap.xatom(
+        imap._simple_command(
             "ID",
             f'("name" "hermes-agent" "version" "{_hermes_version}" '
             '"vendor" "NousResearch" '
