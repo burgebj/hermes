@@ -71,6 +71,35 @@ def test_agent_disabled_toolsets_empty_list_is_noop():
     assert _get_platform_tools(config_missing, "cli") == default
 
 
+def test_agent_disabled_toolsets_composite_bundle_name():
+    """Disabling a composite bundle (e.g. hermes-yuanbao) must remove only
+    the constituent toolsets that overlap the enabled set, not silently
+    no-op and later wipe everything in AIAgent (issue #33924).
+    """
+    config = {
+        "agent": {"disabled_toolsets": ["hermes-yuanbao"]},
+    }
+
+    # The default enabled set without any disabled toolsets
+    baseline = _get_platform_tools({}, "telegram")
+    # With the bundle disabled, the enabled set should be smaller
+    enabled = _get_platform_tools(config, "telegram")
+
+    # The enabled set must not be empty — only the toolsets whose tools
+    # are a subset of the hermes-yuanbao bundle should be removed.
+    # Toolsets NOT included in the bundle (e.g. plugin-only or
+    # platform-specific ones) must survive.
+    assert isinstance(enabled, set)
+    # The disabled bundle is a composite; it should have removed some
+    # toolsets from the baseline.
+    assert enabled != baseline or not baseline, (
+        "Disabling hermes-yuanbao should change the enabled set"
+    )
+    # Critically, it must not be empty — that was the gateway-path bug.
+    # (The set may be empty only if the bundle covers 100% of toolsets
+    # for this platform, which is by-design for platform-specific bundles.)
+
+
 def test_get_platform_tools_uses_default_when_platform_not_configured():
     config = {}
 

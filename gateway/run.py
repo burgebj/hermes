@@ -12652,8 +12652,9 @@ class GatewayRunner:
 
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
-            agent_cfg = user_config.get("agent") or {}
-            disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
+            # _get_platform_tools already honours agent.disabled_toolsets.
+            # Do not forward to AIAgent — see comment at line ~15937.
+            disabled_toolsets = None
 
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -17055,8 +17056,12 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
-        agent_cfg_local = user_config.get("agent") or {}
-        disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
+        # _get_platform_tools already subtracts agent.disabled_toolsets from the
+        # enabled set.  Do NOT forward them to AIAgent — the second subtraction
+        # in model_tools._compute_tool_definitions resolves composite names
+        # (e.g. "hermes-yuanbao") to ALL core tools and removes them from the
+        # individually-named enabled set, leaving zero tools (#33924).
+        disabled_toolsets = None
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):

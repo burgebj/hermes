@@ -1526,11 +1526,38 @@ def _get_platform_tools(
     # globally suppress specific toolsets (e.g. "memory") across all
     # platforms without per-platform toolset configuration.  This runs
     # last so it overrides everything above.
+    #
+    # Disabled entries may be individual toolset names ("memory") OR
+    # platform-bundle names ("hermes-yuanbao").  A bare set subtraction
+    # only removes exact name matches, so a bundle name has no effect
+    # on the set of *individual* names built above.  When the disabled
+    # name is not already in enabled_toolsets, resolve it to its tool
+    # names and remove any individual toolset whose tools are a subset
+    # of the bundle's tools.  Without this, disabling a bundle silently
+    # does nothing in _get_platform_tools, but the same bundle name is
+    # later passed to AIAgent.disabled_toolsets where resolve_toolset()
+    # expands it to ALL core tool names and subtracts them — wiping
+    # every tool in the gateway path (issue #33924).
     agent_cfg = config.get("agent") or {}
     disabled_toolsets = agent_cfg.get("disabled_toolsets") or []
     if disabled_toolsets:
-        disabled_set = {str(ts) for ts in disabled_toolsets}
-        enabled_toolsets -= disabled_set
+        disabled_individual = set()
+        for ts_name in disabled_toolsets:
+            ts_str = str(ts_name)
+            if ts_str in enabled_toolsets:
+                # Direct match — the common case (e.g. "memory")
+                disabled_individual.add(ts_str)
+            elif ts_str in TOOLSETS:
+                # Bundle/platform name not in the individual set — reverse-
+                # map: find every enabled individual toolset whose tool
+                # names are a subset of the bundle's tool names and remove
+                # those.
+                bundle_tools = set(resolve_toolset(ts_str))
+                for ets in list(enabled_toolsets):
+                    if set(resolve_toolset(ets)).issubset(bundle_tools):
+                        disabled_individual.add(ets)
+            # else: unknown name, ignore (matches old behaviour)
+        enabled_toolsets -= disabled_individual
 
     return enabled_toolsets
 
