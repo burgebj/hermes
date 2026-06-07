@@ -170,6 +170,7 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         self._jwks_url = f"{self._portal_url}/.well-known/jwks.json"
         self._authorize_url = f"{self._portal_url}/oauth/authorize"
         self._token_url = f"{self._portal_url}/api/oauth/token"
+        self._missing_contract_version_warned = False
         # PyJWKClient is lazily imported so plugin discovery doesn't pay the
         # crypto-import cost when the provider isn't activated.
         self._jwks_client: Any = None
@@ -498,11 +499,15 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         """Contract C11 — tolerant treatment per OQ-C2."""
         contract_version = claims.get("oauth_contract_version")
         if contract_version is None:
-            logger.warning(
+            message = (
                 "Nous Portal token missing oauth_contract_version claim "
-                "(contract says it should be %d); proceeding anyway.",
-                _EXPECTED_CONTRACT_VERSION,
+                "(contract says it should be %d); proceeding anyway."
             )
+            if not self._missing_contract_version_warned:
+                logger.warning(message, _EXPECTED_CONTRACT_VERSION)
+                self._missing_contract_version_warned = True
+            else:
+                logger.debug(message, _EXPECTED_CONTRACT_VERSION)
             return
         if contract_version != _EXPECTED_CONTRACT_VERSION:
             raise ProviderError(

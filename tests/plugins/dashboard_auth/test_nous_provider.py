@@ -727,17 +727,22 @@ class TestVerifySession:
         session = provider.verify_session(access_token=token)
         assert session is not None
 
-    def test_contract_version_missing_warns_but_succeeds(
+    def test_contract_version_missing_warns_once_but_succeeds(
         self, provider, rsa_keypair, caplog
     ):
         import logging
+
         token = _mint_token(rsa_keypair, oauth_contract_version=None)
-        with caplog.at_level(logging.WARNING, logger="plugins.dashboard_auth.nous"):
-            session = provider.verify_session(access_token=token)
-        assert session is not None
-        assert any(
-            "oauth_contract_version" in r.message for r in caplog.records
-        )
+        with caplog.at_level(logging.DEBUG, logger="plugins.dashboard_auth.nous"):
+            first = provider.verify_session(access_token=token)
+            second = provider.verify_session(access_token=token)
+
+        assert first is not None
+        assert second is not None
+        matching_records = [
+            r for r in caplog.records if "oauth_contract_version" in r.message
+        ]
+        assert [r.levelno for r in matching_records] == [logging.WARNING, logging.DEBUG]
 
     def test_contract_version_mismatch_rejected(self, provider, rsa_keypair):
         token = _mint_token(rsa_keypair, oauth_contract_version=2)
