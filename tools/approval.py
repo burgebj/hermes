@@ -519,6 +519,40 @@ def _approval_key_aliases(pattern_key: str) -> set[str]:
 
 
 # =========================================================================
+# Extension seam — downstream-registered dangerous patterns
+# =========================================================================
+
+_REGISTERED_DANGEROUS_PATTERNS: list[tuple[str, str]] = []
+
+
+def register_dangerous_pattern(pattern: str, description: str) -> None:
+    """Register an additional approval-gated command pattern at runtime.
+
+    Lets a deployment add command patterns to the approval gate WITHOUT
+    editing the built-in ``DANGEROUS_PATTERNS`` list — e.g. a plugin or a
+    site security policy that wants to flag an extra shape. The registered
+    pattern joins the same approve once/session/permanent flow as the
+    built-ins (it is an ASK gate, not a hard block) and is picked up by
+    :func:`detect_dangerous_command` immediately.
+
+    Idempotent: re-registering the same ``(pattern, description)`` is a no-op.
+
+    Args:
+        pattern: regex matched (case-insensitively, via ``_RE_FLAGS``)
+            against the normalized command string.
+        description: human-readable reason; also used as the approval key.
+    """
+    entry = (pattern, description)
+    if entry in _REGISTERED_DANGEROUS_PATTERNS:
+        return
+    _REGISTERED_DANGEROUS_PATTERNS.append(entry)
+    DANGEROUS_PATTERNS_COMPILED.append((re.compile(pattern, _RE_FLAGS), description))
+    _legacy_key = _legacy_pattern_key(pattern)
+    _PATTERN_KEY_ALIASES.setdefault(description, set()).update({description, _legacy_key})
+    _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update({_legacy_key, description})
+
+
+# =========================================================================
 # Detection
 # =========================================================================
 
