@@ -703,6 +703,46 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # pending_title applied post-first-message (see cli.exec handler).
             current["agent"] = agent
 
+            # MCP discovery runs in a background daemon thread at startup.
+            # If it hasn't finished yet, the agent's tool snapshot is missing
+            # slow-connecting HTTP MCP servers. Start a watcher that rebuilds
+            # tools once discovery completes (bounded by the event).
+            try:
+                from tui_gateway.entry import _mcp_discovery_done
+
+                if _mcp_discovery_done is not None and not _mcp_discovery_done.is_set():
+                    import threading as _mcp_watch_threading
+
+                    def _rebuild_mcp_tools() -> None:
+                        _mcp_discovery_done.wait()
+                        session = _sessions.get(sid)
+                        if session is None:
+                            return
+                        agent = session.get("agent")
+                        if agent is None:
+                            return
+                        try:
+                            from model_tools import get_tool_definitions
+                            new_defs = get_tool_definitions(
+                                enabled_toolsets=_load_enabled_toolsets(),
+                                quiet_mode=True,
+                            )
+                            agent.tools = new_defs
+                            agent.valid_tool_names = (
+                                {t["function"]["name"] for t in new_defs}
+                                if new_defs else set()
+                            )
+                        except Exception:
+                            pass
+
+                    _mcp_watch_threading.Thread(
+                        target=_rebuild_mcp_tools,
+                        name="tui-mcp-tool-rebuild",
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
+
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
                 current["slash_worker"] = worker
