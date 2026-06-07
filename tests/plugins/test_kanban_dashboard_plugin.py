@@ -1317,6 +1317,48 @@ def test_patch_status_archive_closes_running_run(client):
         conn.close()
 
 
+def test_patch_status_ready_terminates_running_worker(client, monkeypatch):
+    """Drag-drop off running must terminate the claimed worker first."""
+    plugin_api = sys.modules["hermes_dashboard_plugin_kanban_test"]
+
+    r = client.post("/api/plugins/kanban/tasks", json={"title": "drag", "assignee": "worker"})
+    tid = r.json()["task"]["id"]
+    conn = kb.connect()
+    try:
+        kb.claim_task(conn, tid)
+        kb._set_worker_pid(conn, tid, 515151)
+    finally:
+        conn.close()
+
+    calls = []
+
+    def _fake_terminate(conn, task_id, *, expected_run_id=None, signal_fn=None):
+        calls.append((task_id, expected_run_id))
+        return {"terminated": True}
+
+    monkeypatch.setattr(
+        plugin_api.kanban_db,
+        "_terminate_running_task_for_manual_exit",
+        _fake_terminate,
+    )
+
+    r = client.patch(
+        f"/api/plugins/kanban/tasks/{tid}",
+        json={"status": "ready"},
+    )
+    assert r.status_code == 200, r.text
+    assert calls == [(tid, None)]
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.worker_pid is None
+        assert task.current_run_id is None
+    finally:
+        conn.close()
+
+
 def test_event_dict_includes_run_id(client):
     """GET /tasks/:id returns events with run_id populated."""
     r = client.post("/api/plugins/kanban/tasks", json={"title": "e", "assignee": "worker"})

@@ -3568,6 +3568,7 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    signal_fn=None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -3625,6 +3626,12 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    _terminate_running_task_for_manual_exit(
+        conn, task_id,
+        expected_run_id=expected_run_id,
+        signal_fn=signal_fn,
+    )
 
     with write_txn(conn):
         if expected_run_id is None:
@@ -4050,8 +4057,14 @@ def block_task(
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    signal_fn=None,
 ) -> bool:
     """Transition ``running -> blocked``."""
+    _terminate_running_task_for_manual_exit(
+        conn, task_id,
+        expected_run_id=expected_run_id,
+        signal_fn=signal_fn,
+    )
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -4540,7 +4553,13 @@ def decompose_triage_task(
     return child_ids
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def archive_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    signal_fn=None,
+) -> bool:
+    _terminate_running_task_for_manual_exit(conn, task_id, signal_fn=signal_fn)
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
@@ -4700,6 +4719,7 @@ def schedule_task(
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    signal_fn=None,
 ) -> bool:
     """Park a task in ``scheduled`` so it is waiting on time, not human input.
 
@@ -4707,6 +4727,11 @@ def schedule_task(
     human action, or automation can later call ``unblock_task`` to re-gate them
     to ``ready`` (or ``todo`` if parents are still incomplete).
     """
+    _terminate_running_task_for_manual_exit(
+        conn, task_id,
+        expected_run_id=expected_run_id,
+        signal_fn=signal_fn,
+    )
     with write_txn(conn):
         params: list[Any] = [task_id]
         sql = """
@@ -5069,6 +5094,55 @@ def _terminate_reclaimed_worker(
 
     info["terminated"] = not _pid_alive(pid)
     return info
+
+
+def _terminate_running_task_for_manual_exit(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_run_id: Optional[int] = None,
+    signal_fn=None,
+) -> dict[str, Any]:
+    """Best-effort termination for operator-forced exits from ``running``.
+
+    Manual transitions like complete/archive/block/schedule should not leave a
+    live worker behind. The exception is the in-band worker path: when the
+    worker itself is completing or blocking its own run, killing the current
+    process would abort the transition mid-flight.
+    """
+    info: dict[str, Any] = {
+        "prev_pid": None,
+        "host_local": False,
+        "termination_attempted": False,
+        "terminated": False,
+        "sigkill": False,
+    }
+    row = conn.execute(
+        "SELECT status, claim_lock, worker_pid, current_run_id "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["status"] != "running":
+        return info
+
+    if (
+        expected_run_id is not None
+        and row["current_run_id"] != int(expected_run_id)
+    ):
+        return info
+
+    pid = row["worker_pid"]
+    if pid is None:
+        return info
+
+    info["prev_pid"] = int(pid)
+    if expected_run_id is not None and int(pid) == os.getpid():
+        info["self_skipped"] = True
+        return info
+
+    return _terminate_reclaimed_worker(
+        pid, row["claim_lock"], signal_fn=signal_fn,
+    )
 
 
 def heartbeat_worker(

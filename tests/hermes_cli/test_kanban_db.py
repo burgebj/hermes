@@ -987,6 +987,47 @@ def test_complete_records_result(kanban_home):
     assert task.completed_at is not None
 
 
+def test_complete_task_terminates_foreign_running_worker(kanban_home, monkeypatch):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, t)
+        kb._set_worker_pid(conn, t, 424242)
+
+        calls = []
+
+        def _fake_terminate(pid, claim_lock, *, signal_fn=None):
+            calls.append((pid, claim_lock))
+            return {"terminated": True}
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _fake_terminate)
+
+        assert kb.complete_task(conn, t, summary="closed by operator") is True
+        assert kb.get_task(conn, t).status == "done"
+        assert calls and calls[0][0] == 424242
+        assert calls[0][1]
+
+
+def test_complete_task_skips_terminating_self_worker(kanban_home, monkeypatch):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="worker")
+        claimed = kb.claim_task(conn, t)
+        assert claimed is not None
+        kb._set_worker_pid(conn, t, os.getpid())
+        run_id = kb.latest_run(conn, t).id
+
+        def _unexpected(*_args, **_kwargs):
+            raise AssertionError("self-complete should not terminate current worker")
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _unexpected)
+
+        assert kb.complete_task(
+            conn, t,
+            summary="worker finished cleanly",
+            expected_run_id=run_id,
+        ) is True
+        assert kb.get_task(conn, t).status == "done"
+
+
 def test_block_then_unblock(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
@@ -1314,6 +1355,27 @@ def test_archive_hides_from_default_list(kanban_home):
         assert kb.archive_task(conn, t)
         assert len(kb.list_tasks(conn)) == 0
         assert len(kb.list_tasks(conn, include_archived=True)) == 1
+
+
+def test_archive_task_terminates_foreign_running_worker(kanban_home, monkeypatch):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, t)
+        kb._set_worker_pid(conn, t, 434343)
+
+        calls = []
+
+        def _fake_terminate(pid, claim_lock, *, signal_fn=None):
+            calls.append((pid, claim_lock))
+            return {"terminated": True}
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _fake_terminate)
+
+        assert kb.archive_task(conn, t) is True
+        task = kb.get_task(conn, t)
+        assert task.status == "archived"
+        assert task.current_run_id is None
+        assert calls and calls[0][0] == 434343
 
 
 def test_delete_archived_task_removes_related_rows(kanban_home):
