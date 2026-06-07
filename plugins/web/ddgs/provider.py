@@ -12,12 +12,19 @@ whether the package is importable; the plugin still registers either way so
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+
+# Maximum wall-clock time (seconds) for a single DDGS search call.
+# DuckDuckGo's HTML-scrape backend can chain multiple engines; without an
+# overall timeout a slow/rate-limited backend can block the agent loop
+# indefinitely (#36776).
+_DDGS_SEARCH_TIMEOUT = 30
 
 
 class DDGSWebSearchProvider(WebSearchProvider):
@@ -71,20 +78,34 @@ class DDGSWebSearchProvider(WebSearchProvider):
         safe_limit = max(1, int(limit))
 
         try:
-            web_results = []
-            with DDGS() as client:
-                for i, hit in enumerate(client.text(query, max_results=safe_limit)):
-                    if i >= safe_limit:
-                        break
-                    url = str(hit.get("href") or hit.get("url") or "")
-                    web_results.append(
-                        {
-                            "title": str(hit.get("title", "")),
-                            "url": url,
-                            "description": str(hit.get("body", "")),
-                            "position": i + 1,
-                        }
-                    )
+            # Run the blocking DDGS().text() call in a worker thread so we can
+            # enforce an overall wall-clock timeout.  The DDGS constructor's
+            # ``timeout`` parameter only governs individual HTTP requests;
+            # multi-engine chaining in ``_search_sync`` can still hang
+            # indefinitely when a backend rate-limits or stalls (#36776).
+            def _do_search():
+                web_results = []
+                with DDGS(timeout=10) as client:
+                    for i, hit in enumerate(client.text(query, max_results=safe_limit)):
+                        if i >= safe_limit:
+                            break
+                        url = str(hit.get("href") or hit.get("url") or "")
+                        web_results.append(
+                            {
+                                "title": str(hit.get("title", "")),
+                                "url": url,
+                                "description": str(hit.get("body", "")),
+                                "position": i + 1,
+                            }
+                        )
+                return web_results
+
+            web_results = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1
+            ).submit(_do_search).result(timeout=_DDGS_SEARCH_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            logger.warning("DDGS search timed out after %ds: '%s'", _DDGS_SEARCH_TIMEOUT, query)
+            return {"success": False, "error": f"DuckDuckGo search timed out after {_DDGS_SEARCH_TIMEOUT}s"}
         except Exception as exc:  # noqa: BLE001 — ddgs raises its own exceptions
             logger.warning("DDGS search error: %s", exc)
             return {"success": False, "error": f"DuckDuckGo search failed: {exc}"}
