@@ -67,6 +67,9 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_LANGUAGE", raising=False)
+    from tools import transcription_tools as tt
+
+    monkeypatch.setattr(tt, "_try_lazy_install_stt", lambda: False)
 
 
 # ============================================================================

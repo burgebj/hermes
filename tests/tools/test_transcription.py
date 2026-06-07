@@ -25,8 +25,11 @@ pytestmark = pytest.mark.usefixtures("disable_lazy_stt_install")
 
 
 @pytest.fixture(autouse=True)
-def _clear_openai_env(monkeypatch):
+def _isolate_stt_env(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from tools import transcription_tools as tt
+
+    monkeypatch.setattr(tt, "_try_lazy_install_stt", lambda: False)
 
 
 class TestGetProvider:

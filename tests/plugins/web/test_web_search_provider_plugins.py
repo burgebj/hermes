@@ -63,8 +63,13 @@ def _ensure_plugins_loaded() -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each test starts with a clean web-provider env."""
+    """Each test starts with clean web-provider env and registry state."""
     _clear_web_env(monkeypatch)
+    from agent import web_search_registry
+    from hermes_cli.plugins import _ensure_plugins_discovered
+
+    web_search_registry._reset_for_tests()
+    _ensure_plugins_discovered(force=True)
 
 
 class TestBundledPluginsRegister:

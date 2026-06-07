@@ -1,0 +1,55 @@
+name: wps_xiezuo-platform
+label: WPS Xiezuo
+kind: platform
+version: 1.0.0
+description: >
+  WPS Xiezuo (WPS365 协作) gateway adapter for Hermes Agent.
+  Uses the WPS Open Platform long-connection event stream by default and
+  relays workspace chat messages between WPS Xiezuo and the Hermes agent.
+author: Hermes Agent contributors
+requires_env:
+  - name: WPS_XIEZUO_APP_ID
+    description: "WPS Open Platform application AppId"
+    prompt: "WPS Xiezuo AppId"
+    password: false
+  - name: WPS_XIEZUO_APP_SECRET
+    description: "WPS Open Platform application SecretKey"
+    prompt: "WPS Xiezuo SecretKey"
+    password: true
+optional_env:
+  - name: WPS_XIEZUO_BASE_URL
+    description: "WPS Open Platform API base URL (default: https://openapi.wps.cn)"
+    prompt: "WPS API base URL"
+    password: false
+  - name: WPS_XIEZUO_CONNECTION_MODE
+    description: "Connection mode: websocket or webhook (default: websocket)"
+    prompt: "Connection mode"
+    password: false
+  - name: WPS_XIEZUO_ENCRYPT_KEY
+    description: "Webhook event encryption key, only needed when encrypted webhook events are enabled"
+    prompt: "Encryption key"
+    password: true
+  - name: WPS_XIEZUO_VERIFICATION_TOKEN
+    description: "Webhook verification token, only needed for webhook deployments"
+    prompt: "Verification token"
+    password: true
+  - name: WPS_XIEZUO_ALLOWED_USERS
+    description: "Comma-separated WPS user IDs allowed to talk to the bot"
+    prompt: "Allowed user IDs"
+    password: false
+  - name: WPS_XIEZUO_ALLOW_ALL_USERS
+    description: "Allow any WPS user to talk to the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: WPS_XIEZUO_HOME_CHANNEL
+    description: "Default WPS chat ID for cron / notification delivery"
+    prompt: "Home channel ID"
+    password: false
+  - name: WPS_XIEZUO_HOME_CHANNEL_NAME
+    description: "Display name for the configured WPS home channel"
+    prompt: "Home channel display name"
+    password: false
+  - name: WPS_XIEZUO_HOME_CHANNEL_THREAD_ID
+    description: "Optional thread ID for the configured WPS home channel"
+    prompt: "Home channel thread ID"
+    password: false

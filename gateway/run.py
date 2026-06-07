@@ -4409,7 +4409,24 @@ class GatewayRunner:
                 "security advisory check failed at gateway startup",
                 exc_info=True,
             )
-        
+
+        # Discover Python plugins before allowlist checks and shell hooks so
+        # plugin platform metadata (allowed_users_env / allow_all_env) is
+        # registered before the startup auth diagnostics run.
+        #
+        # The CLI startup path does this via an explicit call in
+        # hermes_cli/main.py; the gateway lazily imports run_agent inside
+        # per-request handlers, so the discover_plugins() side-effect in
+        # model_tools.py is NOT guaranteed to have run by the time we reach
+        # this point.
+        try:
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()
+        except Exception:
+            logger.warning(
+                "plugin discovery failed at gateway startup", exc_info=True,
+            )
+
         # Warn if no user allowlists are configured and open access is not opted in
         _builtin_allowed_vars = (
             "TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
@@ -4472,20 +4489,6 @@ class GatewayRunner:
                 "No user allowlists configured. All unauthorized users will be denied. "
                 "Set GATEWAY_ALLOW_ALL_USERS=true in ~/.hermes/.env to allow open access, "
                 "or configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id)."
-            )
-        
-        # Discover Python plugins before shell hooks so plugin block
-        # decisions take precedence in tie cases.  The CLI startup path
-        # does this via an explicit call in hermes_cli/main.py; the
-        # gateway lazily imports run_agent inside per-request handlers,
-        # so the discover_plugins() side-effect in model_tools.py is NOT
-        # guaranteed to have run by the time we reach this point.
-        try:
-            from hermes_cli.plugins import discover_plugins
-            discover_plugins()
-        except Exception:
-            logger.warning(
-                "plugin discovery failed at gateway startup", exc_info=True,
             )
 
         # Register declarative shell hooks from cli-config.yaml.  Gateway

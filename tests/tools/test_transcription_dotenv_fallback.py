@@ -31,6 +31,9 @@ def isolate_env(monkeypatch):
         "ELEVENLABS_STT_BASE_URL",
     ):
         monkeypatch.delenv(key, raising=False)
+    from tools import transcription_tools as tt
+
+    monkeypatch.setattr(tt, "_try_lazy_install_stt", lambda: False)
 
 
 class TestProviderSelectionGate:
