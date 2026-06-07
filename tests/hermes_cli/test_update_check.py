@@ -27,10 +27,11 @@ def test_check_for_updates_uses_cache(tmp_path, monkeypatch):
     (repo_dir / ".git").mkdir()
 
     cache_file = tmp_path / ".update_check"
-    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3, "ver": __version__}))
+    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3, "ver": __version__, "head": None}))
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run") as mock_run:
+    with patch("hermes_cli.banner._local_head_sha", return_value=None), \
+         patch("hermes_cli.banner.subprocess.run") as mock_run:
         result = check_for_updates()
 
     assert result == 3
@@ -93,7 +94,7 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
         result = check_for_updates()
 
     assert result == 5
-    assert mock_run.call_count == 2  # git fetch + git rev-list
+    assert mock_run.call_count == 3  # rev-parse HEAD + git fetch + git rev-list
 
 
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
@@ -246,3 +247,110 @@ def test_invalidate_update_cache_no_profiles_dir(tmp_path):
         _invalidate_update_cache()
 
     assert not (default_home / ".update_check").exists()
+
+
+def test_check_for_updates_invalidates_on_head_change(tmp_path, monkeypatch):
+    """A git pull that moves HEAD must invalidate the cache even if VERSION is unchanged.
+
+    Regression for #40944: source-install users who manually `git pull --ff-only`
+    saw a stale "N commits behind" count for up to 6h because the cache predicate
+    only checked TTL + rev + VERSION, and HEAD-only updates don't bump VERSION.
+    """
+    import hermes_cli.banner as banner
+    from hermes_cli import __version__
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({
+        "ts": time.time(), "behind": 81, "rev": None,
+        "ver": __version__, "head": "oldsha1234567890",
+    }))
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "rev-parse"]:
+            return MagicMock(returncode=0, stdout="newsha7777777777\n")
+        if cmd[:2] == ["git", "fetch"]:
+            return MagicMock(returncode=0, stdout="")
+        if cmd[:3] == ["git", "rev-list", "--count"]:
+            return MagicMock(returncode=0, stdout="0\n")
+        return MagicMock(returncode=0, stdout="")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_REVISION", raising=False)
+    monkeypatch.setattr(banner, "__file__",
+                        str(tmp_path / "no-such" / "banner.py"))
+    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+        result = banner.check_for_updates()
+
+    assert result == 0
+    written = json.loads(cache_file.read_text())
+    assert written["head"] == "newsha7777777777"
+    assert written["behind"] == 0
+
+
+def test_check_for_updates_cache_hit_includes_head(tmp_path, monkeypatch):
+    """A cache stamped with the CURRENT HEAD is honored without a git fetch."""
+    import hermes_cli.banner as banner
+    from hermes_cli import __version__
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({
+        "ts": time.time(), "behind": 2, "rev": None,
+        "ver": __version__, "head": "currentsha000000",
+    }))
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "rev-parse"]:
+            return MagicMock(returncode=0, stdout="currentsha000000\n")
+        raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_REVISION", raising=False)
+    monkeypatch.setattr(banner, "__file__",
+                        str(tmp_path / "no-such" / "banner.py"))
+    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+        result = banner.check_for_updates()
+    assert result == 2
+
+
+def test_check_for_updates_legacy_cache_without_head_invalidates_on_git_install(tmp_path, monkeypatch):
+    """An old cache file written before the #40944 fix lacks 'head'; for git
+    installs it must be treated as stale (local_head != None != cached None)."""
+    import hermes_cli.banner as banner
+    from hermes_cli import __version__
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({
+        "ts": time.time(), "behind": 7, "rev": None, "ver": __version__,
+    }))
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "rev-parse"]:
+            return MagicMock(returncode=0, stdout="abc123\n")
+        if cmd[:2] == ["git", "fetch"]:
+            return MagicMock(returncode=0, stdout="")
+        if cmd[:3] == ["git", "rev-list", "--count"]:
+            return MagicMock(returncode=0, stdout="0\n")
+        return MagicMock(returncode=0, stdout="")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_REVISION", raising=False)
+    monkeypatch.setattr(banner, "__file__",
+                        str(tmp_path / "no-such" / "banner.py"))
+    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+        result = banner.check_for_updates()
+    assert result == 0
+    written = json.loads(cache_file.read_text())
+    assert "head" in written
+    assert written["head"] == "abc123"

@@ -144,6 +144,21 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
     return 0 if upstream_rev == local_rev else UPDATE_AVAILABLE_NO_COUNT
 
 
+def _local_head_sha(repo_dir: Path) -> Optional[str]:
+    """Return the HEAD SHA of a local git checkout, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except Exception:
+        pass
+    return None
+
+
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     """Count commits behind origin/main in a local checkout."""
     try:
@@ -244,11 +259,19 @@ def check_for_updates() -> Optional[int]:
     except Exception:
         pass
 
+    # Resolve the local git checkout (if any) so we can stamp the cache with
+    # the current HEAD SHA — see the head guard in the cache predicate below.
+    repo_dir = _resolve_repo_dir()
+    local_head = _local_head_sha(repo_dir) if repo_dir else None
+
     # Read cache — invalidate if the embedded rev OR installed version has
     # changed since the last check. The version guard matters for pip installs:
     # `check_via_pypi()` compares against VERSION, so a `pip install --upgrade`
     # changes VERSION but leaves rev unchanged (both None), and without this
     # the stale "behind" count would survive the upgrade for up to 6h. See #34491.
+    # Additionally, the local git HEAD SHA is tracked so that a manual `git pull`
+    # in source installs invalidates the cache immediately — without this, a pull
+    # that doesn't bump VERSION would survive the 6h TTL (see #40944).
     now = time.time()
     try:
         if cache_file.exists():
@@ -257,6 +280,7 @@ def check_for_updates() -> Optional[int]:
                 now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
                 and cached.get("rev") == embedded_rev
                 and cached.get("ver") == VERSION
+                and cached.get("head") == local_head
             ):
                 return cached.get("behind")
     except Exception:
@@ -265,20 +289,15 @@ def check_for_updates() -> Optional[int]:
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
-        # Prefer the running code's location over the profile-scoped path.
-        # $HERMES_HOME/hermes-agent/ may be a stale copy from --clone-all;
-        # Path(__file__) always resolves to the actual installed checkout.
-        repo_dir = Path(__file__).parent.parent.resolve()
-        if not (repo_dir / ".git").exists():
-            repo_dir = hermes_home / "hermes-agent"
-        if not (repo_dir / ".git").exists():
+        if repo_dir is None:
             behind = check_via_pypi()
         else:
             behind = _check_via_local_git(repo_dir)
 
     try:
         cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION})
+            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev,
+                        "ver": VERSION, "head": local_head})
         )
     except Exception:
         pass
