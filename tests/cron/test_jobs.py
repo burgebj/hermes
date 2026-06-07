@@ -685,10 +685,11 @@ class TestGetDueJobs:
         assert len(due) == 1
         assert due[0]["id"] == job["id"]
 
-    def test_stale_past_due_skipped(self, tmp_cron_dir):
-        """Recurring jobs past their dynamic grace window are fast-forwarded, not fired.
+    def test_stale_past_due_runs_once_and_fast_forwards(self, tmp_cron_dir):
+        """Recurring jobs past their grace window run once now and fast-forward next_run_at.
 
         For an hourly job, grace = 30 min. Setting 35 min late exceeds the window.
+        The job should be returned as due (execute once) with next_run_at in the future.
         """
         job = create_job(prompt="Stale", schedule="every 1h")
         # Force next_run_at to 35 minutes ago (beyond the 30-min grace for hourly)
@@ -697,8 +698,10 @@ class TestGetDueJobs:
         save_jobs(jobs)
 
         due = get_due_jobs()
-        assert len(due) == 0
-        # next_run_at should be fast-forwarded to the future
+        # Job is returned as due — execute once now instead of skipping
+        assert len(due) == 1
+        assert due[0]["id"] == job["id"]
+        # next_run_at should be fast-forwarded to the future (accumulated slots skipped)
         updated = get_job(job["id"])
         from cron.jobs import _ensure_aware, _hermes_now
         next_dt = _ensure_aware(datetime.fromisoformat(updated["next_run_at"]))
