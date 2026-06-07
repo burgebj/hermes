@@ -24,8 +24,9 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -73,8 +74,67 @@ class SmsAdapter(BasePlatformAdapter):
         )
         self._webhook_host: str = os.getenv("SMS_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST)
         self._webhook_url: str = os.getenv("SMS_WEBHOOK_URL", "").strip()
+        self._allow_all_users: bool = self._load_allow_all_users()
+        self._allowed_users: Set[str] = self._load_allowed_users()
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
+
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _normalize_phone_number(value: Any) -> str:
+        """Normalize a configured/sender phone number to E.164-ish +digits."""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        digits = re.sub(r"\D", "", raw)
+        if not digits:
+            return ""
+        return f"+{digits}"
+
+    @classmethod
+    def _split_phone_list(cls, value: Any) -> Set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, (list, tuple, set)):
+            raw_values = value
+        else:
+            raw_values = str(value).split(",")
+        return {
+            normalized
+            for item in raw_values
+            if (normalized := cls._normalize_phone_number(item))
+        }
+
+    def _load_allow_all_users(self) -> bool:
+        """Return whether inbound SMS should bypass sender allowlisting."""
+        env_value = os.getenv("SMS_ALLOW_ALL_USERS")
+        if env_value is not None:
+            return self._truthy(env_value)
+        return self._truthy(self.config.extra.get("allow_all_users"))
+
+    def _load_allowed_users(self) -> Set[str]:
+        """Load authorized inbound SMS senders from env or config extra."""
+        env_value = os.getenv("SMS_ALLOWED_USERS")
+        if env_value is not None:
+            return self._split_phone_list(env_value)
+        return self._split_phone_list(
+            self.config.extra.get("allowed_users")
+            or self.config.extra.get("allowed_numbers")
+        )
+
+    def _is_authorized_sender(self, phone_number: str) -> bool:
+        """Return True when an inbound sender may create a gateway event."""
+        return (
+            self._allow_all_users
+            or self._normalize_phone_number(phone_number) in self._allowed_users
+        )
 
     def _basic_auth_header(self) -> str:
         """Build HTTP Basic auth header value for Twilio."""
@@ -94,6 +154,16 @@ class SmsAdapter(BasePlatformAdapter):
             msg = "[sms] TWILIO_PHONE_NUMBER not set — cannot send replies"
             logger.error(msg)
             self._set_fatal_error("sms_missing_phone_number", msg, retryable=False)
+            return False
+
+        if not self._allow_all_users and not self._allowed_users:
+            msg = (
+                "[sms] Refusing to start: configure SMS_ALLOWED_USERS with "
+                "authorized E.164 sender phone numbers, or explicitly set "
+                "SMS_ALLOW_ALL_USERS=true for an intentionally open SMS gateway."
+            )
+            logger.error(msg)
+            self._set_fatal_error("sms_missing_allowed_users", msg, retryable=False)
             return False
 
         insecure_no_sig = os.getenv("SMS_INSECURE_NO_SIGNATURE", "").lower() == "true"
@@ -343,6 +413,17 @@ class SmsAdapter(BasePlatformAdapter):
             return web.Response(
                 text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 content_type="application/xml",
+            )
+
+        if not self._is_authorized_sender(from_number):
+            logger.warning(
+                "[sms] Rejected unauthorized sender %s",
+                redact_phone(from_number),
+            )
+            return web.Response(
+                text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                content_type="application/xml",
+                status=403,
             )
 
         logger.info(

@@ -82,6 +82,16 @@ _HERMES_WEBHOOK_SAFE_TOOLS = [
     "clarify",
 ]
 
+# Inbound SMS senders are authenticated only by the adapter-level allowlist.
+# Keep default SMS tools constrained even for authorized senders; operators can
+# opt into broader access with explicit platform_toolsets.sms configuration.
+_HERMES_SMS_SAFE_TOOLS = [
+    "web_search",
+    "web_extract",
+    "vision_analyze",
+    "clarify",
+]
+
 
 # Core toolset definitions
 # These can include individual tools or reference other toolsets
@@ -532,8 +542,8 @@ TOOLSETS = {
     },
 
     "hermes-sms": {
-        "description": "SMS bot toolset - interact with Hermes via SMS (Twilio)",
-        "tools": _HERMES_CORE_TOOLS,
+        "description": "SMS bot toolset - constrained tools for Twilio SMS sessions",
+        "tools": _HERMES_SMS_SAFE_TOOLS,
         "includes": []
     },
 

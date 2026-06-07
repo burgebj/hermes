@@ -4,10 +4,12 @@ Covers config loading, format/truncate, echo prevention,
 requirements check, toolset verification, and Twilio signature validation.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import os
+import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -228,10 +230,13 @@ class TestStartupGuard:
             "TWILIO_ACCOUNT_SID": "ACtest",
             "TWILIO_AUTH_TOKEN": "tok",
             "TWILIO_PHONE_NUMBER": "+15550001111",
+            "SMS_ALLOWED_USERS": "+15551230000",
+            "SMS_WEBHOOK_HOST": "127.0.0.1",
+            "SMS_WEBHOOK_URL": "",
         }
         if extra_env:
             env.update(extra_env)
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=True):
             pc = PlatformConfig(enabled=True, api_key="tok")
             adapter = SmsAdapter(pc)
         return adapter
@@ -439,6 +444,101 @@ class TestTwilioSignatureValidation:
         ) is True
 
 
+# ── Sender authorization ────────────────────────────────────────────
+
+class TestSmsSenderAuthorization:
+    """SMS inbound sender allowlist must fail closed before dispatch."""
+
+    def _make_adapter(self, extra_env=None):
+        from gateway.platforms.sms import SmsAdapter
+
+        env = {
+            "TWILIO_ACCOUNT_SID": "ACtest",
+            "TWILIO_AUTH_TOKEN": "test_token_secret",
+            "TWILIO_PHONE_NUMBER": "+15550001111",
+            "SMS_WEBHOOK_URL": "https://example.com/webhooks/twilio",
+            "SMS_ALLOWED_USERS": "",
+            "SMS_ALLOW_ALL_USERS": "",
+        }
+        if extra_env:
+            env.update(extra_env)
+        with patch.dict(os.environ, env, clear=False):
+            pc = PlatformConfig(enabled=True, api_key="test_token_secret")
+            adapter = SmsAdapter(pc)
+        adapter._message_handler = AsyncMock(return_value="")
+        return adapter
+
+    def _mock_request(self, from_number, signature_url="https://example.com/webhooks/twilio"):
+        params = {
+            "From": from_number,
+            "To": "+155****1111",
+            "Body": "hello",
+            "MessageSid": "SM123",
+        }
+        body = urllib.parse.urlencode(params).encode("utf-8")
+        sig = _compute_twilio_signature("test_token_secret", signature_url, params)
+        request = MagicMock()
+        request.read = AsyncMock(return_value=body)
+        request.headers = {"X-Twilio-Signature": sig}
+        return request
+
+    async def _drain_background_tasks(self, adapter):
+        for _ in range(10):
+            tasks = list(adapter._background_tasks)
+            if not tasks:
+                await asyncio.sleep(0)
+                continue
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if not adapter._background_tasks:
+                break
+
+    def test_allowed_users_are_normalized_and_split(self):
+        adapter = self._make_adapter({
+            "SMS_ALLOWED_USERS": " +1 (555) 123-0000,15551230001 "
+        })
+
+        assert adapter._allowed_users == {"+15551230000", "+15551230001"}
+
+    def test_allow_all_users_boolean_is_explicit(self):
+        adapter = self._make_adapter({"SMS_ALLOW_ALL_USERS": "true"})
+
+        assert adapter._allow_all_users is True
+
+    @pytest.mark.asyncio
+    async def test_unlisted_signed_sender_is_rejected_before_dispatch(self):
+        adapter = self._make_adapter({"SMS_ALLOWED_USERS": "+15551230000"})
+        request = self._mock_request("+15559870000")
+
+        resp = await adapter._handle_webhook(request)
+        await asyncio.sleep(0)
+
+        assert resp.status == 403
+        adapter._message_handler.assert_not_awaited()
+        assert not adapter._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_listed_signed_sender_is_dispatched(self):
+        adapter = self._make_adapter({"SMS_ALLOWED_USERS": "+15551230000"})
+        request = self._mock_request("+15551230000")
+
+        resp = await adapter._handle_webhook(request)
+        await self._drain_background_tasks(adapter)
+
+        assert resp.status == 200
+        adapter._message_handler.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_allowlist_fails_closed(self):
+        adapter = self._make_adapter()
+        request = self._mock_request("+15551230002")
+
+        resp = await adapter._handle_webhook(request)
+        await asyncio.sleep(0)
+
+        assert resp.status == 403
+        adapter._message_handler.assert_not_awaited()
+
+
 # ── Webhook signature enforcement (handler-level) ──────────────────
 
 class TestWebhookSignatureEnforcement:
@@ -452,11 +552,12 @@ class TestWebhookSignatureEnforcement:
             "TWILIO_AUTH_TOKEN": "test_token_secret",
             "TWILIO_PHONE_NUMBER": "+15550001111",
             "SMS_WEBHOOK_URL": webhook_url,
+            "SMS_ALLOWED_USERS": "+15551234567",
         }
         with patch.dict(os.environ, env):
             pc = PlatformConfig(enabled=True, api_key="test_token_secret")
             adapter = SmsAdapter(pc)
-        adapter._message_handler = AsyncMock()
+        adapter._message_handler = AsyncMock(return_value="")
         return adapter
 
     def _mock_request(self, body, headers=None):

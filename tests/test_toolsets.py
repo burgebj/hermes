@@ -230,6 +230,40 @@ class TestToolsetConsistency:
         assert len(core) > 20, f"Suspiciously small shared core: {len(core)} tools"
 
 
+class TestSmsToolsetSafety:
+    def test_hermes_sms_toolset_omits_powerful_local_tools(self):
+        tools = set(resolve_toolset("hermes-sms"))
+
+        assert {"web_search", "web_extract", "vision_analyze", "clarify"}.issubset(tools)
+        assert {
+            "terminal",
+            "read_file",
+            "write_file",
+            "patch",
+            "browser_navigate",
+            "execute_code",
+            "delegate_task",
+            "cronjob",
+            "send_message",
+        }.isdisjoint(tools)
+
+    def test_sms_default_platform_toolsets_are_safe(self):
+        from hermes_cli.tools_config import _get_platform_tools
+
+        enabled = _get_platform_tools({}, "sms")
+
+        assert {"web", "vision", "clarify"}.issubset(enabled)
+        assert {
+            "terminal",
+            "file",
+            "browser",
+            "code_execution",
+            "delegation",
+            "cronjob",
+            "messaging",
+        }.isdisjoint(enabled)
+
+
 class TestPluginToolsets:
     def test_get_all_toolsets_includes_plugin_toolset(self, monkeypatch):
         reg = ToolRegistry()
