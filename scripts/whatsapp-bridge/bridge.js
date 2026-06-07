@@ -146,6 +146,19 @@ function getContextInfo(messageContent) {
   return {};
 }
 
+// Extract a text snippet from a quoted (replied-to) message so the gateway
+// can inject reply context into the agent prompt.
+function getQuotedText(contextInfo) {
+  const quoted = contextInfo?.quotedMessage;
+  if (!quoted || typeof quoted !== 'object') return null;
+  if (quoted.conversation) return quoted.conversation;
+  if (quoted.extendedTextMessage?.text) return quoted.extendedTextMessage.text;
+  if (quoted.imageMessage) return quoted.imageMessage.caption || '[image]';
+  if (quoted.videoMessage) return quoted.videoMessage.caption || '[video]';
+  if (quoted.documentMessage) return quoted.documentMessage.caption || quoted.documentMessage.fileName || '[document]';
+  return null;
+}
+
 mkdirSync(SESSION_DIR, { recursive: true });
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
@@ -321,6 +334,7 @@ async function startSocket() {
       const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
       const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
       const hasQuotedMessage = !!contextInfo?.quotedMessage;
+      const quotedText = getQuotedText(contextInfo);
 
       // Extract message body
       let body = '';
@@ -436,6 +450,7 @@ async function startSocket() {
         quotedParticipant,
         quotedRemoteJid,
         hasQuotedMessage,
+        quotedText,
         botIds,
         timestamp: msg.messageTimestamp,
       };
