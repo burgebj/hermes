@@ -255,6 +255,20 @@ all = [
   "hermes-agent[web]",
   "hermes-agent[youtube]",
 ]
+docker = [
+  # `[all]` minus `[dev]` — the published Docker image doesn't need debugpy,
+  # pytest, ruff, ty, or setuptools.  See Dockerfile `uv sync --extra docker`.
+  "hermes-agent[cron]",
+  "hermes-agent[cli]",
+  "hermes-agent[pty]",
+  "hermes-agent[mcp]",
+  "hermes-agent[homeassistant]",
+  "hermes-agent[sms]",
+  "hermes-agent[acp]",
+  "hermes-agent[google]",
+  "hermes-agent[web]",
+  "hermes-agent[youtube]",
+]
 
 [project.scripts]
 hermes = "hermes_cli.main:main"
