@@ -1737,6 +1737,75 @@ class TestTryMainAgentModelFallback:
         assert client is None
 
 
+class TestResolveSingleProviderKwargs:
+    """Regression for #27555: _resolve_single_provider must use the kwarg names
+    that resolve_provider_client actually accepts, otherwise every entry in
+    auxiliary.<task>.fallback_chain is silently skipped via TypeError.
+    """
+
+    def test_forwards_base_url_and_api_key_as_explicit_kwargs(self):
+        from agent.auxiliary_client import _resolve_single_provider
+        fake_client = MagicMock()
+        with patch("agent.auxiliary_client.resolve_provider_client",
+                   return_value=(fake_client, "mimo-v2-omni")) as rpc:
+            client, model = _resolve_single_provider(
+                "xiaomi-tp",
+                model="mimo-v2-omni",
+                base_url="https://xm.example/v1",
+                api_key="xm-test-key",
+            )
+        assert client is fake_client
+        assert model == "mimo-v2-omni"
+        rpc.assert_called_once_with(
+            provider="xiaomi-tp",
+            model="mimo-v2-omni",
+            explicit_base_url="https://xm.example/v1",
+            explicit_api_key="xm-test-key",
+        )
+
+    def test_real_resolve_provider_client_accepts_forwarded_kwargs(self):
+        """Real-signature smoke test: catches a future rename of either kwarg."""
+        from agent.auxiliary_client import _resolve_single_provider
+        # `custom` provider + explicit base_url/api_key is the cheapest path
+        # through resolve_provider_client that doesn't touch the network.
+        client, model = _resolve_single_provider(
+            "custom",
+            model="some-model",
+            base_url="https://example.invalid/v1",
+            api_key="sk-test",
+        )
+        # We only care that no TypeError bubbled up — the returned client may
+        # be a real OpenAI() instance, which is fine; it never gets called.
+        assert client is not None
+        assert model == "some-model"
+
+
+class TestConfiguredFallbackChainResolvedModel:
+    """fallback_chain entries without model use the provider default model."""
+
+    def test_uses_resolved_model_when_entry_omits_model(self, monkeypatch):
+        from agent.auxiliary_client import _try_configured_fallback_chain
+
+        fake_client = MagicMock()
+        monkeypatch.setattr(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            lambda task: {"fallback_chain": [{"provider": "openrouter"}]},
+        )
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(fake_client, "openrouter-default-model"),
+        ):
+            client, model, label = _try_configured_fallback_chain(
+                "compression",
+                "primary-provider",
+            )
+
+        assert client is fake_client
+        assert model == "openrouter-default-model"
+        assert label == "fallback_chain[0](openrouter)"
+
+
 # ---------------------------------------------------------------------------
 # Gate: _resolve_api_key_provider must skip anthropic when not configured
 # ---------------------------------------------------------------------------
