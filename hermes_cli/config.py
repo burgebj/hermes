@@ -1989,6 +1989,12 @@ DEFAULT_CONFIG = {
         # 1 = serial (pre-v0.9 behaviour).
         # Also overridable via HERMES_CRON_MAX_PARALLEL env var.
         "max_parallel_jobs": None,
+        # Mirror cron delivery output to the target session's SQLite transcript.
+        # When true, the main agent sees cron messages (prefixed with
+        # "[Delivered from cron]") in conversation history on the next user
+        # message, enabling cross-session awareness without manual lookup.
+        # Default: false (no mirror, original behaviour).
+        "mirror_to_session": False,
     },
 
     # Kanban multi-agent coordination — controls the dispatcher loop that
