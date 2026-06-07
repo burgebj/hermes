@@ -8620,7 +8620,12 @@ class GatewayRunner:
             group_sessions_per_user=_group_sessions_per_user,
             thread_sessions_per_user=_thread_sessions_per_user,
         )
-        if _is_shared_multi_user and source.user_name:
+        # Always preserve explicit sender attribution for group/channel messages
+        # before they reach the agent. Shared multi-user sessions need this so
+        # participants are distinguishable inside one history; per-user-isolated
+        # Telegram groups need it because the session context only describes the
+        # session owner, not necessarily the current message author.
+        if source.chat_type != "dm" and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
 
         # Prepend channel context from history backfill (if any).  This
