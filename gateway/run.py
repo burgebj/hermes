@@ -222,6 +222,12 @@ def _gateway_loop_exception_handler(
 def _redact_gateway_user_facing_secrets(text: str) -> str:
     """Best-effort secret redaction before text can leave the gateway."""
     redacted = str(text or "")
+    try:
+        from agent.redact import redact_sensitive_text
+
+        redacted = redact_sensitive_text(redacted, force=True)
+    except Exception:
+        pass
     for pattern in _GATEWAY_SECRET_PATTERNS:
         redacted = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "[REDACTED]", redacted)
     return redacted
@@ -286,21 +292,35 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
 
 
 def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
-    """Sanitize final gateway replies before sending them to high-noise chats.
+    """Sanitize final gateway replies before sending them to chats.
 
     Telegram is Bob's mobile inbox, so it should receive concise, safe provider
     failure categories instead of raw HTTP bodies, request IDs, or policy text.
-    Other platforms keep the existing behaviour for now.
+    All platforms still redact secret-like material before delivery.
     """
     if not text:
         return text
-    if _gateway_platform_value(platform) != "telegram":
-        return text
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+    if _gateway_platform_value(platform) != "telegram":
+        return redacted
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
+
+
+def _sanitize_gateway_error_reply(platform: Any, text: str) -> str:
+    """Redact exception-path replies before they leave the gateway."""
+    if not text:
+        return text
+    return _redact_gateway_user_facing_secrets(str(text))
+
+
+def _sanitize_gateway_error_detail(platform: Any, text: str, max_chars: int = 300) -> str:
+    """Redact full exception details before truncating for chat display."""
+    if not text:
+        return "no details available"
+    return _sanitize_gateway_error_reply(platform, str(text))[:max_chars]
 
 
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
@@ -308,10 +328,10 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = str(message or "").strip()
     if not text:
         return None
+    text = _redact_gateway_user_facing_secrets(text)
     if _gateway_platform_value(platform) != "telegram":
         return text
 
-    text = _redact_gateway_user_facing_secrets(text)
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
         return None
     if _looks_like_gateway_provider_error(text):
@@ -9899,7 +9919,7 @@ class GatewayRunner:
                 pass
             logger.exception("Agent error in session %s", session_key)
             error_type = type(e).__name__
-            error_detail = str(e)[:300] if str(e) else "no details available"
+            error_detail = _sanitize_gateway_error_detail(source.platform, str(e))
             status_hint = ""
             status_code = getattr(e, "status_code", None)
             _hist_len = len(history) if 'history' in locals() else 0
@@ -9935,18 +9955,20 @@ class GatewayRunner:
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
-                    return (
+                    return _sanitize_gateway_error_reply(
+                        source.platform,
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "
-                        "/reset to start fresh."
+                        "/reset to start fresh.",
                     )
                 elif status_code == 400:
                     status_hint = " The request was rejected by the API."
-            return (
+            return _sanitize_gateway_error_reply(
+                source.platform,
                 f"Sorry, I encountered an error ({error_type}).\n"
                 f"{error_detail}\n"
                 f"{status_hint}"
-                "Try again or use /reset to start a fresh session."
+                "Try again or use /reset to start a fresh session.",
             )
         finally:
             # Restore session context variables to their pre-handler state

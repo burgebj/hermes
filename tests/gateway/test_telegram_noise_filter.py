@@ -2,6 +2,8 @@
 
 from gateway.config import Platform
 from gateway.run import (
+    _sanitize_gateway_error_detail,
+    _sanitize_gateway_error_reply,
     _prepare_gateway_status_message,
     _sanitize_gateway_final_response,
 )
@@ -29,6 +31,45 @@ def test_non_telegram_status_is_unchanged():
 
     assert _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", message) == message
     assert _prepare_gateway_status_message("local", "lifecycle", message) == message
+
+
+def test_non_telegram_status_redacts_auth_secrets():
+    """Status callbacks can carry terminal provider failures to chat."""
+    raw = (
+        "❌ API failed after 3 retries — Incorrect API key provided: "
+        "sk-live_abcdefghijklmnopqrstuvwxyz1234567890"
+    )
+
+    sanitized = _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", raw)
+
+    assert sanitized is not None
+    assert "Incorrect API key provided" in sanitized
+    assert "sk-live" not in sanitized
+    assert "..." in sanitized
+
+
+def test_non_telegram_status_uses_canonical_redactor_for_provider_keys():
+    """Gateway chat redaction should cover supported provider key formats."""
+    google_key = "AIza" + ("A" * 35)
+    raw = f"❌ API failed after 3 retries — GOOGLE_API_KEY={google_key}"
+
+    sanitized = _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", raw)
+
+    assert sanitized is not None
+    assert google_key not in sanitized
+    assert "GOOGLE_API_KEY=" in sanitized
+
+
+def test_non_telegram_status_keeps_gateway_fallback_redaction():
+    """Canonical redaction should not bypass gateway-only fallback patterns."""
+    gitlab_token = "glpat-" + ("A" * 24)
+    raw = f"Provider auth failed with token {gitlab_token}"
+
+    sanitized = _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", raw)
+
+    assert sanitized is not None
+    assert gitlab_token not in sanitized
+    assert "[REDACTED]" in sanitized
 
 
 def test_telegram_status_sanitizes_raw_provider_security_errors():
@@ -73,6 +114,46 @@ def test_telegram_final_response_redacts_auth_secrets():
 
     assert "authentication failed" in sanitized.lower()
     assert "check the configured credentials" in sanitized.lower()
+    assert "sk-live" not in sanitized
+
+
+def test_non_telegram_final_response_redacts_auth_secrets():
+    """Final replies on every gateway platform should redact key material."""
+    raw = (
+        "Provider authentication failed: Incorrect API key provided: "
+        "sk-live_abcdefghijklmnopqrstuvwxyz1234567890"
+    )
+
+    sanitized = _sanitize_gateway_final_response(Platform.DISCORD, raw)
+
+    assert "Provider authentication failed" in sanitized
+    assert "sk-live" not in sanitized
+    assert "..." in sanitized
+
+
+def test_non_telegram_exception_reply_redacts_auth_secrets():
+    """Exception-path replies must not leak provider credentials."""
+    raw = (
+        "Sorry, I encountered an error (AuthenticationError).\n"
+        "Incorrect API key provided: sk-live_abcdefghijklmnopqrstuvwxyz1234567890\n"
+        "Try again or use /reset to start a fresh session."
+    )
+
+    sanitized = _sanitize_gateway_error_reply(Platform.DISCORD, raw)
+
+    assert "AuthenticationError" in sanitized
+    assert "sk-live" not in sanitized
+    assert "..." in sanitized
+
+
+def test_exception_detail_redacts_before_truncating():
+    """A token crossing the display cutoff should not leak a prefix."""
+    secret = "sk-live_" + ("a" * 40)
+    raw = ("x" * 295) + secret
+
+    sanitized = _sanitize_gateway_error_detail(Platform.DISCORD, raw)
+
+    assert len(sanitized) == 300
     assert "sk-live" not in sanitized
 
 
