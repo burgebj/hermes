@@ -973,6 +973,15 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 warnings.append(warning)
                 continue
 
+            from gateway.platforms.base import validate_media_delivery_path
+            safe_media_path = validate_media_delivery_path(media_path)
+            if not safe_media_path:
+                warning = f"Skipping unsafe media path outside allowed roots: {media_path}"
+                logger.warning(warning)
+                warnings.append(warning)
+                continue
+
+            media_path = safe_media_path
             ext = os.path.splitext(media_path)[1].lower()
             try:
                 with open(media_path, "rb") as f:
