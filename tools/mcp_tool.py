@@ -3506,13 +3506,21 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         logger.debug("No explicit MCP servers provided")
         return []
 
-    # Only attempt servers that aren't already connected and are enabled
-    # (enabled: false skips the server entirely without removing its config)
+    # Only skip servers that are both already in ``_servers`` AND have an
+    # active session.  A stale entry (``session is None``, e.g. after a
+    # transport disconnect) must be reconnected so that tool handlers don't
+    # permanently return "not connected" (#37768).
+    #
+    # Enabled: false servers are skipped without removing existing sessions.
     with _lock:
         new_servers = {
             k: v
             for k, v in servers.items()
-            if k not in _servers and _parse_boolish(v.get("enabled", True), default=True)
+            if _parse_boolish(v.get("enabled", True), default=True)
+            and (
+                k not in _servers
+                or getattr(_servers[k], "session", None) is None
+            )
         }
         # Track which servers opt-in to parallel tool calls (idempotent).
         for srv_name, srv_cfg in servers.items():

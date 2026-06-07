@@ -3713,7 +3713,8 @@ class TestRegisterMcpServers:
     def test_skips_already_connected_servers(self):
         from tools.mcp_tool import register_mcp_servers, _servers
 
-        mock_server = _make_mock_server("existing")
+        active_session = MagicMock(name="active-session")
+        mock_server = _make_mock_server("existing", session=active_session)
         _servers["existing"] = mock_server
 
         try:
@@ -3723,6 +3724,68 @@ class TestRegisterMcpServers:
             assert result == ["mcp_existing_tool"]
         finally:
             _servers.pop("existing", None)
+
+    def test_reconnects_stale_server_with_null_session(self):
+        """A server present in ``_servers`` but with ``session=None``
+        must be reconnected rather than skipped — otherwise tool
+        handlers return \"not connected\" forever.  Regression for
+        #37768."""
+        from tools.mcp_tool import register_mcp_servers, _servers, _ensure_mcp_loop
+
+        stale_server = _make_mock_server("stale", session=None)
+        stale_server._registered_tool_names = ["mcp_stale_tool"]
+        _servers["stale"] = stale_server
+
+        async def fake_register(name, cfg):
+            server = _make_mock_server(name)
+            server._registered_tool_names = ["mcp_stale_tool"]
+            _servers[name] = server
+            return ["mcp_stale_tool"]
+
+        try:
+            with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+                 patch("tools.mcp_tool._discover_and_register_server",
+                       side_effect=fake_register) as mock_register, \
+                 patch("tools.mcp_tool._existing_tool_names",
+                       return_value=["mcp_stale_tool"]):
+                _ensure_mcp_loop()
+                result = register_mcp_servers(
+                    {"stale": {"command": "test"}}
+                )
+            assert result == ["mcp_stale_tool"]
+            mock_register.assert_called_once_with(
+                "stale", {"command": "test"}
+            )
+        finally:
+            _servers.pop("stale", None)
+
+    def test_skips_healthy_server_with_active_session(self):
+        """A server with a live ``session`` must NOT be reconnected
+        — it's already healthy."""
+        from tools.mcp_tool import register_mcp_servers, _servers, _ensure_mcp_loop
+
+        active_session = MagicMock(name="active-session")
+        healthy = _make_mock_server("healthy", session=active_session)
+        healthy._registered_tool_names = ["mcp_healthy_tool"]
+        _servers["healthy"] = healthy
+
+        async def fake_register(name, cfg):
+            pytest.fail("should not attempt to reconnect a healthy server")
+
+        try:
+            with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+                 patch("tools.mcp_tool._discover_and_register_server",
+                       side_effect=fake_register) as mock_register, \
+                 patch("tools.mcp_tool._existing_tool_names",
+                       return_value=["mcp_healthy_tool"]):
+                _ensure_mcp_loop()
+                result = register_mcp_servers(
+                    {"healthy": {"command": "test"}}
+                )
+            assert result == ["mcp_healthy_tool"]
+            mock_register.assert_not_called()
+        finally:
+            _servers.pop("healthy", None)
 
     def test_skips_disabled_servers(self):
         from tools.mcp_tool import register_mcp_servers, _servers
