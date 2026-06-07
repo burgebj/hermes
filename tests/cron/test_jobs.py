@@ -991,3 +991,33 @@ class TestSaveJobOutput:
         with pytest.raises(ValueError, match="output path"):
             save_job_output(str(tmp_cron_dir / "outside"), "# Results")
         assert not (tmp_cron_dir / "outside").exists()
+
+
+class TestLoadJobsBomTolerance:
+    """Windows editors prefix a UTF-8 BOM; load_jobs must still parse."""
+
+    def test_loads_jobs_file_with_utf8_bom(self, tmp_cron_dir):
+        from cron.jobs import JOBS_FILE
+
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        JOBS_FILE.write_text(
+            '{"jobs": [{"id": "job1"}]}',
+            encoding="utf-8-sig",
+        )
+
+        # Raw bytes really do start with the BOM.
+        assert JOBS_FILE.read_bytes().startswith(b"\xef\xbb\xbf")
+
+        jobs = load_jobs()
+
+        assert jobs == [{"id": "job1"}]
+
+    def test_loads_jobs_file_without_bom(self, tmp_cron_dir):
+        from cron.jobs import JOBS_FILE
+
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        JOBS_FILE.write_text('{"jobs": [{"id": "job2"}]}', encoding="utf-8")
+
+        jobs = load_jobs()
+
+        assert jobs == [{"id": "job2"}]
