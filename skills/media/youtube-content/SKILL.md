@@ -18,9 +18,16 @@ Extract transcripts from YouTube videos and convert them into useful formats.
 pip install youtube-transcript-api
 ```
 
+Optional Supadata fallback for videos/files that do not expose native YouTube
+captions:
+
+```bash
+export SUPADATA_API_KEY=...
+```
+
 ## Helper Script
 
-`SKILL_DIR` is the directory containing this SKILL.md file. The script accepts any standard YouTube URL format, short links (youtu.be), shorts, embeds, live links, or a raw 11-character video ID.
+`SKILL_DIR` is the directory containing this SKILL.md file. The script accepts any standard YouTube URL format, short links (youtu.be), shorts, embeds, live links, or a raw 11-character video ID. By default it tries `youtube-transcript-api` first, then falls back to Supadata when `SUPADATA_API_KEY` is set.
 
 ```bash
 # JSON output with metadata
@@ -34,6 +41,9 @@ python3 SKILL_DIR/scripts/fetch_transcript.py "URL" --timestamps
 
 # Specific language with fallback chain
 python3 SKILL_DIR/scripts/fetch_transcript.py "URL" --language tr,en
+
+# Force Supadata's transcript API
+python3 SKILL_DIR/scripts/fetch_transcript.py "URL" --provider supadata
 ```
 
 ## Output Formats
@@ -67,7 +77,7 @@ After fetching the transcript, format it based on what the user asks for:
 
 ## Error Handling
 
-- **Transcript disabled**: tell the user; suggest they check if subtitles are available on the video page.
+- **Transcript disabled**: if `SUPADATA_API_KEY` is configured, retry with `--provider supadata`; otherwise tell the user and suggest they check if subtitles are available on the video page.
 - **Private/unavailable video**: relay the error and ask the user to verify the URL.
 - **No matching language**: retry without `--language` to fetch any available transcript, then note the actual language to the user.
 - **Dependency missing**: run `pip install youtube-transcript-api` and retry.

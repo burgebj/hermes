@@ -1,5 +1,6 @@
 """Tests for skills/media/youtube-content/scripts/fetch_transcript.py (issue #22243)."""
 
+import json
 import sys
 from pathlib import Path
 from unittest import mock
@@ -63,6 +64,83 @@ class TestFetchTranscriptImportError:
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "youtube-transcript-api" in captured.err
+
+
+class TestSupadataFallback:
+    def test_fetch_supadata_transcript_normalizes_segments(self, monkeypatch):
+        payload = {
+            "content": [
+                {"text": "Hello", "offset": 1000, "duration": 2500},
+                {"text": "world", "offset": 4000, "duration": 1000},
+            ],
+            "lang": "en",
+        }
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout=0):
+            seen["url"] = request.full_url
+            seen["api_key"] = request.headers.get("X-api-key")
+            seen["user_agent"] = request.headers.get("User-agent")
+            seen["timeout"] = timeout
+            return FakeResponse()
+
+        monkeypatch.setenv("SUPADATA_API_KEY", "supadata-test-key")
+        monkeypatch.setattr(fetch_transcript.urllib.request, "urlopen", fake_urlopen)
+
+        segments = fetch_transcript.fetch_supadata_transcript(
+            "https://youtu.be/dQw4w9WgXcQ",
+            ["en"],
+        )
+
+        assert seen["api_key"] == "supadata-test-key"
+        assert seen["user_agent"] == "curl/8.5.0"
+        assert "https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ" in seen["url"]
+        assert "lang=en" in seen["url"]
+        assert seen["timeout"] == fetch_transcript.SUPADATA_TIMEOUT_SECONDS
+        assert segments == [
+            {"text": "Hello", "start": 1.0, "duration": 2.5},
+            {"text": "world", "start": 4.0, "duration": 1.0},
+        ]
+
+    def test_auto_provider_falls_back_to_supadata(self, monkeypatch, capsys):
+        monkeypatch.setenv("SUPADATA_API_KEY", "supadata-test-key")
+        monkeypatch.setattr(
+            fetch_transcript,
+            "fetch_transcript",
+            mock.Mock(side_effect=RuntimeError("No transcript found")),
+        )
+        monkeypatch.setattr(
+            fetch_transcript,
+            "fetch_supadata_transcript",
+            mock.Mock(return_value=[
+                {"text": "fallback worked", "start": 0.0, "duration": 1.0},
+            ]),
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["fetch_transcript.py", "https://youtu.be/dQw4w9WgXcQ", "--text-only"],
+        )
+
+        fetch_transcript.main()
+
+        assert capsys.readouterr().out.strip() == "fallback worked"
+        fetch_transcript.fetch_supadata_transcript.assert_called_once_with(
+            "https://youtu.be/dQw4w9WgXcQ",
+            None,
+        )
 
 
 class TestPyprojectDeclaresYoutubeExtra:

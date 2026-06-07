@@ -19,8 +19,19 @@ Install dependency:  pip install youtube-transcript-api
 
 import argparse
 import json
+import os
 import re
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+SUPADATA_BASE_URL = os.getenv("SUPADATA_BASE_URL", "https://api.supadata.ai/v1").rstrip("/")
+SUPADATA_TIMEOUT_SECONDS = 120
+SUPADATA_JOB_TIMEOUT_SECONDS = 180
+SUPADATA_JOB_POLL_SECONDS = 3
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -73,6 +84,102 @@ def fetch_transcript(video_id: str, languages: list = None):
     ]
 
 
+def youtube_url_for(video_id_or_url: str) -> str:
+    """Return a URL suitable for Supadata from a YouTube URL or raw video ID."""
+    video_id = extract_video_id(video_id_or_url)
+    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", video_id):
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return video_id_or_url
+
+
+def _supadata_get(path: str, params: dict | None = None) -> dict:
+    api_key = os.getenv("SUPADATA_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("SUPADATA_API_KEY is not set")
+
+    query = urllib.parse.urlencode(params or {})
+    url = f"{SUPADATA_BASE_URL}{path}"
+    if query:
+        url = f"{url}?{query}"
+
+    # Supadata is behind Cloudflare and currently rejects Python's default
+    # urllib User-Agent with HTTP 403 / error code 1010. Use a normal CLI UA.
+    request = urllib.request.Request(
+        url,
+        headers={
+            "x-api-key": api_key,
+            "User-Agent": "curl/8.5.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=SUPADATA_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(detail)
+            detail = data.get("error") or data.get("message") or detail
+        except json.JSONDecodeError:
+            pass
+        raise RuntimeError(f"Supadata API error HTTP {exc.code}: {detail}") from exc
+
+
+def _normalize_supadata_segments(data: dict) -> list[dict]:
+    content = data.get("content", [])
+    if isinstance(content, str):
+        return [{"text": content.strip(), "start": 0.0, "duration": 0.0}]
+
+    segments = []
+    for item in content:
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        offset_ms = float(item.get("offset", 0) or 0)
+        duration_ms = float(item.get("duration", 0) or 0)
+        segments.append({
+            "text": text,
+            "start": offset_ms / 1000,
+            "duration": duration_ms / 1000,
+        })
+    return segments
+
+
+def _poll_supadata_job(job_id: str) -> dict:
+    deadline = time.monotonic() + SUPADATA_JOB_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        data = _supadata_get(f"/transcript/{urllib.parse.quote(job_id)}")
+        status = str(data.get("status", "")).lower()
+        if data.get("content"):
+            return data
+        if status in {"completed", "succeeded", "success"}:
+            return data
+        if status in {"failed", "error"}:
+            raise RuntimeError(f"Supadata transcript job failed: {data}")
+        time.sleep(SUPADATA_JOB_POLL_SECONDS)
+    raise TimeoutError(f"Supadata transcript job timed out: {job_id}")
+
+
+def fetch_supadata_transcript(url_or_id: str, languages: list = None):
+    """Fetch transcript segments from Supadata's universal transcript API."""
+    params = {
+        "url": youtube_url_for(url_or_id),
+        "mode": os.getenv("SUPADATA_TRANSCRIPT_MODE", "auto"),
+    }
+    if languages:
+        params["lang"] = languages[0]
+
+    data = _supadata_get("/transcript", params)
+    job_id = data.get("jobId") or data.get("job_id")
+    if job_id:
+        data = _poll_supadata_job(str(job_id))
+
+    segments = _normalize_supadata_segments(data)
+    if not segments:
+        raise RuntimeError("Supadata returned an empty transcript")
+    return segments
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch YouTube transcript as JSON")
     parser.add_argument("url", help="YouTube URL or video ID")
@@ -82,13 +189,24 @@ def main():
                         help="Include timestamped text in output")
     parser.add_argument("--text-only", action="store_true",
                         help="Output plain text instead of JSON")
+    parser.add_argument("--provider", choices=("auto", "youtube", "supadata"),
+                        default="auto",
+                        help="Transcript provider. Default: YouTube first, then Supadata if SUPADATA_API_KEY is set")
     args = parser.parse_args()
 
     video_id = extract_video_id(args.url)
     languages = [l.strip() for l in args.language.split(",")] if args.language else None
 
     try:
-        segments = fetch_transcript(video_id, languages)
+        if args.provider == "supadata":
+            segments = fetch_supadata_transcript(args.url, languages)
+        else:
+            try:
+                segments = fetch_transcript(video_id, languages)
+            except Exception:
+                if args.provider != "auto" or not os.getenv("SUPADATA_API_KEY"):
+                    raise
+                segments = fetch_supadata_transcript(args.url, languages)
     except Exception as e:
         error_msg = str(e)
         if "disabled" in error_msg.lower():
