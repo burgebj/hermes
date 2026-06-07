@@ -3495,3 +3495,185 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             data = await resp.json()
             assert data["features"]["session_key_header"] == "X-Hermes-Session-Key"
+
+
+# ---------------------------------------------------------------------------
+# X-Hermes-User-Id header (per-user long-term memory scoping)
+# ---------------------------------------------------------------------------
+
+
+class TestUserIdHeader:
+    """The user id is an opt-in, stable end-user identity that scopes
+    long-term memory *per person* (e.g. a Honcho peer = one user_id),
+    independent of the transcript-scoped session_id and the channel-scoped
+    session_key.  It mirrors X-Hermes-Session-Key exactly: same API-key-auth
+    requirement, same validation, same echo-back, backward compatible when
+    absent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_user_id_passed_to_agent_and_echoed(self, auth_adapter):
+        """X-Hermes-User-Id reaches _run_agent as user_id and is echoed back."""
+        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-User-Id": "user-42",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 200
+            assert resp.headers.get("X-Hermes-User-Id") == "user-42"
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["user_id"] == "user-42"
+
+    @pytest.mark.asyncio
+    async def test_user_id_independent_of_session_key_and_id(self, auth_adapter):
+        """All three headers coexist: user_id scopes the person, key the
+        channel, id the transcript."""
+        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
+        mock_db = MagicMock()
+        mock_db.get_messages_as_conversation.return_value = []
+        auth_adapter._session_db = mock_db
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-User-Id": "person-7",
+                        "X-Hermes-Session-Key": "channel-abc",
+                        "X-Hermes-Session-Id": "transcript-xyz",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 200
+            assert resp.headers.get("X-Hermes-User-Id") == "person-7"
+            assert resp.headers.get("X-Hermes-Session-Key") == "channel-abc"
+            assert resp.headers.get("X-Hermes-Session-Id") == "transcript-xyz"
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["user_id"] == "person-7"
+            assert call_kwargs["gateway_session_key"] == "channel-abc"
+            assert call_kwargs["session_id"] == "transcript-xyz"
+
+    @pytest.mark.asyncio
+    async def test_user_id_absent_yields_none(self, auth_adapter):
+        """Omitting the header passes user_id=None and doesn't echo (backward compatible)."""
+        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 200
+            assert "X-Hermes-User-Id" not in resp.headers
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["user_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_user_id_rejected_without_api_key(self, adapter):
+        """Without API_SERVER_KEY, accepting a caller-supplied memory scope is unsafe — reject with 403."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers={"X-Hermes-User-Id": "whatever"},
+                json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_user_id_rejects_control_chars(self, auth_adapter):
+        """Header injection via \\r\\n must be rejected by the server-side validator.
+
+        aiohttp's client refuses to SEND CR/LF headers, so exercise the
+        helper directly with a raw request that bypasses client validation.
+        """
+        mock_request = MagicMock()
+        mock_request.headers = {"X-Hermes-User-Id": "bad\rvalue"}
+        uid, err = auth_adapter._parse_user_id_header(mock_request)
+        assert uid is None
+        assert err is not None
+        assert err.status == 400
+
+    @pytest.mark.asyncio
+    async def test_user_id_rejects_oversized(self, auth_adapter):
+        """User ids longer than the cap are rejected."""
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers={"X-Hermes-User-Id": "x" * 1000, "Authorization": "Bearer sk-secret"},
+                json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_user_id_threads_into_create_agent(self, auth_adapter):
+        """End-to-end: verify AIAgent(user_id=...) receives the id via _create_agent."""
+        captured_kwargs = {}
+
+        def _fake_create_agent(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok", "messages": []}
+            mock_agent.session_prompt_tokens = 0
+            mock_agent.session_completion_tokens = 0
+            mock_agent.session_total_tokens = 0
+            return mock_agent
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent", side_effect=_fake_create_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-User-Id": "honcho-peer-7",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status == 200
+            assert captured_kwargs.get("user_id") == "honcho-peer-7"
+
+    @pytest.mark.asyncio
+    async def test_responses_endpoint_accepts_user_id(self, auth_adapter):
+        """Responses API honors the same X-Hermes-User-Id contract."""
+        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    headers={
+                        "X-Hermes-User-Id": "person-1",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={"model": "hermes-agent", "input": "hello", "store": False},
+                )
+            assert resp.status == 200
+            assert resp.headers.get("X-Hermes-User-Id") == "person-1"
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["user_id"] == "person-1"
+
+    @pytest.mark.asyncio
+    async def test_capabilities_advertises_user_id_header(self, adapter):
+        """GET /v1/capabilities should advertise the new header so clients can feature-detect."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/capabilities")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["features"]["user_id_header"] == "X-Hermes-User-Id"
