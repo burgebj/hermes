@@ -5588,19 +5588,23 @@ def save_env_value(key: str, value: str):
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, env_path)
-        # Restore original permissions before _secure_file may tighten them.
         if original_mode is not None:
+            # File existed — restore its original permissions (e.g. 0640 for
+            # Docker volume mounts).  Skip _secure_file because it would
+            # tighten to 0600 and undo the restore.
             try:
                 os.chmod(env_path, original_mode)
             except OSError:
                 pass
+        else:
+            # New file — tighten to owner-only read/write.
+            _secure_file(env_path)
     except BaseException:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
-    _secure_file(env_path)
 
     os.environ[key] = value
     invalidate_env_cache()
