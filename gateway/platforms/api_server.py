@@ -4233,6 +4233,9 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._runner.cleanup()
             self._runner = None
         self._app = None
+        if self._response_store:
+            self._response_store.close()
+            self._response_store = None
         logger.info("[%s] API server stopped", self.name)
 
     async def send(
