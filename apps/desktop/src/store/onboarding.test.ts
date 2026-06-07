@@ -145,6 +145,54 @@ describe('refreshOnboarding', () => {
 
     expect($desktopOnboarding.get().providers?.map(p => p.id)).toEqual(['shared'])
   })
+
+  // Regression for #37554: a returning user whose runtime probe transiently
+  // fails must NOT have the cached configured=true state downgraded to false.
+  // Otherwise the onboarding overlay re-appears on every restart even though
+  // the user has valid credentials and the durable bootstrap marker is set.
+  it('does not downgrade configured when cache already says true (regression #37554)', async () => {
+    const api = vi.fn(async () => {
+      throw new Error('no api calls expected')
+    })
+
+    installApiMock(api)
+    // Simulate the optimistic cache from a previous successful onboarding.
+    window.localStorage.setItem('hermes-desktop-onboarded-v1', '1')
+    $desktopOnboarding.set(baseState({ configured: true, providers: [provider('cached')] }))
+
+    const ready = await refreshOnboarding(onboardingContext(runtimeMismatchGateway()))
+
+    expect(ready).toBe(false)
+    // Overlay should stay hidden — the store did NOT flip to configured:false.
+    expect($desktopOnboarding.get().configured).toBe(true)
+    // The optimistic cache is sticky and was not erased.
+    expect(window.localStorage.getItem('hermes-desktop-onboarded-v1')).toBe('1')
+    // No API refresh fired (providers were already loaded and onboarding was
+    // not explicitly requested).
+    expect(api).not.toHaveBeenCalled()
+    expect($desktopOnboarding.get().providers?.map(p => p.id)).toEqual(['cached'])
+  })
+
+  it('still flips to configured=false for a brand new install with no prior cache', async () => {
+    const api = vi.fn(async ({ path }: { path: string }) => {
+      if (path === '/api/providers/oauth') {
+        return { providers: [provider('fresh')] }
+      }
+
+      throw new Error(`unexpected api path: ${path}`)
+    })
+
+    installApiMock(api)
+    // No cached value, store starts at configured:false — classic first run.
+    $desktopOnboarding.set(baseState({ requested: true }))
+
+    const ready = await refreshOnboarding(onboardingContext(runtimeMismatchGateway()))
+
+    expect(ready).toBe(false)
+    expect($desktopOnboarding.get().configured).toBe(false)
+    expect(window.localStorage.getItem('hermes-desktop-onboarded-v1')).toBeNull()
+    expect(api).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('OAuth onboarding', () => {

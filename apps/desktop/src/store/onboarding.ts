@@ -490,9 +490,27 @@ export async function refreshOnboarding(ctx: OnboardingContext) {
 
   const state = $desktopOnboarding.get()
   const reason = runtime.reason || state.reason || DEFAULT_ONBOARDING_REASON
+  // If onboarding was already completed (cache or store says configured ===
+  // true), do NOT downgrade to false. A returning user whose runtime probe
+  // transiently fails — e.g. backend still warming up, gateway momentary
+  // timeout, or a genuine runtime/credentials mismatch — would otherwise
+  // see the onboarding overlay flash on every reload and have to re-add
+  // their provider. The bootstrap marker is the durable source of truth;
+  // localStorage is just the optimistic cache that re-evaluates on
+  // every gateway open. Keep the cache sticky once set, and surface
+  // the runtime failure as a notification so the user knows something
+  // is off without losing access to the app.
+  const wasConfigured = state.configured === true || readCachedConfigured() === true
 
-  writeCachedConfigured(false)
-  patch({ configured: false, reason })
+  if (!wasConfigured) {
+    writeCachedConfigured(false)
+    patch({ configured: false, reason })
+  } else {
+    notifyError(
+      'runtime-not-ready',
+      'Hermes Desktop could not verify the running backend on startup. Some features may be unavailable until the gateway is reachable.'
+    )
+  }
 
   if (state.providers !== null && !state.requested) {
     return false
