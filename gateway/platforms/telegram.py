@@ -1851,6 +1851,16 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        _typing_chat_id = str(chat_id)
+        _pause_typing_on_flood = bool((metadata or {}).get("notify"))
+        _typing_paused_for_flood = False
+        typing_paused = getattr(self, "_typing_paused", None)
+        if typing_paused is None:
+            # Some focused tests construct adapters via object.__new__() and
+            # intentionally skip BasePlatformAdapter.__init__().
+            typing_paused = set()
+            self._typing_paused = typing_paused
+
         # getattr() — tests build adapters via object.__new__() (no __init__).
         if getattr(self, "_send_path_degraded", False):
             return SendResult(success=False, error="send_path_degraded", retryable=True)
@@ -2063,6 +2073,14 @@ class TelegramAdapter(BasePlatformAdapter):
                         if retry_after is not None or "retry after" in str(send_err).lower():
                             if _send_attempt < 2:
                                 wait = float(retry_after) if retry_after is not None else 1.0
+                                # Final-response sends can sit inside Telegram's
+                                # retry_after loop for a long time. Pause typing
+                                # refreshes while delivery is blocked so the
+                                # bubble expires naturally instead of persisting
+                                # until the outer processing finally-block.
+                                if _pause_typing_on_flood and not _typing_paused_for_flood:
+                                    self.pause_typing_for_chat(_typing_chat_id)
+                                    _typing_paused_for_flood = True
                                 logger.warning(
                                     "[%s] Telegram flood control on send (attempt %d/3), retrying in %.1fs: %s",
                                     self.name,
@@ -2080,10 +2098,11 @@ class TelegramAdapter(BasePlatformAdapter):
             # so without this the "...typing" bubble disappears mid-response
             # (especially noticeable when the agent sends intermediate progress
             # messages like "Checking:" before running tools).
-            try:
-                await self.send_typing(chat_id, metadata=metadata)
-            except Exception:
-                pass  # Typing failures are non-fatal
+            if _typing_chat_id not in typing_paused:
+                try:
+                    await self.send_typing(chat_id, metadata=metadata)
+                except Exception:
+                    pass  # Typing failures are non-fatal
 
             return SendResult(
                 success=True,
@@ -2116,6 +2135,9 @@ class TelegramAdapter(BasePlatformAdapter):
             is_connect_timeout = self._looks_like_connect_timeout(e)
             is_pool_timeout = self._looks_like_pool_timeout(e)
             return SendResult(success=False, error=str(e), retryable=(is_connect_timeout or is_pool_timeout or not is_timeout))
+        finally:
+            if _typing_paused_for_flood:
+                self.resume_typing_for_chat(_typing_chat_id)
 
     async def send_or_update_status(
         self,
