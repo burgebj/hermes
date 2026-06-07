@@ -1023,6 +1023,57 @@ def test_resolve_requested_provider_precedence(monkeypatch):
     assert rp.resolve_requested_provider() == "auto"
 
 
+# ── warn on dict model config missing provider (#29285) ───────────────
+
+
+def test_resolve_requested_provider_warns_dict_no_provider(monkeypatch, caplog):
+    """model: {default: "abab6.5"} (dict, no provider) should warn."""
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"default": "abab6.5"})
+    monkeypatch.setattr(
+        rp, "read_raw_config", lambda: {"model": {"default": "abab6.5"}}
+    )
+    import logging
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.runtime_provider"):
+        result = rp.resolve_requested_provider()
+    assert result == "auto"
+    assert "model config sets a default but no 'provider'" in caplog.text
+
+
+def test_resolve_requested_provider_no_warn_string_model(monkeypatch, caplog):
+    """model: "claude-sonnet-4-6" (string) should NOT warn."""
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        rp, "_get_model_config", lambda: {"default": "claude-sonnet-4-6"}
+    )
+    monkeypatch.setattr(
+        rp, "read_raw_config", lambda: {"model": "claude-sonnet-4-6"}
+    )
+    import logging
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.runtime_provider"):
+        result = rp.resolve_requested_provider()
+    assert result == "auto"
+    assert "model config sets a default but no 'provider'" not in caplog.text
+
+
+def test_resolve_requested_provider_no_warn_dict_with_provider(monkeypatch, caplog):
+    """model: {default: "x", provider: "anthropic"} should return provider, no warn."""
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        rp, "_get_model_config",
+        lambda: {"default": "x", "provider": "anthropic"},
+    )
+    monkeypatch.setattr(
+        rp, "read_raw_config",
+        lambda: {"model": {"default": "x", "provider": "anthropic"}},
+    )
+    import logging
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.runtime_provider"):
+        result = rp.resolve_requested_provider()
+    assert result == "anthropic"
+    assert "model config sets a default but no 'provider'" not in caplog.text
+
+
 # ── api_mode config override tests ──────────────────────────────────────
 
 

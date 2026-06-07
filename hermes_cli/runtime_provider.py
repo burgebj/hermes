@@ -29,7 +29,7 @@ from hermes_cli.auth import (
     resolve_external_process_provider_credentials,
     has_usable_secret,
 )
-from hermes_cli.config import get_compatible_custom_providers, load_config
+from hermes_cli.config import get_compatible_custom_providers, load_config, read_raw_config
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, env_int
 
@@ -439,6 +439,20 @@ def resolve_requested_provider(requested: Optional[str] = None) -> str:
     if env_provider:
         return env_provider
 
+    # Warn when the raw config is a dict with a model but no provider.
+    # _get_model_config() normalizes string configs into dicts too, so we
+    # must inspect the raw shape to avoid false positives on `model: "x"`.
+    raw_model = read_raw_config().get("model")
+    if (
+        isinstance(raw_model, dict)
+        and (raw_model.get("default") or raw_model.get("model"))
+        and not (isinstance(raw_model.get("provider"), str) and raw_model.get("provider").strip())
+    ):
+        logger.warning(
+            "model config sets a default but no 'provider'; falling back to "
+            "auto-detection, which may route to auth.json active_provider "
+            "instead of the model you configured. Set model.provider explicitly."
+        )
     return "auto"
 
 
