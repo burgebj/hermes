@@ -15,6 +15,7 @@ import contextvars
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -973,9 +974,10 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     (the `memory-watchdog.sh` pattern) without wrapping them in Python.
 
     Args:
-        script_path: Path to the script.  Relative paths are resolved
-            against HERMES_HOME/scripts/.  Absolute and ~-prefixed paths
-            are also validated to ensure they stay within the scripts dir.
+        script_path: Path to the script, optionally followed by CLI arguments.
+            Relative paths are resolved against HERMES_HOME/scripts/.
+            Absolute and ~-prefixed paths are also validated to ensure they stay
+            within the scripts dir.
 
     Returns:
         (success, output) — on failure *output* contains the error message so the
@@ -985,7 +987,15 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
 
-    raw = Path(script_path).expanduser()
+    try:
+        script_parts = shlex.split(script_path)
+    except ValueError as exc:
+        return False, f"Invalid script command: {exc}"
+    if not script_parts:
+        return False, "Script not found: empty script path"
+
+    raw = Path(script_parts[0]).expanduser()
+    script_args = script_parts[1:]
     if raw.is_absolute():
         path = raw.resolve()
     else:
@@ -1028,9 +1038,9 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
                 "On Windows, install Git for Windows (which ships Git Bash) "
                 "or rewrite the script as Python (.py)."
             )
-        argv = [_bash, str(path)]
+        argv = [_bash, str(path), *script_args]
     else:
-        argv = [sys.executable, str(path)]
+        argv = [sys.executable, str(path), *script_args]
 
     run_env = os.environ.copy()
     run_env["HERMES_HOME"] = str(_get_hermes_home())

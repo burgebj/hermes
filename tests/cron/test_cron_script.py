@@ -172,6 +172,20 @@ class TestRunJobScript:
         parsed = json.loads(output)
         assert parsed["new_prs"][0]["number"] == 42
 
+    def test_script_relative_path_with_arguments(self, cron_env):
+        """Cron scripts may include CLI arguments after the script path."""
+        from cron.scheduler import _run_job_script
+
+        script = cron_env / "scripts" / "args.py"
+        script.write_text(textwrap.dedent("""\
+            import sys
+            print("|".join(sys.argv[1:]))
+        """))
+
+        success, output = _run_job_script("args.py expire --check-only")
+        assert success is True
+        assert output == "expire|--check-only"
+
 
 class TestBuildJobPromptWithScript:
     """Test that script output is injected into the prompt."""
