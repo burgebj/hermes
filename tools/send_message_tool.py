@@ -1293,8 +1293,16 @@ async def _send_signal(extra, chat_id, message, media_files=None):
 
 async def _send_email(extra, chat_id, message):
     """Send via SMTP (one-shot, no persistent connection needed)."""
+    import re as _re
     import smtplib
-    from email.mime.text import MIMEText
+    import html as _html_mod
+    from email.mime.multipart import MIMEMultipart as _MIMEMultipart
+    from email.mime.text import MIMEText as _MIMEText
+
+    _HTML_PATTERN = _re.compile(
+        r"(?:<!DOCTYPE\s+html|<html[\s>]|<(?:div|table|h[1-6]|section|article|main|header|footer|style)\b)",
+        _re.IGNORECASE | _re.DOTALL,
+    )
 
     address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
     password = os.getenv("EMAIL_PASSWORD", "")
@@ -1308,7 +1316,42 @@ async def _send_email(extra, chat_id, message):
         return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
 
     try:
-        msg = MIMEText(message, "plain", "utf-8")
+        # Detect HTML content and send with appropriate MIME type.
+        # Use .search() (not .match()) — cron/model preamble may precede HTML.
+        html_match = _HTML_PATTERN.search(message)
+        if html_match:
+            # Strip preamble before first HTML tag (model commentary, cron wrappers)
+            message = message[html_match.start():]
+            # Strip content after </html>; use find() (first occurrence) not
+            # rfind() because models sometimes produce duplicate closing tags
+            # with garbage text between them.
+            html_end = message.lower().find("</html>")
+            if html_end >= 0:
+                message = message[: html_end + len("</html>")]
+            else:
+                # HTML fragment (no </html>) — strip trailing model commentary
+                # by scanning backwards from the last closing block-level tag.
+                _BLOCK_CLOSE = _re.compile(
+                    r"</(?:div|table|section|article|main|header|footer|body|ul|ol|p|h[1-6])>",
+                    _re.IGNORECASE,
+                )
+                for m in reversed(list(_BLOCK_CLOSE.finditer(message))):
+                    after = message[m.end():]
+                    after_stripped = after.strip()
+                    if not after_stripped:
+                        break
+                    if _re.search(r"<[a-zA-Z/!]", after_stripped):
+                        continue  # still HTML
+                    message = message[: m.end()]  # pure prose = commentary
+                    break
+            plain_fallback = _html_mod.unescape(_re.sub(r"<[^>]+>", "", message)).strip()
+            if not plain_fallback:
+                plain_fallback = "(HTML email — please view in a client that supports HTML.)"
+            msg = _MIMEMultipart("alternative")
+            msg.attach(_MIMEText(plain_fallback, "plain", "utf-8"))
+            msg.attach(_MIMEText(message, "html", "utf-8"))
+        else:
+            msg = _MIMEText(message, "plain", "utf-8")
         msg["From"] = address
         msg["To"] = chat_id
         msg["Subject"] = "Hermes Agent"

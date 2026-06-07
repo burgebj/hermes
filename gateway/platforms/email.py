@@ -30,6 +30,21 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email.utils import formatdate
 from email import encoders
+
+# HTML detection regex — matches common HTML document openings or HTML
+# fragment tags that signal the body is HTML (not plain text).  Used to decide
+# whether to send email body as text/html instead of text/plain.
+# Covers: <!DOCTYPE html>, <html>, and common block-level HTML tags that
+# indicate an HTML email body (models sometimes start with <div> or <table>
+# instead of a proper document declaration).
+#
+# NOTE: no ``^`` anchor — cron wrappers and model preamble text may appear
+# before the first HTML tag.  ``_attach_body`` strips any such prefix when
+# HTML is detected.
+_HTML_RE = re.compile(
+    r"(?:<!DOCTYPE\s+html|<html[\s>]|<(?:div|table|h[1-6]|section|article|main|header|footer|style)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +59,69 @@ from gateway.platforms.base import (
 from gateway.config import Platform, PlatformConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _attach_body(msg: MIMEMultipart, body: str) -> None:
+    """Attach body to a MIMEMultipart message.
+
+    If the body contains HTML fragment tags (``<!DOCTYPE html>``, ``<html``,
+    ``<div>``, ``<table>``, etc.), the content is sent as *text/html* wrapped
+    in a ``multipart/alternative`` with an auto-generated plain-text fallback.
+    Otherwise it is attached as plain text (the original behaviour).
+
+    Cron wrappers and model preamble text before the first HTML tag are
+    automatically stripped.  Trailing text after ``</html>`` or common cron
+    footers is also stripped.
+    """
+    html_match = _HTML_RE.search(body)
+    if html_match:
+        # Strip any preamble before the first HTML tag (cron wrappers,
+        # model commentary like "Now I have all the data..." etc.)
+        body = body[html_match.start():]
+
+        # Strip any content after </html> — models sometimes append
+        # commentary or markdown code fences after the closing tag.
+        # Use the FIRST </html> occurrence — models sometimes produce
+        # duplicate closing tags with garbage text between them, and
+        # rfind would pick the second (wrong) one.
+        html_end = body.lower().find("</html>")
+        if html_end >= 0:
+            body = body[: html_end + len("</html>")]
+        else:
+            # For HTML fragments (no </html>), strip trailing model
+            # commentary and cron footer patterns that would render as
+            # plain text inside an HTML email.  Models often append
+            # prose sentences after the last closing block-level tag.
+            # Walk backwards from the last closing block tag; if what
+            # follows it is pure prose (no HTML tags), it is model
+            # commentary and should be stripped.
+            _BLOCK_CLOSE_RE = re.compile(
+                r"</(?:div|table|section|article|main|header|footer|body|ul|ol|p|h[1-6])>",
+                re.IGNORECASE,
+            )
+            for m in reversed(list(_BLOCK_CLOSE_RE.finditer(body))):
+                after_tag = body[m.end():]
+                after_stripped = after_tag.strip()
+                if not after_stripped:
+                    break  # clean end — nothing to strip
+                if re.search(r"<[a-zA-Z/!]", after_stripped):
+                    continue  # still HTML — keep looking
+                # Pure prose after a closing block tag = model commentary
+                body = body[: m.end()]
+                break
+
+        # Generate a rough plain-text fallback by stripping tags.
+        import html as html_mod
+        plain = html_mod.unescape(re.sub(r"<[^>]+>", "", body)).strip()
+        if not plain:
+            plain = "(HTML email — please view in a client that supports HTML.)"
+
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(plain, "plain", "utf-8"))
+        alt.attach(MIMEText(body, "html", "utf-8"))
+        msg.attach(alt)
+    else:
+        msg.attach(MIMEText(body, "plain", "utf-8"))
 # Automated sender patterns — emails from these are silently ignored
 _NOREPLY_PATTERNS = (
     "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
@@ -546,7 +624,7 @@ class EmailAdapter(BasePlatformAdapter):
         msg_id = f"<hermes-{uuid.uuid4().hex[:12]}@{self._address.split('@')[1]}>"
         msg["Message-ID"] = msg_id
 
-        msg.attach(MIMEText(body, "plain", "utf-8"))
+        _attach_body(msg, body)
 
         smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
         try:
@@ -656,7 +734,7 @@ class EmailAdapter(BasePlatformAdapter):
         msg["Message-ID"] = msg_id
 
         if body:
-            msg.attach(MIMEText(body, "plain", "utf-8"))
+            _attach_body(msg, body)
 
         for file_path in file_paths:
             p = Path(file_path)
@@ -737,7 +815,7 @@ class EmailAdapter(BasePlatformAdapter):
         msg["Message-ID"] = msg_id
 
         if body:
-            msg.attach(MIMEText(body, "plain", "utf-8"))
+            _attach_body(msg, body)
 
         # Attach file
         p = Path(file_path)
