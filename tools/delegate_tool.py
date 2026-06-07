@@ -1417,11 +1417,18 @@ def _run_single_child(
     _stale_count = [0]
 
     def _heartbeat_loop():
-        while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+        # Touch once immediately, then at the configured interval. This keeps
+        # parent gateway activity fresh even for short-but-slow child tool calls
+        # and avoids losing the first interval to wait-before-work scheduling.
+        while not _heartbeat_stop.is_set():
             if parent_agent is None:
+                if _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+                    break
                 continue
             touch = getattr(parent_agent, "_touch_activity", None)
             if not touch:
+                if _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+                    break
                 continue
             # Pull detail from the child's own activity tracker
             desc = f"delegate_task: subagent {task_index} working"
