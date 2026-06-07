@@ -191,6 +191,24 @@ from gateway.platforms.base import (
 )
 
 
+# Deterministic audio MIME by extension for generic audio-file attachments
+# (MessageType.AUDIO). Hardcoded rather than relying on the platform mimetypes
+# registry, which varies across OSes (e.g. .m4a maps inconsistently).
+_WHATSAPP_AUDIO_MIME_BY_EXT = {
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+}
+
+
+def _whatsapp_audio_mime(path: str) -> str:
+    """Best-effort audio MIME for a cached audio-file attachment path."""
+    return _WHATSAPP_AUDIO_MIME_BY_EXT.get(Path(path).suffix.lower(), "audio/mpeg")
+
+
 def check_whatsapp_requirements() -> bool:
     """
     Check if WhatsApp dependencies are available.
@@ -1271,8 +1289,14 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     msg_type = MessageType.PHOTO
                 elif "video" in media_type:
                     msg_type = MessageType.VIDEO
-                elif "audio" in media_type or "ptt" in media_type:  # ptt = voice note
+                elif media_type == "ptt":
+                    # Native WhatsApp voice note (Opus/OGG) → STT pipeline.
                     msg_type = MessageType.VOICE
+                elif "audio" in media_type:
+                    # Generic audio file attachment (e.g. .mp3, .m4a) → file note,
+                    # never STT. Mirrors the Telegram audio-vs-voice split so the
+                    # gateway's STT/file-attachment routing contract holds.
+                    msg_type = MessageType.AUDIO
                 else:
                     msg_type = MessageType.DOCUMENT
             
@@ -1325,6 +1349,22 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     cached_urls.append(url)
                     media_types.append("audio/ogg")
                     print(f"[{self.name}] Using bridge-cached audio: {url}", flush=True)
+                elif msg_type == MessageType.AUDIO and url.startswith(("http://", "https://")):
+                    _ext = Path(url).suffix.lower() or ".m4a"
+                    try:
+                        cached_path = await cache_audio_from_url(url, ext=_ext)
+                        cached_urls.append(cached_path)
+                        media_types.append(_whatsapp_audio_mime(cached_path))
+                        print(f"[{self.name}] Cached user audio file: {cached_path}", flush=True)
+                    except Exception as e:
+                        print(f"[{self.name}] Failed to cache audio file: {e}", flush=True)
+                        cached_urls.append(url)
+                        media_types.append(_whatsapp_audio_mime(url))
+                elif msg_type == MessageType.AUDIO and os.path.isabs(url):
+                    # Local file path — bridge already downloaded the audio file
+                    cached_urls.append(url)
+                    media_types.append(_whatsapp_audio_mime(url))
+                    print(f"[{self.name}] Using bridge-cached audio file: {url}", flush=True)
                 elif msg_type == MessageType.DOCUMENT and os.path.isabs(url):
                     # Local file path — bridge already downloaded the document
                     cached_urls.append(url)
