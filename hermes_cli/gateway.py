@@ -2422,12 +2422,10 @@ RestartSec=5
 RestartMaxDelaySec=300
 RestartSteps=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
-KillMode=mixed
+KillMode=process
 KillSignal=SIGTERM
 ExecReload=/bin/kill -USR1 $MAINPID
 TimeoutStopSec={restart_timeout}
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -2457,12 +2455,10 @@ RestartSec=5
 RestartMaxDelaySec=300
 RestartSteps=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
-KillMode=mixed
+KillMode=process
 KillSignal=SIGTERM
 ExecReload=/bin/kill -USR1 $MAINPID
 TimeoutStopSec={restart_timeout}
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=default.target
