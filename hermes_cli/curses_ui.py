@@ -263,6 +263,33 @@ def flush_stdin() -> None:
         pass
 
 
+def pop_kitty_keyboard() -> None:
+    """Disable the Kitty keyboard protocol before a curses session.
+
+    The interactive front-end (Hermes TUI / prompt_toolkit session) may leave
+    the terminal in Kitty keyboard protocol mode.  Terminals that implement it
+    (Ghostty, Kitty, foot, WezTerm) then encode arrow keys as CSI-u sequences
+    (e.g. ``\\x1b[57352u``) instead of the legacy ``\\x1bOA`` form.  Python's
+    ``curses`` was built against the legacy terminfo definition and cannot
+    decode CSI-u, so ``getch()`` returns a bare ``ESC`` (27) — which every
+    wizard treats as cancel, making arrow keys "advance the page" instead of
+    moving the selection.  Terminals without the protocol (Konsole, xterm) are
+    unaffected.
+
+    Emitting the pop sequence (``CSI < u`` — the same escape cli.py already
+    uses on prompt return) before ``curses.wrapper()`` forces legacy encoding
+    for the duration of the curses screen, so arrow keys decode correctly.
+    No-op on non-TTY stdout.
+    """
+    try:
+        if not sys.stdout.isatty():
+            return
+        sys.stdout.write("\x1b[<u")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 # Normalized menu actions returned by ``read_menu_key``.  Using sentinels keeps
 # every menu's key-handling branch identical and free of raw escape-byte logic.
 NAV_UP = "up"
@@ -518,6 +545,7 @@ def _run_curses_menu(
                         result_holder[0] = outcome
                         return
 
+        pop_kitty_keyboard()
         curses.wrapper(_draw)
         flush_stdin()
         return result_holder[0] if result_holder[0] is not _KEEP else cancel_value
