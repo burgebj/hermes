@@ -104,8 +104,23 @@ _CRON_EXFIL_COMMAND_PATTERNS = [
 ]
 
 _CRON_INVISIBLE_CHARS = {
-    '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
-    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+    '\u200b',  # zero-width space
+    '\u200c',  # zero-width non-joiner
+    '\u200d',  # zero-width joiner
+    '\u2060',  # word joiner
+    '\u2062',  # invisible times
+    '\u2063',  # invisible separator
+    '\u2064',  # invisible plus
+    '\ufeff',  # zero-width no-break space (BOM)
+    '\u202a',  # left-to-right embedding
+    '\u202b',  # right-to-left embedding
+    '\u202c',  # pop directional formatting
+    '\u202d',  # left-to-right override
+    '\u202e',  # right-to-left override
+    '\u2066',  # left-to-right isolate
+    '\u2067',  # right-to-left isolate
+    '\u2068',  # first strong isolate
+    '\u2069',  # pop directional isolate
 }
 
 # U+200D Zero-Width Joiner is also a legitimate, required part of many
