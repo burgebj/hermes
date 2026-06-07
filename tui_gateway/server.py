@@ -1788,7 +1788,15 @@ def _current_profile_name() -> str:
 # backend reporting less than its required value (or none at all — a pre-GUI
 # checkout), surfacing a one-click "update to align" prompt instead of failing
 # cryptically downstream. Bump whenever the desktop's backend contract changes.
-DESKTOP_BACKEND_CONTRACT = 1
+#
+# Version history:
+#   1 — initial GUI<->backend contract.
+#   2 — per-session profile routing: session.create / session.resume accept a
+#       `profile` param and the backend builds the agent + persists against that
+#       profile's home/state.db (#39921, #39993). A desktop that sends `profile`
+#       to a contract-1 backend gets silent cross-profile leakage (new chats land
+#       in the launch profile), so the skew must be surfaced.
+DESKTOP_BACKEND_CONTRACT = 2
 
 
 def _session_info(agent, session: dict | None = None) -> dict:

@@ -69,7 +69,13 @@ function isUpdateToastSnoozed(): boolean {
 // Must match tui_gateway's DESKTOP_BACKEND_CONTRACT that this build was written
 // against. The backend reports its own value in session runtime info; a lower
 // value (or none — a pre-GUI checkout) means GUI<->backend skew.
-const REQUIRED_BACKEND_CONTRACT = 1
+//
+// 2 — requires the backend to support per-session profile routing
+//     (session.create / session.resume `profile` param, #39921/#39993). A
+//     contract-1 backend silently leaks new chats into the launch profile, so
+//     a contract-2 desktop must warn when pointed at one (e.g. a remote VM the
+//     user updated the desktop but not the backend on).
+const REQUIRED_BACKEND_CONTRACT = 2
 const SKEW_TOAST_ID = 'backend-contract-skew'
 
 /**
