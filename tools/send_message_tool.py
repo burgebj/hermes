@@ -186,19 +186,28 @@ def _handle_send(args):
     target_ref = parts[1].strip() if len(parts) > 1 else None
     chat_id = None
     thread_id = None
+    send_metadata = None
 
     if target_ref:
         chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+        if is_explicit and chat_id:
+            try:
+                from gateway.channel_directory import lookup_channel_metadata
+                lookup_id = f"{chat_id}:{thread_id}" if thread_id else str(chat_id)
+                send_metadata = lookup_channel_metadata(platform_name, lookup_id) or None
+            except Exception:
+                send_metadata = None
     else:
         is_explicit = False
 
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
         try:
-            from gateway.channel_directory import resolve_channel_name
+            from gateway.channel_directory import lookup_channel_metadata, resolve_channel_name
             resolved = resolve_channel_name(platform_name, target_ref)
             if resolved:
                 chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
+                send_metadata = lookup_channel_metadata(platform_name, resolved) or None
             else:
                 return json.dumps({
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
@@ -320,6 +329,7 @@ def _handle_send(args):
                 thread_id=thread_id,
                 media_files=media_files,
                 force_document=force_document_attachments,
+                send_metadata=send_metadata,
             )
         )
         if used_home_channel and isinstance(result, dict) and result.get("success"):
@@ -580,7 +590,7 @@ async def _send_via_adapter(
     }
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False):
+async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, send_metadata=None):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
@@ -753,6 +763,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 chunk,
                 media_files=media_files if is_last else None,
                 thread_id=thread_id,
+                metadata=send_metadata,
             )
             if isinstance(result, dict) and result.get("error"):
                 return result
@@ -791,7 +802,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.DINGTALK:
             result = await _send_dingtalk(pconfig.extra, chat_id, chunk)
         elif platform == Platform.FEISHU:
-            result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
+            result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id, metadata=send_metadata)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
         elif platform == Platform.BLUEBUBBLES:
@@ -1590,7 +1601,7 @@ async def _send_bluebubbles(extra, chat_id, message):
         return _error(f"BlueBubbles send failed: {e}")
 
 
-async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
+async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None, metadata=None):
     """Send via Feishu/Lark using the adapter's send pipeline."""
     try:
         from gateway.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
@@ -1607,7 +1618,11 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
         domain_name = getattr(adapter, "_domain_name", "feishu")
         domain = FEISHU_DOMAIN if domain_name != "lark" else LARK_DOMAIN
         adapter._client = adapter._build_lark_client(domain)
-        metadata = {"thread_id": thread_id} if thread_id else None
+        metadata = dict(metadata or {})
+        if thread_id and "thread_id" not in metadata:
+            metadata["thread_id"] = thread_id
+        if not metadata:
+            metadata = None
 
         last_result = None
         if message.strip():
