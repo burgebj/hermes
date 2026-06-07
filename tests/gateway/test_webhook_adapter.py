@@ -29,6 +29,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import SendResult
 from gateway.platforms.webhook import (
+    DEFAULT_HOST,
     WebhookAdapter,
     _INSECURE_NO_AUTH,
     check_webhook_requirements,
@@ -44,17 +45,18 @@ def _make_config(
     secret="",
     rate_limit=30,
     max_body_bytes=1_048_576,
-    host="0.0.0.0",
+    host=None,
     port=0,  # let OS pick a free port in tests
 ):
     """Build a PlatformConfig suitable for WebhookAdapter."""
     extra = {
-        "host": host,
         "port": port,
         "routes": routes or {},
         "rate_limit": rate_limit,
         "max_body_bytes": max_body_bytes,
     }
+    if host is not None:
+        extra["host"] = host
     if secret:
         extra["secret"] = secret
     return PlatformConfig(enabled=True, extra=extra)
@@ -525,6 +527,17 @@ class TestHTTPHandling:
             data = await resp.json()
             assert data["status"] == "ok"
             assert data["platform"] == "webhook"
+
+    def test_default_host_is_loopback(self):
+        """The webhook adapter defaults to a local-only bind."""
+        adapter = _make_adapter()
+        assert DEFAULT_HOST == "127.0.0.1"
+        assert adapter._host == "127.0.0.1"
+
+    def test_explicit_public_host_is_preserved(self):
+        """Operators can still opt into a public bind explicitly."""
+        adapter = _make_adapter(host="0.0.0.0")
+        assert adapter._host == "0.0.0.0"
 
     @pytest.mark.asyncio
     async def test_connect_starts_server(self):
@@ -1031,4 +1044,3 @@ class TestInsecureNoAuthSafetyRail:
             assert result is True
         finally:
             await adapter.disconnect()
-
