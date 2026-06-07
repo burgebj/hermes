@@ -661,8 +661,10 @@ class LocalEnvironment(BaseEnvironment):
         except (OSError, FileNotFoundError):
             pass
 
-        # Still strip the marker from output so it's not visible
-        self._extract_cwd_from_output(result)
+        # Still strip the marker from output so it's not visible, but
+        # DO NOT overwrite self.cwd — the file-based read above is the
+        # authoritative source for local backends.
+        self._strip_cwd_marker_from_output(result)
 
     def _extract_cwd_from_output(self, result: dict):
         """Same semantics as the base class, but on Windows the value

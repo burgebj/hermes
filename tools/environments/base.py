@@ -774,27 +774,28 @@ class BaseEnvironment(ABC):
         """Extract CWD from command output. Override for local file-based read."""
         self._extract_cwd_from_output(result)
 
-    def _extract_cwd_from_output(self, result: dict):
-        """Parse the __HERMES_CWD_{session}__ marker from stdout output.
+    def _strip_cwd_marker_from_output(self, result: dict) -> "str | None":
+        """Parse and remove the __HERMES_CWD_{session}__ marker pair from
+        result['output']. Return the captured cwd string (or None).
 
-        Updates self.cwd and strips the marker from result["output"].
-        Used by remote backends (Docker, SSH, Modal, Daytona, Singularity).
+        Does NOT touch self.cwd. Callers decide whether to assign — that
+        lets backends like LocalEnvironment use a validated file-based
+        read for self.cwd while still keeping the marker out of the
+        user-visible output.
         """
         output = result.get("output", "")
         marker = self._cwd_marker
         last = output.rfind(marker)
         if last == -1:
-            return
+            return None
 
         # Find the opening marker before this closing one
         search_start = max(0, last - 4096)  # CWD path won't be >4KB
         first = output.rfind(marker, search_start, last)
         if first == -1 or first == last:
-            return
+            return None
 
-        cwd_path = output[first + len(marker) : last].strip()
-        if cwd_path:
-            self.cwd = cwd_path
+        cwd_path = output[first + len(marker) : last].strip() or None
 
         # Strip the marker line AND the \n we injected before it.
         # The wrapper emits: printf '\n__MARKER__%s__MARKER__\n'
@@ -807,6 +808,20 @@ class BaseEnvironment(ABC):
         line_end = line_end + 1 if line_end != -1 else len(output)
 
         result["output"] = output[:line_start] + output[line_end:]
+
+        return cwd_path
+
+    def _extract_cwd_from_output(self, result: dict):
+        """Update self.cwd from the marker AND strip the marker from output.
+
+        Used by remote backends (Docker, SSH, Modal, Daytona, Singularity)
+        whose cwd lives inside the remote box and can't be validated by
+        local os.path.isdir. Local backends should call
+        _strip_cwd_marker_from_output instead and manage self.cwd themselves.
+        """
+        cwd_path = self._strip_cwd_marker_from_output(result)
+        if cwd_path:
+            self.cwd = cwd_path
 
     # ------------------------------------------------------------------
     # Hooks
