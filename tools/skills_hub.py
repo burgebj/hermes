@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_hermes_home
+from utils import atomic_json_write
 from agent.skill_utils import is_excluded_skill_path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -854,7 +855,7 @@ class GitHubSource(SkillSource):
         INDEX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_file = INDEX_CACHE_DIR / f"{key}.json"
         try:
-            cache_file.write_text(json.dumps(data, ensure_ascii=False))
+            atomic_json_write(cache_file, data, ensure_ascii=False)
         except OSError as e:
             logger.debug("Could not write cache: %s", e)
 
@@ -2994,7 +2995,7 @@ def _write_index_cache(key: str, data: Any) -> None:
             pass
     cache_file = INDEX_CACHE_DIR / f"{key}.json"
     try:
-        cache_file.write_text(json.dumps(data, ensure_ascii=False, default=str))
+        atomic_json_write(cache_file, data, ensure_ascii=False, default=str)
     except OSError as e:
         logger.debug("Could not write cache: %s", e)
 
@@ -3034,7 +3035,7 @@ class HubLockFile:
 
     def save(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        atomic_json_write(self.path, data, ensure_ascii=False)
 
     def record_install(
         self,
@@ -3107,7 +3108,7 @@ class TapsManager:
 
     def save(self, taps: List[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"taps": taps}, indent=2) + "\n")
+        atomic_json_write(self.path, {"taps": taps})
 
     def add(self, repo: str, path: str = "skills/") -> bool:
         """Add a tap. Returns False if already exists."""
@@ -3431,7 +3432,7 @@ def _load_hermes_index() -> Optional[dict]:
     # Cache locally
     try:
         HERMES_INDEX_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        HERMES_INDEX_CACHE_FILE.write_text(json.dumps(data))
+        atomic_json_write(HERMES_INDEX_CACHE_FILE, data)
     except OSError:
         pass
 
