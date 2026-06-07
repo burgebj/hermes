@@ -4596,6 +4596,115 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         )
         adapter._dispatch_inbound_event.assert_not_called()
 
+    def test_thread_mention_only_message_is_processed_not_dropped(self):
+        """Bare @Bot in a thread (root_id set) should synthesise '[Mentioned]' and dispatch.
+
+        Regression for #31336: Feishu 话题/thread @mention-only messages were
+        silently dropped because _strip_edge_self_mentions removed all text,
+        triggering the empty-text guard.  In thread context with a self-mention
+        we now synthesise a minimal ping text so the bot can respond.
+        """
+        from gateway.platforms.base import MessageType
+
+        adapter = self._build_adapter()
+        bot_mention = SimpleNamespace(
+            key="@_user_1",
+            id=SimpleNamespace(open_id="ou_bot", user_id=""),
+            name="Hermes",
+        )
+        # Thread message: root_id identifies the thread root; content is only @Bot.
+        message = SimpleNamespace(
+            content=json.dumps({"text": "@_user_1"}),
+            message_type="text",
+            message_id="m_thread_ping",
+            mentions=[bot_mention],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            thread_id=None,
+            root_id="om_thread_root_123",  # indicates thread context
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m_thread_ping",
+            )
+        )
+        # Must NOT be dropped — dispatch must be called.
+        adapter._dispatch_inbound_event.assert_called_once()
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.message_type, MessageType.TEXT)
+        self.assertIn("[Mentioned]", event.text)
+
+    def test_thread_mention_only_message_via_thread_id_field(self):
+        """Same as above but using thread_id instead of root_id (both are valid)."""
+        from gateway.platforms.base import MessageType
+
+        adapter = self._build_adapter()
+        bot_mention = SimpleNamespace(
+            key="@_user_1",
+            id=SimpleNamespace(open_id="ou_bot", user_id=""),
+            name="Hermes",
+        )
+        message = SimpleNamespace(
+            content=json.dumps({"text": "@_user_1"}),
+            message_type="text",
+            message_id="m_thread_ping2",
+            mentions=[bot_mention],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            thread_id="omt_thread_abc",  # thread_id field set
+            root_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m_thread_ping2",
+            )
+        )
+        adapter._dispatch_inbound_event.assert_called_once()
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.message_type, MessageType.TEXT)
+        self.assertIn("[Mentioned]", event.text)
+
+    def test_non_thread_mention_only_message_still_dropped(self):
+        """Outside thread context, a bare @Bot with no text should still be dropped."""
+        adapter = self._build_adapter()
+        bot_mention = SimpleNamespace(
+            key="@_user_1",
+            id=SimpleNamespace(open_id="ou_bot", user_id=""),
+            name="Hermes",
+        )
+        message = SimpleNamespace(
+            content=json.dumps({"text": "@_user_1"}),
+            message_type="text",
+            message_id="m_group_ping",
+            mentions=[bot_mention],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            thread_id=None,
+            root_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="m_group_ping",
+            )
+        )
+        # No thread context → empty message → should still be dropped.
+        adapter._dispatch_inbound_event.assert_not_called()
+
 
 class TestFeishuFetchMessageText(unittest.TestCase):
     def _build_adapter(self):
