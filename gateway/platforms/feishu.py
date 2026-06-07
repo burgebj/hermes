@@ -2420,7 +2420,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         reason = self._admit(sender, message)
         if reason is not None:
-            logger.debug("[Feishu] dropping inbound event: %s", reason)
+            logger.info("[Feishu] Admit rejected event: reason=%s message_id=%s chat_type=%s",
+                         reason, message_id, getattr(message, "chat_type", None))
             return
 
         chat_type = getattr(message, "chat_type", "p2p")
@@ -3062,10 +3063,16 @@ class FeishuAdapter(BasePlatformAdapter):
             if text.startswith("/"):
                 inbound_type = MessageType.COMMAND
 
-        # Guard runs post-strip so a pure "@Bot" message (stripped to "") is dropped.
+        # Guard runs post-strip so a pure "@Bot" message (stripped to "") is dropped,
+        # unless the bot was specifically mentioned — then treat it as a greeting.
         if inbound_type == MessageType.TEXT and not text and not media_urls:
-            logger.debug("[Feishu] Ignoring empty text message id=%s", message_id)
-            return
+            has_self_mention = any(ref.is_self for ref in mentions)
+            if has_self_mention:
+                text = "你好"
+                logger.info("[Feishu] Pure @mention, defaulting text to greeting")
+            else:
+                logger.debug("[Feishu] Ignoring empty text message id=%s", message_id)
+                return
 
         if inbound_type != MessageType.COMMAND:
             hint = _build_mention_hint(mentions)
@@ -4072,6 +4079,10 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._allow_group_message(
             getattr(sender, "sender_id", None), chat_id, is_bot=is_bot,
         ):
+            logger.info("[Feishu] DEBUG _admit group_policy_rejected: chat_id=%s policy=%s default_policy=%s group_policy=%s",
+                         chat_id, 
+                         self._group_rules.get(chat_id).policy if chat_id and chat_id in self._group_rules else "no_rule",
+                         self._default_group_policy, self._group_policy)
             return "group_policy_rejected"
         if require_mention and not self._mentions_self(message):
             return "group_policy_rejected"
@@ -4096,6 +4107,12 @@ class FeishuAdapter(BasePlatformAdapter):
         sender_open_id = getattr(sender_id, "open_id", None)
         sender_user_id = getattr(sender_id, "user_id", None)
         sender_ids = {sender_open_id, sender_user_id} - {None}
+
+        logger.info("[Feishu] DEBUG _allow_group_message: chat_id=%s default_policy=%r group_policy=%r admins=%s senders=%s has_rule=%s is_bot=%s",
+                     chat_id, self._default_group_policy, self._group_policy,
+                     list(self._admins)[:3] if self._admins else [],
+                     list(sender_ids)[:3],
+                     chat_id in self._group_rules if chat_id else False, is_bot)
 
         if sender_ids and self._admins and (sender_ids & self._admins):
             return True
