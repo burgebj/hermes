@@ -447,18 +447,20 @@ Snapshots over 8000 characters are automatically summarized by an LLM.
 
 ### `browser_click`
 
-Click an element identified by its ref ID from the snapshot.
+Click an element identified by its ref ID from the snapshot or a CSS selector.
 
 ```
 Click @e5 to press the "Sign In" button
+Click "button.submit" using a CSS selector
 ```
 
 ### `browser_type`
 
-Type text into an input field. Clears the field first, then types the new text.
+Type text into an input field. Specify the element via ref ID or CSS selector. Clears the field first, then types the new text.
 
 ```
 Type "hermes agent" into the search field @e3
+Type "john@example.com" into "input.email" using a CSS selector
 ```
 
 ### `browser_scroll`

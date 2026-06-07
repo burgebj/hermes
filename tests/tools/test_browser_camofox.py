@@ -238,6 +238,44 @@ class TestCamofoxInteractions:
         assert result["typed"] == "hello world"
 
     @patch("tools.browser_camofox.requests.post")
+    def test_click_with_selector(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab_sel", "url": "https://x.com"})
+        camofox_navigate("https://x.com", task_id="t_sel")
+
+        mock_post.return_value = _mock_response(json_data={"ok": True, "url": "https://x.com"})
+        result = json.loads(camofox_click(selector="button.submit", task_id="t_sel"))
+        assert result["success"] is True
+        assert result["clicked"] == "button.submit"
+
+        # Verify POST payload contains selector instead of ref
+        call_args = mock_post.call_args_list[-1]
+        payload = call_args.kwargs["json"]
+        assert "selector" in payload
+        assert payload["selector"] == "button.submit"
+        assert "ref" not in payload
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_type_with_selector(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab_sel_type", "url": "https://x.com"})
+        camofox_navigate("https://x.com", task_id="t_sel_type")
+
+        mock_post.return_value = _mock_response(json_data={"ok": True})
+        result = json.loads(camofox_type(selector="input.username", text="myusername", task_id="t_sel_type"))
+        assert result["success"] is True
+        assert result["typed"] == "myusername"
+        assert result["element"] == "input.username"
+
+        # Verify POST payload contains selector instead of ref
+        call_args = mock_post.call_args_list[-1]
+        payload = call_args.kwargs["json"]
+        assert "selector" in payload
+        assert payload["selector"] == "input.username"
+        assert payload["text"] == "myusername"
+        assert "ref" not in payload
+
+    @patch("tools.browser_camofox.requests.post")
     def test_scroll(self, mock_post, monkeypatch):
         monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
         mock_post.return_value = _mock_response(json_data={"tabId": "tab6", "url": "https://x.com"})
@@ -424,5 +462,71 @@ class TestBrowserToolRouting:
         monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
         from tools.browser_tool import check_browser_requirements
         assert check_browser_requirements() is True
+
+    def test_browser_click_validation(self):
+        from tools.browser_tool import browser_click
+        # Both missing
+        res = json.loads(browser_click(task_id="t_val"))
+        assert res["success"] is False
+        assert "Either 'ref' or 'selector' must be provided" in res["error"]
+
+        # Both present
+        res = json.loads(browser_click(ref="@e1", selector="button.submit", task_id="t_val"))
+        assert res["success"] is False
+        assert "mutually exclusive" in res["error"]
+
+    def test_browser_type_validation(self):
+        from tools.browser_tool import browser_type
+        # Both missing
+        res = json.loads(browser_type(text="hello", task_id="t_val"))
+        assert res["success"] is False
+        assert "Either 'ref' or 'selector' must be provided" in res["error"]
+
+        # Both present
+        res = json.loads(browser_type(ref="@e1", text="hello", selector="input.username", task_id="t_val"))
+        assert res["success"] is False
+        assert "mutually exclusive" in res["error"]
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_browser_click_delegation_with_selector(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab_del_c", "url": "https://example.com"})
+
+        from tools.browser_tool import browser_navigate, browser_click
+        with patch("tools.browser_tool._is_safe_url", return_value=True):
+            browser_navigate("https://example.com", task_id="t_del_c")
+
+        mock_post.return_value = _mock_response(json_data={"ok": True, "url": "https://example.com"})
+        res = json.loads(browser_click(selector=".btn", task_id="t_del_c"))
+        assert res["success"] is True
+        assert res["clicked"] == ".btn"
+
+        # Verify POST payload contains selector instead of ref
+        call_args = mock_post.call_args_list[-1]
+        payload = call_args.kwargs["json"]
+        assert payload["selector"] == ".btn"
+        assert "ref" not in payload
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_browser_type_delegation_with_selector(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab_del_t", "url": "https://example.com"})
+
+        from tools.browser_tool import browser_navigate, browser_type
+        with patch("tools.browser_tool._is_safe_url", return_value=True):
+            browser_navigate("https://example.com", task_id="t_del_t")
+
+        mock_post.return_value = _mock_response(json_data={"ok": True})
+        res = json.loads(browser_type(selector=".input", text="abc", task_id="t_del_t"))
+        assert res["success"] is True
+        assert res["typed"] == "abc"
+        assert res["element"] == ".input"
+
+        # Verify POST payload contains selector instead of ref
+        call_args = mock_post.call_args_list[-1]
+        payload = call_args.kwargs["json"]
+        assert payload["selector"] == ".input"
+        assert payload["text"] == "abc"
+        assert "ref" not in payload
 
 

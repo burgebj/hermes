@@ -1499,34 +1499,42 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_click",
-        "description": "Click on an element identified by its ref ID from the snapshot (e.g., '@e5'). The ref IDs are shown in square brackets in the snapshot output. Requires browser_navigate and browser_snapshot to be called first.",
+        "description": "Click on an element. Specify either the ref ID (e.g., '@e5') or a CSS selector (e.g., 'button.submit'). Requires browser_navigate first.",
         "parameters": {
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "The element reference from the snapshot (e.g., '@e5', '@e12')"
+                    "description": "The element reference from the snapshot (e.g., '@e5'). Mutually exclusive with selector."
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector of the element to click (e.g., 'button.submit'). Mutually exclusive with ref."
                 }
             },
-            "required": ["ref"]
+            "required": []
         }
     },
     {
         "name": "browser_type",
-        "description": "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
+        "description": "Type text into an input field. Specify either the ref ID (e.g., '@e3') or a CSS selector (e.g., 'input.username'). Clears the field first, then types. Requires browser_navigate first.",
         "parameters": {
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "The element reference from the snapshot (e.g., '@e3')"
+                    "description": "The element reference from the snapshot (e.g., '@e3'). Mutually exclusive with selector."
                 },
                 "text": {
                     "type": "string",
                     "description": "The text to type into the field"
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector of the element to type into (e.g., 'input.username'). Mutually exclusive with ref."
                 }
             },
-            "required": ["ref", "text"]
+            "required": ["text"]
         }
     },
     {
@@ -2555,79 +2563,108 @@ def browser_snapshot(
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_click(ref: str, task_id: Optional[str] = None) -> str:
+def browser_click(
+    ref: Optional[str] = None,
+    selector: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
     """
     Click on an element.
 
     Args:
-        ref: Element reference (e.g., "@e5")
+        ref: Element reference (e.g., "@e5"). Mutually exclusive with selector.
+        selector: CSS selector of the element to click (e.g., "button.submit"). Mutually exclusive with ref.
         task_id: Task identifier for session isolation
 
     Returns:
         JSON string with click result
     """
+    if not ref and not selector:
+        return json.dumps({"success": False, "error": "Either 'ref' or 'selector' must be provided."}, ensure_ascii=False)
+    if ref and selector:
+        return json.dumps({"success": False, "error": "Parameters 'ref' and 'selector' are mutually exclusive."}, ensure_ascii=False)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
-        return camofox_click(ref, task_id)
+        return camofox_click(ref=ref, selector=selector, task_id=task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
 
-    # Ensure ref starts with @
-    if not ref.startswith("@"):
-        ref = f"@{ref}"
+    if ref:
+        # Ensure ref starts with @
+        if not ref.startswith("@"):
+            ref = f"@{ref}"
+        target = ref
+    else:
+        target = selector
 
-    result = _run_browser_command(effective_task_id, "click", [ref])
+    result = _run_browser_command(effective_task_id, "click", [target])
 
     if result.get("success"):
         response = {
             "success": True,
-            "clicked": ref
+            "clicked": target
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
     else:
         response = {
             "success": False,
-            "error": result.get("error", f"Failed to click {ref}")
+            "error": result.get("error", f"Failed to click {target}")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
+def browser_type(
+    ref: Optional[str] = None,
+    text: str = "",
+    selector: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
     """
     Type text into an input field.
 
     Args:
-        ref: Element reference (e.g., "@e3")
+        ref: Element reference (e.g., "@e3"). Mutually exclusive with selector.
         text: Text to type
+        selector: CSS selector of the element to type into (e.g., "input.username"). Mutually exclusive with ref.
         task_id: Task identifier for session isolation
 
     Returns:
         JSON string with type result
     """
+    if not ref and not selector:
+        return json.dumps({"success": False, "error": "Either 'ref' or 'selector' must be provided."}, ensure_ascii=False)
+    if ref and selector:
+        return json.dumps({"success": False, "error": "Parameters 'ref' and 'selector' are mutually exclusive."}, ensure_ascii=False)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
-        return camofox_type(ref, text, task_id)
+        return camofox_type(ref=ref, text=text, selector=selector, task_id=task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
 
-    # Ensure ref starts with @
-    if not ref.startswith("@"):
-        ref = f"@{ref}"
+    if ref:
+        # Ensure ref starts with @
+        if not ref.startswith("@"):
+            ref = f"@{ref}"
+        target = ref
+    else:
+        target = selector
 
     # Use fill command (clears then types)
-    result = _run_browser_command(effective_task_id, "fill", [ref, text])
+    result = _run_browser_command(effective_task_id, "fill", [target, text])
 
     if result.get("success"):
         response = {
             "success": True,
             "typed": text,
-            "element": ref
+            "element": target
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
     else:
         response = {
             "success": False,
-            "error": result.get("error", f"Failed to type into {ref}")
+            "error": result.get("error", f"Failed to type into {target}")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
@@ -3800,7 +3837,9 @@ registry.register(
     name="browser_click",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_click"],
-    handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_click(
+        ref=args.get("ref"), selector=args.get("selector"), task_id=kw.get("task_id")
+    ),
     check_fn=check_browser_requirements,
     emoji="👆",
 )
@@ -3808,7 +3847,12 @@ registry.register(
     name="browser_type",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_type"],
-    handler=lambda args, **kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_type(
+        ref=args.get("ref"),
+        text=args.get("text", ""),
+        selector=args.get("selector"),
+        task_id=kw.get("task_id"),
+    ),
     check_fn=check_browser_requirements,
     emoji="⌨️",
 )
