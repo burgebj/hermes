@@ -27,6 +27,7 @@ from agent.prompt_builder import (
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
+    SKILLS_GUIDANCE,
 )
 from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
 
@@ -47,6 +48,14 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+    def test_skills_guidance_includes_safety_rule(self):
+        """Skill Safety Rule (P1) tells the agent to treat [SKILL_PRUNED]
+        as unavailable and reload before relying on the skill."""
+        assert "## Skill Safety Rule" in SKILLS_GUIDANCE
+        assert "[SKILL_PRUNED]" in SKILLS_GUIDANCE
+        assert "UNAVAILABLE" in SKILLS_GUIDANCE
+        assert "reload it with skill_view" in SKILLS_GUIDANCE
 
 
 # =========================================================================

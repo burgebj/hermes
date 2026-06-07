@@ -172,10 +172,15 @@ SESSION_SEARCH_GUIDANCE = (
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
     "or discovering a non-trivial workflow, save the approach as a "
-    "skill with skill_manage so you can reuse it next time.\n"
+    "skill with skill_manage so you can reuse it next time.\\n"
     "When using a skill and finding it outdated, incomplete, or wrong, "
     "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
-    "Skills that aren't maintained become liabilities."
+    "Skills that aren't maintained become liabilities.\\n\\n"
+    "## Skill Safety Rule\\n"
+    "If you see a tool result with [SKILL_PRUNED] or only metadata (name/char count):\\n"
+    "1. Treat the skill content as UNAVAILABLE.\\n"
+    "2. If your current task requires that skill, reload it with skill_view(name='...') before continuing.\\n"
+    "3. If no task is in progress, do not reload automatically; wait until needed.\\n"
 )
 
 KANBAN_GUIDANCE = (

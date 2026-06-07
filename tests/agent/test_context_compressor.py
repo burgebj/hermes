@@ -3,7 +3,11 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import (
+    ContextCompressor,
+    SUMMARY_PREFIX,
+    _summarize_tool_result,
+)
 
 
 @pytest.fixture()
@@ -186,6 +190,45 @@ class TestCompress:
         # (head=assistant, tail=user in this fixture).  Verify the
         # original content is present in either case.
         assert msgs[-2]["content"] in result[-2]["content"]
+
+
+class TestToolResultSummaries:
+    """Ghost skill mitigation: _summarize_tool_result adds [SKILL_PRUNED]
+    marker for skill_view but keeps other skill tools as metadata-only.
+
+    Based on tests from LeonSGP43 (PR #32375).
+    """
+
+    def test_skill_view_summary_marks_pruned_content(self):
+        summary = _summarize_tool_result(
+            "skill_view",
+            '{"name":"docker-management"}',
+            "x" * 1234,
+        )
+
+        assert summary.startswith("[skill_view] name=docker-management (1,234 chars)")
+        assert "[SKILL_PRUNED:" in summary
+        assert "reload with skill_view" in summary
+
+    def test_other_skill_tool_summaries_remain_metadata_only(self):
+        summary = _summarize_tool_result(
+            "skills_list",
+            '{"name":"docker-management"}',
+            "x" * 128,
+        )
+
+        assert summary == "[skills_list] name=docker-management (128 chars)"
+        assert "[SKILL_PRUNED:" not in summary
+
+    def test_skill_manage_summary_remains_metadata_only(self):
+        summary = _summarize_tool_result(
+            "skill_manage",
+            '{"action":"create","name":"test-skill"}',
+            "x" * 256,
+        )
+
+        assert summary == "[skill_manage] name=test-skill (256 chars)"
+        assert "[SKILL_PRUNED:" not in summary
 
 
 class TestGenerateSummaryNoneContent:
