@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -379,6 +380,47 @@ class TestRunJobProfileContext:
 
 
 class TestTickProfilePartition:
+    def test_deliver_result_uses_profile_wrap_response_config(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        """Profile jobs should read cron.wrap_response from their runtime profile."""
+        import cron.scheduler as sched
+        from gateway.config import Platform
+
+        root, profile_home = isolated_cron_profile_home
+        (root / "config.yaml").write_text("cron:\n  wrap_response: true\n", encoding="utf-8")
+        (profile_home / "config.yaml").write_text(
+            "cron:\n  wrap_response: false\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(sched, "_hermes_home", None)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        job = {
+            "id": "profile-delivery",
+            "name": "profile delivery",
+            "profile": "support",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch(
+                 "tools.send_message_tool._send_to_platform",
+                 new=AsyncMock(return_value={"success": True}),
+             ) as send_mock:
+            sched._deliver_result(job, "Clean profile output.")
+
+        send_mock.assert_called_once()
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content == "Clean profile output."
+        assert "Cronjob Response" not in sent_content
+        assert os.environ["HERMES_HOME"] == str(root)
+        assert sched._get_hermes_home() == root
+
     def test_profile_and_workdir_combined(self, isolated_cron_profile_home, monkeypatch):
         """Both profile and workdir set — verify both are applied and restored."""
         import cron.scheduler as sched
