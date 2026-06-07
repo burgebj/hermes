@@ -20,15 +20,19 @@ def _make_cli():
 
 
 class TestCliResumeCommand:
-    def test_show_recent_sessions_includes_indexes_and_resume_hint(self, capsys):
+    def test_show_recent_sessions_includes_indexes_and_resume_hint(self):
         cli_obj = _make_cli()
         cli_obj._list_recent_sessions = MagicMock(return_value=[
             {"id": "sess_002", "title": "Coding", "preview": "build feature", "last_active": None},
             {"id": "sess_001", "title": "Research", "preview": "read docs", "last_active": None},
         ])
 
-        shown = cli_obj._show_recent_sessions(reason="resume")
-        output = capsys.readouterr().out
+        # _show_recent_sessions prints via _cprint (prompt_toolkit-safe), which
+        # capsys cannot observe — capture the routed lines instead (#36815).
+        _lines: list[str] = []
+        with patch("cli._cprint", side_effect=lambda text="": _lines.append(str(text))):
+            shown = cli_obj._show_recent_sessions(reason="resume")
+        output = "\n".join(_lines)
 
         assert shown is True
         assert "1" in output

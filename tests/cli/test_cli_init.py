@@ -3,10 +3,29 @@ that only manifest at runtime (not in mocked unit tests)."""
 
 import os
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+@contextmanager
+def _capture_cprint():
+    """Capture text routed through cli._cprint.
+
+    The history / recent-sessions views print through ``_cprint`` (the
+    prompt_toolkit-safe path) rather than the builtin ``print`` so the output
+    isn't swallowed / overdrawn by the live prompt (#36815). ``capsys`` does
+    not see prompt_toolkit's renderer, so tests assert on the captured lines.
+    """
+    lines: list[str] = []
+
+    def _record(text=""):
+        lines.append(str(text))
+
+    with patch("cli._cprint", side_effect=_record):
+        yield lines
 
 
 def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
@@ -276,8 +295,9 @@ class TestHistoryDisplay:
             {"role": "user", "content": "A" * 250},
         ]
 
-        cli.show_history()
-        output = capsys.readouterr().out
+        with _capture_cprint() as _lines:
+            cli.show_history()
+        output = "\n".join(_lines)
 
         assert "[You #1]" in output
         assert "[Hermes #2]" in output
@@ -309,8 +329,9 @@ class TestHistoryDisplay:
             },
         ]
 
-        cli.show_history()
-        output = capsys.readouterr().out
+        with _capture_cprint() as _lines:
+            cli.show_history()
+        output = "\n".join(_lines)
 
         assert "No messages in the current chat yet" in output
         assert "Checking Running Hermes Agent" in output
@@ -337,8 +358,9 @@ class TestHistoryDisplay:
             },
         ]
 
-        cli._handle_resume_command("/resume")
-        output = capsys.readouterr().out
+        with _capture_cprint() as _lines:
+            cli._handle_resume_command("/resume")
+        output = "\n".join(_lines)
 
         assert "Recent sessions" in output
         assert "Checking Running Hermes Agent" in output
@@ -394,8 +416,9 @@ class TestHistoryDisplay:
             },
         ]
 
-        cli._handle_resume_command("/resume")
-        output = capsys.readouterr().out
+        with _capture_cprint() as _lines:
+            cli._handle_resume_command("/resume")
+        output = "\n".join(_lines)
 
         assert long_title in output
         assert "20260401_201329_d85961" in output
@@ -422,8 +445,9 @@ class TestHistoryDisplay:
 
         # Drive it through the public dispatcher to also lock in the
         # process_command wiring, not just the handler in isolation.
-        cli.process_command("/sessions")
-        output = capsys.readouterr().out
+        with _capture_cprint() as _lines:
+            cli.process_command("/sessions")
+        output = "\n".join(_lines)
 
         assert "Unknown command" not in output
         assert "Recent sessions" in output
@@ -444,8 +468,9 @@ class TestHistoryDisplay:
             },
         ]
 
-        cli.process_command("/sessions list")
-        output = capsys.readouterr().out
+        with _capture_cprint() as _lines:
+            cli.process_command("/sessions list")
+        output = "\n".join(_lines)
 
         assert "Unknown command" not in output
         assert "Recent sessions" in output
