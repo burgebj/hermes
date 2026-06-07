@@ -2637,6 +2637,122 @@ class TestThreadReplyHandling:
         adapter.handle_message.assert_not_called()
 
 
+class TestSlackNearbyChannelContext:
+    """Top-level deictic references should recover a small nearby context window."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_reference_fetches_nearby_context(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_history = AsyncMock(return_value={
+            "messages": [
+                {
+                    "ts": "123.455",
+                    "user": "U_REPORTER",
+                    "text": "Bug report: worker pool exhausted after retries spike",
+                }
+            ]
+        })
+
+        event = {
+            "text": "<@U_BOT> please identify the root cause of this bug report",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        async def _name_lookup(user_id, chat_id=None):
+            return {
+                "U_REPORTER": "Baxter Black",
+                "U_USER": "Alice",
+            }.get(user_id, user_id)
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(side_effect=_name_lookup)):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_history.assert_awaited_once_with(
+            channel="C123",
+            latest="123.456",
+            inclusive=False,
+            limit=3,
+        )
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Slack nearby context" in msg_event.text
+        assert "Baxter Black: Bug report: worker pool exhausted after retries spike" in msg_event.text
+        assert "<@U_BOT>" not in msg_event.text
+        assert "please identify the root cause of this bug report" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_nearby_context_permission_failure_is_surfaced(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+
+        class _SlackHistoryError(Exception):
+            def __init__(self):
+                super().__init__("missing_scope")
+                self.response = {
+                    "error": "missing_scope",
+                    "needed": "channels:history",
+                    "provided": "chat:write",
+                }
+
+        adapter._app.client.conversations_history = AsyncMock(side_effect=_SlackHistoryError())
+
+        event = {
+            "text": "<@U_BOT> please identify the root cause of this bug report",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "team": "T_TEAM",
+        }
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="Alice")):
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text.startswith(
+            "[Slack nearby context fetch failed: missing channels:history permission]"
+        )
+        assert "please identify the root cause of this bug report" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_still_uses_thread_context_only(self, adapter):
+        adapter._team_bot_user_ids = {"T_TEAM": "U_BOT"}
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": "123.000", "user": "U_REPORTER", "text": "Bug report: thread parent"},
+                {"ts": "123.456", "user": "U_USER", "text": "<@U_BOT> please fix this bug report"},
+            ]
+        })
+        adapter._app.client.conversations_history = AsyncMock()
+
+        event = {
+            "text": "<@U_BOT> please fix this bug report",
+            "user": "U_USER",
+            "channel": "C123",
+            "channel_type": "channel",
+            "ts": "123.456",
+            "thread_ts": "123.000",
+            "team": "T_TEAM",
+        }
+
+        async def _name_lookup(user_id, chat_id=None):
+            return {
+                "U_REPORTER": "Baxter Black",
+                "U_USER": "Alice",
+            }.get(user_id, user_id)
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(side_effect=_name_lookup)):
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.conversations_replies.assert_awaited_once()
+        adapter._app.client.conversations_history.assert_not_called()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Thread context" in msg_event.text
+        assert "[Slack nearby context" not in msg_event.text
+
+
 # ---------------------------------------------------------------------------
 # TestAssistantThreadLifecycle
 # ---------------------------------------------------------------------------
