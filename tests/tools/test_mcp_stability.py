@@ -505,6 +505,48 @@ class TestMCPInitialConnectionRetry:
 
         asyncio.get_event_loop().run_until_complete(_run())
 
+    def test_coerce_retry_limit(self):
+        """0/negative => infinite; positive => value; None/garbage => default."""
+        import math
+        from tools.mcp_tool import _coerce_retry_limit
+        assert _coerce_retry_limit(None, 5) == 5
+        assert _coerce_retry_limit(0, 5) == math.inf
+        assert _coerce_retry_limit(-3, 5) == math.inf
+        assert _coerce_retry_limit(9, 5) == 9
+        assert _coerce_retry_limit("4", 5) == 4
+        assert _coerce_retry_limit("nope", 5) == 5
+
+    def test_initial_connect_honors_config_retry_override(self):
+        """A per-server max_initial_connect_retries overrides the default."""
+        from tools.mcp_tool import MCPServerTask
+
+        call_count = 0
+
+        async def _run():
+            nonlocal call_count
+            server = MCPServerTask("test-config-retries")
+
+            async def fake_run_stdio(self_inner, config):
+                nonlocal call_count
+                call_count += 1
+                raise ConnectionError("still warming up")
+
+            # Patch sleep so backoff doesn't slow the test down.
+            async def _instant_sleep(_):
+                return None
+
+            with patch.object(MCPServerTask, '_run_stdio', fake_run_stdio), \
+                 patch("tools.mcp_tool.asyncio.sleep", _instant_sleep):
+                task = asyncio.ensure_future(
+                    server.run({"command": "fake", "max_initial_connect_retries": 6})
+                )
+                await server._ready.wait()
+                # 1 initial + 6 retries = 7 attempts before giving up.
+                assert call_count == 7
+                await task
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
     def test_initial_connect_retry_respects_shutdown(self):
         """Shutdown during initial retry backoff aborts cleanly."""
         from tools.mcp_tool import MCPServerTask

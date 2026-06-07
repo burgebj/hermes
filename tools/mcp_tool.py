@@ -19,6 +19,8 @@ Example config::
         env: {}
         timeout: 120         # per-tool-call timeout in seconds (default: 120)
         connect_timeout: 60  # initial connection timeout (default: 60)
+        max_initial_connect_retries: 3  # first-connect retries (default: 3; 0/negative = retry forever)
+        max_reconnect_retries: 5         # post-ready reconnect retries (default: 5; 0/negative = retry forever)
       github:
         command: "npx"
         args: ["-y", "@modelcontextprotocol/server-github"]
@@ -50,7 +52,8 @@ Example config::
 Features:
     - Stdio transport (command + args) and HTTP/StreamableHTTP transport (url)
     - SSE transport (transport: sse) for MCP servers using the SSE protocol
-    - Automatic reconnection with exponential backoff (up to 5 retries)
+    - Automatic reconnection with exponential backoff (retry budget is
+      per-server configurable and can be unlimited; see max_*_retries)
     - Environment variable filtering for stdio subprocesses (security)
     - Credential stripping in error messages returned to the LLM
     - Configurable per-server timeouts for tool calls and connections
@@ -262,6 +265,26 @@ _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
+
+
+def _coerce_retry_limit(value: Any, default: int) -> float:
+    """Resolve a per-server retry limit from config.
+
+    Servers that legitimately go offline for long stretches (e.g. a desktop
+    trading app that closes overnight or restarts on its own) need to keep
+    retrying instead of permanently giving up after a handful of attempts.
+
+    Returns ``math.inf`` when *value* is 0 or negative (retry forever), the
+    integer value when a positive number is given, or *default* when *value*
+    is ``None`` or cannot be parsed.
+    """
+    if value is None:
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return math.inf if n <= 0 else n
 
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
@@ -1124,7 +1147,7 @@ class MCPServerTask:
         "_tools", "_error", "_config",
         "_sampling", "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
-        "initialize_result",
+        "initialize_result", "_served_since_failure",
     )
 
     def __init__(self, name: str):
@@ -1161,6 +1184,12 @@ class MCPServerTask:
         # ``.capabilities.prompts``) instead of assuming every ``ClientSession``
         # method attribute corresponds to a supported server method. See #18051.
         self.initialize_result: Optional[Any] = None
+        # Set True once the connection reaches the live "serving" state and
+        # cleared when a post-ready reconnect failure is counted. Lets the
+        # reconnect loop reset its retry budget after any healthy stretch,
+        # so a server that drops and recovers repeatedly over the process
+        # lifetime never exhausts a lifetime-cumulative retry cap.
+        self._served_since_failure: bool = False
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -1309,6 +1338,11 @@ class MCPServerTask:
         # Keepalive interval in seconds.  Must be shorter than typical
         # LB / NAT idle-timeout (commonly 300-600s).
         _KEEPALIVE_INTERVAL = 180  # 3 minutes
+
+        # We only reach this helper once the session is initialized and tools
+        # are discovered — i.e. the connection is genuinely healthy. Mark the
+        # cycle as served so the reconnect loop can refresh its retry budget.
+        self._served_since_failure = True
 
         shutdown_task = asyncio.create_task(self._shutdown_event.wait())
         reconnect_task = asyncio.create_task(self._reconnect_event.wait())
@@ -1763,6 +1797,18 @@ class MCPServerTask:
         self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
         self._auth_type = (config.get("auth") or "").lower().strip()
 
+        # Per-server retry budgets. 0 / negative in config means retry forever
+        # — appropriate for servers backed by an app that legitimately goes
+        # offline for long stretches (e.g. a desktop trading client that is
+        # closed overnight or started after Hermes). Defaults preserve the
+        # historical 3 initial / 5 reconnect behavior for everyone else.
+        max_initial_retries = _coerce_retry_limit(
+            config.get("max_initial_connect_retries"), _MAX_INITIAL_CONNECT_RETRIES
+        )
+        max_reconnect_retries = _coerce_retry_limit(
+            config.get("max_reconnect_retries"), _MAX_RECONNECT_RETRIES
+        )
+
         # Set up sampling handler if enabled and SDK types are available
         sampling_config = config.get("sampling", {})
         if sampling_config.get("enabled", True) and _MCP_SAMPLING_TYPES:
@@ -1875,11 +1921,11 @@ class MCPServerTask:
                         return
 
                     initial_retries += 1
-                    if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
+                    if initial_retries > max_initial_retries:
                         logger.warning(
                             "MCP server '%s' failed initial connection after "
                             "%d attempts, giving up: %s",
-                            self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
+                            self.name, max_initial_retries, exc,
                         )
                         self._error = exc
                         self._ready.set()
@@ -1887,9 +1933,9 @@ class MCPServerTask:
 
                     logger.warning(
                         "MCP server '%s' initial connection failed "
-                        "(attempt %d/%d), retrying in %.0fs: %s",
+                        "(attempt %d/%s), retrying in %.0fs: %s",
                         self.name, initial_retries,
-                        _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
+                        max_initial_retries, backoff, exc,
                     )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
@@ -1909,19 +1955,28 @@ class MCPServerTask:
                     )
                     return
 
+                # If the server was healthy at any point since the last
+                # counted failure, this drop starts a fresh failure streak —
+                # reset the budget and backoff so a server that recovers
+                # between outages never exhausts a lifetime-cumulative cap.
+                if self._served_since_failure:
+                    retries = 0
+                    backoff = 1.0
+                    self._served_since_failure = False
+
                 retries += 1
-                if retries > _MAX_RECONNECT_RETRIES:
+                if retries > max_reconnect_retries:
                     logger.warning(
                         "MCP server '%s' failed after %d reconnection attempts, "
                         "giving up: %s",
-                        self.name, _MAX_RECONNECT_RETRIES, exc,
+                        self.name, retries - 1, exc,
                     )
                     return
 
                 logger.warning(
-                    "MCP server '%s' connection lost (attempt %d/%d), "
+                    "MCP server '%s' connection lost (attempt %d/%s), "
                     "reconnecting in %.0fs: %s",
-                    self.name, retries, _MAX_RECONNECT_RETRIES,
+                    self.name, retries, max_reconnect_retries,
                     backoff, exc,
                 )
                 await asyncio.sleep(backoff)
