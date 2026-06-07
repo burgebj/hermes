@@ -41,6 +41,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
+from agent.memory_recall_packet import (
+    EntityObservation,
+    RecallEntity,
+    RecallEvidenceChunk,
+    RecallObservation,
+    RecallPacket,
+    format_recall_packet,
+)
 from hermes_constants import get_hermes_home
 from tools.registry import tool_error
 from hermes_cli.config import cfg_get
@@ -81,6 +89,158 @@ def _parse_int_setting(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         logger.warning("Invalid integer Hindsight setting %r; using default %s", value, default)
         return default
+
+
+def _parse_bool_setting(value: Any, default: bool) -> bool:
+    """Parse a boolean-ish config/env value, falling back on invalid input."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    logger.warning("Invalid boolean Hindsight setting %r; using default %s", value, default)
+    return default
+
+
+def _normalise_recall_packet_format(value: Any) -> str:
+    """Return a supported recall packet format name."""
+    text = str(value or "plain").strip().lower()
+    return text if text in {"plain", "graph"} else "plain"
+
+
+def _object_value(obj: Any, *names: str, default: Any = None) -> Any:
+    """Read the first present key/attribute from dicts, Pydantic models, or objects."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        for name in names:
+            if name in obj:
+                return obj[name]
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return default
+
+
+def _object_dict(obj: Any) -> dict[str, Any]:
+    """Convert dict/Pydantic/simple objects to a best-effort plain dict."""
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return dict(obj)
+    if hasattr(obj, "model_dump"):
+        try:
+            data = obj.model_dump(exclude_none=True)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    if hasattr(obj, "dict"):
+        try:
+            data = obj.dict(exclude_none=True)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {
+        key: value
+        for key, value in vars(obj).items()
+        if not key.startswith("_")
+    } if hasattr(obj, "__dict__") else {}
+
+
+def _list_or_empty(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _string_list(value: Any) -> list[str]:
+    return [str(item) for item in _list_or_empty(value) if item is not None and str(item).strip()]
+
+
+def _recall_observation_from_result(result: Any) -> RecallObservation:
+    metadata = _object_value(result, "metadata", default={})
+    if not isinstance(metadata, dict):
+        metadata = _object_dict(metadata)
+    return RecallObservation(
+        text=str(_object_value(result, "text", "content", "summary", default="") or ""),
+        type=_object_value(result, "type", "fact_type", "memory_type"),
+        entities=_string_list(_object_value(result, "entities", "entity_names", default=[])),
+        context=_object_value(result, "context"),
+        occurred_start=_object_value(result, "occurred_start", "valid_at", "start_time"),
+        occurred_end=_object_value(result, "occurred_end", "end_time"),
+        mentioned_at=_object_value(result, "mentioned_at", "timestamp", "created_at"),
+        document_id=_object_value(result, "document_id", "source_document_id", "doc_id"),
+        metadata=metadata,
+        chunk_id=_object_value(result, "chunk_id", "chunkId"),
+        tags=_string_list(_object_value(result, "tags", default=[])),
+        source_fact_ids=_string_list(_object_value(result, "source_fact_ids", "sourceFactIds", "source_facts", default=[])),
+    )
+
+
+def _entity_observation_from_value(value: Any) -> EntityObservation:
+    return EntityObservation(
+        text=str(_object_value(value, "text", "content", "summary", default=value) or ""),
+        mentioned_at=_object_value(value, "mentioned_at", "timestamp", "created_at"),
+    )
+
+
+def _recall_entity_from_value(value: Any) -> RecallEntity:
+    observations = [
+        _entity_observation_from_value(obs)
+        for obs in _list_or_empty(_object_value(value, "observations", "evidence", default=[]))
+    ]
+    return RecallEntity(
+        entity_id=_object_value(value, "entity_id", "id"),
+        canonical_name=str(_object_value(value, "canonical_name", "name", "entity", default="") or ""),
+        observations=observations,
+    )
+
+
+def _recall_chunk_from_value(value: Any) -> RecallEvidenceChunk | None:
+    chunk_id = _object_value(value, "id", "chunk_id", "chunkId")
+    if chunk_id is None:
+        return None
+    return RecallEvidenceChunk(
+        id=str(chunk_id),
+        text=str(_object_value(value, "text", "content", default="") or ""),
+        chunk_index=_object_value(value, "chunk_index", "index"),
+        truncated=_object_value(value, "truncated"),
+    )
+
+
+def _recall_packet_from_response(query: str, resp: Any) -> RecallPacket:
+    chunks: list[RecallEvidenceChunk] = []
+    for chunk in _list_or_empty(_object_value(resp, "chunks", "source_chunks", default=[])):
+        mapped = _recall_chunk_from_value(chunk)
+        if mapped is not None:
+            chunks.append(mapped)
+    return RecallPacket(
+        query=query,
+        observations=[
+            _recall_observation_from_result(result)
+            for result in _list_or_empty(_object_value(resp, "results", default=[]))
+            if _object_value(result, "text", "content", "summary", default="")
+        ],
+        entities=[
+            _recall_entity_from_value(entity)
+            for entity in _list_or_empty(_object_value(resp, "entities", default=[]))
+        ],
+        chunks=chunks,
+        source_facts=_list_or_empty(_object_value(resp, "source_facts", "sourceFacts", default=[])),
+        trace=_object_value(resp, "trace"),
+    )
 
 
 def _check_local_runtime() -> tuple[bool, str | None]:
@@ -269,6 +429,14 @@ RECALL_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
+            "format": {
+                "type": "string",
+                "enum": ["plain", "graph"],
+                "description": (
+                    "Optional output format. 'plain' preserves the existing numbered-list "
+                    "contract; 'graph' returns a provenance-forward recall packet."
+                ),
+            },
         },
         "required": ["query"],
     },
@@ -874,6 +1042,14 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "recall_max_tokens", "description": "Maximum tokens for recall results", "default": 4096},
             {"key": "recall_max_input_chars", "description": "Maximum input query length for auto-recall", "default": 800},
             {"key": "recall_prompt_preamble", "description": "Custom preamble for recalled memories in context"},
+            {"key": "recall_packet_format", "description": "Recall output format for automatic recall and hindsight_recall when no per-call format is provided", "default": "plain", "choices": ["plain", "graph"]},
+            {"key": "recall_graph_entities", "description": "Request entity graph data when recall_packet_format is graph", "default": True},
+            {"key": "recall_graph_source_facts", "description": "Request source-fact handles when recall_packet_format is graph", "default": True},
+            {"key": "recall_graph_chunks", "description": "Request source chunks when recall_packet_format is graph", "default": False},
+            {"key": "recall_graph_trace", "description": "Request provider trace metadata when recall_packet_format is graph", "default": False},
+            {"key": "recall_graph_max_observations", "description": "Maximum observations rendered in graph recall packets", "default": 6},
+            {"key": "recall_graph_max_entities", "description": "Maximum entities rendered in graph recall packets", "default": 8},
+            {"key": "recall_graph_max_evidence", "description": "Maximum evidence handles rendered in graph recall packets", "default": 6},
             {"key": "timeout", "description": "API request timeout in seconds", "default": _DEFAULT_TIMEOUT},
             {"key": "idle_timeout", "description": "Embedded daemon idle timeout in seconds (0 disables auto-shutdown)", "default": _DEFAULT_IDLE_TIMEOUT, "when": {"mode": "local_embedded"}},
         ]
@@ -1210,6 +1386,33 @@ class HindsightMemoryProvider(MemoryProvider):
             self._recall_types = list(configured_types) or ["observation"]
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         self._recall_max_input_chars = int(self._config.get("recall_max_input_chars", 800))
+        self._recall_packet_format = _normalise_recall_packet_format(
+            self._config.get("recall_packet_format", "plain")
+        )
+        self._recall_graph_entities = _parse_bool_setting(
+            self._config.get("recall_graph_entities"), True
+        )
+        self._recall_graph_source_facts = _parse_bool_setting(
+            self._config.get("recall_graph_source_facts"), True
+        )
+        self._recall_graph_chunks = _parse_bool_setting(
+            self._config.get("recall_graph_chunks"), False
+        )
+        self._recall_graph_trace = _parse_bool_setting(
+            self._config.get("recall_graph_trace"), False
+        )
+        self._recall_graph_max_observations = max(
+            1,
+            _parse_int_setting(self._config.get("recall_graph_max_observations"), 6),
+        )
+        self._recall_graph_max_entities = max(
+            1,
+            _parse_int_setting(self._config.get("recall_graph_max_entities"), 8),
+        )
+        self._recall_graph_max_evidence = max(
+            1,
+            _parse_int_setting(self._config.get("recall_graph_max_evidence"), 6),
+        )
         self._retain_async = self._config.get("retain_async", True)
 
         _client_version = "unknown"
@@ -1298,6 +1501,60 @@ class HindsightMemoryProvider(MemoryProvider):
             f"hindsight_retain to store facts."
         )
 
+    def _effective_recall_packet_format(self, value: Any = None) -> str:
+        """Resolve recall output format from per-call override or provider config."""
+        if value is None or value == "":
+            return self._recall_packet_format
+        return _normalise_recall_packet_format(value)
+
+    def _build_recall_kwargs(self, query: str, *, packet_format: str | None = None) -> Dict[str, Any]:
+        """Build kwargs for Hindsight arecall, adding rich fields only in graph mode."""
+        recall_kwargs: Dict[str, Any] = {
+            "bank_id": self._bank_id,
+            "query": query,
+            "budget": self._budget,
+            "max_tokens": self._recall_max_tokens,
+        }
+        if self._recall_tags:
+            recall_kwargs["tags"] = self._recall_tags
+            recall_kwargs["tags_match"] = self._recall_tags_match
+        if self._recall_types:
+            recall_kwargs["types"] = self._recall_types
+        if self._effective_recall_packet_format(packet_format) == "graph":
+            recall_kwargs["include_entities"] = self._recall_graph_entities
+            recall_kwargs["include_source_facts"] = self._recall_graph_source_facts
+            recall_kwargs["include_chunks"] = self._recall_graph_chunks
+            recall_kwargs["trace"] = self._recall_graph_trace
+        return recall_kwargs
+
+    def _format_recall_response(
+        self,
+        query: str,
+        resp: Any,
+        *,
+        packet_format: str | None = None,
+        compact: bool = False,
+    ) -> str:
+        """Format a Hindsight recall response using the selected recall contract."""
+        if self._effective_recall_packet_format(packet_format) != "graph":
+            results = _list_or_empty(_object_value(resp, "results", default=[]))
+            if not results:
+                return "No relevant memories found."
+            return "\n".join(
+                f"{i}. {_object_value(result, 'text', 'content', 'summary', default='')}"
+                for i, result in enumerate(results, 1)
+                if _object_value(result, "text", "content", "summary", default="")
+            )
+
+        packet = _recall_packet_from_response(query, resp)
+        return format_recall_packet(
+            packet,
+            compact=compact,
+            max_observations=self._recall_graph_max_observations,
+            max_entities=self._recall_graph_max_entities,
+            max_evidence=self._recall_graph_max_evidence,
+        )
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             logger.debug("Prefetch: waiting for background thread to complete")
@@ -1337,21 +1594,23 @@ class HindsightMemoryProvider(MemoryProvider):
                     resp = self._run_hindsight_operation(lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget))
                     text = resp.text or ""
                 else:
-                    recall_kwargs: dict = {
-                        "bank_id": self._bank_id, "query": query,
-                        "budget": self._budget, "max_tokens": self._recall_max_tokens,
-                    }
-                    if self._recall_tags:
-                        recall_kwargs["tags"] = self._recall_tags
-                        recall_kwargs["tags_match"] = self._recall_tags_match
-                    if self._recall_types:
-                        recall_kwargs["types"] = self._recall_types
-                    logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s)",
-                                 self._bank_id, len(query), self._budget)
+                    recall_kwargs = self._build_recall_kwargs(
+                        query,
+                        packet_format=self._recall_packet_format,
+                    )
+                    logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s, format=%s)",
+                                 self._bank_id, len(query), self._budget, self._recall_packet_format)
                     resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
                     num_results = len(resp.results) if resp.results else 0
                     logger.debug("Prefetch: recall returned %d results", num_results)
-                    text = "\n".join(f"- {r.text}" for r in resp.results if r.text) if resp.results else ""
+                    text = self._format_recall_response(
+                        query,
+                        resp,
+                        packet_format=self._recall_packet_format,
+                        compact=True,
+                    )
+                    if text == "No relevant memories found.":
+                        text = ""
                 if text:
                     with self._prefetch_lock:
                         self._prefetch_result = text
@@ -1541,24 +1800,21 @@ class HindsightMemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             try:
-                recall_kwargs: dict = {
-                    "bank_id": self._bank_id, "query": query, "budget": self._budget,
-                    "max_tokens": self._recall_max_tokens,
-                }
-                if self._recall_tags:
-                    recall_kwargs["tags"] = self._recall_tags
-                    recall_kwargs["tags_match"] = self._recall_tags_match
-                if self._recall_types:
-                    recall_kwargs["types"] = self._recall_types
-                logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
+                packet_format = self._effective_recall_packet_format(args.get("format"))
+                recall_kwargs = self._build_recall_kwargs(query, packet_format=packet_format)
+                logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s, format=%s",
+                             self._bank_id, len(query), self._budget, packet_format)
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
                 num_results = len(resp.results) if resp.results else 0
                 logger.debug("Tool hindsight_recall: %d results", num_results)
-                if not resp.results:
-                    return json.dumps({"result": "No relevant memories found."})
-                lines = [f"{i}. {r.text}" for i, r in enumerate(resp.results, 1)]
-                return json.dumps({"result": "\n".join(lines)})
+                return json.dumps({
+                    "result": self._format_recall_response(
+                        query,
+                        resp,
+                        packet_format=packet_format,
+                        compact=False,
+                    )
+                })
             except Exception as e:
                 logger.warning("hindsight_recall failed: %s", e, exc_info=True)
                 return tool_error(f"Failed to search memory: {e}")

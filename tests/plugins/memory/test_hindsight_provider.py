@@ -80,7 +80,56 @@ def _make_mock_client():
     return client
 
 
+def _graph_recall_response():
+    """Create a mocked rich Hindsight recall response for graph-mode tests."""
+    return SimpleNamespace(
+        results=[
+            SimpleNamespace(
+                text="Atlas is authority; Hindsight is candidate recall.",
+                type="world",
+                entities=["Atlas", "Hindsight"],
+                context="Hermes memory architecture",
+                occurred_start=None,
+                occurred_end=None,
+                mentioned_at="2026-06-01T10:00:00Z",
+                document_id="session-1-1",
+                metadata={
+                    "source": "hermes",
+                    "session_id": "session-1",
+                    "turn_index": "1",
+                },
+                chunk_id="chunk-1",
+                tags=["hermes", "memory"],
+                source_fact_ids=["fact-1"],
+            )
+        ],
+        entities=[
+            SimpleNamespace(
+                entity_id="ent-atlas",
+                canonical_name="Atlas",
+                observations=[
+                    SimpleNamespace(
+                        text="source-backed authority layer",
+                        mentioned_at="2026-06-01T10:00:00Z",
+                    )
+                ],
+            )
+        ],
+        chunks=[
+            SimpleNamespace(
+                id="chunk-1",
+                text="source chunk text",
+                chunk_index=0,
+                truncated=False,
+            )
+        ],
+        source_facts=["fact-1 — Atlas/source files are authority; Hindsight is a lead."],
+        trace=None,
+    )
+
+
 class _FakeSessionDB:
+
     def __init__(self, messages=None):
         self._messages = list(messages or [])
 
@@ -170,6 +219,12 @@ class TestSchemas:
         assert "query" in RECALL_SCHEMA["parameters"]["properties"]
         assert "query" in RECALL_SCHEMA["parameters"]["required"]
 
+    def test_recall_schema_allows_optional_format(self):
+        props = RECALL_SCHEMA["parameters"]["properties"]
+        assert "format" in props
+        assert props["format"]["enum"] == ["plain", "graph"]
+        assert "format" not in RECALL_SCHEMA["parameters"].get("required", [])
+
     def test_reflect_schema_has_query(self):
         assert REFLECT_SCHEMA["name"] == "hindsight_reflect"
         assert "query" in REFLECT_SCHEMA["parameters"]["properties"]
@@ -206,6 +261,37 @@ class TestConfig:
         assert provider._bank_mission == ""
         assert provider._bank_retain_mission is None
         assert provider._retain_context == "conversation between Hermes Agent and the User"
+        assert provider._recall_packet_format == "plain"
+        assert provider._recall_graph_entities is True
+        assert provider._recall_graph_source_facts is True
+        assert provider._recall_graph_chunks is False
+        assert provider._recall_graph_trace is False
+        assert provider._recall_graph_max_observations == 6
+        assert provider._recall_graph_max_entities == 8
+        assert provider._recall_graph_max_evidence == 6
+
+    def test_recall_packet_format_accepts_graph(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="graph")
+        assert p._recall_packet_format == "graph"
+
+    def test_recall_packet_format_invalid_value_falls_back_to_plain(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="cathedral")
+        assert p._recall_packet_format == "plain"
+
+    def test_recall_graph_caps_accept_config(self, provider_with_config):
+        p = provider_with_config(
+            recall_packet_format="graph",
+            recall_graph_chunks=True,
+            recall_graph_trace=True,
+            recall_graph_max_observations=3,
+            recall_graph_max_entities=4,
+            recall_graph_max_evidence=5,
+        )
+        assert p._recall_graph_chunks is True
+        assert p._recall_graph_trace is True
+        assert p._recall_graph_max_observations == 3
+        assert p._recall_graph_max_entities == 4
+        assert p._recall_graph_max_evidence == 5
 
     def test_recall_types_default_is_observation_only(self, provider):
         """Auto-recall must filter to observation by default."""
@@ -525,6 +611,57 @@ class TestToolHandlers:
         call_kwargs = p._client.arecall.call_args.kwargs
         assert call_kwargs["types"] == ["world", "experience"]
 
+    def test_graph_recall_passes_rich_field_flags(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="graph")
+
+        p.handle_tool_call("hindsight_recall", {"query": "memory graph"})
+
+        call_kwargs = p._client.arecall.call_args.kwargs
+        assert call_kwargs["include_entities"] is True
+        assert call_kwargs["include_source_facts"] is True
+        assert call_kwargs["include_chunks"] is False
+        assert call_kwargs["trace"] is False
+
+    def test_graph_recall_formats_packet(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="graph")
+        p._client.arecall.return_value = _graph_recall_response()
+
+        result = json.loads(p.handle_tool_call("hindsight_recall", {"query": "memory graph"}))
+
+        assert "Memory Recall Packet" in result["result"]
+        assert "Candidate context" in result["result"]
+        assert "Atlas is authority" in result["result"]
+        assert "session-1-1" in result["result"]
+        assert "fact-1" in result["result"]
+        assert "ent-atlas" in result["result"]
+
+    def test_recall_format_override_graph(self, provider):
+        provider._client.arecall.return_value = _graph_recall_response()
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall",
+            {"query": "memory graph", "format": "graph"},
+        ))
+
+        assert provider._recall_packet_format == "plain"
+        assert "Memory Recall Packet" in result["result"]
+        call_kwargs = provider._client.arecall.call_args.kwargs
+        assert call_kwargs["include_entities"] is True
+        assert call_kwargs["include_source_facts"] is True
+
+    def test_recall_format_override_plain_keeps_flat_output(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="graph")
+
+        result = json.loads(p.handle_tool_call(
+            "hindsight_recall",
+            {"query": "dark mode", "format": "plain"},
+        ))
+
+        assert result["result"] == "1. Memory 1\n2. Memory 2"
+        call_kwargs = p._client.arecall.call_args.kwargs
+        assert "include_entities" not in call_kwargs
+        assert "include_source_facts" not in call_kwargs
+
     def test_recall_no_results(self, provider):
         provider._client.arecall.return_value = SimpleNamespace(results=[])
         result = json.loads(provider.handle_tool_call(
@@ -664,6 +801,34 @@ class TestPrefetch:
         assert call_kwargs["tags"] == ["t1"]
         assert call_kwargs["tags_match"] == "all"
         assert call_kwargs["types"] == ["world"]
+
+    def test_graph_prefetch_passes_rich_field_flags(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="graph")
+
+        p.queue_prefetch("memory graph")
+        if p._prefetch_thread:
+            p._prefetch_thread.join(timeout=5.0)
+
+        call_kwargs = p._client.arecall.call_args.kwargs
+        assert call_kwargs["include_entities"] is True
+        assert call_kwargs["include_source_facts"] is True
+        assert call_kwargs["include_chunks"] is False
+        assert call_kwargs["trace"] is False
+
+    def test_graph_prefetch_formats_compact_packet(self, provider_with_config):
+        p = provider_with_config(recall_packet_format="graph")
+        p._client.arecall.return_value = _graph_recall_response()
+
+        p.queue_prefetch("memory graph")
+        if p._prefetch_thread:
+            p._prefetch_thread.join(timeout=5.0)
+
+        result = p.prefetch("memory graph")
+        assert "Hindsight Memory" in result
+        assert "candidate" in result.lower()
+        assert "Atlas is authority" in result
+        assert "session-1-1" in result
+        assert "source chunk text" not in result
 
 
 # ---------------------------------------------------------------------------
