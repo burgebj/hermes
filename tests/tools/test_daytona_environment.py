@@ -1,5 +1,6 @@
 """Unit tests for the Daytona cloud sandbox environment backend."""
 
+from datetime import datetime, timedelta, timezone
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -19,6 +20,8 @@ def _make_sandbox(sandbox_id="sb-123", state="started"):
     sb = MagicMock()
     sb.id = sandbox_id
     sb.state = state
+    sb.name = f"hermes-{sandbox_id}"
+    sb.labels = {}
     sb.process.exec.return_value = _make_exec_response()
     return sb
 
@@ -37,7 +40,9 @@ def _patch_daytona_imports(monkeypatch):
 
     daytona_mod = _types.ModuleType("daytona")
     daytona_mod.Daytona = MagicMock
-    daytona_mod.CreateSandboxFromImageParams = MagicMock
+    daytona_mod.CreateSandboxFromImageParams = MagicMock(
+        name="CreateSandboxFromImageParams"
+    )
     daytona_mod.DaytonaError = type("DaytonaError", (Exception,), {})
     daytona_mod.Resources = MagicMock(name="Resources")
     daytona_mod.SandboxState = _SandboxState
@@ -175,6 +180,25 @@ class TestPersistence:
         # Verify the name and labels were passed to CreateSandboxFromImageParams
         # by checking get() was called with the right sandbox name
         env._mock_client.get.assert_called_with("hermes-mytask")
+        env._mock_client.list.assert_called_with(
+            labels={"hermes_task_id": "mytask"}, limit=1)
+
+    def test_created_sandbox_gets_profile_and_owner_labels(
+        self, make_env, daytona_sdk, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "tools.environments.daytona._get_active_profile_name",
+            lambda: "research",
+        )
+        env = make_env(
+            get_side_effect=daytona_sdk.DaytonaError("not found"),
+            persistent=True,
+            task_id="mytask",
+        )
+        labels = daytona_sdk.CreateSandboxFromImageParams.call_args.kwargs["labels"]
+        assert labels["hermes_task_id"] == "mytask"
+        assert labels["hermes_profile"] == "research"
+        assert labels["hermes_owner_pid"].isdigit()
         env._mock_client.list.assert_called_with(
             labels={"hermes_task_id": "mytask"}, limit=1)
 
@@ -413,3 +437,108 @@ class TestEnsureSandboxReady:
         env._sandbox.state = "started"
         env._ensure_sandbox_ready()
         env._sandbox.start.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Orphan reaper
+# ---------------------------------------------------------------------------
+
+class TestOrphanReaper:
+    def _stale_sandbox(self, task_id="oldtask", profile="default", state="started"):
+        sb = _make_sandbox(sandbox_id=f"sb-{task_id}", state=state)
+        sb.name = f"hermes-{task_id}"
+        sb.labels = {
+            "hermes_task_id": task_id,
+            "hermes_profile": profile,
+            "hermes_owner_pid": "12345",
+        }
+        sb.created_at = datetime.now(timezone.utc) - timedelta(seconds=1000)
+        return sb
+
+    def test_reaper_stops_matching_stale_sandbox(self, monkeypatch):
+        from tools.environments import daytona
+
+        stale = self._stale_sandbox()
+        client = MagicMock()
+        client.list.return_value = iter([stale])
+        monkeypatch.setattr(daytona, "_pid_is_alive", lambda pid: False)
+
+        stopped = daytona.reap_orphan_sandboxes(
+            max_age_seconds=600,
+            current_task_id="current",
+            profile_filter="default",
+            daytona_client=client,
+        )
+
+        assert stopped == 1
+        stale.stop.assert_called_once()
+
+    def test_reaper_skips_current_task_sandbox(self, monkeypatch):
+        from tools.environments import daytona
+
+        current = self._stale_sandbox(task_id="current")
+        client = MagicMock()
+        client.list.return_value = iter([current])
+        monkeypatch.setattr(daytona, "_pid_is_alive", lambda pid: False)
+
+        stopped = daytona.reap_orphan_sandboxes(
+            max_age_seconds=600,
+            current_task_id="current",
+            profile_filter="default",
+            daytona_client=client,
+        )
+
+        assert stopped == 0
+        current.stop.assert_not_called()
+
+    def test_reaper_skips_recent_sandbox(self, monkeypatch):
+        from tools.environments import daytona
+
+        recent = self._stale_sandbox()
+        recent.created_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        client = MagicMock()
+        client.list.return_value = iter([recent])
+        monkeypatch.setattr(daytona, "_pid_is_alive", lambda pid: False)
+
+        stopped = daytona.reap_orphan_sandboxes(
+            max_age_seconds=600,
+            current_task_id="current",
+            profile_filter="default",
+            daytona_client=client,
+        )
+
+        assert stopped == 0
+        recent.stop.assert_not_called()
+
+    def test_reaper_skips_live_owner(self, monkeypatch):
+        from tools.environments import daytona
+
+        active = self._stale_sandbox()
+        client = MagicMock()
+        client.list.return_value = iter([active])
+        monkeypatch.setattr(daytona, "_pid_is_alive", lambda pid: True)
+
+        stopped = daytona.reap_orphan_sandboxes(
+            max_age_seconds=600,
+            current_task_id="current",
+            profile_filter="default",
+            daytona_client=client,
+        )
+
+        assert stopped == 0
+        active.stop.assert_not_called()
+
+    def test_reaper_swallows_sdk_failures(self):
+        from tools.environments import daytona
+
+        client = MagicMock()
+        client.list.side_effect = RuntimeError("sdk down")
+
+        stopped = daytona.reap_orphan_sandboxes(
+            max_age_seconds=600,
+            current_task_id="current",
+            profile_filter="default",
+            daytona_client=client,
+        )
+
+        assert stopped == 0

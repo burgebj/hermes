@@ -10,6 +10,7 @@ import math
 import os
 import shlex
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tools.environments.base import (
@@ -25,6 +26,183 @@ from tools.environments.file_sync import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_active_profile_name() -> str:
+    """Return the active Hermes profile name, or ``"default"`` on any error."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name() or "default"
+    except Exception:
+        return "default"
+
+
+def _sandbox_attr(sandbox, *names):
+    for name in names:
+        value = getattr(sandbox, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _sandbox_labels(sandbox) -> dict:
+    labels = _sandbox_attr(sandbox, "labels", "metadata")
+    return labels if isinstance(labels, dict) else {}
+
+
+def _sandbox_name(sandbox) -> str:
+    return str(_sandbox_attr(sandbox, "name", "sandbox_name") or "")
+
+
+def _sandbox_state(sandbox) -> str:
+    state = _sandbox_attr(sandbox, "state", "status")
+    value = getattr(state, "value", state)
+    return str(value or "").lower()
+
+
+def _sandbox_task_id(sandbox) -> str | None:
+    labels = _sandbox_labels(sandbox)
+    task_id = labels.get("hermes_task_id")
+    if task_id:
+        return str(task_id)
+    name = _sandbox_name(sandbox)
+    if name.startswith("hermes-"):
+        return name[len("hermes-"):]
+    return None
+
+
+def _parse_daytona_time(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        dt = datetime.fromtimestamp(value, timezone.utc)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _sandbox_age_seconds(sandbox, now: datetime) -> float | None:
+    for attr in ("last_active_at", "updated_at", "created_at", "createdAt"):
+        dt = _parse_daytona_time(_sandbox_attr(sandbox, attr))
+        if dt is not None:
+            return (now - dt).total_seconds()
+    return None
+
+
+def _pid_is_alive(pid: object) -> bool | None:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid_int <= 0:
+        return False
+    try:
+        import psutil  # type: ignore
+
+        return bool(psutil.pid_exists(pid_int))
+    except Exception:
+        return None
+
+
+def reap_orphan_sandboxes(
+    *,
+    max_age_seconds: int = 600,
+    current_task_id: str | None = None,
+    profile_filter: str | None = None,
+    daytona_client=None,
+) -> int:
+    """Stop stale Hermes-created Daytona sandboxes from prior processes.
+
+    Daytona persistent cleanup normally stops the active sandbox to preserve
+    its filesystem. The startup reaper uses the same non-destructive action
+    for old sandboxes because Daytona metadata does not reliably distinguish
+    persistent from disposable sandboxes after process death. Sandboxes without
+    any usable age metadata are left alone.
+    """
+    try:
+        if daytona_client is None:
+            from daytona import Daytona
+
+            daytona_client = Daytona()
+    except Exception as e:
+        logger.debug("Daytona orphan reaper could not initialize SDK: %s", e)
+        return 0
+
+    list_kwargs = [{"limit": 100}]
+    if profile_filter:
+        list_kwargs.insert(0, {"labels": {"hermes_profile": profile_filter}, "limit": 100})
+
+    candidates = []
+    seen = set()
+    for kwargs in list_kwargs:
+        try:
+            try:
+                results = daytona_client.list(**kwargs)
+            except TypeError:
+                fallback = {k: v for k, v in kwargs.items() if k != "limit"}
+                results = daytona_client.list(**fallback)
+            for sandbox in results:
+                key = _sandbox_attr(sandbox, "id") or _sandbox_name(sandbox) or id(sandbox)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(sandbox)
+        except Exception as e:
+            logger.debug("Daytona orphan reaper list failed: %s", e)
+
+    now = datetime.now(timezone.utc)
+    stopped = 0
+    for sandbox in candidates:
+        labels = _sandbox_labels(sandbox)
+        name = _sandbox_name(sandbox)
+        task_id = _sandbox_task_id(sandbox)
+        if not task_id and not name.startswith("hermes-"):
+            continue
+        if current_task_id and task_id == current_task_id:
+            continue
+
+        sandbox_profile = labels.get("hermes_profile")
+        if profile_filter and sandbox_profile and sandbox_profile != profile_filter:
+            continue
+
+        age = _sandbox_age_seconds(sandbox, now)
+        if age is None or age < max_age_seconds:
+            continue
+
+        owner_alive = _pid_is_alive(labels.get("hermes_owner_pid"))
+        if owner_alive is True:
+            continue
+
+        state = _sandbox_state(sandbox)
+        if state and state in {"stopped", "archived"}:
+            continue
+
+        try:
+            sandbox.stop()
+            stopped += 1
+            logger.info(
+                "Daytona orphan reaper stopped sandbox %s for task %s",
+                _sandbox_attr(sandbox, "id") or name or "<unknown>",
+                task_id or "<unknown>",
+            )
+        except Exception as e:
+            logger.debug("Daytona orphan reaper stop failed: %s", e)
+    return stopped
 
 
 class DaytonaEnvironment(BaseEnvironment):
@@ -83,7 +261,12 @@ class DaytonaEnvironment(BaseEnvironment):
             disk_gib = 10
         resources = Resources(cpu=cpu, memory=memory_gib, disk=disk_gib)
 
-        labels = {"hermes_task_id": task_id}
+        labels = {
+            "hermes_task_id": task_id,
+            "hermes_profile": _get_active_profile_name(),
+            "hermes_owner_pid": str(os.getpid()),
+        }
+        legacy_labels = {"hermes_task_id": task_id}
         sandbox_name = f"hermes-{task_id}"
 
         if self._persistent:
@@ -104,7 +287,7 @@ class DaytonaEnvironment(BaseEnvironment):
                     # Daytona SDK >=0.108.0 uses cursor-based pagination and
                     # list() returns an iterator. Offset-based pagination
                     # (page=1) is removed on June 10, 2026.
-                    results = self._daytona.list(labels=labels, limit=1)
+                    results = self._daytona.list(labels=legacy_labels, limit=1)
                     legacy = next(iter(results), None)
                     if legacy is not None:
                         self._sandbox = legacy
