@@ -39,6 +39,14 @@ def _set_dm(adapter, room_id="!room1:example.org", is_dm=True):
     adapter._dm_rooms[room_id] = is_dm
 
 
+def _set_two_member_state_store(adapter):
+    store = MagicMock()
+    store.get_members = AsyncMock(return_value=[MagicMock(), MagicMock()])
+    adapter._client = MagicMock()
+    adapter._client.state_store = store
+    return store
+
+
 def _make_event(
     body,
     sender="@alice:example.org",
@@ -361,6 +369,44 @@ async def test_require_mention_dm_always_responds(monkeypatch):
 
     await adapter._on_room_message(event)
     adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_two_member_group_honors_m_direct_false_for_mentions(monkeypatch):
+    """A known non-DM room must not bypass mention-gating just because it has two members."""
+    monkeypatch.delenv("MATRIX_REQUIRE_MENTION", raising=False)
+    monkeypatch.delenv("MATRIX_FREE_RESPONSE_ROOMS", raising=False)
+    monkeypatch.delenv("MATRIX_AUTO_THREAD", raising=False)
+
+    adapter = _make_adapter()
+    _set_dm(adapter, is_dm=False)
+    _set_two_member_state_store(adapter)
+    event = _make_event("hello without mention")
+
+    await adapter._on_room_message(event)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_two_member_group_honors_group_auto_thread(monkeypatch):
+    """Known non-DM two-member rooms still use group auto-threading when mentioned."""
+    monkeypatch.delenv("MATRIX_REQUIRE_MENTION", raising=False)
+    monkeypatch.delenv("MATRIX_FREE_RESPONSE_ROOMS", raising=False)
+    monkeypatch.delenv("MATRIX_AUTO_THREAD", raising=False)
+
+    adapter = _make_adapter()
+    _set_dm(adapter, is_dm=False)
+    _set_two_member_state_store(adapter)
+    event = _make_event("@hermes:example.org help", event_id="$group-msg")
+
+    await adapter._on_room_message(event)
+
+    adapter.handle_message.assert_awaited_once()
+    msg = adapter.handle_message.await_args.args[0]
+    assert msg.text == "help"
+    assert msg.source.chat_type == "group"
+    assert msg.source.thread_id == "$group-msg"
 
 
 @pytest.mark.asyncio

@@ -465,6 +465,18 @@ class TestMatrixDmDetection:
         assert self.adapter._dm_rooms["!room_b:ex.org"] is True
         assert self.adapter._dm_rooms["!room_c:ex.org"] is False
 
+    @pytest.mark.asyncio
+    async def test_explicit_non_dm_cache_beats_two_member_fallback(self):
+        """m.direct can explicitly identify a two-member room as not a DM."""
+        self.adapter._dm_rooms = {"!group_room:ex.org": False}
+        state_store = MagicMock()
+        state_store.get_members = AsyncMock(return_value=[MagicMock(), MagicMock()])
+        self.adapter._client = MagicMock()
+        self.adapter._client.state_store = state_store
+
+        assert await self.adapter._is_dm_room("!group_room:ex.org") is False
+        state_store.get_members.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # Reply fallback stripping
