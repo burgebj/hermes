@@ -804,6 +804,14 @@ DEFAULT_CONFIG = {
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},
+    # Optional gateway channel-lane routing. A channel route can turn a busy
+    # event/workflow channel into a compact worker lane with fresh sessions,
+    # narrow tools, and disabled heavyweight context/memory.
+    "channel_routes": {},
+    # Backward-compatible split config for final gateway replies. Used by
+    # workflow channels that need analysis and copy-ready drafts delivered as
+    # separate platform messages.
+    "response_splitters": {},
     "toolsets": ["hermes-cli"],
     "agent": {
         "max_turns": 90,
