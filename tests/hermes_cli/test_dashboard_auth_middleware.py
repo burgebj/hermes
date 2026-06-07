@@ -297,6 +297,41 @@ def test_api_auth_me_requires_auth(gated_app):
     assert r.status_code == 401
 
 
+def test_gated_plugin_hub_accepts_cookie_session_without_legacy_token(gated_app, monkeypatch):
+    def fake_hub():
+        return {"plugins": [{"id": "stub-plugin"}]}
+
+    monkeypatch.setattr(web_server, "_merged_plugins_hub", fake_hub)
+
+    r1 = gated_app.get("/auth/login?provider=stub", follow_redirects=False)
+    state = r1.headers["location"].split("state=")[1]
+    gated_app.get(
+        f"/auth/callback?code=stub_code&state={state}",
+        follow_redirects=False,
+    )
+
+    r = gated_app.get("/api/dashboard/plugins/hub")
+
+    assert r.status_code == 200
+    assert r.json() == {"plugins": [{"id": "stub-plugin"}]}
+
+
+def test_gated_plugin_hub_still_requires_cookie_session(gated_app, monkeypatch):
+    called = False
+
+    def fake_hub():
+        nonlocal called
+        called = True
+        return {"plugins": []}
+
+    monkeypatch.setattr(web_server, "_merged_plugins_hub", fake_hub)
+
+    r = gated_app.get("/api/dashboard/plugins/hub")
+
+    assert r.status_code == 401
+    assert called is False
+
+
 # ---------------------------------------------------------------------------
 # Zero-providers fail-closed
 # ---------------------------------------------------------------------------

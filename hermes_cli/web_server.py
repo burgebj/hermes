@@ -202,7 +202,18 @@ def _has_valid_session_token(request: Request) -> bool:
 
 
 def _require_token(request: Request) -> None:
-    """Validate the ephemeral session token.  Raises 401 on mismatch."""
+    """Validate dashboard API auth. Raises 401 on mismatch.
+
+    Remote/gated dashboards authenticate browser users through the OAuth
+    middleware, which attaches ``request.state.session`` after cookie
+    validation. Local/legacy dashboard callers still use the ephemeral header
+    token checked below.
+    """
+    if (
+        getattr(request.app.state, "auth_required", False)
+        and getattr(request.state, "session", None) is not None
+    ):
+        return
     if not _has_valid_session_token(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
