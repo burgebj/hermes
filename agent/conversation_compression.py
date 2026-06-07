@@ -432,6 +432,15 @@ def compress_context(
         except Exception:
             pass
 
+    if getattr(agent, "_memory_review_on_compression", False):
+        try:
+            agent._spawn_background_review(
+                list(messages),
+                review_memory=True,
+            )
+        except Exception:
+            pass
+
     try:
         compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
     except TypeError:

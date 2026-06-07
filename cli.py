@@ -6815,6 +6815,14 @@ class HermesCLI:
                     )
             except Exception:
                 pass
+            if getattr(self.agent, "_memory_review_on_reset", False):
+                try:
+                    self.agent._spawn_background_review(
+                        list(self.conversation_history),
+                        review_memory=True,
+                    )
+                except Exception:
+                    pass
             self._notify_session_boundary("on_session_reset")
 
         if not silent:

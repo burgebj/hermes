@@ -501,6 +501,17 @@ memory:
   # For exit/reset, only fires if the session had at least this many user turns.
   flush_min_turns: 6        # Min user turns to trigger flush on exit/reset (0 = disabled)
 
+  # Background memory review at session boundaries (#31597). Complements
+  # ``nudge_interval`` by firing a background review thread at natural
+  # boundaries instead of mid-conversation. Unlike ``flush_min_turns`` (which
+  # adds an inline turn), these spawn an out-of-band review thread.
+  # All default to false — opt in per boundary.
+  review_on_reset: false        # Fire on /reset, /new
+  review_on_session_end: false  # Fire on CLI exit, gateway session expiry
+                                # (bounded 10s join keeps shutdown responsive)
+  review_on_compression: false  # Fire before context compression discards
+                                # pre-compression messages
+
 # =============================================================================
 # Session Reset Policy (Messaging Platforms)
 # =============================================================================

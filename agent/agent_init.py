@@ -1104,6 +1104,9 @@ def init_agent(
     agent._memory_enabled = False
     agent._user_profile_enabled = False
     agent._memory_nudge_interval = 10
+    agent._memory_review_on_reset = False
+    agent._memory_review_on_session_end = False
+    agent._memory_review_on_compression = False
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
     if not skip_memory:
@@ -1112,6 +1115,9 @@ def init_agent(
             agent._memory_enabled = mem_config.get("memory_enabled", False)
             agent._user_profile_enabled = mem_config.get("user_profile_enabled", False)
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
+            agent._memory_review_on_reset = bool(mem_config.get("review_on_reset", False))
+            agent._memory_review_on_session_end = bool(mem_config.get("review_on_session_end", False))
+            agent._memory_review_on_compression = bool(mem_config.get("review_on_compression", False))
             if agent._memory_enabled or agent._user_profile_enabled:
                 from tools.memory_tool import MemoryStore
                 agent._memory_store = MemoryStore(
