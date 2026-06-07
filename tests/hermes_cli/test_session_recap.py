@@ -97,6 +97,20 @@ def test_tool_counts_and_files():
     assert "README.md" in out
 
 
+def test_files_touched_are_inline_code():
+    msgs = [
+        _user("update profile config"),
+        _assistant(
+            tool_calls=[
+                _tool_call("patch", {"path": "/tmp/config.yaml"}),
+            ]
+        ),
+        _tool_result(),
+    ]
+    out = build_recap(msgs)
+    assert "Files touched: `/tmp/config.yaml`" in out
+
+
 def test_tool_preview_length_truncates_long_user_prompt():
     long = "x " * 500
     out = build_recap([_user(long)])
