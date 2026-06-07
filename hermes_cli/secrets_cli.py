@@ -217,19 +217,33 @@ def cmd_setup(args: argparse.Namespace) -> int:
             table.add_row(str(i), p.get("name", "?"), p.get("id", "?"))
         console.print(table)
 
-        while True:
-            choice = console.input(f"  Select project [1-{len(projects)}]: ").strip()
-            if not choice:
-                continue
-            try:
-                idx = int(choice)
-            except ValueError:
-                console.print("  [red]Enter a number.[/red]")
-                continue
-            if 1 <= idx <= len(projects):
-                project_id = projects[idx - 1]["id"]
-                break
-            console.print(f"  [red]Out of range — pick 1-{len(projects)}.[/red]")
+        if not _is_tty():
+            if len(projects) == 1:
+                project_id = projects[0]["id"]
+                console.print(
+                    f"  Non-interactive — auto-selected the only project: "
+                    f"{projects[0].get('name', '?')}"
+                )
+            else:
+                console.print(
+                    "  [red]Multiple projects found but stdin is not a TTY.[/red]\n"
+                    "  Re-run with [cyan]--project-id <UUID>[/cyan] to pick one."
+                )
+                return 1
+        else:
+            while True:
+                choice = console.input(f"  Select project [1-{len(projects)}]: ").strip()
+                if not choice:
+                    continue
+                try:
+                    idx = int(choice)
+                except ValueError:
+                    console.print("  [red]Enter a number.[/red]")
+                    continue
+                if 1 <= idx <= len(projects):
+                    project_id = projects[idx - 1]["id"]
+                    break
+                console.print(f"  [red]Out of range — pick 1-{len(projects)}.[/red]")
 
     # ------------------------------------------------------------------- test
     console.print()
@@ -521,6 +535,14 @@ _REGION_PRESETS = [
 ]
 
 
+def _is_tty() -> bool:
+    """Return True when stdin looks like an interactive terminal."""
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
+
+
 def _resolve_server_url(
     args: argparse.Namespace,
     secrets_cfg: dict,
@@ -533,7 +555,7 @@ def _resolve_server_url(
       2. ``BWS_SERVER_URL`` env var (so users running with that already set
          in their shell don't have to re-enter it)
       3. Existing ``secrets.bitwarden.server_url`` value (for re-runs)
-      4. Interactive menu: US / EU / self-hosted
+      4. Interactive menu: US / EU / self-hosted (skipped in non-TTY)
 
     Returns the chosen URL as a string (empty string = bws default,
     i.e. US Cloud).  Returns None if the user aborted with an empty
@@ -555,6 +577,12 @@ def _resolve_server_url(
             f"  Existing config: [cyan]{existing}[/cyan]. "
             "Press Enter to keep, or pick a different option below."
         )
+
+    if not _is_tty():
+        if existing:
+            return existing
+        # Non-interactive: default to US Cloud rather than crashing.
+        return ""
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("#", style="cyan", width=4)
