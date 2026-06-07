@@ -58,6 +58,7 @@ import subprocess
 import time
 from pathlib import Path
 from hermes_constants import get_hermes_home
+from hermes_cli.path_compat import native_path
 from typing import Dict, List, Optional, Set, Tuple
 
 from utils import env_int
@@ -194,7 +195,7 @@ def _validate_file_path(file_path: str, working_dir: str) -> Optional[str]:
 
 def _normalize_path(path_value: str) -> Path:
     """Return a canonical absolute path for checkpoint operations."""
-    return Path(path_value).expanduser().resolve()
+    return Path(native_path(path_value)).expanduser().resolve()
 
 
 def _project_hash(working_dir: str) -> str:

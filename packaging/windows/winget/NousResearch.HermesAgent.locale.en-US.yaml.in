@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: NousResearch.HermesAgent
+PackageVersion: {{VERSION}}
+PackageLocale: en-US
+Publisher: Nous Research
+PublisherUrl: https://nousresearch.com
+PackageName: Hermes Agent
+PackageUrl: https://hermes-agent.nousresearch.com
+License: MIT
+LicenseUrl: https://github.com/NousResearch/hermes-agent/blob/main/LICENSE
+ShortDescription: Self-improving AI agent with CLI, tools, skills, and gateway support.
+Description: Hermes Agent is a self-improving AI agent with a terminal interface, tool execution, skill learning, memory, scheduling, and messaging gateway support.
+Moniker: hermes-agent
+Tags:
+  - ai
+  - agent
+  - cli
+  - llm
+  - nous
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

@@ -46,6 +46,7 @@ import uuid
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
+from hermes_cli.path_compat import native_path
 from tools.thread_context import propagate_context_to_thread
 
 # Availability gate.  On Windows we fall back to loopback TCP for the
@@ -1680,7 +1681,7 @@ def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
         return staging_dir
     raw = os.environ.get("TERMINAL_CWD", "").strip()
     if raw:
-        expanded = os.path.expanduser(raw)
+        expanded = native_path(os.path.expanduser(raw))
         if os.path.isdir(expanded):
             return expanded
     here = os.getcwd()

@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: NousResearch.HermesAgent
+PackageVersion: {{VERSION}}
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: scripts\install.cmd
+    PortableCommandAlias: hermes-agent-installer
+UpgradeBehavior: install
+Commands:
+  - hermes-agent-installer
+Installers:
+  - Architecture: x64
+    InstallerUrl: {{INSTALLER_URL}}
+    InstallerSha256: {{INSTALLER_SHA256}}
+ManifestType: installer
+ManifestVersion: 1.9.0

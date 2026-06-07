@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 from agent.file_safety import get_read_block_error
+from hermes_cli.path_compat import native_path
 from tools.binary_extensions import has_binary_extension
 from tools.file_operations import (
     ShellFileOperations,
@@ -136,10 +137,10 @@ def _resolve_base_dir(task_id: str = "default") -> Path:
     """
     live = _get_live_tracking_cwd(task_id)
     if live:
-        base = Path(live).expanduser()
+        base = Path(native_path(live)).expanduser()
     else:
         raw = os.environ.get("TERMINAL_CWD")
-        base = Path(raw).expanduser() if raw else Path(os.getcwd())
+        base = Path(native_path(raw)).expanduser() if raw else Path(os.getcwd())
     if not base.is_absolute():
         # A relative base (".", "./sub", "..") is anchored to the process cwd
         # once, here, so the result no longer depends on cwd at resolve() time.
@@ -153,7 +154,7 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     See :func:`_resolve_base_dir` for how the base is chosen. Absolute input
     paths are returned resolved-but-unanchored.
     """
-    p = Path(filepath).expanduser()
+    p = Path(native_path(filepath)).expanduser()
     if p.is_absolute():
         return p.resolve()
     return (_resolve_base_dir(task_id) / p).resolve()

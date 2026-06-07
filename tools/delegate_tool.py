@@ -30,6 +30,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from hermes_cli.path_compat import native_path
 from toolsets import TOOLSETS
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -695,7 +696,7 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
         if not candidate:
             continue
         try:
-            text = os.path.abspath(os.path.expanduser(str(candidate)))
+            text = os.path.abspath(native_path(os.path.expanduser(str(candidate))))
         except Exception:
             continue
         if os.path.isabs(text) and os.path.isdir(text):

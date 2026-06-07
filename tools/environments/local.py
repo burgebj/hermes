@@ -247,8 +247,28 @@ def _find_bash() -> str:
             or "/bin/sh"
         )
 
+    def _is_wsl_bash(path: str) -> bool:
+        resolved = os.path.abspath(path).lower().replace("/", "\\")
+        system_root = os.environ.get("SystemRoot", r"C:\Windows").lower().replace("/", "\\")
+        return resolved == f"{system_root}\\system32\\bash.exe"
+
+    def _git_bash_error(reason: str) -> RuntimeError:
+        return RuntimeError(
+            f"{reason}\n"
+            "Git Bash not found. Hermes Agent requires Git for Windows on native Windows.\n"
+            "The WSL bash launcher is not supported for native Windows terminal execution.\n"
+            "Run scripts\\install.ps1, install Git for Windows from "
+            "https://git-scm.com/download/win, or set HERMES_GIT_BASH_PATH."
+        )
+
     custom = os.environ.get("HERMES_GIT_BASH_PATH")
-    if custom and os.path.isfile(custom):
+    if custom:
+        if not os.path.isfile(custom):
+            raise _git_bash_error(f"HERMES_GIT_BASH_PATH points at a missing file: {custom}")
+        if _is_wsl_bash(custom):
+            raise _git_bash_error(
+                f"HERMES_GIT_BASH_PATH points at the WSL bash launcher: {custom}"
+            )
         return custom
 
     # Prefer our own portable Git install first — this way a broken or
@@ -272,7 +292,9 @@ def _find_bash() -> str:
 
     found = shutil.which("bash")
     if found:
-        return found
+        if not _is_wsl_bash(found):
+            return found
+        logger.debug("Ignoring WSL bash launcher on native Windows: %s", found)
 
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
@@ -282,10 +304,8 @@ def _find_bash() -> str:
         if candidate and os.path.isfile(candidate):
             return candidate
 
-    raise RuntimeError(
-        "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
-        "Install it from: https://git-scm.com/download/win\n"
-        "Or set HERMES_GIT_BASH_PATH to your bash.exe location."
+    raise _git_bash_error(
+        "No Git for Windows bash.exe was found in Portable Git, PATH, or standard install locations."
     )
 
 
@@ -478,7 +498,16 @@ class LocalEnvironment(BaseEnvironment):
                 cache_dir = get_hermes_home() / "cache" / "terminal"
             except Exception:
                 cache_dir = Path(tempfile.gettempdir()) / "hermes_terminal"
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.debug(
+                    "Could not create terminal cache %s: %s; using system temp",
+                    cache_dir,
+                    exc,
+                )
+                cache_dir = Path(tempfile.gettempdir()) / "hermes_terminal"
+                cache_dir.mkdir(parents=True, exist_ok=True)
             # Force forward slashes so the same string serves both contexts.
             return str(cache_dir).replace("\\", "/")
 

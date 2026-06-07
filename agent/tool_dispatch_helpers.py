@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
 )
+from hermes_cli.path_compat import native_path
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optiona
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
 
-    expanded = Path(raw_path).expanduser()
+    expanded = Path(native_path(raw_path)).expanduser()
     if expanded.is_absolute():
         return Path(os.path.abspath(str(expanded)))
 
