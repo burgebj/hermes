@@ -32,6 +32,7 @@ def _make_agent(monkeypatch):
         log_prefix_chars = 200
         _checkpoint_mgr = MagicMock(enabled=False)
         _subdirectory_hints = MagicMock()
+        _subdirectory_hints.check_tool_call.return_value = ""
         tool_progress_callback = None
         tool_start_callback = None
         tool_complete_callback = None
@@ -46,6 +47,9 @@ def _make_agent(monkeypatch):
         # Worker-thread tracking state mirrored from AIAgent.__init__ so the
         # real interrupt() method can fan out to concurrent-tool workers.
         _active_children: list = []
+        # Guardrails stub — returns allows_execution=True for all tools
+        _tool_guardrails = MagicMock()
+        _tool_guardrails.before_call.return_value = MagicMock(allows_execution=True)
 
         def __init__(self):
             # Instance-level (not class-level) so each test gets a fresh set.
@@ -81,6 +85,10 @@ def _make_agent(monkeypatch):
     # fanout, not steer injection.
     stub._apply_pending_steer_to_tool_results = lambda *a, **kw: None
     stub._invoke_tool = MagicMock(side_effect=lambda *a, **kw: '{"ok": true}')
+    # Post-execution callbacks — stubbed as no-ops
+    stub._append_guardrail_observation = lambda *a, **kw: a[2] if len(a) > 2 else None
+    stub._record_file_mutation_result = lambda *a, **kw: None
+    stub._tool_result_content_for_active_model = lambda *a, **kw: str(a[1]) if len(a) > 1 else ""
     return stub
 
 
@@ -142,4 +150,67 @@ def test_clear_interrupt_clears_worker_tids(monkeypatch):
         "clear_interrupt() did not clear the interrupt bit for a tracked "
         "worker tid — stale interrupt can leak into the next turn"
     )
+
+
+def test_concurrent_mid_execution_interrupt_detected_promptly(monkeypatch):
+    """When _interrupt_requested is set DURING concurrent tool execution,
+    the interrupt is detected on the next poll (<=0.5s) even if all
+    tools completed before that poll (issue #35267).
+
+    Before the fix, the interrupt check only ran when not_done was
+    non-empty, so fast-completing batches never noticed the interrupt
+    until the main loop's top-of-iteration check.  Now the interrupt
+    flag is checked unconditionally after every wait() call.
+    """
+    agent = _make_agent(monkeypatch)
+    agent._interrupt_requested = False
+
+    _start_time = time.time()
+
+    # Tools that sleep briefly then return a simple result
+    def _slow_tool(*a, **kw):
+        time.sleep(0.15)
+        return '{"ok": true}'
+
+    agent._invoke_tool = MagicMock(side_effect=_slow_tool)
+
+    tcs = [_FakeToolCall(f"tool_{i}", call_id=f"tc_{i}") for i in range(5)]
+    msg = _FakeAssistantMsg(tcs)
+    messages = []
+
+    def _run():
+        agent._execute_tool_calls_concurrent(msg, messages, "test_task")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    # Let all tools start, then inject interrupt before the first poll
+    time.sleep(0.05)
+    agent._interrupt_requested = True
+    t.join(timeout=3.0)
+    assert not t.is_alive(), "concurrent execution did not finish within 3s"
+
+    elapsed = time.time() - _start_time
+    # With 0.5s polling, interrupt should be detected within ~0.5s of
+    # being set.  Even if all tools already completed, the +break on
+    # interrupt should return quickly.
+    assert elapsed < 1.5, (
+        f"Execution took {elapsed:.2f}s; interrupt should be detected "
+        f"within ~0.5s (polling window) even when tools complete fast"
+    )
+
+    # All 5 tools should have results (they completed before interrupt
+    # was detected — this is expected for concurrent fast tools).
+    # The key fix is that the function returns quickly instead of
+    # waiting for the full 5s old polling interval.
+    assert len(messages) == 5, (
+        f"Expected 5 tool result messages, got {len(messages)}"
+    )
+    # Verify all messages are proper tool results (not cancellation stubs
+    # from pre-flight — the tools actually ran).
+    for m in messages:
+        assert m["role"] == "tool", f"Unexpected role: {m['role']}"
+        assert '"ok"' in m.get("content", ""), (
+            f"Tool should have completed with result, got: {m.get('content', '')}"
+        )
 

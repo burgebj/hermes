@@ -574,37 +574,42 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 # concurrent tool batches. Also check for user interrupts
                 # so we don't block indefinitely when the user sends /stop
                 # or a new message during concurrent tool execution.
+                #
+                # Poll at 0.5s intervals instead of 5s so interrupts from
+                # gateways (Discord, Telegram, etc.) are detected promptly
+                # even when the entire tool batch completes in under 5s
+                # (issue #35267).  The tighter poll also shrinks the worst-
+                # case window where an interrupt arrives just after the last
+                # tool finishes but before we re-enter the main loop.
                 _conc_start = time.time()
                 _interrupt_logged = False
                 while True:
                     done, not_done = concurrent.futures.wait(
-                        futures, timeout=5.0,
+                        futures, timeout=0.5,
                     )
+                    # Check for interrupt even when all futures are done —
+                    # the flag may have been set by the gateway while the
+                    # last tool(s) were completing.
+                    if agent._interrupt_requested:
+                        if not_done:
+                            if not _interrupt_logged:
+                                _interrupt_logged = True
+                                agent._vprint(
+                                    f"{agent.log_prefix}⚡ Interrupt: cancelling "
+                                    f"{len(not_done)} pending concurrent tool(s)",
+                                    force=True,
+                                )
+                            for f in not_done:
+                                f.cancel()
+                            # Give already-running tools a moment to notice
+                            # the per-thread interrupt signal and exit.
+                            concurrent.futures.wait(not_done, timeout=3.0)
+                        break
                     if not not_done:
                         break
 
-                    # Check for interrupt — the per-thread interrupt signal
-                    # already causes individual tools (terminal, execute_code)
-                    # to abort, but tools without interrupt checks (web_search,
-                    # read_file) will run to completion. Cancel any futures
-                    # that haven't started yet so we don't block on them.
-                    if agent._interrupt_requested:
-                        if not _interrupt_logged:
-                            _interrupt_logged = True
-                            agent._vprint(
-                                f"{agent.log_prefix}⚡ Interrupt: cancelling "
-                                f"{len(not_done)} pending concurrent tool(s)",
-                                force=True,
-                            )
-                        for f in not_done:
-                            f.cancel()
-                        # Give already-running tools a moment to notice the
-                        # per-thread interrupt signal and exit gracefully.
-                        concurrent.futures.wait(not_done, timeout=3.0)
-                        break
-
                     _conc_elapsed = int(time.time() - _conc_start)
-                    # Heartbeat every ~30s (6 × 5s poll intervals)
+                    # Heartbeat every ~30s (60 × 0.5s poll intervals)
                     if _conc_elapsed > 0 and _conc_elapsed % 30 < 6:
                         _still_running = [
                             parsed_calls[futures.index(f)][1]
