@@ -8767,14 +8767,31 @@ class GatewayRunner:
                     )
                 message_text = f"{context_note}\n\n{message_text}"
 
-        if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
+        reply_ctx_text = getattr(event, "reply_to_text", None)
+        if not reply_ctx_text and event.reply_to_message_id:
+            # The platform captured a reply pointer but no quoted text. This
+            # happens when the user replies to a message that has no .text and
+            # no .caption to quote — most commonly a voice or other media
+            # message. Recover the referenced message from this session's
+            # transcript by platform message id; for a voice message that's the
+            # STT transcript we stored when it first arrived, so the agent gets
+            # the same disambiguation it would for a text reply instead of
+            # having to guess which prior message the user meant.
+            _target_id = str(event.reply_to_message_id)
+            for _entry in reversed(history):
+                if str(_entry.get("message_id") or "") == _target_id:
+                    _entry_content = _entry.get("content")
+                    if isinstance(_entry_content, str) and _entry_content.strip():
+                        reply_ctx_text = _entry_content.strip()
+                    break
+        if reply_ctx_text and event.reply_to_message_id:
             # Always inject the reply-to pointer — even when the quoted text
             # already appears in history. The prefix isn't deduplication, it's
             # disambiguation: it tells the agent *which* prior message the user
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
+            reply_snippet = reply_ctx_text[:500]
             message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
 
         if "@" in message_text:

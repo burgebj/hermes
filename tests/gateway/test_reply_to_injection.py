@@ -137,6 +137,68 @@ async def test_no_prefix_when_reply_to_text_is_empty():
 
 
 @pytest.mark.asyncio
+async def test_reply_prefix_recovered_from_transcript_for_voice_reply():
+    """A reply to a voice/media message carries a reply_to_message_id but no
+    reply_to_text (nothing to quote). The pointer is recovered from this
+    session's transcript by platform message id — for a voice message that's
+    the STT transcript stored when it first arrived."""
+    runner = _make_runner()
+    source = _source()
+    event = MessageEvent(
+        text="yes, book it",
+        source=source,
+        reply_to_message_id="42",
+        reply_to_text=None,
+    )
+
+    history = [
+        {"role": "user", "content": "earlier unrelated turn"},
+        {
+            "role": "user",
+            "content": "Should I reserve the 7pm table?",
+            "message_id": "42",
+        },
+        {"role": "assistant", "content": "The 7pm slot is available."},
+    ]
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=history,
+    )
+
+    assert result is not None
+    assert result.startswith('[Replying to: "Should I reserve the 7pm table?"]')
+    assert result.endswith("yes, book it")
+
+
+@pytest.mark.asyncio
+async def test_no_prefix_when_transcript_has_no_matching_message():
+    """If the replied-to message id isn't in the loaded transcript, there's
+    nothing to recover and no prefix should be injected."""
+    runner = _make_runner()
+    source = _source()
+    event = MessageEvent(
+        text="yes, book it",
+        source=source,
+        reply_to_message_id="999",
+        reply_to_text=None,
+    )
+
+    history = [
+        {"role": "user", "content": "Should I reserve the 7pm table?", "message_id": "42"},
+    ]
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=history,
+    )
+
+    assert result == "yes, book it"
+
+
+@pytest.mark.asyncio
 async def test_reply_snippet_truncated_to_500_chars():
     runner = _make_runner()
     source = _source()
