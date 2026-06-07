@@ -78,6 +78,13 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
 
     - Direct api.openai.com endpoints need the Responses API for GPT-5.x
       tool calls with reasoning (chat/completions returns 400).
+    - Direct api.anthropic.com endpoints must use the native Messages
+      API (``/v1/messages``).  Anthropic also exposes an OpenAI-compat
+      ``/chat/completions`` shim on the same host, but Pro/Max OAuth
+      subscriptions are only billed against the native Messages route;
+      hitting the shim accounts against a separate "extra usage" pool
+      that is empty by default and surfaces as HTTP 400 "You're out of
+      extra usage."  See issue #32243.
     - Third-party Anthropic-compatible gateways (MiniMax, Zhipu GLM,
       LiteLLM proxies, etc.) conventionally expose the native Anthropic
       protocol under a ``/anthropic`` suffix — treat those as
@@ -93,6 +100,8 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
         return "codex_responses"
     if hostname == "api.openai.com":
         return "codex_responses"
+    if hostname == "api.anthropic.com":
+        return "anthropic_messages"
     if normalized.endswith("/anthropic"):
         return "anthropic_messages"
     if hostname == "api.kimi.com" and "/coding" in normalized:
