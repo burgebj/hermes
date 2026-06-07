@@ -225,11 +225,13 @@ class TestDefaultContextLengths:
 # =========================================================================
 
 class TestCodexOAuthContextLength:
-    """ChatGPT Codex OAuth imposes lower context limits than the direct
-    OpenAI API for the same slugs. Verified Apr 2026 via live probe of
-    chatgpt.com/backend-api/codex/models: most models return 272k, while
-    models.dev reports 1.05M for gpt-5.5/gpt-5.4 and 400k for the rest.
-    (Known exception: gpt-5.3-codex-spark is 128k.)
+    """ChatGPT Codex OAuth exposes provider-specific context limits that
+    differ from the direct OpenAI API for the same slugs. Verified Apr 2026
+    via live probe of chatgpt.com/backend-api/codex/models: default
+    context_window can be 272k while max_context_window may advertise a
+    larger usable window for selected models such as gpt-5.4. When the live
+    probe is unavailable, conservative fallback defaults are used (known
+    exception: gpt-5.3-codex-spark is 128k).
     """
 
     def setup_method(self):
@@ -239,7 +241,7 @@ class TestCodexOAuthContextLength:
 
     def test_fallback_table_used_without_token(self):
         """With no access token, the hardcoded Codex fallback table wins
-        over models.dev (which reports 1.05M for gpt-5.5 but Codex is 272k).
+        over models.dev (which reports larger direct-API values for GPT-5 slugs).
         """
         from agent.model_metadata import get_model_context_length
 
@@ -268,17 +270,18 @@ class TestCodexOAuthContextLength:
                     "(models.dev leakage?)"
                 )
 
-    def test_live_probe_overrides_fallback(self):
-        """When a token is provided, the live /models probe is preferred
-        and its context_window drives the result."""
+    def test_live_probe_prefers_max_context_window_when_available(self):
+        """When Codex advertises a larger max_context_window, Hermes should
+        use it as the provider-enforced usable window.
+        """
         from agent.model_metadata import get_model_context_length
 
         fake_response = MagicMock()
         fake_response.status_code = 200
         fake_response.json.return_value = {
             "models": [
-                {"slug": "gpt-5.5", "context_window": 300_000},
-                {"slug": "gpt-5.4", "context_window": 400_000},
+                {"slug": "gpt-5.5", "context_window": 272_000, "max_context_window": 272_000},
+                {"slug": "gpt-5.4", "context_window": 272_000, "max_context_window": 1_000_000},
             ]
         }
 
@@ -297,8 +300,31 @@ class TestCodexOAuthContextLength:
                 api_key="fake-token",
                 provider="openai-codex",
             )
-        assert ctx_55 == 300_000
-        assert ctx_54 == 400_000
+        assert ctx_55 == 272_000
+        assert ctx_54 == 1_000_000
+
+    def test_live_probe_falls_back_to_context_window_when_max_missing(self):
+        """Older Codex model entries without max_context_window still resolve
+        from context_window.
+        """
+        from agent.model_metadata import get_model_context_length
+
+        fake_response = MagicMock()
+        fake_response.status_code = 200
+        fake_response.json.return_value = {
+            "models": [{"slug": "gpt-5.4", "context_window": 400_000}]
+        }
+
+        with patch("agent.model_metadata.requests.get", return_value=fake_response), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata.save_context_length"):
+            ctx = get_model_context_length(
+                model="gpt-5.4",
+                base_url="https://chatgpt.com/backend-api/codex",
+                api_key="fake-token",
+                provider="openai-codex",
+            )
+        assert ctx == 400_000
 
     def test_probe_failure_falls_back_to_hardcoded(self):
         """If the probe fails (non-200 / network error), we still return
@@ -349,8 +375,8 @@ class TestCodexOAuthContextLength:
         """Pre-PR #14935 builds cached gpt-5.5 at 1.05M (from models.dev)
         before the Codex-aware branch existed. Upgrading users keep that
         stale entry on disk and the cache-first lookup returns it forever.
-        Codex OAuth caps at 272k for every slug, so any cached Codex
-        entry >= 400k must be dropped and re-resolved via the live probe.
+        Cached direct-API-sized Codex entries remain suspicious and must be
+        dropped and re-resolved via the live probe or conservative fallback.
         """
         from agent import model_metadata as mm
 
@@ -390,9 +416,50 @@ class TestCodexOAuthContextLength:
         assert stale_key not in remaining, "Stale entry was not invalidated from the cache file"
         assert remaining.get(other_key) == 128_000, "Unrelated cache entries must not be touched"
 
-    def test_fresh_codex_cache_under_400k_is_respected(self, tmp_path, monkeypatch):
-        """Codex entries at the correct 272k must NOT be invalidated —
-        only stale pre-fix values (>= 400k) get dropped."""
+    def test_stale_codex_272k_cache_is_refreshed_when_token_available(self, tmp_path, monkeypatch):
+        """Codex /models can raise a slug's usable max_context_window after a
+        272k value was cached. With an access token, prefer a fresh live probe
+        over stale persistent cache.
+        """
+        from agent import model_metadata as mm
+
+        cache_file = tmp_path / "context_length_cache.yaml"
+        monkeypatch.setattr(mm, "_get_context_cache_path", lambda: cache_file)
+
+        base_url = "https://chatgpt.com/backend-api/codex/"
+        stale_key = f"gpt-5.4@{base_url}"
+        other_key = "gpt-5.5@https://chatgpt.com/backend-api/codex/"
+        import yaml as _yaml
+        cache_file.write_text(_yaml.dump({"context_lengths": {
+            stale_key: 272_000,
+            other_key: 272_000,
+        }}))
+
+        fake_response = MagicMock()
+        fake_response.status_code = 200
+        fake_response.json.return_value = {
+            "models": [
+                {"slug": "gpt-5.4", "context_window": 272_000, "max_context_window": 1_000_000},
+                {"slug": "gpt-5.5", "context_window": 272_000, "max_context_window": 272_000},
+            ]
+        }
+
+        with patch("agent.model_metadata.requests.get", return_value=fake_response), \
+             patch("agent.model_metadata.save_context_length") as mock_save:
+            ctx = mm.get_model_context_length(
+                model="gpt-5.4",
+                base_url=base_url,
+                api_key="fake-token",
+                provider="openai-codex",
+            )
+
+        assert ctx == 1_000_000
+        mock_save.assert_called_with("gpt-5.4", base_url, 1_000_000)
+
+    def test_codex_cache_used_when_no_token_available(self, tmp_path, monkeypatch):
+        """Without an access token, Hermes cannot do a live Codex probe and
+        should still use a reasonable persistent cache entry.
+        """
         from agent import model_metadata as mm
 
         cache_file = tmp_path / "context_length_cache.yaml"
@@ -404,12 +471,11 @@ class TestCodexOAuthContextLength:
             f"gpt-5.5@{base_url}": 272_000,
         }}))
 
-        # If the invalidation incorrectly fired, this would be called; assert it isn't.
         with patch("agent.model_metadata.requests.get") as mock_get:
             ctx = mm.get_model_context_length(
                 model="gpt-5.5",
                 base_url=base_url,
-                api_key="fake-token",
+                api_key="",
                 provider="openai-codex",
             )
         assert ctx == 272_000

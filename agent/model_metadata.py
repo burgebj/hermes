@@ -1308,13 +1308,13 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
     return None
 
 
-# Known ChatGPT Codex OAuth context windows (observed via live
-# chatgpt.com/backend-api/codex/models probe, Apr 2026). These are the
-# `context_window` values, which are what Codex actually enforces — the
-# direct OpenAI API has larger limits for the same slugs, but Codex OAuth
-# caps lower (e.g. gpt-5.5 is 1.05M on the API, 272K on Codex).
+# Known ChatGPT Codex OAuth default context windows (observed via live
+# chatgpt.com/backend-api/codex/models probe, Apr 2026). These conservative
+# defaults are used only when the live probe fails (no token, network error).
 #
-# Used as a fallback when the live probe fails (no token, network error).
+# The live endpoint can also advertise a larger per-slug `max_context_window`
+# (for example gpt-5.4 can expose a 1M usable window). Prefer the live value
+# whenever an access token is available.
 # Longest keys first so substring match picks the most specific entry.
 _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     "gpt-5.1-codex-max": 272_000,
@@ -1343,11 +1343,12 @@ _CODEX_OAUTH_CONTEXT_CACHE_TTL = 3600  # 1 hour
 def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
     """Probe the ChatGPT Codex /models endpoint for per-slug context windows.
 
-    Codex OAuth imposes its own context limits that differ from the direct
-    OpenAI API (e.g. gpt-5.5 is 1.05M on the API, 272K on Codex). The
-    `context_window` field in each model entry is the authoritative source.
+    Codex OAuth has provider-specific context limits that differ from the direct
+    OpenAI API. Prefer the live ``max_context_window`` when present (that is the
+    usable upper bound Codex advertises), then fall back to ``context_window``
+    for older entries.
 
-    Returns a ``{slug: context_window}`` dict. Empty on failure.
+    Returns a ``{slug: resolved_context_window}`` dict. Empty on failure.
     """
     global _codex_oauth_context_cache, _codex_oauth_context_cache_time
     now = time.time()
@@ -1381,7 +1382,9 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
         if not isinstance(item, dict):
             continue
         slug = item.get("slug")
-        ctx = item.get("context_window")
+        ctx = item.get("max_context_window")
+        if not isinstance(ctx, int) or ctx <= 0:
+            ctx = item.get("context_window")
         if isinstance(slug, str) and isinstance(ctx, int) and ctx > 0:
             result[slug.strip()] = ctx
 
@@ -1563,16 +1566,23 @@ def get_model_context_length(
     if base_url and provider != "lmstudio":
         cached = get_cached_context_length(model, base_url)
         if cached is not None:
-            # Invalidate stale Codex OAuth cache entries: pre-PR #14935 builds
-            # resolved gpt-5.x to the direct-API value (e.g. 1.05M) via
-            # models.dev and persisted it. Codex OAuth caps at 272K for every
-            # slug, so any cached Codex entry at or above 400K is a leftover
-            # from the old resolution path. Drop it and fall through to the
-            # live /models probe in step 5 below.
-            if provider == "openai-codex" and cached >= 400_000:
+            # Codex OAuth is account/model metadata and has changed over time
+            # (e.g. gpt-5.4 gained max_context_window=1M after 272K entries
+            # were already cached). If we have a token, prefer a fresh live
+            # probe over persistent cache; the live probe has its own in-memory
+            # TTL, and save_context_length() writes the refreshed value back.
+            # Without a token, fall back to reasonable cached values, while
+            # still dropping old pre-PR #14935 direct-API-sized entries.
+            if provider == "openai-codex" and api_key:
+                logger.info(
+                    "Refreshing Codex cache entry %s@%s -> %s via live /models probe",
+                    model, base_url, f"{cached:,}",
+                )
+                _invalidate_cached_context_length(model, base_url)
+            elif provider == "openai-codex" and cached >= 400_000:
                 logger.info(
                     "Dropping stale Codex cache entry %s@%s -> %s (pre-fix value); "
-                    "re-resolving via live /models probe",
+                    "re-resolving via fallback/live probe if possible",
                     model, base_url, f"{cached:,}",
                 )
                 _invalidate_cached_context_length(model, base_url)
