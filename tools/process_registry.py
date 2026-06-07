@@ -171,6 +171,11 @@ class ProcessRegistry:
         # via wait/poll/log.  Drain loops skip notifications for these.
         self._completion_consumed: set = set()
 
+        # Track sessions that were explicitly killed by the user/agent.
+        # Completion watchers skip notifications for these so the agent
+        # doesn't present results the user already cancelled.  (#36184)
+        self._killed_sessions: set = set()
+
         # Global watch-match circuit breaker — across all sessions.
         # Prevents sibling processes from collectively flooding the user even
         # when each stays under its own per-session cap.
@@ -892,6 +897,14 @@ class ProcessRegistry:
         """Check if a completion notification was already consumed via wait/poll/log."""
         return session_id in self._completion_consumed
 
+    def mark_killed(self, session_id: str) -> None:
+        """Mark a session as explicitly killed so watchers skip notifications."""
+        self._killed_sessions.add(session_id)
+
+    def is_killed(self, session_id: str) -> bool:
+        """Return True if the session was explicitly killed by the user/agent."""
+        return session_id in self._killed_sessions
+
     def drain_notifications(self) -> "list[tuple[dict, str]]":
         """Pop all pending notification events and return formatted pairs.
 
@@ -1193,6 +1206,7 @@ class ProcessRegistry:
                 }
             session.exited = True
             session.exit_code = -15  # SIGTERM
+            self.mark_killed(session_id)
             self._move_to_finished(session)
             self._write_checkpoint()
             return {"status": "killed", "session_id": session.id}
@@ -1353,6 +1367,7 @@ class ProcessRegistry:
         for sid in expired:
             del self._finished[sid]
             self._completion_consumed.discard(sid)
+            self._killed_sessions.discard(sid)
 
         # If still over limit, remove oldest finished
         total = len(self._running) + len(self._finished)
@@ -1360,6 +1375,7 @@ class ProcessRegistry:
             oldest_id = min(self._finished, key=lambda sid: self._finished[sid].started_at)
             del self._finished[oldest_id]
             self._completion_consumed.discard(oldest_id)
+            self._killed_sessions.discard(oldest_id)
 
         # Drop any _completion_consumed entries whose sessions are no longer
         # tracked at all — belt-and-suspenders against module-lifetime growth
@@ -1368,6 +1384,9 @@ class ProcessRegistry:
         stale = self._completion_consumed - tracked
         if stale:
             self._completion_consumed -= stale
+        stale_killed = self._killed_sessions - tracked
+        if stale_killed:
+            self._killed_sessions -= stale_killed
 
     # ----- Checkpoint (crash recovery) -----
 
