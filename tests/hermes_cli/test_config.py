@@ -292,6 +292,70 @@ class TestSaveEnvValueSecure:
             env_mode = (tmp_path / ".env").stat().st_mode & 0o777
             assert env_mode == 0o600
 
+    def test_save_env_value_quotes_values_containing_hash(self, tmp_path):
+        """Regression test for #30355.
+
+        python-dotenv treats an unquoted ``#`` as the start of an inline
+        comment, so a token written as ``ANTHROPIC_TOKEN=abc#xyz``
+        round-trips back as just ``abc`` and authentication fails with
+        401.  save_env_value must quote any value containing ``#`` so the
+        value survives intact through both Hermes' own loader and
+        python-dotenv.
+        """
+        # python-dotenv is the runtime loader Hermes uses; importing here
+        # so the test exercises the same parser real users hit.
+        from dotenv import dotenv_values
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            os.environ.pop("ANTHROPIC_TOKEN", None)
+            token = "sk-ant-oat01-abc#xyz#more"
+            save_env_value("ANTHROPIC_TOKEN", token)
+
+            # The on-disk line must wrap the value in quotes so '#' is
+            # not interpreted as a comment.
+            content = (tmp_path / ".env").read_text(encoding="utf-8")
+            assert f'ANTHROPIC_TOKEN="{token}"' in content
+
+            # python-dotenv must round-trip the full value, not a prefix.
+            parsed = dotenv_values(str(tmp_path / ".env"))
+            assert parsed["ANTHROPIC_TOKEN"] == token
+
+            # Hermes' own load_env() must also round-trip the full value.
+            assert load_env()["ANTHROPIC_TOKEN"] == token
+
+    def test_save_env_value_hash_value_round_trips_quotes_and_backslashes(self, tmp_path):
+        from dotenv import dotenv_values
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            os.environ.pop("ANTHROPIC_TOKEN", None)
+            token = 'abc"def\\ghi#jkl'
+            save_env_value("ANTHROPIC_TOKEN", token)
+
+            content = (tmp_path / ".env").read_text(encoding="utf-8")
+            assert 'ANTHROPIC_TOKEN="abc\\"def\\\\ghi#jkl"' in content
+
+            parsed = dotenv_values(str(tmp_path / ".env"))
+            assert parsed["ANTHROPIC_TOKEN"] == token
+            assert load_env()["ANTHROPIC_TOKEN"] == token
+
+    def test_save_env_value_updates_hash_value_with_quotes(self, tmp_path):
+        from dotenv import dotenv_values
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            os.environ.pop("ANTHROPIC_TOKEN", None)
+            save_env_value("ANTHROPIC_TOKEN", "old-token")
+
+            token = 'abc"def\\ghi#jkl'
+            save_env_value("ANTHROPIC_TOKEN", token)
+
+            content = (tmp_path / ".env").read_text(encoding="utf-8")
+            assert content.count("ANTHROPIC_TOKEN=") == 1
+            assert 'ANTHROPIC_TOKEN="abc\\"def\\\\ghi#jkl"' in content
+
+            parsed = dotenv_values(str(tmp_path / ".env"))
+            assert parsed["ANTHROPIC_TOKEN"] == token
+            assert load_env()["ANTHROPIC_TOKEN"] == token
+
 
 class TestRemoveEnvValue:
     def test_removes_key_from_env_file(self, tmp_path):
