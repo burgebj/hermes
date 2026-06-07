@@ -790,6 +790,20 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("No code", result["error"])
 
+    @unittest.skipUnless(check_sandbox_requirements(), "execute_code sandbox unavailable")
+    def test_output_redaction_preserves_code_like_env_names(self):
+        with patch("agent.redact._REDACT_ENABLED", True), \
+             patch("model_tools.handle_function_call",
+                   side_effect=_mock_handle_function_call):
+            result = json.loads(execute_code(
+                'print("MAX_TOKENS=100")',
+                task_id="test-code-output-redaction",
+            ))
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("MAX_TOKENS=100", result["output"])
+        self.assertNotIn("MAX_TOKENS=***", result["output"])
+
     @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
     def test_none_enabled_tools_uses_all(self):
         """When enabled_tools is None, all sandbox tools should be available."""

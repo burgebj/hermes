@@ -130,7 +130,19 @@ def test_terminal_output_transform_still_runs_strip_and_redact(monkeypatch, tmp_
     assert "\x1b" not in result["output"]
     assert secret not in result["output"]
     assert "OPENAI_API_KEY=" in result["output"]
-    assert "***" in result["output"]
+    assert "sk-pro..." in result["output"]
+
+
+def test_terminal_output_redaction_preserves_code_like_env_names(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+
+    result, _mock_env = _run_terminal(
+        monkeypatch,
+        tmp_path,
+        output="MAX_TOKENS=100\n",
+    )
+
+    assert result["output"] == "MAX_TOKENS=100"
 
 
 def test_terminal_output_transform_hook_exception_falls_back(monkeypatch, tmp_path):
