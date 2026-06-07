@@ -323,7 +323,13 @@ def _redact_form_body(text: str) -> str:
     return _redact_query_string(text.strip())
 
 
-def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = False) -> str:
+def redact_sensitive_text(
+    text: str,
+    *,
+    force: bool = False,
+    code_file: bool = False,
+    redact_prefixes: bool = True,
+) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe to call on any string -- non-matching text passes through unchanged.
@@ -335,6 +341,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     patterns when the text is known to be source code (e.g. MAX_TOKENS=***
     constants, "apiKey": "test" fixtures). Prefix patterns, auth headers,
     private keys, DB connstrings, JWTs, and URL secrets are still redacted.
+
+    Set redact_prefixes=False for structured configuration reads where masking
+    known vendor token prefixes (``sk-...``, ``ghp_...``) would corrupt the
+    value the agent is intentionally inspecting. Other high-confidence secret
+    forms (private keys, auth headers, DB passwords, JWTs, etc.) still redact.
 
     Performance: each regex pattern is gated behind a cheap substring
     pre-check (e.g. ``"=" in text`` for ENV assignments, ``"://" in text``
@@ -355,7 +366,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         return text
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
-    if _has_known_prefix_substring(text):
+    if redact_prefixes and _has_known_prefix_substring(text):
         text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
 
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)

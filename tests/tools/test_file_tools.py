@@ -6,6 +6,7 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tools.file_tools import (
@@ -63,6 +64,43 @@ class TestReadFileHandler:
         result = json.loads(read_file_tool("/tmp/test.txt"))
         assert "error" in result
         assert "terminal not available" in result["error"]
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_config_file_read_preserves_prefixed_token_values(self, mock_get, monkeypatch):
+        """#35519: config reads must not return ghp_abc...1234 impostors."""
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+        token = "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"
+        content = f"github:\n  token: {token}\n"
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = content
+        result_obj.to_dict.return_value = {"content": content, "total_lines": 2}
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import read_file_tool
+        result = json.loads(read_file_tool("/tmp/config.yaml", task_id="config-token-read"))
+
+        assert token in result["content"]
+        assert "..." not in result["content"]
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_source_file_read_still_redacts_prefixed_tokens(self, mock_get, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+        token = "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"
+        content = f"TOKEN = '{token}'\n"
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = content
+        result_obj.to_dict.return_value = {"content": content, "total_lines": 1}
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import read_file_tool
+        result = json.loads(read_file_tool("/tmp/app.py", task_id="source-token-read"))
+
+        assert token not in result["content"]
+        assert "ghp_IG...S199" in result["content"]
 
 
 class TestWriteFileHandler:
@@ -300,6 +338,28 @@ class TestSearchHandler:
         from tools.file_tools import search_tool
         result = json.loads(search_tool(pattern="x"))
         assert "error" in result
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_config_search_preserves_prefixed_token_values(self, mock_get, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+        token = "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"
+        match = SimpleNamespace(path="/tmp/config.yaml", line_number=2, content=f"  token: {token}")
+        result_obj = SimpleNamespace(
+            matches=[match],
+            to_dict=lambda: {
+                "total_count": 1,
+                "matches": [{"path": match.path, "line": match.line_number, "content": match.content}],
+            },
+        )
+        mock_ops = MagicMock()
+        mock_ops.search.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import search_tool
+        result = json.loads(search_tool(pattern="token", path="/tmp", task_id="config-token-search"))
+
+        assert token in result["matches"][0]["content"]
+        assert "..." not in result["matches"][0]["content"]
 
 
 # ---------------------------------------------------------------------------

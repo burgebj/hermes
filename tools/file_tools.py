@@ -62,6 +62,57 @@ def _get_max_read_chars() -> int:
 # range (limit <= 200), we include a hint encouraging targeted reads.
 _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
 
+_CONFIG_LIKE_EXTENSIONS = {
+    ".cfg",
+    ".conf",
+    ".config",
+    ".env",
+    ".ini",
+    ".json",
+    ".jsonc",
+    ".properties",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+
+_CONFIG_LIKE_FILENAMES = {
+    ".env",
+    ".env.local",
+    ".npmrc",
+    ".pypirc",
+    "config",
+    "config.yaml",
+    "config.yml",
+    "settings.json",
+    "settings.toml",
+}
+
+
+def _redact_file_content_for_path(content: str, path: str) -> str:
+    """Redact file-tool output without corrupting config token values.
+
+    File tools use ``code_file=True`` to avoid false positives in source code.
+    Config files are a special case: the agent often reads them specifically to
+    discover current credential values. Prefix masking (``ghp_abc...1234``)
+    makes those values look real enough to be written back later, permanently
+    corrupting auth. For config-like paths, skip only the vendor-prefix pass;
+    keep the rest of the redactor active for private keys, auth headers, JWTs,
+    DB URLs, Telegram tokens, phone numbers, etc.
+    """
+    file_path = Path(path)
+    name = file_path.name.lower()
+    suffixes = {s.lower() for s in file_path.suffixes}
+    is_config_like = (
+        name in _CONFIG_LIKE_FILENAMES
+        or bool(suffixes & _CONFIG_LIKE_EXTENSIONS)
+    )
+    return redact_sensitive_text(
+        content,
+        code_file=True,
+        redact_prefixes=not is_config_like,
+    )
+
 # ---------------------------------------------------------------------------
 # Device path blocklist — reading these hangs the process (infinite output
 # or blocking on input).  Checked by path only (no I/O).
@@ -820,7 +871,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         # ── Redact secrets (after guard check to skip oversized content) ──
         if result.content:
-            result.content = redact_sensitive_text(result.content, code_file=True)
+            result.content = _redact_file_content_for_path(result.content, path)
             result_dict["content"] = result.content
 
         # Large-file hint: if the file is big and the caller didn't ask
@@ -1339,7 +1390,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         if hasattr(result, 'matches'):
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
-                    m.content = redact_sensitive_text(m.content, code_file=True)
+                    m.content = _redact_file_content_for_path(m.content, m.path)
         result_dict = result.to_dict()
 
         if count >= 3:

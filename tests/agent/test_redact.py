@@ -32,6 +32,12 @@ class TestKnownPrefixes:
         result = redact_sensitive_text("token: ghp_abc123def456ghi789jkl")
         assert "abc123def456" not in result
 
+    def test_can_skip_vendor_prefix_redaction_for_config_reads(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+        token = "ghp_abc123def456ghi789jkl"
+        result = redact_sensitive_text(f"token: {token}", redact_prefixes=False)
+        assert token in result
+
     def test_github_pat_fine_grained(self):
         result = redact_sensitive_text("github_pat_abc123def456ghi789jklmno")
         assert "abc123def456" not in result
