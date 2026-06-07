@@ -176,6 +176,7 @@ def _build_provider_env_blocklist() -> frozenset:
         "EMAIL_HOME_ADDRESS",
         "EMAIL_HOME_ADDRESS_NAME",
         "HERMES_DASHBOARD_SESSION_TOKEN",
+        "HERMES_SESSION_KEY",
         "GATEWAY_ALLOWED_USERS",
         "GH_TOKEN",
         "GITHUB_APP_ID",

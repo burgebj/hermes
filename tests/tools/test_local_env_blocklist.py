@@ -177,6 +177,7 @@ class TestProviderEnvBlocklist:
             "EMAIL_PASSWORD": "email-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
             "HERMES_DASHBOARD_SESSION_TOKEN": "dashboard-session-secret",
+            "HERMES_SESSION_KEY": "hermes-session-secret",
             "BROWSERBASE_PROJECT_ID": "bb-project",
             "ELEVENLABS_API_KEY": "el-secret",
             "GITHUB_TOKEN": "ghp_secret",
@@ -191,6 +192,24 @@ class TestProviderEnvBlocklist:
 
         for var in leaked_vars:
             assert var not in result_env, f"{var} leaked into subprocess env"
+
+    def test_hermes_session_key_is_stripped(self):
+        """HERMES_SESSION_KEY is the Hermes-internal session / approval-binding
+        credential. It must not leak into terminal/execute_code subprocesses —
+        a child that reads it can borrow the live session's approval scope
+        (borrowed-credential escalation).
+
+        Sibling follow-up to commit 3278b423d, which stripped the dashboard
+        session token (HERMES_DASHBOARD_SESSION_TOKEN) but left this adjacent
+        Hermes session credential inheritable.
+        """
+        result_env = _run_with_env(extra_os_env={
+            "HERMES_SESSION_KEY": "hermes-session-secret",
+        })
+
+        assert "HERMES_SESSION_KEY" not in result_env, (
+            "HERMES_SESSION_KEY leaked into subprocess env"
+        )
 
     def test_safe_vars_are_preserved(self):
         """Standard env vars (PATH, HOME, USER) must still be passed through."""
@@ -364,6 +383,7 @@ class TestBlocklistCoverage:
             "EMAIL_HOME_ADDRESS",
             "EMAIL_HOME_ADDRESS_NAME",
             "HERMES_DASHBOARD_SESSION_TOKEN",
+            "HERMES_SESSION_KEY",
             "GATEWAY_ALLOWED_USERS",
             "GH_TOKEN",
             "GITHUB_APP_ID",
