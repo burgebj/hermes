@@ -497,6 +497,8 @@ DANGEROUS_PATTERNS = [
      "restart Hermes gateway (agent host restart)"),
     (r'\btaskkill\b[^;|&\n]*/F\b[^;|&\n]*/T\b',
      "force-kill process tree (taskkill /F /T)"),
+    (r'\btaskkill\b[^;|&\n]*/T\b[^;|&\n]*/F\b',
+     "force-kill process tree (taskkill /T /F)"),
     (r'\bschtasks\b[^;|&\n]*/End\b[^;|&\n]*hermes',
      "end Hermes scheduled task"),
     (r'\bschtasks\b[^;|&\n]*/Delete\b[^;|&\n]*hermes',

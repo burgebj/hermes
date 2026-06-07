@@ -102,7 +102,7 @@ class TestScheduleRestartHandoff:
             # Mock _wait_for_completion to return immediately
             monkeypatch.setattr(
                 "hermes_cli.gateway_windows_restart._wait_for_completion",
-                lambda profile, timeout: True,
+                lambda profile, timeout, request_id="": True,
             )
             monkeypatch.setattr(
                 "hermes_cli.gateway_windows_restart._read_final_status",

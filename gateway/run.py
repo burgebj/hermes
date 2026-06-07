@@ -10918,10 +10918,10 @@ class GatewayRunner:
             logger.debug("Failed to write restart dedup marker: %s", e)
 
         active_agents = self._running_agent_count()
-        # On Windows, use the transactional restart coordinator instead of
-        # the legacy detached watcher.  The coordinator writes an intent,
-        # spawns a detached worker (without _HERMES_GATEWAY=1), and the
-        # worker handles drain → stop → port release → start → verify.
+        # P0-9: On Windows, use the transactional restart coordinator.
+        # No automatic legacy fallback.  If the coordinator fails, the
+        # error is logged and the user is notified.  Legacy
+        # request_restart() is preserved only for non-Windows platforms.
         if sys.platform == "win32":
             try:
                 from hermes_cli.gateway_windows_restart import schedule_restart_handoff
@@ -10929,25 +10929,24 @@ class GatewayRunner:
                     origin="slash-command",
                     wait=False,  # Don't block the chat response
                 )
-                if result.get("scheduled"):
-                    logger.info("Gateway restart scheduled via coordinator (request_id=%s)", result["request_id"])
-                else:
-                    logger.warning("Coordinator failed: %s", result.get("detail"))
-                    # Fall through to legacy path
-                    _under_service = bool(os.environ.get("INVOCATION_ID"))
-                    _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-                    if _under_service or _in_container:
-                        self.request_restart(detached=False, via_service=True)
-                    else:
-                        self.request_restart(detached=True, via_service=False)
-            except Exception as e:
-                logger.warning("Coordinator unavailable, using legacy restart: %s", e)
-                _under_service = bool(os.environ.get("INVOCATION_ID"))
-                _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-                if _under_service or _in_container:
-                    self.request_restart(detached=False, via_service=True)
-                else:
-                    self.request_restart(detached=True, via_service=False)
+            except Exception as exc:
+                # Error isolation: coordinator failure must NOT crash the
+                # gateway chat loop.  Log and return error to user.
+                logger.error("Coordinator exception: %s", exc)
+                return EphemeralReply(
+                    f"Gateway restart failed: coordinator error: {exc}"
+                )
+            if result.get("scheduled"):
+                logger.info("Gateway restart scheduled via coordinator (request_id=%s)", result["request_id"])
+                if active_agents:
+                    return t("gateway.draining", count=active_agents)
+                return EphemeralReply(t("gateway.restart.restarting"))
+            else:
+                logger.error("Coordinator failed: %s", result.get("detail"))
+                # P0-9: Do NOT fall through to legacy.  Return error message.
+                return EphemeralReply(
+                    f"Gateway restart failed: {result.get('detail', 'unknown')}"
+                )
         else:
             # When running under a service manager (systemd/launchd) or inside a
             # Docker/Podman container, use the service restart path: exit with

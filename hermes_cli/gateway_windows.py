@@ -1307,22 +1307,20 @@ def restart() -> None:
 
     Uses the transactional restart coordinator for a safer restart that
     verifies PID exit, port release, and new gateway launch evidence.
-    Falls back to the legacy stop→sleep→start path if the coordinator fails.
+
+    P0-9: No automatic legacy fallback.  If the coordinator fails, the
+    error is raised.  Legacy ``stop()→sleep()→start()`` is preserved only
+    as a manual recovery command (call ``stop()`` + ``start()`` separately).
     """
     _assert_windows()
-    try:
-        from hermes_cli.gateway_windows_restart import schedule_restart_handoff
-        result = schedule_restart_handoff(origin="gateway_windows_restart", wait=True)
-        if result.get("completed"):
-            return
-        if result.get("scheduled") and not result.get("completed"):
-            # Coordinator scheduled but didn't complete in time — fall through
-            pass
-    except Exception:
-        pass
-
-    # Legacy path
-    stop()
-    # Give Windows a moment to release the listening port.
-    time.sleep(1.0)
-    start()
+    from hermes_cli.gateway_windows_restart import schedule_restart_handoff
+    result = schedule_restart_handoff(origin="gateway_windows_restart", wait=True)
+    if result.get("completed"):
+        return
+    if result.get("scheduled") and not result.get("completed"):
+        raise RuntimeError(
+            f"Restart scheduled but did not complete: {result.get('detail', 'timeout')}"
+        )
+    raise RuntimeError(
+        f"Restart failed: {result.get('detail', 'unknown')}"
+    )

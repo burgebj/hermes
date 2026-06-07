@@ -24,12 +24,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-if sys.platform != "win32":
-    # This module is Windows-specific.  Import is safe on other platforms
-    # (functions raise RuntimeError if called).
-    pass
-
-
 def _assert_windows() -> None:
     if sys.platform != "win32":
         raise RuntimeError("gateway_windows_restart is Windows-only")
@@ -237,10 +231,10 @@ def schedule_restart_handoff(
 
     # If external CLI with wait, poll for completion
     if wait:
-        completed = _wait_for_completion(profile, timeout_s)
+        completed = _wait_for_completion(profile, timeout_s, request_id=request_id)
         result["completed"] = completed
         final_status = _read_final_status(profile)
-        if final_status:
+        if final_status and final_status.get("request_id") == request_id:
             result["new_pid"] = final_status.get("new_pid", 0)
             result["launcher"] = final_status.get("launcher", "")
             if final_status.get("state") == "failed":
@@ -276,15 +270,22 @@ def _wait_for_worker_claim(
 def _wait_for_completion(
     profile: str,
     timeout_s: float,
+    request_id: str = "",
 ) -> bool:
-    """Poll status file until completion or timeout."""
+    """Poll status file until completion or timeout.
+
+    P1-1: Must verify status belongs to the current request_id.
+    A stale ``completed`` from an old transaction must not be misread
+    as success for the current one.
+    """
     from hermes_cli.gateway_restart_state import read_status
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         status = read_status(profile)
-        if status and status.get("state") in ("completed", "failed"):
-            return status["state"] == "completed"
+        if status and status.get("request_id") == request_id:
+            if status.get("state") in ("completed", "failed"):
+                return status["state"] == "completed"
         time.sleep(1.0)
     return False
 

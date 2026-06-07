@@ -25,6 +25,9 @@ from typing import Any, Optional
 if sys.platform == "win32":
     import msvcrt
 else:
+    # Used by RestartLock._acquire_os_lock / _release_os_lock on non-Windows.
+    # On Windows, msvcrt is used instead.  This import is needed for
+    # cross-platform tests and non-Windows deployments.
     import fcntl
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -84,13 +87,14 @@ def create_intent(
     ttl_s: int = _DEFAULT_TTL_S,
 ) -> dict[str, Any]:
     """Create and atomically write a restart intent.  Returns the intent dict."""
+    from hermes_cli.config import get_hermes_home
     now = datetime.now(timezone.utc)
     intent = {
         "schema_version": _SCHEMA_VERSION,
         "request_id": str(uuid.uuid4()),
         "nonce": secrets.token_urlsafe(32),
         "profile": profile,
-        "hermes_home": hermes_home or str(Path.home() / ".hermes"),
+        "hermes_home": hermes_home or str(Path(get_hermes_home()).resolve()),
         "target_pid": target_pid,
         "task_name": task_name,
         "origin": origin,

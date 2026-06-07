@@ -374,3 +374,178 @@ def test_sudo_stdin_guard_container_bypass(clean_session):
         for cmd in _SUDO_STDIN_BLOCK:
             result = check_all_command_guards(cmd, env)
             assert result["approved"] is True, f"container {env} should bypass sudo guard on {cmd!r}"
+
+
+# =========================================================================
+# Gateway lifecycle protection patterns — DANGEROUS_PATTERNS regression
+# =========================================================================
+# These verify that commands which would stop/restart/kill the Hermes
+# Gateway process trigger the dangerous-command check, preventing the
+# agent from silently killing its own host.
+
+# Commands that MUST be detected as dangerous (gateway lifecycle).
+_GATEWAY_LIFECYCLE_BLOCK = [
+    "hermes gateway stop",
+    "hermes gateway restart",
+    "taskkill /F /T /IM hermes.exe",
+    "taskkill /T /F /IM hermes.exe",
+    "schtasks /End /TN HermesGateway",
+    "schtasks /Delete /TN HermesGateway /F",
+    "systemctl restart hermes-gateway",
+    "launchctl kickstart --k hermes-gateway",
+]
+
+# Commands that look similar but must NOT be flagged as gateway lifecycle.
+_GATEWAY_LIFECYCLE_ALLOW = [
+    "hermes gateway status",
+    "hermes gateway start",
+    "taskkill /PID 1234",
+    "schtasks /Query /TN HermesGateway",
+]
+
+
+@pytest.mark.parametrize("command", _GATEWAY_LIFECYCLE_BLOCK)
+def test_gateway_lifecycle_patterns_detect_dangerous(command):
+    """Gateway lifecycle commands must be detected via detect_dangerous_command."""
+    is_dangerous, desc_key, description = detect_dangerous_command(command)
+    assert is_dangerous, f"expected dangerous detection on {command!r}"
+    assert description, f"dangerous match on {command!r} must provide a description"
+
+
+@pytest.mark.parametrize("command", _GATEWAY_LIFECYCLE_ALLOW)
+def test_gateway_lifecycle_patterns_allow_benign(command):
+    """Non-destructive gateway/similar commands must NOT trigger dangerous detection."""
+    is_dangerous, desc_key, description = detect_dangerous_command(command)
+    assert not is_dangerous, (
+        f"expected dangerous detection to allow {command!r} "
+        f"(matched: {description!r})"
+    )
+
+
+@pytest.fixture
+def interactive_session(clean_session, monkeypatch):
+    """Session fixture that simulates an interactive CLI context.
+
+    check_dangerous_command auto-approves DANGEROUS_PATTERNS (non-hardline)
+    when neither HERMES_INTERACTIVE nor HERMES_GATEWAY_SESSION is set.
+    This fixture sets HERMES_INTERACTIVE so dangerous commands are blocked.
+    """
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    yield
+
+
+@pytest.mark.parametrize("command", _GATEWAY_LIFECYCLE_BLOCK)
+def test_gateway_lifecycle_blocked_via_check_dangerous_command(interactive_session, command):
+    """Gateway lifecycle commands are blocked through the approval flow."""
+    result = check_dangerous_command(command, "local")
+    assert result["approved"] is False, f"expected block on {command!r}"
+    assert "BLOCKED" in result["message"]
+
+
+@pytest.mark.parametrize("command", _GATEWAY_LIFECYCLE_BLOCK)
+def test_gateway_lifecycle_blocked_via_check_all_guards(interactive_session, command):
+    """Gateway lifecycle commands are blocked through check_all_command_guards."""
+    result = check_all_command_guards(command, "local")
+    assert result["approved"] is False, f"expected block on {command!r}"
+    assert "BLOCKED" in result["message"]
+
+
+def test_gateway_lifecycle_not_hardline(clean_session):
+    """Gateway lifecycle commands are in DANGEROUS_PATTERNS, not HARDLINE_PATTERNS.
+
+    They should be blockable via yolo (dangerous) but not unconditionally
+    hardline-blocked like rm -rf /.
+    """
+    for cmd in _GATEWAY_LIFECYCLE_BLOCK:
+        is_hl, _ = detect_hardline_command(cmd)
+        assert not is_hl, f"{cmd!r} should be dangerous, not hardline"
+
+
+def test_gateway_lifecycle_yolo_still_bypasses(clean_session, monkeypatch):
+    """Yolo mode bypasses gateway lifecycle detection (they're dangerous, not hardline)."""
+    monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+    for cmd in _GATEWAY_LIFECYCLE_BLOCK:
+        result = check_dangerous_command(cmd, "local")
+        assert result["approved"] is True, f"yolo should bypass dangerous on {cmd!r}"
+
+
+class TestGatewayLifecyclePatterns:
+    """Test class grouping gateway lifecycle regression tests.
+
+    Uses detect_dangerous_command directly to verify pattern coverage
+    without needing approval session fixtures.
+    """
+
+    @pytest.mark.parametrize("command", _GATEWAY_LIFECYCLE_BLOCK)
+    def test_blocked_commands_detected(self, command):
+        is_dangerous, _, description = detect_dangerous_command(command)
+        assert is_dangerous, f"gateway lifecycle pattern missed {command!r}"
+        assert description
+
+    @pytest.mark.parametrize("command", _GATEWAY_LIFECYCLE_ALLOW)
+    def test_allowed_commands_not_detected(self, command):
+        is_dangerous, _, description = detect_dangerous_command(command)
+        assert not is_dangerous, (
+            f"gateway lifecycle pattern false-positive on {command!r} "
+            f"(matched: {description!r})"
+        )
+
+    def test_hermes_gateway_stop_requires_approval(self, interactive_session):
+        result = check_all_command_guards("hermes gateway stop", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_hermes_gateway_restart_requires_approval(self, interactive_session):
+        result = check_all_command_guards("hermes gateway restart", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_taskkill_force_tree_requires_approval(self, interactive_session):
+        result = check_all_command_guards("taskkill /F /T /IM hermes.exe", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_schtasks_end_hermes_requires_approval(self, interactive_session):
+        result = check_all_command_guards("schtasks /End /TN HermesGateway", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_schtasks_delete_hermes_requires_approval(self, interactive_session):
+        result = check_all_command_guards("schtasks /Delete /TN HermesGateway /F", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_systemctl_restart_hermes_requires_approval(self, interactive_session):
+        result = check_all_command_guards("systemctl restart hermes-gateway", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_launchctl_kickstart_hermes_requires_approval(self, interactive_session):
+        result = check_all_command_guards("launchctl kickstart --k hermes-gateway", "local")
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+
+    def test_gateway_status_allowed(self, interactive_session):
+        result = check_all_command_guards("hermes gateway status", "local")
+        assert result["approved"] is True
+
+    def test_gateway_start_allowed(self, interactive_session):
+        result = check_all_command_guards("hermes gateway start", "local")
+        assert result["approved"] is True
+
+    def test_taskkill_pid_only_allowed(self, interactive_session):
+        result = check_all_command_guards("taskkill /PID 1234", "local")
+        assert result["approved"] is True
+
+    def test_schtasks_query_allowed(self, interactive_session):
+        result = check_all_command_guards("schtasks /Query /TN HermesGateway", "local")
+        assert result["approved"] is True
+
+    def test_container_bypasses_gateway_lifecycle(self, interactive_session):
+        """Containerized backends bypass gateway lifecycle detection."""
+        for env in ("docker", "singularity", "modal", "daytona"):
+            for cmd in _GATEWAY_LIFECYCLE_BLOCK:
+                result = check_all_command_guards(cmd, env)
+                assert result["approved"] is True, (
+                    f"container {env} should bypass gateway lifecycle on {cmd!r}"
+                )

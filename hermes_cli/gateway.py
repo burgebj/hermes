@@ -6607,44 +6607,31 @@ def _gateway_command_inner(args):
             except subprocess.CalledProcessError:
                 pass
         elif is_windows():
-            # Use the transactional restart coordinator on Windows.
-            # This handles the full lifecycle: intent → worker spawn →
-            # drain → stop → port release → start → verify.
-            # Falls back to the legacy path if the coordinator fails.
-            try:
-                from hermes_cli.gateway_windows_restart import schedule_restart_handoff
+            # P0-9: Use the transactional restart coordinator on Windows.
+            # No automatic legacy fallback.  If the coordinator fails,
+            # the error is reported.  Legacy stop()→sleep()→start() is
+            # preserved only as manual recovery (separate stop + start).
+            from hermes_cli.gateway_windows_restart import schedule_restart_handoff
 
-                no_wait = getattr(args, "no_wait", False)
-                result = schedule_restart_handoff(
-                    origin="external-cli",
-                    wait=not no_wait,
-                )
-                if result.get("scheduled"):
-                    if result.get("completed"):
-                        print(f"✓ Gateway restarted (request_id: {result['request_id']}, "
-                              f"new PID: {result.get('new_pid', '?')})")
-                        return
-                    elif no_wait:
-                        print(f"✓ Gateway restart scheduled (request_id: {result['request_id']})")
-                        return
-                    else:
-                        print(f"⚠ {result.get('detail', 'Restart did not complete')}")
-                        # Fall through to legacy path
+            no_wait = getattr(args, "no_wait", False)
+            result = schedule_restart_handoff(
+                origin="external-cli",
+                wait=not no_wait,
+            )
+            if result.get("scheduled"):
+                if result.get("completed"):
+                    print(f"✓ Gateway restarted (request_id: {result['request_id']}, "
+                          f"new PID: {result.get('new_pid', '?')})")
+                    return
+                elif no_wait:
+                    print(f"✓ Gateway restart scheduled (request_id: {result['request_id']})")
+                    return
                 else:
-                    print(f"⚠ Coordinator failed: {result.get('detail', 'unknown')}")
-                    # Fall through to legacy path
-            except Exception as e:
-                print(f"⚠ Coordinator unavailable: {e}")
-                # Fall through to legacy path
-
-            # Legacy path: gateway_windows.restart() (stop → sleep → start)
-            from hermes_cli import gateway_windows
-            service_configured = gateway_windows.is_installed()
-            try:
-                gateway_windows.restart()
-                return
-            except (subprocess.CalledProcessError, RuntimeError, OSError):
-                pass
+                    print_error(f"Restart scheduled but did not complete: {result.get('detail', 'timeout')}")
+                    sys.exit(1)
+            else:
+                print_error(f"Gateway restart failed: {result.get('detail', 'unknown')}")
+                sys.exit(1)
 
         if not service_available:
             # systemd/launchd restart failed — check if linger is the issue
