@@ -924,6 +924,14 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if preserved:
             msg["reasoning_details"] = preserved
 
+    # Propagate the original interleaved Anthropic content array from provider_data
+    # to preserve thinking-block order and signature validity across turns.
+    _pd = getattr(assistant_message, 'provider_data', None)
+    if isinstance(_pd, dict):
+        _raw_content = _pd.get("anthropic_content")
+        if isinstance(_raw_content, list) and _raw_content:
+            msg["anthropic_content"] = _raw_content
+
     # Codex Responses API: preserve encrypted reasoning items for
     # multi-turn continuity. These get replayed as input on the next turn.
     codex_items = getattr(assistant_message, "codex_reasoning_items", None)
