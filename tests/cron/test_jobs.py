@@ -1,8 +1,10 @@
 """Tests for cron/jobs.py — schedule parsing, job CRUD, and due-job detection."""
 
+import json
 import threading
-import pytest
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from cron.jobs import (
     parse_duration,
@@ -187,6 +189,31 @@ def tmp_cron_dir(tmp_path, monkeypatch):
 
 
 class TestJobCRUD:
+    def test_load_jobs_repairs_top_level_list(self, tmp_cron_dir):
+        jobs_file = tmp_cron_dir / "cron" / "jobs.json"
+        jobs_file.parent.mkdir(parents=True, exist_ok=True)
+        legacy_jobs = [
+            {
+                "id": "legacy-job",
+                "prompt": "Run report",
+                "schedule": {"kind": "interval", "minutes": 60},
+            }
+        ]
+        jobs_file.write_text(json.dumps(legacy_jobs), encoding="utf-8")
+
+        assert load_jobs() == legacy_jobs
+        repaired = json.loads(jobs_file.read_text(encoding="utf-8"))
+        assert repaired["jobs"] == legacy_jobs
+        assert "updated_at" in repaired
+
+    def test_load_jobs_rejects_wrong_top_level_shape(self, tmp_cron_dir):
+        jobs_file = tmp_cron_dir / "cron" / "jobs.json"
+        jobs_file.parent.mkdir(parents=True, exist_ok=True)
+        jobs_file.write_text('"not an object"', encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match=r"expected \{'jobs': \[\.\.\.\]\}, got str"):
+            load_jobs()
+
     def test_create_and_get(self, tmp_cron_dir):
         job = create_job(prompt="Check server status", schedule="30m")
         assert job["id"]
