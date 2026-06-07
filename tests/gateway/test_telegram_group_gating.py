@@ -82,6 +82,9 @@ def _make_adapter(
     # under test runs.  Without this, every fake message hits the new
     # fail-closed auth path and gets dropped before trigger evaluation.
     adapter._is_callback_user_authorized = lambda user_id, **_kw: True
+    # Bypass early auth check added by #40916 so handler tests still reach
+    # the trigger/gating logic under test.
+    adapter._is_user_auth_early = lambda msg: True
     return adapter
 
 

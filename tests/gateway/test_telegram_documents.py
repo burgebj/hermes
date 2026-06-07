@@ -137,6 +137,9 @@ def adapter():
     # document-routing tests need to bypass the new gate so messages from fake
     # senders reach handle_message.
     a._is_callback_user_authorized = lambda user_id, **_kw: True
+    # Bypass early auth check added by #40916 so document/media tests still
+    # reach the handler logic under test.
+    a._is_user_auth_early = lambda msg: True
     return a
 
 
