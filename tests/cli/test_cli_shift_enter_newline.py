@@ -86,3 +86,33 @@ def test_plain_enter_remains_distinct_from_alt_enter():
     assert enter != alt_enter
     assert len(enter) == 1
     assert len(alt_enter) == 2
+
+
+def test_iterm_esc_lf_shift_enter_registered():
+    """iTerm2 Shift+Enter key mappings (Send Hex Codes / Escape Sequence)
+    commonly deliver ESC + LF (0x1b 0x0a) to the application — the second
+    byte arrives as Ctrl+J (c-j / LF), not Ctrl+M (c-m / CR), even when the
+    iTerm UI displays 0x1b 0x0d. Stock prompt_toolkit has no mapping for
+    "\\x1b\\n", so Shift+Enter falls through and does nothing. The alias must
+    register it to the Alt+Enter tuple the newline handler binds. See the
+    iTerm2 Shift+Enter investigation.
+    """
+    assert ANSI_SEQUENCES.get("\x1b\n") == (Keys.Escape, Keys.ControlM)
+
+
+def test_iterm_esc_lf_shift_enter_parses_as_alt_enter():
+    """ESC+LF (the bytes iTerm2 actually sends for Shift+Enter) must parse to
+    the same key tuple Alt+Enter produces, so the existing handler fires."""
+    alt_enter = _parse("\x1b\r")
+    shift_enter = _parse("\x1b\n")
+    assert shift_enter == alt_enter, (
+        f"iTerm Shift+Enter (ESC+LF) should parse identically to Alt+Enter; "
+        f"got {shift_enter!r} vs {alt_enter!r}"
+    )
+
+
+def test_plain_lf_remains_single_key():
+    """A bare LF (Ctrl+J) must stay a single key — mapping ESC+LF must not
+    accidentally swallow lone LF, which some thin PTYs deliver as Enter."""
+    lf = _parse("\n")
+    assert len(lf) == 1

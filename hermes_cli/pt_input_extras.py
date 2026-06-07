@@ -21,6 +21,10 @@ def install_shift_enter_alias() -> int:
       - "\\x1b[13;2u"     — Kitty keyboard protocol / CSI-u, modifier=2 (Shift)
       - "\\x1b[27;2;13~"  — xterm modifyOtherKeys=2, modifier=2 (Shift)
       - "\\x1b[27;2;13u"  — alternate ordering some emitters use
+      - "\\x1b\\n"          — iTerm2 Shift+Enter (ESC + LF / Ctrl+J); the common
+                          macOS case, where the second byte reaches the app as
+                          LF even when iTerm's UI shows hex 0x1b 0x0d
+      - "\\x1b\\r"          — ESC + CR variant, for setups where CR survives
 
     The CSI-u sequence is not in stock prompt_toolkit. The modifyOtherKeys
     variant `\\x1b[27;2;13~` IS in stock prompt_toolkit but mapped to plain
@@ -44,7 +48,19 @@ def install_shift_enter_alias() -> int:
 
     alt_enter = (Keys.Escape, Keys.ControlM)
     changed = 0
+    # CSI-u / modifyOtherKeys forms (Kitty, xterm, mintty over SSH).
     for seq in ("\x1b[13;2u", "\x1b[27;2;13~", "\x1b[27;2;13u"):
+        if ANSI_SEQUENCES.get(seq) != alt_enter:
+            ANSI_SEQUENCES[seq] = alt_enter
+            changed += 1
+    # iTerm2 "Send Hex Codes / Escape Sequence" Shift+Enter mappings commonly
+    # emit ESC + LF (0x1b 0x0a) — i.e. an Escape prefix followed by Ctrl+J —
+    # even when the UI shows 0x1b 0x0d, because the second byte reaches the
+    # app as LF (c-j), not CR (c-m). Stock prompt_toolkit has no entry for
+    # "\x1b\n", so the chord falls through and Shift+Enter does nothing useful.
+    # Map it to the same Alt+Enter tuple the newline handler already binds.
+    # (Also map "\x1b\r" for completeness in case CR survives on some setups.)
+    for seq in ("\x1b\n", "\x1b\r"):
         if ANSI_SEQUENCES.get(seq) != alt_enter:
             ANSI_SEQUENCES[seq] = alt_enter
             changed += 1
