@@ -549,14 +549,32 @@ def classify_api_error(
             should_fallback=True,
         )
 
-    # Anthropic thinking block signature invalid (400).
+    # Anthropic thinking block replay rejected (400). Two distinct upstream
+    # messages, same root meaning ("the thinking block we replayed no longer
+    # matches what Anthropic originally returned") and same recovery (strip
+    # reasoning_details and retry):
+    #   1. "Invalid signature in thinking block ..."  (signature mismatch)
+    #   2. "thinking ... blocks in the latest assistant message cannot be
+    #      modified. These blocks must remain as they were in the original
+    #      response."  (content/order mismatch — interleaved thinking blocks
+    #      reordered relative to tool_use on rebuild)
+    # Variant 2 carries no "signature" token, so the original pattern missed it
+    # and the turn hard-aborted as a non-retryable client error instead of
+    # self-healing. This is defense-in-depth: the anthropic_content_blocks
+    # channel prevents the reorder at the source, but if any future mutator
+    # reintroduces it, the turn still recovers instead of crash-looping.
+    # Adapted from #36087 / #36071 (classifier broadening).
     # Don't gate on provider — OpenRouter proxies Anthropic errors, so the
     # provider may be "openrouter" even though the error is Anthropic-specific.
-    # The message pattern ("signature" + "thinking") is unique enough.
+    # The "thinking" token plus any one of these signals is unique enough.
     if (
         status_code == 400
-        and "signature" in error_msg
         and "thinking" in error_msg
+        and (
+            "signature" in error_msg
+            or "cannot be modified" in error_msg
+            or "must remain as they were" in error_msg
+        )
     ):
         return _result(
             FailoverReason.thinking_signature,

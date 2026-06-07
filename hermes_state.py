@@ -282,6 +282,7 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning TEXT,
     reasoning_content TEXT,
     reasoning_details TEXT,
+    anthropic_content_blocks TEXT,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
     platform_message_id TEXT,
@@ -1939,6 +1940,7 @@ class SessionDB:
         reasoning: str = None,
         reasoning_content: str = None,
         reasoning_details: Any = None,
+        anthropic_content_blocks: Any = None,
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
         platform_message_id: str = None,
@@ -1960,6 +1962,10 @@ class SessionDB:
         reasoning_details_json = (
             json.dumps(reasoning_details)
             if reasoning_details else None
+        )
+        anthropic_content_blocks_json = (
+            json.dumps(anthropic_content_blocks)
+            if anthropic_content_blocks else None
         )
         codex_items_json = (
             json.dumps(codex_reasoning_items)
@@ -1983,9 +1989,10 @@ class SessionDB:
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
-                   reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+                   reasoning, reasoning_content, reasoning_details, anthropic_content_blocks,
+                   codex_reasoning_items,
                    codex_message_items, platform_message_id, observed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -1999,6 +2006,7 @@ class SessionDB:
                     reasoning,
                     reasoning_content,
                     reasoning_details_json,
+                    anthropic_content_blocks_json,
                     codex_items_json,
                     codex_message_items_json,
                     platform_message_id,
@@ -2047,6 +2055,9 @@ class SessionDB:
                 role = msg.get("role", "unknown")
                 tool_calls = msg.get("tool_calls")
                 reasoning_details = msg.get("reasoning_details") if role == "assistant" else None
+                anthropic_content_blocks = (
+                    msg.get("anthropic_content_blocks") if role == "assistant" else None
+                )
                 codex_reasoning_items = (
                     msg.get("codex_reasoning_items") if role == "assistant" else None
                 )
@@ -2056,6 +2067,9 @@ class SessionDB:
 
                 reasoning_details_json = (
                     json.dumps(reasoning_details) if reasoning_details else None
+                )
+                anthropic_content_blocks_json = (
+                    json.dumps(anthropic_content_blocks) if anthropic_content_blocks else None
                 )
                 codex_items_json = (
                     json.dumps(codex_reasoning_items) if codex_reasoning_items else None
@@ -2073,9 +2087,10 @@ class SessionDB:
                 conn.execute(
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
-                       reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+                       reasoning, reasoning_content, reasoning_details, anthropic_content_blocks,
+                       codex_reasoning_items,
                        codex_message_items, platform_message_id, observed)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         role,
@@ -2089,6 +2104,7 @@ class SessionDB:
                         msg.get("reasoning") if role == "assistant" else None,
                         msg.get("reasoning_content") if role == "assistant" else None,
                         reasoning_details_json,
+                        anthropic_content_blocks_json,
                         codex_items_json,
                         codex_message_items_json,
                         platform_msg_id,
@@ -2431,6 +2447,7 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
+                "anthropic_content_blocks, "
                 "codex_reasoning_items, codex_message_items, platform_message_id, observed "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 f"{active_clause} ORDER BY id",
@@ -2478,6 +2495,12 @@ class SessionDB:
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize reasoning_details, falling back to None")
                         msg["reasoning_details"] = None
+                if row["anthropic_content_blocks"]:
+                    try:
+                        msg["anthropic_content_blocks"] = json.loads(row["anthropic_content_blocks"])
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Failed to deserialize anthropic_content_blocks, falling back to None")
+                        msg["anthropic_content_blocks"] = None
                 if row["codex_reasoning_items"]:
                     try:
                         msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
