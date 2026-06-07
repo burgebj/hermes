@@ -1195,6 +1195,25 @@ setup_venv() {
 
         "$PYTHON_PATH" -m venv venv
         log_success "Virtual environment ready ($(./venv/bin/python --version 2>/dev/null))"
+
+        # On some systems (Ubuntu 25.10+, Debian trixie) python3 -m venv
+        # creates a venv without pip.  Bootstrap it via ensurepip if missing.
+        if ! ./venv/bin/python -m pip --version >/dev/null 2>&1; then
+            log_info "pip not found in venv — bootstrapping via ensurepip..."
+            if ./venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1; then
+                log_success "pip bootstrapped successfully"
+            else
+                log_warn "ensurepip failed — trying get-pip.py fallback..."
+                if command -v curl >/dev/null 2>&1; then
+                    curl -fsSL https://bootstrap.pypa.io/get-pip.py | ./venv/bin/python
+                elif command -v wget >/dev/null 2>&1; then
+                    wget -qO- https://bootstrap.pypa.io/get-pip.py | ./venv/bin/python
+                else
+                    log_error "Cannot bootstrap pip: neither ensurepip nor curl/wget available."
+                    exit 1
+                fi
+            fi
+        fi
         return 0
     fi
 
@@ -1220,6 +1239,26 @@ setup_venv() {
     fi
 
     log_success "Virtual environment ready (Python $PYTHON_VERSION)"
+
+    # On some systems (Ubuntu 25.10+, Debian trixie) the venv may be created
+    # without pip even when using uv.  Bootstrap it via ensurepip if missing
+    # so subsequent pip-based steps do not fail with "No module named pip".
+    if ! ./venv/bin/python -m pip --version >/dev/null 2>&1; then
+        log_info "pip not found in venv — bootstrapping via ensurepip..."
+        if ./venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1; then
+            log_success "pip bootstrapped successfully"
+        else
+            log_warn "ensurepip failed — trying get-pip.py fallback..."
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL https://bootstrap.pypa.io/get-pip.py | ./venv/bin/python
+            elif command -v wget >/dev/null 2>&1; then
+                wget -qO- https://bootstrap.pypa.io/get-pip.py | ./venv/bin/python
+            else
+                log_error "Cannot bootstrap pip: neither ensurepip nor curl/wget available."
+                exit 1
+            fi
+        fi
+    fi
 }
 
 install_deps() {
