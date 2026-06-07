@@ -1392,8 +1392,8 @@ WRITE_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does)"},
-            "content": {"type": "string", "description": "Complete content to write to the file"},
+            "path": {"type": "string", "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does). 'file_path' is accepted as an alias."},
+            "content": {"type": "string", "description": "Complete content to write to the file. 'file_content' is accepted as an alias."},
             "cross_profile": {
                 "type": "boolean",
                 "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories — by default these writes are blocked with a warning because they affect a different profile than the one this session is running under.",
@@ -1482,12 +1482,32 @@ def _handle_read_file(args, **kw):
 
 def _handle_write_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    if not args.get("path") or not isinstance(args.get("path"), str):
+    # #39964: skill_manage(action="write_file") uses file_path/file_content for the
+    # same operation, and models routinely carry that naming across to the standalone
+    # write_file tool. Accept file_path/file_content as aliases so a complete-but-
+    # misnamed call succeeds instead of dead-looping on a false "dropped-arg" error
+    # (symmetric with the skill_manage fix in #35741). Canonical keys win when both
+    # are present; an explicit empty-string content under either key is preserved.
+    path = args.get("path")
+    if path is None:
+        path = args.get("file_path")
+    if "content" in args:
+        content = args["content"]
+        content_present = True
+    elif "file_content" in args:
+        content = args["file_content"]
+        content_present = True
+    else:
+        content = None
+        content_present = False
+
+    if not path or not isinstance(path, str):
         return tool_error(
             "write_file: missing required field 'path'. Re-emit the tool call with "
-            "both 'path' and 'content' set."
+            "both 'path' and 'content' set ('file_path'/'file_content' are accepted "
+            "as aliases)."
         )
-    if "content" not in args:
+    if not content_present:
         return tool_error(
             "write_file: missing required field 'content'. The tool call included a "
             "path but no content argument — this is almost always a dropped-arg bug "
@@ -1495,13 +1515,13 @@ def _handle_write_file(args, **kw):
             "payload, or use execute_code with hermes_tools.write_file() for very "
             "large files."
         )
-    if not isinstance(args["content"], str):
+    if not isinstance(content, str):
         return tool_error(
             f"write_file: 'content' must be a string, got "
-            f"{type(args['content']).__name__}."
+            f"{type(content).__name__}."
         )
     return write_file_tool(
-        path=args["path"], content=args["content"], task_id=tid,
+        path=path, content=content, task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
     )
 

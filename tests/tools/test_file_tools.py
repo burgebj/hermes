@@ -139,6 +139,78 @@ class TestWriteFileHandler:
         assert "error" in result
         assert "string" in result["error"].lower() or "content" in result["error"].lower()
 
+    @patch("tools.file_tools._get_file_ops")
+    def test_file_content_alias_is_accepted(self, mock_get):
+        """#39964 — a complete call using the file_content alias must succeed."""
+        from tools.file_tools import _handle_write_file
+
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": "/tmp/out.txt", "bytes": 5}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        result = json.loads(_handle_write_file({"path": "/tmp/out.txt", "file_content": "hello"}))
+        assert result["status"] == "ok"
+        # The aliased value must reach the underlying writer unchanged (called
+        # positionally as write_file(path, content)).
+        assert mock_ops.write_file.call_args[0][1] == "hello"
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_file_path_alias_is_accepted(self, mock_get):
+        """#39964 — a complete call using the file_path alias must succeed."""
+        from tools.file_tools import _handle_write_file
+
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": "/tmp/out.txt", "bytes": 5}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        result = json.loads(_handle_write_file({"file_path": "/tmp/out.txt", "content": "hello"}))
+        assert result["status"] == "ok"
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_canonical_keys_win_over_aliases(self, mock_get):
+        """#39964 — when both canonical and alias keys are present, canonical wins."""
+        from tools.file_tools import _handle_write_file
+
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": "/tmp/canon.txt", "bytes": 5}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        json.loads(_handle_write_file({
+            "path": "/tmp/canon.txt", "file_path": "/tmp/alias.txt",
+            "content": "canonical", "file_content": "aliased",
+        }))
+        written_path, written_content = mock_ops.write_file.call_args[0][:2]
+        assert "canon.txt" in written_path and "alias.txt" not in written_path
+        assert written_content == "canonical"
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_empty_file_content_alias_is_preserved(self, mock_get):
+        """#39964 — explicit empty string under the alias must still truncate, not error."""
+        from tools.file_tools import _handle_write_file
+
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": "/tmp/empty.txt", "bytes": 0}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        result = json.loads(_handle_write_file({"path": "/tmp/empty.txt", "file_content": ""}))
+        assert result["status"] == "ok"
+
+    def test_missing_content_under_any_key_returns_error(self):
+        """#39964 — neither content nor file_content present is still a clean error."""
+        from tools.file_tools import _handle_write_file
+
+        result = json.loads(_handle_write_file({"path": "/tmp/oops.md"}))
+        assert "error" in result
+        assert "content" in result["error"]
+
 
 class TestPatchHandler:
     @patch("tools.file_tools._get_file_ops")
