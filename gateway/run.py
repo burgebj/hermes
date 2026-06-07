@@ -6893,12 +6893,8 @@ class GatewayRunner:
                 return None
             return SlackAdapter(config)
 
-        elif platform == Platform.SIGNAL:
-            from gateway.platforms.signal import SignalAdapter, check_signal_requirements
-            if not check_signal_requirements():
-                logger.warning("Signal: SIGNAL_HTTP_URL or SIGNAL_ACCOUNT not configured")
-                return None
-            return SignalAdapter(config)
+        # signal migrated to a bundled plugin (plugins/platforms/signal/);
+        # the platform_registry check at the top of this method creates it.
 
         elif platform == Platform.EMAIL:
             from gateway.platforms.email import EmailAdapter, check_email_requirements
@@ -14975,7 +14971,7 @@ class GatewayRunner:
     # honored via the registry fallback at ``_handle_update_command`` below.
     _UPDATE_ALLOWED_PLATFORMS = frozenset({
         Platform.TELEGRAM, Platform.SLACK, Platform.WHATSAPP,
-        Platform.SIGNAL, Platform.MATRIX,
+        Platform.MATRIX,
         Platform.EMAIL, Platform.SMS, Platform.DINGTALK,
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })
