@@ -531,11 +531,26 @@ def sync_skills(quiet: bool = False) -> dict:
                         )
                 else:
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_src, dest)
-                    copied.append(skill_name)
-                    manifest[skill_name] = bundled_hash
-                    if not quiet:
-                        print(f"  + {skill_name}")
+                    try:
+                        shutil.copytree(skill_src, dest)
+                        copied.append(skill_name)
+                        manifest[skill_name] = bundled_hash
+                        if not quiet:
+                            print(f"  + {skill_name}")
+                    except FileExistsError:
+                        # Race: dest появилась между check (line 452) и
+                        # copy (host bind-mount may lag behind container
+                        # init, or another sync ran concurrently). Treat
+                        # the on-disk copy as authoritative — same logic
+                        # как ветка ``if dest.exists()`` выше.
+                        skipped += 1
+                        if _dir_hash(dest) == bundled_hash:
+                            manifest[skill_name] = bundled_hash
+                        elif not quiet:
+                            print(
+                                f"  ⚠ {skill_name}: appeared mid-sync, "
+                                f"kept existing on-disk version"
+                            )
             except (OSError, IOError) as e:
                 if not quiet:
                     print(f"  ! Failed to copy {skill_name}: {e}")
