@@ -198,3 +198,25 @@ class TestKeepTypingTimeoutPerTick:
         assert calls == [], (
             f"send_typing was called on a paused chat: {calls}"
         )
+
+    @pytest.mark.asyncio
+    async def test_stale_typing_generation_exits_before_refreshing(self, monkeypatch):
+        """A stale typing loop must not keep refreshing a chat after its
+        ownership lease has been invalidated by turn cleanup or a newer turn."""
+        adapter = _StubAdapter()
+        calls = []
+
+        async def recording_send_typing(chat_id, metadata=None):
+            calls.append(chat_id)
+
+        monkeypatch.setattr(adapter, "send_typing", recording_send_typing)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+        adapter._typing_generations["chat"] = 2
+
+        await adapter._keep_typing(
+            chat_id="chat",
+            interval=0.1,
+            typing_generation=1,
+        )
+
+        assert calls == []

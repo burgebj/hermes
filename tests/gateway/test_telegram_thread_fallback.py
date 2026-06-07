@@ -457,6 +457,68 @@ async def test_send_private_dm_topic_uses_direct_messages_topic_id():
     assert call_log[0]["direct_messages_topic_id"] == 99999
 
 
+@pytest.mark.asyncio
+async def test_send_final_notify_does_not_retrigger_typing():
+    """Final Telegram responses should not leave a post-send typing bubble."""
+    adapter = _make_adapter()
+    message_calls = []
+    typing_calls = []
+
+    async def mock_send_message(**kwargs):
+        message_calls.append(dict(kwargs))
+        return SimpleNamespace(message_id=42)
+
+    async def mock_send_chat_action(**kwargs):
+        typing_calls.append(dict(kwargs))
+
+    adapter._bot = SimpleNamespace(
+        send_message=mock_send_message,
+        send_chat_action=mock_send_chat_action,
+    )
+
+    result = await adapter.send(
+        chat_id="123",
+        content="final response",
+        metadata={"notify": True},
+    )
+
+    assert result.success is True
+    assert len(message_calls) == 1
+    assert typing_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_non_final_progress_retriggers_typing():
+    """Intermediate Telegram progress messages should keep the typing bubble alive."""
+    adapter = _make_adapter()
+    message_calls = []
+    typing_calls = []
+
+    async def mock_send_message(**kwargs):
+        message_calls.append(dict(kwargs))
+        return SimpleNamespace(message_id=42)
+
+    async def mock_send_chat_action(**kwargs):
+        typing_calls.append(dict(kwargs))
+
+    adapter._bot = SimpleNamespace(
+        send_message=mock_send_message,
+        send_chat_action=mock_send_chat_action,
+    )
+
+    result = await adapter.send(
+        chat_id="123",
+        content="progress update",
+        metadata={"notify": False},
+    )
+
+    assert result.success is True
+    assert len(message_calls) == 1
+    assert typing_calls == [
+        {"chat_id": 123, "action": "typing", "message_thread_id": None},
+    ]
+
+
 def test_base_gateway_metadata_marks_telegram_dm_topics_as_reply_fallback():
     source = SimpleNamespace(
         platform=Platform.TELEGRAM,

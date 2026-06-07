@@ -1863,6 +1863,10 @@ class BasePlatformAdapter(ABC):
         # Chats where typing indicator is paused (e.g. during approval waits).
         # _keep_typing skips send_typing when the chat_id is in this set.
         self._typing_paused: set = set()
+        # Per-chat typing lease generation.  A surviving stale _keep_typing task
+        # must not be able to keep refreshing a platform typing bubble after the
+        # response was delivered or a newer turn took ownership of the chat.
+        self._typing_generations: Dict[str, int] = {}
 
     @property
     def message_len_fn(self) -> Callable[[str], int]:
@@ -3057,6 +3061,7 @@ class BasePlatformAdapter(ABC):
         interval: float = 2.0,
         metadata=None,
         stop_event: asyncio.Event | None = None,
+        typing_generation: int | None = None,
     ) -> None:
         """
         Continuously send typing indicator until cancelled.
@@ -3085,6 +3090,11 @@ class BasePlatformAdapter(ABC):
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
+                    return
+                if (
+                    typing_generation is not None
+                    and self._typing_generations.get(chat_id) != typing_generation
+                ):
                     return
                 if chat_id not in self._typing_paused:
                     try:
@@ -4045,23 +4055,34 @@ class BasePlatformAdapter(ABC):
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
         
-        # Start continuous typing indicator (refreshes every 2 seconds)
+        # Start continuous typing indicator (refreshes every 2 seconds).  Give
+        # each loop a per-chat lease so a stale task cannot keep refreshing the
+        # typing bubble after this turn has finished or another turn took over.
         _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
-        _keep_typing_kwargs = {"metadata": _thread_metadata}
+        _typing_chat_id = event.source.chat_id
+        _typing_generation = self._typing_generations.get(_typing_chat_id, 0) + 1
+        self._typing_generations[_typing_chat_id] = _typing_generation
+        _typing_stop_event = asyncio.Event()
+        _keep_typing_kwargs: Dict[str, Any] = {"metadata": _thread_metadata}
         try:
             _keep_typing_sig = inspect.signature(self._keep_typing)
         except (TypeError, ValueError):
             _keep_typing_sig = None
         if _keep_typing_sig is None or "stop_event" in _keep_typing_sig.parameters:
-            _keep_typing_kwargs["stop_event"] = interrupt_event
+            _keep_typing_kwargs["stop_event"] = _typing_stop_event
+        if _keep_typing_sig is None or "typing_generation" in _keep_typing_sig.parameters:
+            _keep_typing_kwargs["typing_generation"] = _typing_generation
         typing_task = asyncio.create_task(
             self._keep_typing(
-                event.source.chat_id,
+                _typing_chat_id,
                 **_keep_typing_kwargs,
             )
         )
 
         async def _stop_typing_task() -> None:
+            if self._typing_generations.get(_typing_chat_id) == _typing_generation:
+                self._typing_generations[_typing_chat_id] = _typing_generation + 1
+            _typing_stop_event.set()
             typing_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(typing_task), timeout=0.5)
