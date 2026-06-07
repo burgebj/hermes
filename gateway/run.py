@@ -8640,10 +8640,18 @@ class GatewayRunner:
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
                     image_paths.append(path)
-                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
-                # MessageType.VOICE = voice message (Opus/OGG) — always STT
+                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a).
+                # By default these are surfaced as files, not STT'd.  A trusted
+                # capture channel can opt in via
+                # discord.transcribe_audio_attachment_channels so iPhone/Discord
+                # voice notes that arrive as generic audio attachments still get
+                # transcribed.
+                # MessageType.VOICE = voice message (Opus/OGG) — always STT.
                 if event.message_type == MessageType.AUDIO:
-                    audio_file_paths.append(path)
+                    if self._should_transcribe_audio_attachment(source):
+                        audio_paths.append(path)
+                    else:
+                        audio_file_paths.append(path)
                 elif event.message_type == MessageType.VOICE or (
                     mtype.startswith("audio/")
                     and event.message_type not in {MessageType.AUDIO, MessageType.DOCUMENT}
@@ -15791,6 +15799,40 @@ class GatewayRunner:
                 return f"{prefix}\n\n{user_text}"
             return prefix
         return user_text
+
+    def _should_transcribe_audio_attachment(self, source) -> bool:
+        """Return whether generic audio attachments from this source should be STT'd.
+
+        Native voice messages are transcribed unconditionally elsewhere.  This
+        opt-in handles trusted channels whose mobile/webhook path uploads voice
+        notes as regular ``MessageType.AUDIO`` attachments.
+        """
+        _platform_cfg = self.config.platforms.get(source.platform)
+        if _platform_cfg is None:
+            return False
+
+        _raw_channels = (_platform_cfg.extra or {}).get("transcribe_audio_attachment_channels")
+        if isinstance(_raw_channels, (list, tuple, set)):
+            configured_channels = [str(v) for v in _raw_channels]
+        elif _raw_channels is not None:
+            configured_channels = [str(_raw_channels)]
+        else:
+            configured_channels = []
+
+        configured_lower = {v.lower() for v in configured_channels}
+        if "*" in configured_channels or "all" in configured_lower:
+            return True
+
+        source_channel_ids = {
+            str(v)
+            for v in (
+                getattr(source, "chat_id", None),
+                getattr(source, "parent_chat_id", None),
+                getattr(source, "thread_id", None),
+            )
+            if v is not None
+        }
+        return bool(source_channel_ids.intersection(configured_channels))
 
     async def _enrich_message_with_transcription(
         self,
