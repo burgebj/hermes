@@ -1774,7 +1774,8 @@ def detect_provider_for_model(
     Priority:
     0. Bare provider name → switch to that provider's default model
     1. Direct provider static catalog match
-    2. OpenRouter catalog match
+    2. OpenRouter catalog match (skipped when current provider is ``custom``
+       — the user's explicit base_url/provider config must take precedence)
     """
     name = (model_name or "").strip()
     if not name:
@@ -1787,6 +1788,13 @@ def detect_provider_for_model(
         return None
 
     # --- Step 2: check OpenRouter catalog ---
+    # Skip entirely when the user has explicitly configured a custom provider
+    # (provider: custom + base_url in config.yaml). Querying the OpenRouter
+    # catalog would silently override the user's endpoint and route traffic to
+    # openrouter.ai, bypassing the configured base_url. Ref: issue #39753.
+    if normalize_provider(current_provider) == "custom":
+        return None
+
     # First try exact match (handles provider/model format)
     or_slug = _find_openrouter_slug(name)
     if or_slug:
