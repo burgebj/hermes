@@ -779,6 +779,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         return msg
 
     delivery_errors = []
+    delivery_successes = 0
 
     for target in targets:
         platform_name = target["platform"]
@@ -877,6 +878,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                     delivered = True
+                    delivery_successes += 1
             except Exception as e:
                 logger.warning(
                     "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
@@ -910,6 +912,38 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+            delivery_successes += 1
+
+    # Fail-loud fallback: if every configured target failed, persist the content
+    # to a dedicated failed-deliveries dir AND escalate to ERROR-level logging.
+    # The user can recover the message there even if Telegram/Discord/etc. drop it.
+    if targets and delivery_successes == 0 and delivery_errors:
+        try:
+            from hermes_constants import get_hermes_home
+            from datetime import datetime
+            failed_dir = get_hermes_home() / "cron" / "failed-deliveries"
+            failed_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(job.get("name", job["id"])))[:60]
+            failed_path = failed_dir / f"{stamp}_{job['id']}_{safe_name}.md"
+            failed_path.write_text(
+                f"# Failed delivery — {job.get('name', job['id'])}\n\n"
+                f"**Job ID:** {job['id']}\n"
+                f"**Time:** {stamp}\n"
+                f"**Targets attempted:** {len(targets)}\n"
+                f"**Errors:** {'; '.join(delivery_errors)}\n\n"
+                f"---\n\n{delivery_content}\n",
+                encoding="utf-8",
+            )
+            logger.error(
+                "Job '%s': ALL %d delivery targets failed — content saved to %s",
+                job["id"], len(targets), failed_path,
+            )
+        except Exception as save_err:
+            logger.error(
+                "Job '%s': all deliveries failed AND failed-delivery save also failed: %s",
+                job["id"], save_err,
+            )
 
     if delivery_errors:
         return "; ".join(delivery_errors)

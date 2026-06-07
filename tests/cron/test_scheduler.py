@@ -866,6 +866,85 @@ class TestDeliverResultErrorReturns:
         assert result is not None
         assert "no delivery target" in result
 
+    def test_all_targets_failing_persists_to_failed_deliveries_dir(self, tmp_path, monkeypatch, caplog):
+        """When every configured target fails, content is saved under
+        <hermes_home>/cron/failed-deliveries/ and ERROR is logged, so the user
+        can recover the message even if Telegram/Discord/etc. drop it."""
+        import logging
+        from gateway.config import Platform
+
+        # Redirect hermes_home so the test writes into tmp_path
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform",
+                   new=AsyncMock(return_value={"error": "telegram api: 400 chat not found"})), \
+             caplog.at_level(logging.ERROR, logger="cron.scheduler"):
+            job = {
+                "id": "test-failed",
+                "name": "morning-briefing",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            result = _deliver_result(job, "Content that must not be lost.")
+
+        # Error string is still returned (preserves caller contract)
+        assert result is not None
+        assert "delivery error" in result
+
+        # File is persisted with content + metadata
+        failed_dir = tmp_path / "cron" / "failed-deliveries"
+        assert failed_dir.is_dir(), "failed-deliveries directory should be created"
+        files = list(failed_dir.glob("*_test-failed_morning-briefing.md"))
+        assert len(files) == 1, f"expected one failed-delivery file, got {files}"
+        body = files[0].read_text(encoding="utf-8")
+        assert "Content that must not be lost." in body
+        assert "test-failed" in body
+        assert "morning-briefing" in body
+        assert "telegram api: 400 chat not found" in body
+
+        # ERROR is logged so operators see the failure even without checking the dir
+        assert any(
+            "ALL" in rec.message and "delivery targets failed" in rec.message
+            for rec in caplog.records
+        ), f"expected ERROR log about failed targets, got {[r.message for r in caplog.records]}"
+
+    def test_partial_success_does_not_persist_to_failed_deliveries_dir(self, tmp_path, monkeypatch):
+        """If at least one target succeeds, no failed-delivery file is written
+        (fan-out absorbs the partial failure)."""
+        from gateway.config import Platform
+
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        # First call fails, second succeeds — simulates fan-out where one chat is broken
+        send_mock = AsyncMock(side_effect=[
+            {"error": "telegram api: 400 chat not found"},
+            {"success": True},
+        ])
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=send_mock):
+            job = {
+                "id": "partial",
+                "name": "fanout-job",
+                "deliver": "telegram:111,telegram:222",
+            }
+            _deliver_result(job, "Important content.")
+
+        failed_dir = tmp_path / "cron" / "failed-deliveries"
+        assert not failed_dir.exists() or not any(failed_dir.iterdir()), \
+            "no file should be written when at least one delivery succeeded"
+
 
 class TestRunJobSessionPersistence:
     def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
