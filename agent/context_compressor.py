@@ -2069,12 +2069,12 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # Special case: zero structural progress (N→N messages) immediately
         # arms the guard, even if token savings aren't yet < 10%.
         n_messages_after = len(compressed)
+        savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
+        self._last_compression_savings_pct = savings_pct
         if n_messages_after >= n_messages:
             # Zero structural progress — set count to threshold immediately
             self._ineffective_compression_count = _INEFFECTIVE_THRESHOLD
         else:
-            savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
-            self._last_compression_savings_pct = savings_pct
             if savings_pct < 10:
                 self._ineffective_compression_count += 1
             else:
