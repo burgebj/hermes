@@ -587,6 +587,11 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
     """
     Save raw image bytes to the cache and return the absolute file path.
 
+    Uses content-hash deduplication: if the same bytes were already cached,
+    the existing path is returned without writing a new file. This also
+    guards against the stale-content bug (issue #35242) where a UUID-named
+    file could be written with wrong content.
+
     Args:
         data: Raw image bytes.
         ext:  File extension including the dot (e.g. ".jpg", ".png").
@@ -604,9 +609,26 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
             f"Refusing to cache non-image data as {ext} "
             f"(starts with: {snippet!r})"
         )
+    import hashlib as _hashlib
     cache_dir = get_image_cache_dir()
-    filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
+
+    # Content-addressed filename using BLAKE2b (fast, collision-resistant).
+    # Same bytes always map to the same file — prevents stale-content
+    # collisions when concurrent asyncio tasks download the same Telegram
+    # file_path and write to different UUID names (issue #35242).
+    content_hash = _hashlib.blake2b(data, digest_size=8).hexdigest()
+    filename = f"img_b2_{content_hash}{ext}"
     filepath = cache_dir / filename
+
+    if filepath.exists():
+        # Verify on-disk content matches — guard against hash prefix collision
+        existing = filepath.read_bytes()
+        if existing == data:
+            return str(filepath)
+        # Hash prefix collision (astronomically rare): fall back to UUID name
+        filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
+        filepath = cache_dir / filename
+
     filepath.write_bytes(data)
     return str(filepath)
 
