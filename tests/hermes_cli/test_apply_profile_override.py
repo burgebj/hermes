@@ -138,3 +138,75 @@ class TestApplyProfileOverrideHermesHomeGuard:
         _apply_profile_override()
 
         assert os.environ.get("HERMES_HOME") is None
+
+    @pytest.mark.parametrize(
+        "profile_args",
+        [
+            ["--profile", "default"],
+            ["--profile=default"],
+        ],
+    )
+    def test_subcommand_profile_flag_is_not_consumed(
+        self, tmp_path, monkeypatch, profile_args
+    ):
+        """A subcommand-owned --profile must survive pre-argparse handling.
+
+        Regression case: ``hermes cron create ... --profile default`` uses
+        ``--profile`` to pin the cron job's runtime profile. The early global
+        profile pre-parser must not consume it as the current process profile.
+        """
+        argv = [
+            "hermes",
+            "cron",
+            "create",
+            "0 3 * * *",
+            "task",
+            *profile_args,
+        ]
+
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            active_profile=None,
+            argv=argv,
+        )
+
+        assert result is None
+        assert sys.argv == argv
+
+    def test_top_level_profile_consumed_but_subcommand_profile_survives(
+        self, tmp_path, monkeypatch
+    ):
+        """Only the top-level --profile should be stripped from argv."""
+        argv = [
+            "hermes",
+            "--profile",
+            "coder",
+            "cron",
+            "create",
+            "0 3 * * *",
+            "task",
+            "--profile",
+            "default",
+        ]
+
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            active_profile="coder",
+            argv=argv,
+        )
+
+        assert result is not None
+        assert result.endswith("profiles/coder")
+        assert sys.argv == [
+            "hermes",
+            "cron",
+            "create",
+            "0 3 * * *",
+            "task",
+            "--profile",
+            "default",
+        ]

@@ -307,22 +307,61 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # The flag is stripped from sys.argv so argparse never sees it.
 # Falls back to ~/.hermes/active_profile for sticky default.
 # ---------------------------------------------------------------------------
+_PROFILE_PREPARSE_VALUE_FLAGS = frozenset(
+    {
+        "-z", "--oneshot",
+        "-m", "--model",
+        "--provider",
+        "-t", "--toolsets",
+        "-r", "--resume",
+        "-s", "--skills",
+    }
+)
+_PROFILE_PREPARSE_OPTIONAL_VALUE_FLAGS = frozenset({"-c", "--continue"})
+
+
+def _find_profile_override_arg(argv: list[str]) -> tuple[str | None, int | None, int]:
+    """Find a top-level ``--profile`` override before argparse runs.
+
+    Only flags before the first positional token are top-level flags. Once we
+    see a command/prompt token, later ``--profile`` flags belong to that
+    subcommand and must be left for argparse (for example ``cron create
+    --profile default`` pins the job profile, not this CLI process profile).
+    """
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            break
+        if arg in {"--profile", "-p"}:
+            if i + 1 < len(argv):
+                return argv[i + 1], i, 2
+            return None, None, 0
+        if arg.startswith("--profile="):
+            return arg.split("=", 1)[1], i, 1
+        if arg.startswith("-"):
+            if "=" in arg:
+                i += 1
+                continue
+            if arg in _PROFILE_PREPARSE_OPTIONAL_VALUE_FLAGS:
+                if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if arg in _PROFILE_PREPARSE_VALUE_FLAGS and i + 1 < len(argv):
+                i += 2
+                continue
+            i += 1
+            continue
+        break
+    return None, None, 0
+
+
 def _apply_profile_override() -> None:
     """Pre-parse --profile/-p and set HERMES_HOME before module imports."""
     argv = sys.argv[1:]
-    profile_name = None
-    consume = 0
-
-    # 1. Check for explicit -p / --profile flag
-    for i, arg in enumerate(argv):
-        if arg in {"--profile", "-p"} and i + 1 < len(argv):
-            profile_name = argv[i + 1]
-            consume = 2
-            break
-        elif arg.startswith("--profile="):
-            profile_name = arg.split("=", 1)[1]
-            consume = 1
-            break
+    profile_name, profile_arg_index, consume = _find_profile_override_arg(argv)
 
     # 1b. Reject values that can't be valid profile names (e.g. pytest's
     # "-p no:xdist" would be misread as profile "no:xdist" otherwise).
@@ -381,16 +420,9 @@ def _apply_profile_override() -> None:
             return
         os.environ["HERMES_HOME"] = hermes_home
         # Strip the flag from argv so argparse doesn't choke
-        if consume > 0:
-            for i, arg in enumerate(argv):
-                if arg in {"--profile", "-p"}:
-                    start = i + 1  # +1 because argv is sys.argv[1:]
-                    sys.argv = sys.argv[:start] + sys.argv[start + consume :]
-                    break
-                elif arg.startswith("--profile="):
-                    start = i + 1
-                    sys.argv = sys.argv[:start] + sys.argv[start + 1 :]
-                    break
+        if consume > 0 and profile_arg_index is not None:
+            start = profile_arg_index + 1  # +1 because argv is sys.argv[1:]
+            sys.argv = sys.argv[:start] + sys.argv[start + consume :]
 
 
 _apply_profile_override()
