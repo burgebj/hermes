@@ -2434,6 +2434,65 @@ class TestParallelTick:
         start_s2 = [t for action, jid, t in call_times if action == "start" and jid == "s2"][0]
         assert start_s2 >= end_s1, "Jobs ran concurrently despite max_parallel=1"
 
+    def test_profile_context_restores_env_and_context_home(self, tmp_path, monkeypatch):
+        """Profile-scoped cron jobs must not leave profile env/home state behind."""
+        root_home = tmp_path / "hermes-root"
+        profile_home = root_home / "profiles" / "secure-voice"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(root_home))
+        monkeypatch.setenv("CROSS_PROFILE_SECRET", "root-value")
+        monkeypatch.delenv("PROFILE_ONLY_SECRET", raising=False)
+
+        import cron.scheduler as scheduler
+        from hermes_constants import get_hermes_home
+
+        scheduler._hermes_home = None
+        before_env = os.environ.copy()
+        with scheduler._job_profile_context("profile-job", "secure-voice"):
+            assert scheduler._get_hermes_home() == profile_home.resolve()
+            assert get_hermes_home() == profile_home.resolve()
+            os.environ["CROSS_PROFILE_SECRET"] = "profile-value"
+            os.environ["PROFILE_ONLY_SECRET"] = "temporary-profile-value"
+
+        assert scheduler._hermes_home is None
+        assert get_hermes_home() == root_home
+        assert os.environ.get("CROSS_PROFILE_SECRET") == "root-value"
+        assert "PROFILE_ONLY_SECRET" not in os.environ
+        for key in ("HERMES_HOME", "CROSS_PROFILE_SECRET"):
+            assert os.environ.get(key) == before_env.get(key)
+
+    def test_tick_runs_profile_jobs_outside_parallel_pool(self):
+        """Profile jobs mutate process-global env, so tick must serialize them."""
+        events = []
+
+        def mock_run_job(job):
+            import time
+            events.append(("start", job["id"], time.monotonic()))
+            time.sleep(0.03)
+            events.append(("end", job["id"], time.monotonic()))
+            return (True, "output", "response", None)
+
+        jobs = [
+            {"id": "profile-a", "name": "profile-a", "deliver": "local", "profile": "secure-voice"},
+            {"id": "profile-b", "name": "profile-b", "deliver": "local", "profile": "secure-voice"},
+            {"id": "plain", "name": "plain", "deliver": "local"},
+        ]
+
+        with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", side_effect=mock_run_job), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            result = tick(verbose=False)
+
+        assert result == 3
+        starts = {jid: t for action, jid, t in events if action == "start"}
+        ends = {jid: t for action, jid, t in events if action == "end"}
+        assert starts["profile-b"] >= ends["profile-a"]
+        assert starts["plain"] >= ends["profile-b"]
+
 
 class TestDeliverResultTimeoutCancelsFuture:
     """When future.result(timeout=60) raises TimeoutError in the live
