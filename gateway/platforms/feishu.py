@@ -609,6 +609,12 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     return rows or [[{"tag": "md", "text": content}]]
 
 
+# Card JSON 2.0 table builders live in a sibling module so they can be
+# unit-tested without loading the full feishu adapter stack (which pulls in
+# hermes_cli, lark_oapi, websockets, aiohttp). See _feishu_card_table.py.
+from gateway.platforms._feishu_card_table import _build_card_with_table_payload  # noqa: E402
+
+
 def parse_feishu_post_payload(
     payload: Any,
     *,
@@ -1786,7 +1792,14 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             for chunk in chunks:
-                msg_type, payload = self._build_outbound_payload(chunk)
+                # If this chunk carries a markdown table, asynchronously create
+                # a Lark Sheet so the card can include an "Open in Sheet" CTA.
+                # Failure (network / OAuth / quota) returns ``None`` and we
+                # fall back to the no-CTA card — never blocks the send.
+                sheet_url: Optional[str] = None
+                if _MARKDOWN_TABLE_RE.search(chunk):
+                    sheet_url = await self._create_lark_sheet_from_first_table(chunk)
+                msg_type, payload = self._build_outbound_payload(chunk, sheet_url=sheet_url)
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -4323,13 +4336,142 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound payload construction and send pipeline
     # =========================================================================
 
-    def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
+    async def _create_lark_sheet_from_first_table(self, content: str) -> Optional[str]:
+        """Parse the first markdown table from ``content``, create a Lark
+        spreadsheet, populate it with the table data, and return the sheet
+        URL. Returns ``None`` on any failure — callers fall back to the
+        no-button card layout. All failures are logged but never raised.
+
+        Requires the bot to have these OAuth scopes:
+        - ``sheets:spreadsheet`` (create + write)
+        - ``drive:drive`` (place the new file in cloud space)
+        """
+        from gateway.platforms._feishu_card_table import (
+            _split_content_at_tables,
+            _split_md_table_row,
+        )
+        table_text: Optional[str] = None
+        for kind, seg in _split_content_at_tables(content):
+            if kind == "table":
+                table_text = seg
+                break
+        if not table_text:
+            return None
+        raw_lines = [ln for ln in table_text.splitlines() if ln.strip().startswith("|")]
+        if len(raw_lines) < 2:
+            return None
+
+        def _strip_inline_md(s: str) -> str:
+            return re.sub(r"\*\*(.+?)\*\*", r"\1", s).strip()
+
+        headers = [_strip_inline_md(h) for h in _split_md_table_row(raw_lines[0])]
+        data_rows = [
+            [_strip_inline_md(c) for c in _split_md_table_row(ln)]
+            for ln in raw_lines[2:]
+        ]
+        if not headers or not data_rows:
+            return None
+
+        # Bot credentials live on the adapter instance (set in connect()
+        # from FEISHU_APP_ID / FEISHU_APP_SECRET), not on the lark_oapi
+        # Client object — Client has no ``.config`` attribute on this SDK
+        # build.
+        app_id = self._app_id
+        app_secret = self._app_secret
+        base_url = "https://open.feishu.cn"
+        if not app_id or not app_secret:
+            logger.warning("[Feishu] sheet create: app_id or app_secret missing")
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as http:
+                tok_resp = await http.post(
+                    f"{base_url}/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": app_id, "app_secret": app_secret},
+                )
+                tok_data = tok_resp.json()
+                if tok_data.get("code") != 0:
+                    logger.warning("[Feishu] sheet create: token fetch failed: %s", tok_data)
+                    return None
+                token = tok_data["tenant_access_token"]
+                api_headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                }
+
+                title = f"Scout 表格 {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+                create_resp = await http.post(
+                    f"{base_url}/open-apis/sheets/v3/spreadsheets",
+                    json={"title": title},
+                    headers=api_headers,
+                )
+                create_data = create_resp.json()
+                if create_data.get("code") != 0:
+                    logger.warning("[Feishu] sheet create v3 failed: %s", create_data)
+                    return None
+                sheet_info = create_data["data"]["spreadsheet"]
+                sst_token = sheet_info["spreadsheet_token"]
+                sheet_url = sheet_info.get("url") or f"https://feishu.cn/sheets/{sst_token}"
+
+                meta_resp = await http.get(
+                    f"{base_url}/open-apis/sheets/v3/spreadsheets/{sst_token}/sheets/query",
+                    headers=api_headers,
+                )
+                meta_data = meta_resp.json()
+                if meta_data.get("code") != 0 or not meta_data.get("data", {}).get("sheets"):
+                    logger.warning(
+                        "[Feishu] sheet meta query failed; returning blank-sheet URL: %s",
+                        meta_data,
+                    )
+                    return sheet_url
+                sheet_id = meta_data["data"]["sheets"][0]["sheet_id"]
+
+                all_rows = [headers] + data_rows
+                n_rows = len(all_rows)
+                n_cols = max(len(r) for r in all_rows)
+                all_rows = [r + [""] * (n_cols - len(r)) for r in all_rows]
+
+                def _col_letter(idx: int) -> str:
+                    if idx < 26:
+                        return chr(ord("A") + idx)
+                    return chr(ord("A") + idx // 26 - 1) + chr(ord("A") + idx % 26)
+
+                end_col = _col_letter(n_cols - 1)
+                range_str = f"{sheet_id}!A1:{end_col}{n_rows}"
+                append_resp = await http.post(
+                    f"{base_url}/open-apis/sheets/v2/spreadsheets/{sst_token}/values_append",
+                    json={"valueRange": {"range": range_str, "values": all_rows}},
+                    headers=api_headers,
+                )
+                append_data = append_resp.json()
+                if append_data.get("code") != 0:
+                    logger.warning("[Feishu] sheet values_append failed: %s", append_data)
+                else:
+                    logger.info(
+                        "[Feishu] sheet populated: token=%s rows=%d cols=%d",
+                        sst_token, n_rows, n_cols,
+                    )
+                return sheet_url
+        except Exception as exc:
+            logger.warning("[Feishu] sheet create exception: %s", exc, exc_info=True)
+            return None
+
+    def _build_outbound_payload(
+        self,
+        content: str,
+        sheet_url: Optional[str] = None,
+    ) -> tuple[str, str]:
+        # Markdown tables: route through Card JSON 2.0 interactive card with
+        # native ``tag: "table"`` component (Lark V7.4+). Previously this path
+        # forced plain text because post-type 'md' elements render tables as
+        # blank — the native card path produces sortable / paginated UI that
+        # matches the experience Doubao etc. ship in their own apps.
+        # ``sheet_url`` (when provided by an async caller via
+        # ``_create_lark_sheet_from_first_table``) decorates the card with a
+        # "Open in Lark Sheet" CTA pointing at the populated spreadsheet.
+        # See ``_build_card_with_table_payload`` for the conversion details.
         if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
+            return "interactive", _build_card_with_table_payload(content, sheet_url=sheet_url)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
