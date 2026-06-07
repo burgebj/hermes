@@ -1055,6 +1055,31 @@ class TestBuildAnthropicKwargs:
         assert kwargs["max_tokens"] == 4096
         assert "tools" not in kwargs
 
+    def test_oauth_prefixes_tools_with_claude_code_mcp_marker(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            }
+        ]
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-7",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=tools,
+            max_tokens=4096,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+        assert kwargs["tools"][0]["name"] == "mcp__terminal"
+
     def test_strips_anthropic_prefix(self):
         kwargs = build_anthropic_kwargs(
             model="anthropic/claude-sonnet-4-20250514",
@@ -1483,6 +1508,21 @@ class TestNormalizeResponse:
         assert len(nr.tool_calls) == 1
         assert nr.tool_calls[0].name == "search"
         assert json.loads(nr.tool_calls[0].arguments) == {"query": "test"}
+
+    def test_tool_use_response_strips_oauth_mcp_prefix(self):
+        block = SimpleNamespace(
+            type="tool_use",
+            id="tc_1",
+            name="mcp__terminal",
+            input={"command": "pwd"},
+        )
+        nr = get_transport("anthropic_messages").normalize_response(
+            self._make_response([block], "tool_use"),
+            strip_tool_prefix=True,
+        )
+        assert len(nr.tool_calls) == 1
+        assert nr.tool_calls[0].name == "terminal"
+        assert json.loads(nr.tool_calls[0].arguments) == {"command": "pwd"}
 
     def test_thinking_response(self):
         blocks = [
