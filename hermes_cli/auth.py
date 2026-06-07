@@ -5480,6 +5480,7 @@ def _snapshot_nous_pool_status() -> Dict[str, Any]:
 # mtime so that `hermes auth login/logout/add/remove` invalidate naturally on the next call.
 _NOUS_AUTH_STATUS_CACHE_TTL = 15.0  # seconds
 _nous_auth_status_cache: Optional[Tuple[float, Optional[float], Dict[str, Any]]] = None
+_NOUS_AUTH_STATUS_CACHE_LOCK = threading.Lock()
 
 
 def _auth_file_mtime() -> Optional[float]:
@@ -5500,7 +5501,8 @@ def invalidate_nous_auth_status_cache() -> None:
     automatically — explicit invalidation is the belt-and-braces option.
     """
     global _nous_auth_status_cache
-    _nous_auth_status_cache = None
+    with _NOUS_AUTH_STATUS_CACHE_LOCK:
+        _nous_auth_status_cache = None
 
 
 def get_nous_auth_status() -> Dict[str, Any]:
@@ -5521,17 +5523,19 @@ def get_nous_auth_status() -> Dict[str, Any]:
     global _nous_auth_status_cache
     now = time.monotonic()
     mtime = _auth_file_mtime()
-    cached = _nous_auth_status_cache
-    if cached is not None:
-        cached_at, cached_mtime, cached_status = cached
-        if (
-            cached_mtime == mtime
-            and (now - cached_at) < _NOUS_AUTH_STATUS_CACHE_TTL
-        ):
-            return dict(cached_status)
+    with _NOUS_AUTH_STATUS_CACHE_LOCK:
+        cached = _nous_auth_status_cache
+        if cached is not None:
+            cached_at, cached_mtime, cached_status = cached
+            if (
+                cached_mtime == mtime
+                and (now - cached_at) < _NOUS_AUTH_STATUS_CACHE_TTL
+            ):
+                return dict(cached_status)
 
     status = _compute_nous_auth_status()
-    _nous_auth_status_cache = (now, mtime, dict(status))
+    with _NOUS_AUTH_STATUS_CACHE_LOCK:
+        _nous_auth_status_cache = (now, mtime, dict(status))
     return status
 
 
