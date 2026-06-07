@@ -3,6 +3,7 @@
 import os
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -1818,6 +1819,23 @@ class TestNewEndpoints:
         assert deleted.status_code == 200
         names = [p["name"] for p in self.client.get("/api/profiles").json()["profiles"]]
         assert "test-prof-2" not in names
+
+    def test_profiles_create_initializes_profile_state_db(self, monkeypatch):
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
+
+        monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
+
+        created = self.client.post("/api/profiles", json={"name": "isolated-prof"})
+
+        assert created.status_code == 200
+        profile_state = get_hermes_home() / "profiles" / "isolated-prof" / "state.db"
+        assert profile_state.exists()
+        with sqlite3.connect(profile_state) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ).fetchone()
+        assert row == ("sessions",)
 
     def test_profile_setup_command_uses_named_profile_wrapper(self):
         from hermes_constants import get_hermes_home

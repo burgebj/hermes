@@ -7206,6 +7206,17 @@ def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
         reset_hermes_home_override(token)
 
 
+def _ensure_profile_state_db(profile_dir: Path) -> None:
+    """Initialize the profile-local session store before WebUI uses it."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=profile_dir / "state.db")
+    try:
+        pass
+    finally:
+        db.close()
+
+
 @app.get("/api/profiles")
 async def list_profiles_endpoint():
     from hermes_cli import profiles as profiles_mod
@@ -7252,6 +7263,7 @@ async def create_profile_endpoint(body: ProfileCreate):
         collision = profiles_mod.check_alias_collision(body.name)
         if not collision:
             profiles_mod.create_wrapper_script(body.name)
+        _ensure_profile_state_db(path)
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
