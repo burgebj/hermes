@@ -968,6 +968,7 @@ def restore_primary_runtime(agent) -> bool:
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
+        agent._rate_limit_backoff_count = 0  # reset exponential backoff counter
 
         logger.info(
             "Primary runtime restored for new turn: %s (%s)",
