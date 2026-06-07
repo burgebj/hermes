@@ -394,3 +394,55 @@ def test_env_scrub_no_log_when_nothing_dropped(caplog):
             is_windows=False,
         )
     assert "dropped" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Permanent allowlist regression (#39187)
+# ---------------------------------------------------------------------------
+
+def test_guard_honours_permanent_allowlist(gw_session):
+    """Regression for #39187: execute_code "Always" (permanent allowlist) must
+    be respected on subsequent calls."""
+    # Add execute_code to the permanent allowlist (simulating a previous
+    # "Always" click that populated command_allowlist in config.yaml).
+    A.approve_permanent("execute_code")
+    try:
+        # Even with a denier registered, the permanent allowlist check should
+        # short-circuit before reaching the gateway approval prompt.
+        _register_resolver(gw_session, "deny")
+        res = A.check_execute_code_guard("import os; print(1)", "local")
+        assert res["approved"] is True, (
+            f"Permanent allowlist entry for 'execute_code' was not honoured; "
+            f"got {res}"
+        )
+    finally:
+        with A._lock:
+            A._permanent_approved.discard("execute_code")
+
+
+def test_guard_permanent_allowlist_does_not_need_yolo(gw_session, monkeypatch):
+    """Regression for #39187: permanent allowlist takes effect in manual mode
+    without relying on the separate yolo/off bypass."""
+    A.approve_permanent("execute_code")
+    try:
+        monkeypatch.setattr(A, "_get_approval_mode", lambda: "manual")
+        res = A.check_execute_code_guard("import os; print(1)", "local")
+        assert res["approved"] is True
+    finally:
+        with A._lock:
+            A._permanent_approved.discard("execute_code")
+
+
+def test_guard_cron_deny_still_blocks_permanent_allowlist(monkeypatch):
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+    A.approve_permanent("execute_code")
+    try:
+        res = A.check_execute_code_guard("import os", "local")
+        assert res["approved"] is False
+        assert res["outcome"] == "blocked"
+    finally:
+        with A._lock:
+            A._permanent_approved.discard("execute_code")
