@@ -12636,8 +12636,29 @@ class HermesCLI:
             sys.stdout.flush()
             time.sleep(0.15)
 
-            # Update history with full conversation
-            self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history
+            # Update history with full conversation, filtering out synthetic
+            # messages injected by the loop guardrails (see agent/tool_guardrails.py).
+            # Those messages serve their purpose during the API call but should
+            # not persist in conversation_history.  Also guard against consecutive
+            # user messages from edge cases in the interrupt path.
+            if result is not None:
+                incoming_messages = result.get("messages")
+                if incoming_messages:
+                    final_history = []
+                    for msg in incoming_messages:
+                        # Filter synthetic guardrail nudge messages
+                        if msg.get("role") == "user" and msg.get("content") == "Are you stuck in a loop?":
+                            logger.debug("Filtering synthetic guardrail message from conversation history.")
+                            continue
+
+                        # Prevent consecutive user messages (interrupt edge case)
+                        if final_history and final_history[-1].get("role") == "user" and msg.get("role") == "user":
+                            logger.warning("Dropping consecutive user message to maintain valid history structure.")
+                            continue
+
+                        final_history.append(msg)
+
+                    self.conversation_history = final_history
 
             # If auto-compression fired mid-turn, the agent created a new
             # continuation session and mutated self.agent.session_id. Sync
