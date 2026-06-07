@@ -2858,6 +2858,37 @@ def test_default_spawn_leaves_terminal_timeout_without_runtime_cap(kanban_home, 
     assert "TERMINAL_MAX_FOREGROUND_TIMEOUT" not in captured["env"]
 
 
+def test_default_spawn_pins_terminal_cwd_to_workspace(kanban_home, monkeypatch):
+    """Worker env must set TERMINAL_CWD to the task workspace.
+
+    Without this, ``_resolve_base_dir()`` in file_tools falls back to the
+    inherited ``TERMINAL_CWD`` from the gateway (typically the home dir),
+    causing relative file writes to land outside the workspace.  (#41312)
+    """
+    captured = {}
+
+    class FakeProc:
+        pid = 126
+
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="cwd pin", assignee="ops")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb._default_spawn(task, str(workspace))
+    finally:
+        conn.close()
+
+    assert captured["env"]["TERMINAL_CWD"] == str(workspace)
+    assert captured["env"]["HERMES_KANBAN_WORKSPACE"] == str(workspace)
+
+
 def test_build_worker_context_includes_runtime_timeout_budget(kanban_home, monkeypatch):
     monkeypatch.setenv("TERMINAL_TIMEOUT", "180")
     conn = kb.connect()

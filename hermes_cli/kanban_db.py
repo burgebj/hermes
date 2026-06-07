@@ -6726,6 +6726,12 @@ def _default_spawn(
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    # Pin TERMINAL_CWD to the workspace so file-tools' _resolve_base_dir()
+    # resolves relative paths against the task workspace, not the gateway's
+    # inherited TERMINAL_CWD (which points to the home directory).  Without
+    # this, a relative write like ``report.md`` lands at ``~/report.md``
+    # instead of ``<workspace>/report.md``.  Fixes #41312.
+    env["TERMINAL_CWD"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:
