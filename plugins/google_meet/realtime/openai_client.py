@@ -80,7 +80,6 @@ class RealtimeSession:
         url = f"{REALTIME_URL}?model={self.model}"
         headers = [
             ("Authorization", f"Bearer {self.api_key}"),
-            ("OpenAI-Beta", "realtime=v1"),
         ]
         # websockets.sync.client.connect accepts either additional_headers=
         # (newer) or extra_headers= depending on version; try the newer

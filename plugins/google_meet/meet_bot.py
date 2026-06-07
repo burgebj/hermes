@@ -567,6 +567,17 @@ def run_bot() -> int:  # noqa: C901 — orchestration, explicit branches
 
             # Guest-mode: Meet shows a name field before "Ask to join". When
             # we're authed, we instead see "Join now".
+            # Settle wait: wait up to 15s for the pre-join UI to become visible.
+            for _ in range(30):
+                try:
+                    if (page.locator('input[aria-label*="name" i]').first.count() and page.locator('input[aria-label*="name" i]').first.is_visible()) or \
+                       (page.get_by_role("button", name="Join now", exact=False).first.count() and page.get_by_role("button", name="Join now", exact=False).first.is_visible()) or \
+                       (page.get_by_role("button", name="Ask to join", exact=False).first.count() and page.get_by_role("button", name="Ask to join", exact=False).first.is_visible()):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
             _try_guest_name(page, guest_name)
             _click_join(page, state)
 
@@ -754,16 +765,16 @@ def _detect_admission(page) -> bool:
     """
     probe = r"""
     (() => {
-      const leave = document.querySelector('button[aria-label*="eave call" i]');
+      const leave = document.querySelector('button[aria-label*="eave call" i], button[aria-label*="離開" i], button[aria-label*="結束" i], button[jsname="HeV7id"]');
       if (leave) return true;
       if (window.__hermesMeetInstalled) {
         const caps = document.querySelector(
-          '[role="region"][aria-label*="aption" i], ' +
+          '[role="region"][aria-label*="aption" i], [role="region"][aria-label*="字幕" i], ' +
           'div[jsname="YSxPC"], div[jsname="tgaKEf"]'
         );
         if (caps) return true;
       }
-      const parts = document.querySelector('[aria-label*="articipants" i]');
+      const parts = document.querySelector('[aria-label*="articipants" i], [aria-label*="人數" i], [aria-label*="參與者" i], [jsname="S3ZaFe"]');
       if (parts) return true;
       return false;
     })();
@@ -819,16 +830,25 @@ def _click_join(page, state: _BotState) -> None:
     Flags ``lobby_waiting`` when we hit the "waiting for host to admit you"
     state so the agent can surface that in status.
     """
-    for label in ("Join now", "Ask to join"):
+    for label in ("Join now", "Ask to join", "立即加入", "要求加入", "申請加入", "同時在這裡加入", "Join here too"):
         try:
             btn = page.get_by_role("button", name=label, exact=False).first
             if btn.count() and btn.is_visible():
                 btn.click(timeout=3_000)
-                if label == "Ask to join":
+                if label in ("Ask to join", "要求加入", "申請加入"):
                     state.set(lobby_waiting=True)
-                break
+                return
         except Exception:
             continue
+
+    # Fallback to jsname for "Join here too" (同時在這裡加入)
+    try:
+        btn = page.locator('button[jsname="Qx7uuf"]').first
+        if btn.count() and btn.is_visible():
+            btn.click(timeout=3_000)
+            return
+    except Exception:
+        pass
 
 
 def _parse_duration(raw: str) -> Optional[float]:

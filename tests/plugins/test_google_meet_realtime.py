@@ -97,13 +97,12 @@ def test_connect_sends_session_update_with_voice_and_instructions(monkeypatch):
     )
     sess.connect()
 
-    # Auth + beta headers set.
+    # Auth headers set.
     assert captured["url"].startswith("wss://api.openai.com/v1/realtime")
     assert "model=gpt-realtime" in captured["url"]
     headers = captured["headers"] or []
     hdict = dict(headers)
     assert hdict.get("Authorization") == "Bearer sk-test"
-    assert hdict.get("OpenAI-Beta") == "realtime=v1"
 
     # First frame sent must be session.update with the right shape.
     assert len(ws.sent) == 1
