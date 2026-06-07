@@ -1,0 +1,7 @@
+name: web-kagi
+version: 2.0.0
+description: "Kagi web search + extract via API v1 (Bearer token). Set KAGI_API_KEY in ~/.hermes/.env."
+author: iacore
+kind: backend
+provides_web_providers:
+  - kagi
