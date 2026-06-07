@@ -909,6 +909,10 @@ class TestRunJobSessionPersistence:
         call_args = fake_db.end_session.call_args
         assert call_args[0][0].startswith("cron_test-job_")
         assert call_args[0][1] == "cron_complete"
+        fake_db.set_session_title.assert_called_once()
+        title_call_args = fake_db.set_session_title.call_args
+        assert title_call_args[0][0].startswith("cron_test-job_")
+        assert title_call_args[0][1] == "test"
         fake_db.close.assert_called_once()
         mock_agent.close.assert_called_once()
 
@@ -946,7 +950,106 @@ class TestRunJobSessionPersistence:
         assert success is False
         assert final_response == ""
         assert "RuntimeError: boom" in error
+        fake_db.set_session_title.assert_called_once()
         mock_agent.close.assert_called_once()
+
+    def test_run_job_sets_session_title_on_failure(self, tmp_path):
+        """set_session_title is called even when run_agent raises."""
+        job = {
+            "id": "title-fail-job",
+            "name": "title-fail",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.side_effect = RuntimeError("boom")
+            mock_agent_cls.return_value = mock_agent
+
+            run_job(job)
+
+        fake_db.set_session_title.assert_called_once()
+        title_call_args = fake_db.set_session_title.call_args
+        assert title_call_args[0][0].startswith("cron_title-fail-job_")
+        assert title_call_args[0][1] == "title-fail"
+
+    def test_run_job_handles_session_title_valueerror(self, tmp_path):
+        """set_session_title ValueError does not crash the job."""
+        job = {
+            "id": "title-collision-job",
+            "name": "title-collision",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+        fake_db.set_session_title.side_effect = ValueError("title in use")
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _resp, _error = run_job(job)
+
+        # Job still succeeds despite title collision
+        assert success is True
+        fake_db.set_session_title.assert_called_once()
+
+    def test_run_job_skips_title_when_session_db_is_none(self, tmp_path):
+        """No crash when SessionDB returns None (no session persistence)."""
+        job = {
+            "id": "no-db-job",
+            "name": "no-db",
+            "prompt": "hello",
+        }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=None), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _resp, _error = run_job(job)
+
+        assert success is True
 
     def test_run_job_reaps_stale_auxiliary_clients_per_tick(self, tmp_path):
         # Regression: auxiliary clients bound to the cron worker's dead

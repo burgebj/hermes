@@ -1972,6 +1972,15 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
+        # Auto-title the cron session so it's identifiable in session listings
+        if _session_db:
+            try:
+                _session_db.set_session_title(_cron_session_id, job_name)
+            except ValueError:
+                logger.warning(
+                    "Job '%s': could not set session title (already in use)",
+                    job_name,
+                )
         if _session_db:
             try:
                 _session_db.end_session(_cron_session_id, "cron_complete")
