@@ -104,7 +104,9 @@ def _is_stale_session_ret(
     a genuine rate limit."""
     if ret != RATE_LIMIT_ERRCODE and errcode != RATE_LIMIT_ERRCODE:
         return False
-    return (errmsg or "").lower() == "unknown error"
+    if not errmsg:
+        return True
+    return errmsg.lower() == "unknown error"
 
 
 MEDIA_IMAGE = 1
@@ -432,7 +434,7 @@ async def _get_updates(
             timeout_ms=timeout_ms,
         )
     except asyncio.TimeoutError:
-        return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
+        return {"ret": -999, "errcode": -999, "errmsg": "connection timeout", "get_updates_buf": sync_buf}
 
 
 async def _send_message(
