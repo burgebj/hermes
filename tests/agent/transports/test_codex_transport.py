@@ -54,6 +54,18 @@ class TestCodexBuildKwargs:
         assert "input" in kw
         assert kw["store"] is False
 
+    def test_omits_tools_when_none(self, transport):
+        """OpenAI SDK Responses.stream() treats tools=None as iterable input."""
+        messages = [{"role": "user", "content": "Hello"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=None,
+        )
+        assert "tools" not in kw
+        assert "tool_choice" not in kw
+        assert "parallel_tool_calls" not in kw
+
     def test_system_extracted_from_messages(self, transport):
         messages = [
             {"role": "system", "content": "Custom system prompt"},
