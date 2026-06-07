@@ -4793,6 +4793,12 @@ class DiscordAdapter(BasePlatformAdapter):
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions and not mention_prefix:
+                    logger.debug(
+                        "[Discord] require_mention: dropped message from %s in #%s "
+                        "(no mention; set discord.require_mention: false to allow)",
+                        getattr(message.author, "name", "unknown"),
+                        getattr(message.channel, "name", str(getattr(message.channel, "id", "?"))),
+                    )
                     return
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
@@ -4803,7 +4809,14 @@ class DiscordAdapter(BasePlatformAdapter):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
             skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
-            auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
+            _auto_thread_cfg = self.config.extra.get("auto_thread")
+            if _auto_thread_cfg is not None:
+                if isinstance(_auto_thread_cfg, str):
+                    auto_thread = _auto_thread_cfg.lower() not in {"false", "0", "no", "off"}
+                else:
+                    auto_thread = bool(_auto_thread_cfg)
+            else:
+                auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
                 thread = await self._auto_create_thread(message)
