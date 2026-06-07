@@ -118,3 +118,36 @@ def test_gateway_runtime_loaders_expand_env_var_templates(
     loader = getattr(gateway_run.GatewayRunner, loader_name)
 
     assert loader() == expected
+
+
+def test_load_soul_identity_true(monkeypatch, gateway_home):
+    """agent.load_soul_identity: true → True."""
+    _write_config(gateway_home, "agent:\n  load_soul_identity: true\n")
+    assert gateway_run.GatewayRunner._load_soul_identity() is True
+
+
+def test_load_soul_identity_false(monkeypatch, gateway_home):
+    """agent.load_soul_identity: false → False."""
+    _write_config(gateway_home, "agent:\n  load_soul_identity: false\n")
+    assert gateway_run.GatewayRunner._load_soul_identity() is False
+
+
+def test_load_soul_identity_absent(monkeypatch, gateway_home):
+    """Missing key defaults to False."""
+    _write_config(gateway_home, "agent: {}\n")
+    assert gateway_run.GatewayRunner._load_soul_identity() is False
+
+
+def test_load_soul_identity_cache_busting_key_present():
+    """Agent config change busts the agent cache."""
+    from gateway.run import GatewayRunner
+    from unittest.mock import patch
+
+    out = GatewayRunner._extract_cache_busting_config({})
+    assert "agent.load_soul_identity" in out
+    assert out["agent.load_soul_identity"] is None  # absent → None
+
+    out = GatewayRunner._extract_cache_busting_config(
+        {"agent": {"load_soul_identity": True}}
+    )
+    assert out["agent.load_soul_identity"] is True
