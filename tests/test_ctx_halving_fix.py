@@ -74,6 +74,29 @@ class TestParseAvailableOutputTokens:
         msg = "max_tokens: 9999 > context_window: 10000 - input_tokens: 9999 = available_tokens: 1"
         assert self._parse(msg) == 1
 
+    # ── OpenRouter/Nous "in the output" format ─────────────────────────────
+
+    def test_openrouter_in_the_output_format(self):
+        """OpenRouter/Nous error: '262000 in the output'."""
+        msg = (
+            "This request is not valid. Check the model name and other parameters. "
+            "Additional info: This endpoint's maximum context length is 256000 tokens. "
+            "However, you requested about 281093 tokens "
+            "(5683 of text input, 13410 of tool input, 262000 in the output). "
+            "Please reduce the length of either one."
+        )
+        assert self._parse(msg) == 262000
+
+    def test_openrouter_in_the_output_small_number(self):
+        """OpenRouter format with smaller output token count."""
+        msg = "requested about 100000 tokens (50000 of text input, 50000 in the output)"
+        assert self._parse(msg) == 50000
+
+    def test_openrouter_in_the_output_single_token(self):
+        """Edge case: only 1 token in output."""
+        msg = "requested about 10001 tokens (10000 of text input, 1 in the output)"
+        assert self._parse(msg) == 1
+
     # ── Should NOT detect (returns None) ─────────────────────────────────
 
     def test_prompt_too_long_is_not_output_cap_error(self):

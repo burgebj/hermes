@@ -952,24 +952,36 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
            Fix: reduce max_tokens (the output cap) for this call.
            Do NOT touch context_length — the window hasn't shrunk.
 
-    Anthropic's API returns errors like:
-      "max_tokens: 32768 > context_window: 200000 - input_tokens: 190000 = available_tokens: 10000"
+    Supported error formats:
+      - Anthropic: "max_tokens: 32768 > context_window: 200000 - input_tokens: 190000 = available_tokens: 10000"
+      - OpenRouter/Nous: "(5683 of text input, 13410 of tool input, 262000 in the output)"
 
-    Returns the number of output tokens that would fit (e.g. 10000 above), or None if
-    the error does not look like a max_tokens-too-large error.
+    Returns the number of output tokens that would fit (e.g. 10000 or 262000 above),
+    or None if the error does not look like a max_tokens-too-large error.
     """
     error_lower = error_msg.lower()
 
-    # Must look like an output-cap error, not a prompt-length error.
-    is_output_cap_error = (
+    # Format 1: Anthropic — "max_tokens" + "available_tokens"
+    is_anthropic_format = (
         "max_tokens" in error_lower
         and ("available_tokens" in error_lower or "available tokens" in error_lower)
     )
-    if not is_output_cap_error:
+
+    # Format 2: OpenRouter/Nous — "N in the output" pattern
+    # Example: "262000 in the output"
+    openrouter_output_pattern = re.search(r'(\d+)\s+in\s+the\s+output', error_lower)
+    is_openrouter_format = openrouter_output_pattern is not None
+
+    if not is_anthropic_format and not is_openrouter_format:
         return None
 
-    # Extract the available_tokens figure.
-    # Anthropic format: "… = available_tokens: 10000"
+    # OpenRouter/Nous format: extract "N in the output"
+    if openrouter_output_pattern:
+        tokens = int(openrouter_output_pattern.group(1))
+        if tokens >= 1:
+            return tokens
+
+    # Anthropic format: extract "available_tokens: N"
     patterns = [
         r'available_tokens[:\s]+(\d+)',
         r'available\s+tokens[:\s]+(\d+)',
