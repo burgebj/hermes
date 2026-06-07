@@ -1186,3 +1186,52 @@ updates:
 #   # default — works on Fly.io out of the box).
 #   #
 #   #   public_url: "https://example.com/hermes"
+
+# External secret sources: pull provider API keys from a secret manager at
+# startup instead of putting each one in ~/.hermes/.env. The bootstrap TOKEN
+# always lives in ~/.hermes/.env (never here); only non-secret wiring lives in
+# this file. See website/docs/user-guide/secrets/.
+secrets:
+  # Proton Pass — fetch secrets from Proton Pass via the official `pass-cli`.
+  # Non-destructive (existing env wins by default), fail-open (never blocks
+  # startup), never logs values. Setup wizard: `hermes secrets protonpass setup`.
+  # Full guide: website/docs/user-guide/secrets/protonpass.md
+  protonpass:
+    # Master switch. When false, Proton Pass is never contacted.
+    enabled: false
+
+    # Name of the env var (in ~/.hermes/.env) that holds the bootstrap token.
+    # Prefer an agent token (one vault, viewer role, expiring) over a PAT.
+    service_token_env: PROTON_PASS_PERSONAL_ACCESS_TOKEN
+
+    # MODE A — list one vault by name and map every item field to an env var
+    # (ITEM_FIELD, upper-snake-cased). PAT-only: bulk vault listing with
+    # secret values is blocked under agent sessions. Leave empty to skip.
+    vault: ""
+
+    # MODE B (preferred) — map each env var to a single Proton Pass field via a
+    # pass:// reference. Deterministic, least-privilege, works under both agent
+    # and PAT sessions. On key collision, MODE B wins over MODE A.
+    # Example:
+    #   env:
+    #     OPENROUTER_API_KEY: "pass://SHARE_ID/ITEM_ID/api_key"
+    #     ANTHROPIC_API_KEY:  "pass://SHARE_ID/ITEM_ID/api_key"
+    env: {}
+
+    # TTL for cached fetch results, in seconds. Caching is two-layer: an
+    # in-process cache plus a disk cache at
+    # <hermes_home>/cache/protonpass_cache.json (mode 0600) that persists
+    # across processes, so back-to-back hermes invocations within the TTL
+    # reuse the disk cache instead of re-fetching. Set to 0 (or any value
+    # <= 0) to disable both layers entirely.
+    cache_ttl_seconds: 300
+
+    # When false (default), values already in env win — .env is authoritative.
+    # Flip to true to make Proton Pass the source of truth (rotation in the app
+    # takes effect on next start).
+    override_existing: false
+
+    # When true, `pass-cli` is auto-downloaded into <hermes_home>/bin/ on first
+    # use and verified against a pinned, hardcoded SHA-256. Set false for
+    # air-gapped boxes or if you install pass-cli yourself.
+    auto_install: true

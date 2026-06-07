@@ -2395,6 +2395,15 @@ DEFAULT_CONFIG = {
             # `hermes secrets bitwarden setup`.
             "server_url": "",
         },
+        "protonpass": {
+            "enabled": False,
+            "service_token_env": "PROTON_PASS_PERSONAL_ACCESS_TOKEN",
+            "vault": "",
+            "env": {},
+            "cache_ttl_seconds": 300,
+            "override_existing": False,
+            "auto_install": True,
+        },
     },
 
     # Paste collapse thresholds (TUI + CLI).
@@ -3025,6 +3034,18 @@ OPTIONAL_ENV_VARS = {
         "url": "https://github.com/settings/tokens",
         "password": True,
         "category": "tool",
+    },
+
+    # ── Secret sources (bootstrap tokens for the secrets.* providers) ──
+    # These are surfaced in `hermes setup`/`config` like other provider keys,
+    # but the canonical setup path is `hermes secrets <provider> setup`.
+    "PROTON_PASS_PERSONAL_ACCESS_TOKEN": {
+        "description": "Proton Pass personal access token (bootstrap token for the secrets.protonpass source)",
+        "prompt": "Proton Pass personal access token",
+        "url": "https://proton.me/support/pass-cli",
+        "password": True,
+        "category": "tool",
+        "advanced": True,
     },
 
     # ── Bundled skills (opt-in: only needed if the user uses that skill) ──

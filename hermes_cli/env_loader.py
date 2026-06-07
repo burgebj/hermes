@@ -78,6 +78,8 @@ def format_secret_source_suffix(env_var: str) -> str:
         return ""
     if source == "bitwarden":
         return " (from Bitwarden)"
+    if source == "protonpass":
+        return " (from Proton Pass)"
     # Generic fallback — future-proofing for additional secret sources
     # (e.g. 1Password, HashiCorp Vault) without having to update every
     # call site.
@@ -247,22 +249,104 @@ def load_hermes_dotenv(
     return loaded
 
 
+def _coerce_enabled(value: object) -> bool:
+    """Coerce a config ``enabled`` flag to a bool (default False on garbage).
+
+    Shared by the registry loop for every secret source so a string such as
+    ``enabled: "false"`` (which is truthy as a bare str and would otherwise
+    enable the source) is interpreted as the user intended.  Recognizes the
+    usual textual falses/trues; any unrecognized non-empty string falls back to
+    False so an ambiguous value never silently turns a source ON.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1", "on"):
+            return True
+        return False
+    return False
+
+
+def _apply_bitwarden(cfg: dict, home_path: Path):
+    """Import + invoke the Bitwarden applicator.  Returns its FetchResult.
+
+    Raises ImportError if the backend module isn't available (the registry
+    loop treats that specially with a one-line stderr warning); any other
+    exception (bad config coercion, etc.) propagates to the registry loop's
+    fail-open guard.
+    """
+    from agent.secret_sources.bitwarden import apply_bitwarden_secrets
+
+    return apply_bitwarden_secrets(
+        enabled=True,
+        access_token_env=cfg.get("access_token_env", "BWS_ACCESS_TOKEN"),
+        project_id=cfg.get("project_id", ""),
+        override_existing=bool(cfg.get("override_existing", False)),
+        cache_ttl_seconds=float(cfg.get("cache_ttl_seconds", 300)),
+        auto_install=bool(cfg.get("auto_install", True)),
+        server_url=str(cfg.get("server_url", "") or "").strip(),
+        home_path=home_path,
+    )
+
+
+def _apply_protonpass(cfg: dict, home_path: Path):
+    """Import + invoke the Proton Pass applicator.  Returns its FetchResult.
+
+    See :func:`_apply_bitwarden` for the import/exception contract.  Config
+    parsing/coercion is delegated to ``ProtonPassConfig.from_mapping`` (the
+    single home for config invariants), which tolerates garbage without
+    raising — so a malformed ``secrets.protonpass`` value can never crash
+    startup from here.
+    """
+    from agent.secret_sources.protonpass import (
+        ProtonPassConfig,
+        apply_protonpass_secrets,
+    )
+
+    pp_cfg = ProtonPassConfig.from_mapping(cfg)
+    return apply_protonpass_secrets(
+        enabled=True,  # the registry loop already confirmed enabled
+        config=pp_cfg,  # thread the parsed config; no re-splatting its fields
+        home_path=home_path,
+    )
+
+
+# Provider registry: one (config-key, source-label, display-name, applicator)
+# tuple per external secret source.  The single loop in
+# ``_apply_external_secret_sources`` iterates this so every source shares one
+# guarded code path, one record path, and one deterministic ordering.  Add a
+# future source (1Password, Vault, ...) by appending one tuple here.
+_SECRET_SOURCE_REGISTRY = [
+    ("bitwarden", "bitwarden", "Bitwarden Secrets Manager", _apply_bitwarden),
+    ("protonpass", "protonpass", "Proton Pass", _apply_protonpass),
+]
+
+
 def _apply_external_secret_sources(home_path: Path) -> None:
-    """Pull secrets from external sources (currently Bitwarden) into env.
+    """Pull secrets from external sources (Bitwarden, Proton Pass) into env.
 
     Runs AFTER dotenv loads so .env values are visible (we use them to
     locate the access token) but BEFORE the rest of Hermes reads
     ``os.environ`` for credentials.  Any failure here is logged and
-    swallowed — external secret sources must never block startup.
+    swallowed — external secret sources must NEVER block startup.
+
+    Each registered source is processed in ONE loop where the full
+    iteration (config read + coerce, applicator import+invoke, AND result
+    recording) is wrapped in ``except Exception``: a failure logs a single
+    warning and continues to the next source.  This is what closes the
+    fail-open hole where e.g. ``float(cfg["cache_ttl_seconds"])`` on a bad
+    config value would otherwise crash startup before any FetchResult was
+    produced.
 
     Idempotent within a process: subsequent calls for the same
     ``home_path`` are no-ops.  ``load_hermes_dotenv()`` runs at import
     time from several hot modules (cli.py, hermes_cli/main.py,
     run_agent.py, trajectory_compressor.py, ...), so without this guard
-    the Bitwarden status line would print 3-5x per CLI startup.  Use
-    ``reset_secret_source_cache()`` if you need to force a re-pull
-    (tests, future ``hermes secrets bitwarden sync`` from a long-running
-    process).
+    the status line would print 3-5x per CLI startup.  Use
+    ``reset_secret_source_cache()`` if you need to force a re-pull.
     """
     home_key = str(Path(home_path).resolve())
     if home_key in _APPLIED_HOMES:
@@ -273,52 +357,83 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         cfg = _load_secrets_config(home_path)
     except Exception:  # noqa: BLE001 — config errors must not block startup
         return
+    cfg = cfg or {}
 
-    bw_cfg = (cfg or {}).get("bitwarden") or {}
-    if not bw_cfg.get("enabled"):
-        return
+    for cfg_key, source, display_name, applicator in _SECRET_SOURCE_REGISTRY:
+        try:
+            # Read + coerce the per-source config INSIDE the guarded boundary so
+            # a malformed value (e.g. `protonpass: true`, a bare bool) can never
+            # crash startup with an AttributeError before any FetchResult is
+            # produced.  A non-mapping config is treated as "not enabled".
+            raw_cfg = cfg.get(cfg_key)
+            src_cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+            # Coerce the enabled flag uniformly for every source so a STRING
+            # like `enabled: "false"` (truthy as a bare str) actually disables
+            # the source instead of silently enabling it.  This only gates
+            # whether the applicator runs; it does NOT alter any source's
+            # output strings or downstream behavior.
+            if not _coerce_enabled(src_cfg.get("enabled")):
+                continue
+            result = applicator(src_cfg, home_path)
+        except ImportError:
+            # The backend module isn't importable even though the source is
+            # enabled — surface it (don't swallow) so the user knows why no
+            # secrets appeared, then move on.
+            print(
+                f"  {display_name}: enabled but the integration module "
+                "could not be imported; skipping.",
+                file=sys.stderr,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — fail open, never block startup
+            # Covers bad config coercion (e.g. cache_ttl_seconds: abc) and any
+            # unexpected error from the applicator.  One warning, then continue.
+            print(
+                f"  {display_name}: skipped due to an error ({exc}).",
+                file=sys.stderr,
+            )
+            continue
+        _record_secret_source_result(
+            result,
+            source=source,
+            display_name=display_name,
+        )
 
-    try:
-        from agent.secret_sources.bitwarden import apply_bitwarden_secrets
-    except ImportError:
-        return
 
-    result = apply_bitwarden_secrets(
-        enabled=True,
-        access_token_env=bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN"),
-        project_id=bw_cfg.get("project_id", ""),
-        override_existing=bool(bw_cfg.get("override_existing", False)),
-        cache_ttl_seconds=float(bw_cfg.get("cache_ttl_seconds", 300)),
-        auto_install=bool(bw_cfg.get("auto_install", True)),
-        server_url=str(bw_cfg.get("server_url", "") or "").strip(),
-        home_path=home_path,
-    )
+def _record_secret_source_result(result, *, source: str, display_name: str) -> None:
+    """Apply the side effects of an external secret-source fetch.
 
+    Shared by every provider in ``_apply_external_secret_sources`` so the
+    applied/error/warnings reporting and the ``_SECRET_SOURCES`` bookkeeping
+    stay identical across sources.  ``result`` is a provider FetchResult
+    (bitwarden / protonpass share the same shape).  Non-fatal and fail-open:
+    callers already swallowed any exception from the fetch itself.
+    """
     if result.applied:
-        # Re-run the ASCII sanitization pass: BSM values are user-supplied
+        # Re-run the ASCII sanitization pass: fetched values are user-supplied
         # and might have the same copy-paste corruption as a manually
         # edited .env (see #6843).
         _sanitize_loaded_credentials()
         # Remember where these came from so the setup / `hermes model`
-        # flows can label detected credentials with "(from Bitwarden)" —
-        # otherwise users see "credentials ✓" with no hint that the value
-        # came from BSM rather than .env.
+        # flows can label detected credentials with "(from <source>)" -
+        # otherwise users see "credentials detected" with no hint that the
+        # value came from the secret source rather than .env.
         for name in result.applied:
-            _SECRET_SOURCES[name] = "bitwarden"
+            _SECRET_SOURCES[name] = source
         print(
-            f"  Bitwarden Secrets Manager: applied {len(result.applied)} "
+            f"  {display_name}: applied {len(result.applied)} "
             f"secret{'s' if len(result.applied) != 1 else ''} "
             f"({', '.join(sorted(result.applied))})",
             file=sys.stderr,
         )
     if result.error:
         print(
-            f"  Bitwarden Secrets Manager: {result.error}",
+            f"  {display_name}: {result.error}",
             file=sys.stderr,
         )
     for warn in result.warnings:
         print(
-            f"  Bitwarden Secrets Manager: {warn}",
+            f"  {display_name}: {warn}",
             file=sys.stderr,
         )
 
@@ -341,4 +456,12 @@ def _load_secrets_config(home_path: Path) -> dict:
             data = yaml.safe_load(f) or {}
     except Exception:  # noqa: BLE001
         return {}
-    return data.get("secrets") or {}
+    secrets = data.get("secrets")
+    # Normalize ONCE at the config boundary: a non-Mapping `secrets:` value (e.g.
+    # `secrets: true`) would otherwise reach the provider loop, where every
+    # ``secrets.get(cfg_key)`` raises ``'bool' object has no attribute 'get'``
+    # and prints a per-source "skipped" warning ONCE PER SOURCE.  Coercing to
+    # ``{}`` here simply disables all sources (nothing to read) with ZERO noise.
+    if not isinstance(secrets, dict):
+        return {}
+    return secrets

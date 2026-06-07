@@ -12980,12 +12980,16 @@ def main():
     # =========================================================================
     secrets_parser = subparsers.add_parser(
         "secrets",
-        help="Manage external secret sources (Bitwarden Secrets Manager)",
+        help="Manage external secret sources (Bitwarden, Proton Pass)",
         description=(
             "Pull API keys from an external secret manager at process startup "
             "instead of storing them in ~/.hermes/.env.  Currently supports "
-            "Bitwarden Secrets Manager.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/bitwarden"
+            "Bitwarden Secrets Manager and Proton Pass.  See: "
+            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/ "
+            "(Bitwarden: "
+            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/bitwarden, "
+            "Proton Pass: "
+            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/protonpass)"
         ),
     )
     secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
@@ -12996,15 +13000,26 @@ def main():
         help="Bitwarden Secrets Manager integration",
     )
 
+    secrets_pp = secrets_subparsers.add_parser(
+        "protonpass",
+        aliases=["pp"],
+        help="Proton Pass integration",
+    )
+
     # Lazy import — only pays for itself when this subcommand is actually used.
+    from hermes_cli import protonpass_secrets_cli as _protonpass_cli
     from hermes_cli import secrets_cli as _secrets_cli
 
     _secrets_cli.register_cli(secrets_bw)
+    _protonpass_cli.register_protonpass_cli(secrets_pp)
 
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
+        pp_sub = getattr(args, "secrets_pp_command", None)
         if sub in ("bitwarden", "bw") and bw_sub is not None:
+            return args.func(args)
+        if sub in ("protonpass", "pp") and pp_sub is not None:
             return args.func(args)
         secrets_parser.print_help()
         return 0

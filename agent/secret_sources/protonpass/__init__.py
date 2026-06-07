@@ -1,0 +1,85 @@
+"""Proton Pass (`pass-cli`) integration.
+
+Hermes pulls API keys from a user's Proton Pass account at process startup so
+they don't have to live in plaintext in ``~/.hermes/.env``.  This mirrors the
+Bitwarden Secrets Manager source (:mod:`agent.secret_sources.bitwarden`)
+one-for-one so the rest of the system can wire it identically.
+
+This package is split into focused modules:
+
+* :mod:`~agent.secret_sources.protonpass.config` — the ``ProtonPassConfig``
+  model: the single home for config parsing/coercion/validation.
+* :mod:`~agent.secret_sources.protonpass.install` — binary discovery + the
+  lazy, SHA-256-pinned ``pass-cli`` install.
+* :mod:`~agent.secret_sources.protonpass.session` — minimal-env subprocess
+  plumbing + session establishment.
+* :mod:`~agent.secret_sources.protonpass.cache` — two-layer (in-process +
+  disk) cache of resolved secrets.
+* :mod:`~agent.secret_sources.protonpass.fetch` — MODE A/B fetch + JSON
+  parsing + argument-injection validators.
+* :mod:`~agent.secret_sources.protonpass.apply` — ``FetchResult``, the
+  application planner, and the env_loader entry point.
+
+Design summary
+--------------
+
+* The ``pass-cli`` binary is auto-installed into ``<hermes_home>/bin/pass-cli``
+  on first use.  Hermes pins one version (``_PASS_CLI_VERSION``) and downloads
+  the matching asset, verifying its SHA-256 against a HARDCODED pinned table
+  (``_PINNED_SHA256`` in :mod:`install`).
+* The service token (a Proton Pass personal-access / agent token) is stored in
+  ``~/.hermes/.env`` as ``PROTON_PASS_PERSONAL_ACCESS_TOKEN`` (or whatever name
+  the user picked in ``secrets.protonpass.service_token_env``).
+* Two fetch modes (both optional, MODE B wins on collision): MODE B refs
+  (``env: {ENV_VAR: "pass://SHARE/ITEM/FIELD"}``) and MODE A vault list
+  (``vault: "<name>"``).
+* Resolved values are cached in-process and on disk (mode 0600) so back-to-back
+  ``hermes`` invocations don't re-establish a session.  Only the values + a
+  token FINGERPRINT are persisted; the token itself is NEVER stored.
+* Failures NEVER block Hermes startup.
+
+The user-facing setup wizard lives in :mod:`hermes_cli.protonpass_secrets_cli`.
+"""
+
+from __future__ import annotations
+
+from .apply import (
+    FetchResult,
+    PlanItem,
+    SKIP_ALREADY_SET,
+    SKIP_BOOTSTRAP_TOKEN,
+    apply_protonpass_secrets,
+    plan_application,
+)
+from .config import ProtonPassConfig
+from .fetch import fetch_protonpass_secrets
+from .install import (
+    find_pass_cli,
+    get_pass_cli_version,
+    install_pass_cli,
+)
+
+# Kept importable for the broad set of callers/tests that still reach for them
+# as ``pp.<name>`` (the cache reset is used by every test module's autouse
+# fixture; the pinned version by the install tests + the CLI ``install`` help),
+# but DELIBERATELY left OUT of ``__all__`` below: they are private/test-only and
+# should not be part of the package's advertised public surface.  Callers that
+# want the validator or the version constant directly should import them from
+# their defining submodule (``...config.is_valid_env_name``,
+# ``...install._PASS_CLI_VERSION``).
+from .cache import _reset_cache_for_tests  # noqa: F401
+from .install import _PASS_CLI_VERSION  # noqa: F401
+
+__all__ = [
+    "apply_protonpass_secrets",
+    "fetch_protonpass_secrets",
+    "find_pass_cli",
+    "get_pass_cli_version",
+    "install_pass_cli",
+    "FetchResult",
+    "PlanItem",
+    "ProtonPassConfig",
+    "plan_application",
+    "SKIP_ALREADY_SET",
+    "SKIP_BOOTSTRAP_TOKEN",
+]
