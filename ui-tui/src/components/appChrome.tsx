@@ -406,6 +406,7 @@ export function StatusRule({
   turnStartedAt,
   voiceLabel,
   onSessionCountClick,
+  tinfoilSecure,
   t
 }: StatusRuleProps) {
   const pct = usage.context_percent
@@ -453,7 +454,8 @@ export function StatusRule({
     slotWidth +
     stringWidth(' │ ') +
     stringWidth(modelText) +
-    (ctxLabel ? stringWidth(' │ ') + stringWidth(ctxLabel) : 0)
+    (ctxLabel ? stringWidth(' │ ') + stringWidth(ctxLabel) : 0) +
+    (tinfoilSecure !== undefined ? stringWidth(' │ ') + stringWidth('🔒') : 0)
 
   const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, cwdLabel, essentialWidth)
 
@@ -552,6 +554,14 @@ export function StatusRule({
             <Text color={t.color.muted} wrap="truncate-end">
               {' │ '}
               {ctxLabel}
+            </Text>
+          ) : null}
+          {tinfoilSecure !== undefined ? (
+            <Text wrap="truncate-end">
+              <Text color={t.color.muted}>{' │ '}</Text>
+              <Text color={tinfoilSecure ? t.color.ok : t.color.error}>
+                {tinfoilSecure ? '🔒' : '🔓'}
+              </Text>
             </Text>
           ) : null}
         </Box>
@@ -739,6 +749,7 @@ interface StatusRuleProps {
   status: string
   statusColor: string
   t: Theme
+  tinfoilSecure?: boolean
   turnStartedAt?: null | number
   usage: Usage
   voiceLabel?: string

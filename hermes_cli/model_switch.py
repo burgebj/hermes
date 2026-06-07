@@ -1591,6 +1591,16 @@ def list_authenticated_providers(
         _cp_has_creds = False
         if _cp_config and _cp_config.api_key_env_vars:
             _cp_has_creds = any(os.environ.get(ev) for ev in _cp_config.api_key_env_vars)
+        # Fallback: check plugin ProviderProfile env_vars for providers not
+        # in PROVIDER_REGISTRY (e.g. tinfoil.sh).
+        if not _cp_has_creds and _cp_config is None:
+            try:
+                from providers import get_provider_profile
+                _cp_pp = get_provider_profile(_cp.slug)
+                if _cp_pp and _cp_pp.env_vars:
+                    _cp_has_creds = any(os.environ.get(ev) for ev in _cp_pp.env_vars)
+            except Exception:
+                pass
         # Also check auth store and credential pool
         if not _cp_has_creds:
             try:
