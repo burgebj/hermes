@@ -8157,7 +8157,7 @@ def _update_via_zip(args):
     if not uv_bin:
         uv_bin = _ensure_uv_for_termux(pip_cmd)
     if uv_bin:
-        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+        uv_env = {**os.environ, "VIRTUAL_ENV": str(_active_virtualenv_path())}
         if _is_termux_env(uv_env):
             uv_env.pop("PYTHONPATH", None)
             uv_env.pop("PYTHONHOME", None)
@@ -8792,9 +8792,25 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _active_virtualenv_path() -> Path:
+    """Return the virtualenv that is running Hermes, falling back to venv/.
+
+    Source installs are not consistent about the environment directory name:
+    older managed installs used ``venv/`` while uv-based installs commonly use
+    ``.venv/``. During ``hermes update`` we must update the interpreter that is
+    actually launching Hermes, not a hardcoded sibling directory.
+    """
+    if sys.prefix != sys.base_prefix:
+        return Path(sys.prefix)
+    env_venv = os.environ.get("VIRTUAL_ENV")
+    if env_venv:
+        return Path(env_venv)
+    return PROJECT_ROOT / "venv"
+
+
 def _venv_scripts_dir() -> Path | None:
-    """Return the venv Scripts directory if we're running inside the project venv."""
-    venv_dir = PROJECT_ROOT / "venv"
+    """Return the active venv Scripts/bin directory if it exists."""
+    venv_dir = _active_virtualenv_path()
     if not venv_dir.is_dir():
         return None
     scripts = venv_dir / ("Scripts" if _is_windows() else "bin")
@@ -10686,7 +10702,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         install_group = "all"
 
         if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+            uv_env = {**os.environ, "VIRTUAL_ENV": str(_active_virtualenv_path())}
             if _is_termux_env(uv_env):
                 uv_env.pop("PYTHONPATH", None)
                 uv_env.pop("PYTHONHOME", None)

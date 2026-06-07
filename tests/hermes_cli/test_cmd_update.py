@@ -109,6 +109,47 @@ class TestCmdUpdatePip:
         assert "env" not in mock_run.call_args.kwargs
 
 
+class TestCmdUpdateSourceVirtualEnv:
+    """Source/git update dependency installs target the active interpreter venv."""
+
+    @patch("shutil.which", return_value="/usr/bin/uv")
+    @patch("subprocess.run")
+    def test_source_update_uses_sys_prefix_virtualenv_for_uv_install(
+        self, mock_run, _mock_which, mock_args, monkeypatch
+    ):
+        """Regression for #39714: do not hardcode PROJECT_ROOT/venv.
+
+        uv-managed installs commonly run from PROJECT_ROOT/.venv. The update
+        path must export that active venv so `uv pip install -e .[...]` updates
+        the environment that actually launches Hermes.
+        """
+        from hermes_cli import main as hm
+
+        mock_run.side_effect = _make_run_side_effect(
+            branch="main", verify_ok=True, commit_count="1"
+        )
+        active_venv = str(PROJECT_ROOT / ".venv")
+        monkeypatch.setattr(hm.sys, "prefix", active_venv)
+        monkeypatch.setattr(hm.sys, "base_prefix", "/usr")
+
+        captured_envs = []
+
+        def fake_install(_cmd, *, env=None, group="all"):
+            captured_envs.append(env)
+
+        with patch.object(hm, "_install_python_dependencies_with_optional_fallback", side_effect=fake_install), \
+             patch.object(hm, "_update_node_dependencies"), \
+             patch.object(hm, "_build_web_ui", return_value=True), \
+             patch.object(hm, "_refresh_active_lazy_features"), \
+             patch.object(hm, "_desktop_packaged_executable", return_value=None), \
+             patch.object(hm, "_desktop_dist_exists", return_value=False):
+            cmd_update(mock_args)
+
+        assert captured_envs
+        assert captured_envs[0]["VIRTUAL_ENV"] == active_venv
+        assert captured_envs[0]["VIRTUAL_ENV"] != str(PROJECT_ROOT / "venv")
+
+
 class TestCmdUpdateBranchFallback:
     """cmd_update falls back to main when current branch has no remote counterpart."""
 
