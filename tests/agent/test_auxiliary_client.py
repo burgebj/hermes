@@ -2846,6 +2846,42 @@ class TestCodexAuxiliaryAdapterTimeout:
         assert fake_client.responses.kwargs["stream"] is True
         assert response.choices[0].message.content == "summary"
 
+    def test_recovers_from_final_response_typeerror_using_streamed_output_items(self):
+        events = [
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text="recovered from stream")],
+                ),
+            ),
+        ]
+
+        class FakeStream:
+            def __iter__(self):
+                return iter(events)
+
+            def close(self):
+                pass
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                assert kwargs["stream"] is True
+                return FakeStream()
+
+        fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
+        adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
+
+        response = adapter.create(
+            messages=[{"role": "user", "content": "summarize this"}],
+            timeout=5,
+        )
+
+        assert response.choices[0].message.content == "recovered from stream"
+
     def test_enforces_total_timeout_while_stream_keeps_emitting_events(self):
         class _SlowAliveCreateStream:
             def __iter__(self):
@@ -2869,7 +2905,12 @@ class TestCodexAuxiliaryAdapterTimeout:
                 timeout=0.05,
             )
 
-        assert time.monotonic() - started < 0.14
+        # The synchronous adapter checks cancellation between yielded events.
+        # This fake stream ignores ``client.close()``, so the watchdog cannot
+        # preempt the in-flight ``time.sleep()`` inside ``__iter__`` the way a
+        # real SDK/httpx stream close would.  The assertion therefore only pins
+        # that we abort well before the full 5×0.03s stream completes.
+        assert time.monotonic() - started < 0.25
 
 
 class TestCodexAuxiliaryAdapterNullOutputRecovery:

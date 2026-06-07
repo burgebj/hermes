@@ -674,6 +674,33 @@ def test_run_codex_stream_ignores_completed_response_with_null_output(monkeypatc
     assert response.usage.total_tokens == 11
 
 
+def test_run_codex_stream_recovers_from_final_response_typeerror_with_streamed_items(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    output_item = SimpleNamespace(
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="stream recovered ok")],
+    )
+    create_stream = _FakeCreateStream([
+        SimpleNamespace(type="response.created"),
+        SimpleNamespace(type="response.output_item.done", item=output_item),
+    ])
+
+    def _fake_create(**kwargs):
+        assert kwargs.get("stream") is True
+        return create_stream
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(create=_fake_create),
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    assert response.output[0].content[0].text == "stream recovered ok"
+    assert create_stream.closed is True
+
+
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))
