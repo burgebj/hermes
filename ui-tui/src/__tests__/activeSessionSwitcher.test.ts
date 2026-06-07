@@ -4,6 +4,8 @@ import {
   activeSessionCountLabel,
   canTypeOrchestratorPrompt,
   clampOrchestratorSelection,
+  clampSessionSel,
+  classifySessionsListKey,
   closeFallbackAfterClose,
   currentSessionSelectionIndex,
   draftModelArgFromPickerValue,
@@ -20,6 +22,7 @@ import {
   orchestratorHintSegmentColor,
   orchestratorRowClickAction,
   orchestratorVisibleRowIndexes,
+  rankByText,
   relativeSessionAge,
   resumableHistory,
   selectedSessionRowStyle,
@@ -102,7 +105,13 @@ describe('session orchestrator helpers', () => {
 
     expect(currentSessionSelectionIndex(sessions, 'second')).toBe(1)
     expect(
-      currentSessionSelectionIndex([{ id: 'first', status: 'idle' }, { id: 'third', status: 'idle' }], 'third')
+      currentSessionSelectionIndex(
+        [
+          { id: 'first', status: 'idle' },
+          { id: 'third', status: 'idle' }
+        ],
+        'third'
+      )
     ).toBe(1)
     expect(currentSessionSelectionIndex(sessions, 'missing')).toBe(1)
     expect(currentSessionSelectionIndex([], 'missing')).toBe(0)
@@ -200,5 +209,119 @@ describe('unified Sessions overlay helpers', () => {
     expect(relativeSessionAge(nowSec - 3 * 86400)).toBe('3d ago')
     expect(relativeSessionAge(undefined)).toBe('')
     expect(relativeSessionAge(0)).toBe('')
+  })
+})
+
+describe('Sessions overlay fuzzy filtering', () => {
+  const live = [
+    { id: 's1', status: 'idle', title: 'refactor the auth module' },
+    { id: 's2', status: 'working', title: 'write billing tests' }
+  ] satisfies SessionActiveItem[]
+
+  const history = [
+    { id: 'h1', message_count: 4, preview: '', started_at: 0, title: 'parser cleanup' },
+    { id: 'h2', message_count: 9, preview: '', started_at: 0, title: 'auth follow-up' }
+  ] satisfies SessionListItem[]
+
+  it('keeps the full list for an empty query', () => {
+    expect(rankByText(live, '')).toEqual(live)
+    expect(rankByText(history, '   ')).toEqual(history)
+  })
+
+  it('filters live + resumable rows by title, id and preview', () => {
+    expect(rankByText(live, 'auth').map(s => s.id)).toEqual(['s1'])
+    expect(rankByText(history, 'auth').map(h => h.id)).toEqual(['h2'])
+    expect(rankByText(live, 's2').map(s => s.id)).toContain('s2')
+  })
+
+  it('drops rows that do not match', () => {
+    expect(rankByText(live, 'zzzz')).toEqual([])
+  })
+})
+
+describe('Sessions overlay key gating', () => {
+  const ctx = (over: Partial<Parameters<typeof classifySessionsListKey>[2]> = {}) => ({
+    filterActive: false,
+    onNewRow: false,
+    selectedKind: 'live' as const,
+    ...over
+  })
+
+  it('routes Ctrl chords and Tab regardless of filter', () => {
+    expect(classifySessionsListKey('n', { ctrl: true }, ctx())).toEqual({ kind: 'newSession' })
+    expect(classifySessionsListKey('r', { ctrl: true }, ctx({ filterActive: true }))).toEqual({ kind: 'refresh' })
+    expect(classifySessionsListKey('', { tab: true }, ctx({ onNewRow: true, selectedKind: 'new' }))).toEqual({
+      kind: 'pickModel'
+    })
+  })
+
+  it('closes a live session with Ctrl+D only when not filtering', () => {
+    expect(classifySessionsListKey('d', { ctrl: true }, ctx())).toEqual({ kind: 'closeLive' })
+    expect(classifySessionsListKey('d', { ctrl: true }, ctx({ filterActive: true }))).toEqual({ kind: 'ignore' })
+  })
+
+  it('arms delete on `d` only on a resumable row when not filtering', () => {
+    expect(classifySessionsListKey('d', {}, ctx({ selectedKind: 'history' }))).toEqual({ kind: 'armDelete' })
+    // While filtering, `d` types into the filter instead of arming a delete.
+    expect(classifySessionsListKey('d', {}, ctx({ filterActive: true, selectedKind: 'history' }))).toEqual({
+      ch: 'd',
+      kind: 'filterAppend'
+    })
+  })
+
+  it('routes printable keys to the draft on the new row, the filter on a session row', () => {
+    expect(classifySessionsListKey('a', {}, ctx({ onNewRow: true, selectedKind: 'new' }))).toEqual({ kind: 'draft' })
+    expect(classifySessionsListKey('a', {}, ctx({ selectedKind: 'history' }))).toEqual({
+      ch: 'a',
+      kind: 'filterAppend'
+    })
+  })
+
+  it('clears a non-empty filter on Esc before cancelling', () => {
+    expect(classifySessionsListKey('', { escape: true }, ctx({ filterActive: true }))).toEqual({ kind: 'clearFilter' })
+    expect(classifySessionsListKey('', { escape: true }, ctx())).toEqual({ kind: 'cancel' })
+  })
+
+  it('edits the filter with Backspace / Ctrl+U only on a session row while filtering', () => {
+    expect(classifySessionsListKey('', { backspace: true }, ctx({ filterActive: true }))).toEqual({
+      kind: 'filterBackspace'
+    })
+    expect(classifySessionsListKey('', { backspace: true }, ctx())).toEqual({ kind: 'ignore' })
+    expect(classifySessionsListKey('u', { ctrl: true }, ctx({ filterActive: true }))).toEqual({ kind: 'clearFilter' })
+  })
+
+  it('keeps arrows + Enter navigating regardless of filter state', () => {
+    expect(classifySessionsListKey('', { upArrow: true }, ctx({ filterActive: true }))).toEqual({ kind: 'navUp' })
+    expect(classifySessionsListKey('', { downArrow: true }, ctx())).toEqual({ kind: 'navDown' })
+    expect(classifySessionsListKey('', { return: true }, ctx({ filterActive: true }))).toEqual({ kind: 'select' })
+  })
+
+  it('does not start a filter on a leading space, but allows spaces mid-query', () => {
+    expect(classifySessionsListKey(' ', {}, ctx({ selectedKind: 'history' }))).toEqual({ kind: 'ignore' })
+    expect(classifySessionsListKey(' ', {}, ctx({ filterActive: true, selectedKind: 'history' }))).toEqual({
+      ch: ' ',
+      kind: 'filterAppend'
+    })
+  })
+})
+
+describe('Sessions overlay selection clamp (clampSessionSel)', () => {
+  it('floors the cursor at row 1 while filtering so it never lands on the new row', () => {
+    // Rows are [new=0][live/history=1..matchCount]; filtering floors at 1.
+    expect(clampSessionSel(0, 3, true)).toBe(1)
+    expect(clampSessionSel(-2, 3, true)).toBe(1)
+    // Even with zero matches, sel stays at the benign row-1 sentinel (not 0).
+    expect(clampSessionSel(0, 0, true)).toBe(1)
+  })
+
+  it('allows the new row (index 0) when not filtering', () => {
+    expect(clampSessionSel(0, 3, false)).toBe(0)
+    expect(clampSessionSel(-1, 3, false)).toBe(0)
+  })
+
+  it('clamps down to the last matching row', () => {
+    expect(clampSessionSel(9, 3, true)).toBe(3)
+    expect(clampSessionSel(9, 3, false)).toBe(3)
+    expect(clampSessionSel(2, 3, true)).toBe(2)
   })
 })
