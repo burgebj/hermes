@@ -308,6 +308,290 @@ describe('preserveLocalAssistantErrors', () => {
     expect(assistant?.error).toBe('OpenRouter 403')
     expect(assistant?.pending).toBe(false)
   })
+
+  it('preserves a pending clarify tool when hydration omits the live assistant row', () => {
+    const nextMessages: ChatMessage[] = [
+      {
+        id: 'stored-user',
+        parts: [{ text: 'Need more detail', type: 'text' }],
+        role: 'user'
+      }
+    ]
+
+    const pendingClarify: ChatMessagePart = {
+      args: { choices: ['src', 'tests'], question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const currentMessages: ChatMessage[] = [
+      ...nextMessages,
+      {
+        id: 'assistant-stream-1',
+        parts: [pendingClarify],
+        pending: true,
+        role: 'assistant'
+      }
+    ]
+
+    const merged = preserveLocalAssistantErrors(nextMessages, currentMessages)
+
+    expect(merged.map(message => message.id)).toEqual(['stored-user', 'assistant-stream-1'])
+    expect(merged[1]?.parts).toContain(pendingClarify)
+    expect(merged[1]?.pending).toBe(true)
+  })
+
+  it('merges a pending clarify tool back into a hydrated assistant row with the same id', () => {
+    const nextMessages: ChatMessage[] = [
+      {
+        id: 'assistant-stream-1',
+        parts: [{ text: 'I need one detail first.', type: 'text' }],
+        role: 'assistant'
+      }
+    ]
+
+    const pendingClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const currentMessages: ChatMessage[] = [
+      {
+        id: 'assistant-stream-1',
+        parts: [pendingClarify],
+        pending: true,
+        role: 'assistant'
+      }
+    ]
+
+    const merged = preserveLocalAssistantErrors(nextMessages, currentMessages)
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0]?.parts).toEqual([...nextMessages[0]!.parts, pendingClarify])
+    expect(merged[0]?.pending).toBe(true)
+  })
+
+  it('does not duplicate a pending clarify tool when hydration has the same question under another id', () => {
+    const hydratedClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'stored-tool-0',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const localClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const merged = preserveLocalAssistantErrors(
+      [
+        {
+          id: 'stored-assistant',
+          parts: [hydratedClarify],
+          role: 'assistant'
+        }
+      ],
+      [
+        {
+          id: 'assistant-stream-1',
+          parts: [localClarify],
+          pending: true,
+          role: 'assistant'
+        }
+      ]
+    )
+
+    const clarifyParts = merged.flatMap(message =>
+      message.parts.filter(part => part.type === 'tool-call' && part.toolName === 'clarify')
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(clarifyParts).toHaveLength(1)
+    expect(clarifyParts[0]).toBe(hydratedClarify)
+  })
+
+  it('does not duplicate a pending clarify tool when hydrated args cannot identify it', () => {
+    const hydratedClarify: ChatMessagePart = {
+      args: {},
+      argsText: '{}',
+      toolCallId: 'stored-tool-0',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const localClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const merged = preserveLocalAssistantErrors(
+      [
+        {
+          id: 'stored-assistant',
+          parts: [hydratedClarify],
+          role: 'assistant'
+        }
+      ],
+      [
+        {
+          id: 'assistant-stream-1',
+          parts: [localClarify],
+          pending: true,
+          role: 'assistant'
+        }
+      ]
+    )
+
+    const clarifyParts = merged.flatMap(message =>
+      message.parts.filter(part => part.type === 'tool-call' && part.toolName === 'clarify')
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(clarifyParts).toEqual([hydratedClarify])
+  })
+
+  it('keeps only one local pending clarify row when duplicate live rows already exist', () => {
+    const firstClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const duplicateClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-2',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const merged = preserveLocalAssistantErrors(
+      [
+        {
+          id: 'stored-user',
+          parts: [{ text: 'Need more detail', type: 'text' }],
+          role: 'user'
+        }
+      ],
+      [
+        {
+          id: 'assistant-stream-1',
+          parts: [firstClarify],
+          pending: true,
+          role: 'assistant'
+        },
+        {
+          id: 'assistant-stream-2',
+          parts: [duplicateClarify],
+          pending: true,
+          role: 'assistant'
+        }
+      ]
+    )
+
+    const clarifyRows = merged.filter(message =>
+      message.parts.some(part => part.type === 'tool-call' && part.toolName === 'clarify')
+    )
+
+    expect(clarifyRows.map(message => message.id)).toEqual(['assistant-stream-1'])
+  })
+
+  it('keeps only one pending clarify row even if live rows have different questions', () => {
+    const firstClarify: ChatMessagePart = {
+      args: { question: 'Which directory should Hermes inspect?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const secondClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-2',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const merged = preserveLocalAssistantErrors(
+      [
+        {
+          id: 'stored-user',
+          parts: [{ text: 'Need more detail', type: 'text' }],
+          role: 'user'
+        }
+      ],
+      [
+        {
+          id: 'assistant-stream-1',
+          parts: [firstClarify],
+          pending: true,
+          role: 'assistant'
+        },
+        {
+          id: 'assistant-stream-2',
+          parts: [secondClarify],
+          pending: true,
+          role: 'assistant'
+        }
+      ]
+    )
+
+    const clarifyParts = merged.flatMap(message =>
+      message.parts.filter(part => part.type === 'tool-call' && part.toolName === 'clarify')
+    )
+
+    expect(clarifyParts).toEqual([firstClarify])
+  })
+
+  it('deduplicates equivalent pending clarify tools inside one assistant row', () => {
+    const firstClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const duplicateClarify: ChatMessagePart = {
+      args: { question: 'Which files should Hermes update?' },
+      argsText: '{}',
+      toolCallId: 'clarify-tool-2',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+
+    const merged = preserveLocalAssistantErrors(
+      [
+        {
+          id: 'assistant-stream-1',
+          parts: [firstClarify, duplicateClarify],
+          pending: true,
+          role: 'assistant'
+        }
+      ],
+      []
+    )
+
+    const clarifyParts = merged[0]?.parts.filter(part => part.type === 'tool-call' && part.toolName === 'clarify')
+
+    expect(clarifyParts).toEqual([firstClarify])
+  })
 })
 
 describe('upsertToolPart', () => {

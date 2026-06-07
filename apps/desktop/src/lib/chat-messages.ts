@@ -814,20 +814,158 @@ export function preserveLocalAssistantErrors(
   currentMessages: ChatMessage[]
 ): ChatMessage[] {
   const localById = new Map(currentMessages.map(message => [message.id, message]))
+  const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+
+  const pendingClarifyParts = (message: ChatMessage): ChatMessagePart[] =>
+    message.role === 'assistant'
+      ? message.parts.filter(
+          part => part.type === 'tool-call' && part.toolName === 'clarify' && part.result === undefined
+        )
+      : []
+
+  const clarifyPartKeys = (part: ChatMessagePart): string[] => {
+    if (part.type !== 'tool-call' || part.toolName !== 'clarify') {
+      return []
+    }
+
+    const args = part.args && typeof part.args === 'object' ? (part.args as Record<string, unknown>) : null
+
+    const requestId =
+      typeof args?.request_id === 'string'
+        ? args.request_id.trim()
+        : typeof args?.requestId === 'string'
+          ? args.requestId.trim()
+          : ''
+
+    const question = typeof args?.question === 'string' ? args.question.trim() : ''
+
+    const keys = [
+      requestId ? `request:${requestId}` : '',
+      question ? `question:${normalize(question)}` : '',
+      part.toolCallId ? `id:${part.toolCallId}` : ''
+    ].filter(Boolean)
+
+    return keys
+  }
+
+  const clarifyPartsMatch = (left: ChatMessagePart, right: ChatMessagePart): boolean => {
+    const leftKeys = clarifyPartKeys(left)
+    const rightKeys = new Set(clarifyPartKeys(right))
+
+    return leftKeys.some(key => rightKeys.has(key))
+  }
+
+  const messageHasClarifyPart = (message: ChatMessage, candidate: ChatMessagePart): boolean => {
+    if (candidate.type !== 'tool-call' || candidate.toolName !== 'clarify') {
+      return false
+    }
+
+    return message.parts.some(part => {
+      if (part.type !== 'tool-call' || part.toolName !== 'clarify') {
+        return false
+      }
+
+      return clarifyPartsMatch(part, candidate)
+    })
+  }
+
+  const withoutDuplicatePendingClarifyParts = (message: ChatMessage): ChatMessage => {
+    if (message.role !== 'assistant') {
+      return message
+    }
+
+    const seen = new Set<string>()
+    let changed = false
+
+    const parts = message.parts.filter(part => {
+      if (part.type !== 'tool-call' || part.toolName !== 'clarify' || part.result !== undefined) {
+        return true
+      }
+
+      const keys = clarifyPartKeys(part)
+
+      if (keys.length > 0 && keys.some(key => seen.has(key))) {
+        changed = true
+
+        return false
+      }
+
+      keys.forEach(key => seen.add(key))
+
+      return true
+    })
+
+    return changed ? { ...message, parts } : message
+  }
+
+  const withSinglePendingClarify = (messages: ChatMessage[]): ChatMessage[] => {
+    let hasPendingClarify = false
+    let changed = false
+
+    const next = messages.map(message => {
+      if (message.role !== 'assistant') {
+        return message
+      }
+
+      const parts = message.parts.filter(part => {
+        if (part.type !== 'tool-call' || part.toolName !== 'clarify' || part.result !== undefined) {
+          return true
+        }
+
+        if (hasPendingClarify) {
+          changed = true
+
+          return false
+        }
+
+        hasPendingClarify = true
+
+        return true
+      })
+
+      return parts.length === message.parts.length ? message : { ...message, parts }
+    })
+
+    if (!changed) {
+      return messages
+    }
+
+    return next.filter(message => {
+      if (message.role !== 'assistant') {
+        return true
+      }
+
+      return Boolean(message.error) || message.parts.length > 0
+    })
+  }
 
   const mergedNextMessages = nextMessages.map(message => {
+    let nextMessage = withoutDuplicatePendingClarifyParts(message)
+
     if (message.role !== 'assistant' || message.error || message.hidden) {
-      return message
+      return nextMessage
     }
 
     const local = localById.get(message.id)
 
+    if (local?.role === 'assistant' && !local.hidden) {
+      const missingClarifyParts = pendingClarifyParts(local).filter(part => !messageHasClarifyPart(nextMessage, part))
+
+      if (missingClarifyParts.length > 0) {
+        nextMessage = withoutDuplicatePendingClarifyParts({
+          ...nextMessage,
+          parts: [...nextMessage.parts, ...missingClarifyParts],
+          pending: true
+        })
+      }
+    }
+
     if (!local || local.role !== 'assistant' || !local.error || local.hidden) {
-      return message
+      return nextMessage
     }
 
     return {
-      ...message,
+      ...nextMessage,
       error: local.error,
       pending: false
     }
@@ -835,7 +973,11 @@ export function preserveLocalAssistantErrors(
 
   const existingIds = new Set(mergedNextMessages.map(message => message.id))
   const preserveIds = new Set<string>()
-  const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+
+  const seenClarifyKeys = new Set(
+    mergedNextMessages.flatMap(message => pendingClarifyParts(message).flatMap(clarifyPartKeys))
+  )
+
   const tailUserInNext = [...mergedNextMessages].reverse().find(message => message.role === 'user' && !message.hidden)
   const tailUserText = tailUserInNext ? normalize(chatMessageText(tailUserInNext)) : ''
   const tailUserRefs = tailUserInNext ? (tailUserInNext.attachmentRefs ?? []).join('\n') : ''
@@ -845,10 +987,33 @@ export function preserveLocalAssistantErrors(
     normalize(chatMessageText(candidate)) === tailUserText &&
     (candidate.attachmentRefs ?? []).join('\n') === tailUserRefs
 
+  const hasUnseenClarifyPart = (message: ChatMessage): boolean => {
+    let found = false
+
+    for (const part of pendingClarifyParts(message)) {
+      const keys = clarifyPartKeys(part)
+
+      if (keys.length === 0 || keys.some(key => seenClarifyKeys.has(key))) {
+        continue
+      }
+
+      keys.forEach(key => seenClarifyKeys.add(key))
+      found = true
+    }
+
+    return found
+  }
+
   for (let index = 0; index < currentMessages.length; index += 1) {
     const message = currentMessages[index]
 
     if (message.role !== 'assistant' || !message.error || message.hidden || existingIds.has(message.id)) {
+      if (!hasUnseenClarifyPart(message) || message.hidden || existingIds.has(message.id)) {
+        continue
+      }
+
+      preserveIds.add(message.id)
+
       continue
     }
 
@@ -870,14 +1035,19 @@ export function preserveLocalAssistantErrors(
   }
 
   if (preserveIds.size === 0) {
-    return mergedNextMessages
+    return withSinglePendingClarify(mergedNextMessages)
   }
 
   const preserved = currentMessages
     .filter(message => preserveIds.has(message.id))
-    .map(message => ({ ...message, pending: false }))
+    .map(message =>
+      withoutDuplicatePendingClarifyParts({
+        ...message,
+        pending: pendingClarifyParts(message).length > 0 ? (message.pending ?? true) : false
+      })
+    )
 
-  return [...mergedNextMessages, ...preserved]
+  return withSinglePendingClarify([...mergedNextMessages, ...preserved])
 }
 
 export function branchGroupForUser(userMessage: ChatMessage): string {
