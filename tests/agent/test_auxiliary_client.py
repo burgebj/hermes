@@ -26,6 +26,8 @@ from agent.auxiliary_client import (
     _refresh_nous_recommended_model,
     _normalize_aux_provider,
     _try_payment_fallback,
+    _try_configured_fallback_chain,
+    _resolve_single_provider,
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
@@ -1602,6 +1604,49 @@ class TestCallLlmPaymentFallback:
             )
         # Fallback client should have been used
         assert fallback_client.chat.completions.create.called
+
+
+class TestConfiguredFallbackChainResolution:
+    """fallback_chain entries must reach a real client through resolve_provider_client.
+
+    Regression: ``_resolve_single_provider`` called ``resolve_provider_client``
+    with ``base_url=`` / ``api_key=`` — kwargs that don't exist in its
+    signature (the parameters are ``explicit_base_url`` / ``explicit_api_key``).
+    Every fallback_chain entry raised TypeError, which the bare ``except`` in
+    ``_try_configured_fallback_chain`` swallowed, so configured chains never
+    resolved a client.  ``autospec=True`` enforces the real signature so a
+    kwarg-name regression fails loudly instead of being masked by a
+    permissive MagicMock.
+    """
+
+    def test_resolve_single_provider_matches_resolver_signature(self):
+        sentinel = MagicMock()
+        with patch("agent.auxiliary_client.resolve_provider_client",
+                   autospec=True,
+                   return_value=(sentinel, "some-model")) as rpc:
+            client = _resolve_single_provider(
+                "openrouter", model="some-model",
+                base_url="https://example.test/v1", api_key="sk-test")
+        assert client is sentinel
+        _, kwargs = rpc.call_args
+        assert kwargs["explicit_base_url"] == "https://example.test/v1"
+        assert kwargs["explicit_api_key"] == "sk-test"
+
+    def test_configured_chain_resolves_entry_end_to_end(self):
+        sentinel = MagicMock()
+        chain_cfg = {"fallback_chain": [
+            {"provider": "openrouter", "model": "meta-llama/llama-3.3-70b"},
+        ]}
+        with patch("agent.auxiliary_client._get_auxiliary_task_config",
+                   return_value=chain_cfg), \
+             patch("agent.auxiliary_client.resolve_provider_client",
+                   autospec=True,
+                   return_value=(sentinel, "meta-llama/llama-3.3-70b")):
+            client, model, label = _try_configured_fallback_chain(
+                "compression", "glm", reason="payment error")
+        assert client is sentinel
+        assert model == "meta-llama/llama-3.3-70b"
+        assert label == "fallback_chain[0](openrouter)"
 
 
 class TestAuxiliaryFallbackLayering:
