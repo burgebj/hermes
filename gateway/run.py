@@ -8738,6 +8738,29 @@ class GatewayRunner:
                             )
                         except Exception:
                             pass
+                else:
+                    # STT succeeded — optionally echo the transcript back so
+                    # the user has a readable record in chat history.
+                    if getattr(self.config, "stt_echo_transcript", True):
+                        _stt_adapter = self.adapters.get(source.platform)
+                        _stt_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                        if _stt_adapter:
+                            try:
+                                import re as _re
+                                _stt_match = _re.search(
+                                    r'voice message[~]?\s*Here\'?s what they said:\s*"([^"]*)"',
+                                    message_text,
+                                )
+                                if _stt_match:
+                                    _transcript = _stt_match.group(1).strip()
+                                    if _transcript:
+                                        await _stt_adapter.send(
+                                            source.chat_id,
+                                            f"🎤 {_transcript}",
+                                            metadata=_stt_meta,
+                                        )
+                            except Exception:
+                                pass
 
         if audio_file_paths:
             from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
