@@ -1,0 +1,5 @@
+name: apertis-provider
+kind: model-provider
+version: 1.0.0
+description: Apertis AI multi-model inference platform
+author: Apertis AI

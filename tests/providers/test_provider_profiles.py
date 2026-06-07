@@ -18,6 +18,8 @@ class TestRegistry:
         assert get_provider_profile("nous-portal").name == "nous"
         assert get_provider_profile("qwen").name == "qwen-oauth"
         assert get_provider_profile("qwen-portal").name == "qwen-oauth"
+        assert get_provider_profile("apertis-ai").name == "apertis"
+        assert get_provider_profile("apertis-api").name == "apertis"
 
     def test_unknown_provider_returns_none(self):
         assert get_provider_profile("nonexistent-provider") is None
