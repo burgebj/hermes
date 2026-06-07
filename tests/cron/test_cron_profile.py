@@ -18,6 +18,7 @@ def isolated_cron_profile_home(tmp_path, monkeypatch):
     root = tmp_path / "hermes-root"
     profile_home = root / "profiles" / "support"
     profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("", encoding="utf-8")
     (root / "cron").mkdir(parents=True)
 
     monkeypatch.setenv("HERMES_HOME", str(root))
