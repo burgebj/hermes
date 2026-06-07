@@ -506,6 +506,21 @@ def test_base_gateway_replies_to_triggering_message_for_telegram_dm_topic():
     assert _reply_anchor_for_event(event) == "463"
 
 
+def test_base_gateway_replies_to_triggering_message_for_feishu_topic():
+    """Feishu topics should reply to the current message, not a quoted parent."""
+    event = SimpleNamespace(
+        message_id="om_current",
+        reply_to_message_id="om_quoted_parent",
+        source=SimpleNamespace(
+            platform=Platform.FEISHU,
+            chat_type="dm",
+            thread_id="omt_topic",
+        ),
+    )
+
+    assert _reply_anchor_for_event(event) == "om_current"
+
+
 @pytest.mark.asyncio
 async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegram_dm_topic(monkeypatch, tmp_path):
     """GatewayRunner's duplicate thread metadata must match the base helper."""
