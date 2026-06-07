@@ -31,6 +31,12 @@ If `$HERMES_TENANT` is set, the task belongs to a tenant namespace. When reading
 - Good: `business-a: Acme is our biggest customer`
 - Bad (leaks): `Acme is our biggest customer`
 
+## Source-file reads
+
+Treat a truncated `read_file` result as incomplete source, never as a whole file. In a Kanban worker, if the default 500-line read trips the truncation guard, re-read with an explicit `limit` that covers the whole file when possible, or page through with `offset`/`limit` before editing.
+
+Do not `write_file` or commit content reconstructed from a truncated page. Use `patch` for targeted edits, and if you cannot establish the full file state safely, `kanban_block` with the exact file and range you could not verify.
+
 ## Good summary + metadata shapes
 
 The `kanban_complete(summary=..., metadata=...)` handoff is how downstream workers read what you did. Patterns that work:
