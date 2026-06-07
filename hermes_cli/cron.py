@@ -322,7 +322,11 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
     if action in {"resume", "run"} and result.get("job", {}).get("next_run_at"):
         print(f"  Next run: {result['job']['next_run_at']}")
     if action == "run":
-        print("  It will run on the next scheduler tick.")
+        if result.get("dispatched", False):
+            print("  Running now (dispatched to background thread).")
+        else:
+            note = result.get("note", "")
+            print(f"  Scheduled for next tick.{(' ' + note) if note else ''}")
     return 0
 
 

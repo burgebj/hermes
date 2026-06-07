@@ -623,7 +623,22 @@ def cronjob(
 
         if normalized in {"run", "run_now", "trigger"}:
             updated = trigger_job(job_id)
-            return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
+            try:
+                from cron.scheduler import run_job_immediate
+                dispatched, dispatch_error = run_job_immediate(job_id)
+            except Exception as _e:
+                dispatched, dispatch_error = False, str(_e)
+            result = {
+                "success": True,
+                "job": _format_job(updated),
+                "dispatched": dispatched,
+            }
+            if not dispatched:
+                result["note"] = (
+                    dispatch_error
+                    or "Job scheduled for next tick. Start the gateway if you need automatic execution."
+                )
+            return json.dumps(result, indent=2)
 
         if normalized == "update":
             updates: Dict[str, Any] = {}

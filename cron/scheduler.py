@@ -1348,6 +1348,61 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return _run_job_impl(job)
 
 
+def run_job_immediate(job_id: str) -> tuple[bool, Optional[str]]:
+    """Execute a job now, bypassing the tick cycle.
+
+    Called by the cronjob tool's action='run' path when the gateway is
+    not running or the user wants instant execution rather than waiting
+    for the next scheduled tick.
+
+    Returns (dispatched, error_message). error_message is None on success.
+    """
+    from cron.jobs import resolve_job_ref, save_job_output, advance_next_run
+
+    job = resolve_job_ref(job_id)
+    if not job:
+        return False, f"Job '{job_id}' not found"
+
+    advance_next_run(job["id"])
+
+    pool = _get_parallel_pool(None)
+    with _running_lock:
+        if job["id"] in _running_job_ids:
+            return False, f"Job '{job_id}' is already running"
+        _running_job_ids.add(job["id"])
+
+    def _run_and_release(j=job):
+        try:
+            success, output, final_response, error = run_job(j)
+            save_job_output(j["id"], output)
+            deliver_content = (
+                final_response if success
+                else f"⚠️ Cron job '{j.get('name', j['id'])}' failed:\n{error}"
+            )
+            should_deliver = bool(deliver_content.strip())
+            if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+                should_deliver = False
+            delivery_error = None
+            if should_deliver:
+                try:
+                    delivery_error = _deliver_result(j, deliver_content)
+                except Exception as de:
+                    delivery_error = str(de)
+            if success and not final_response.strip():
+                success = False
+                error = "Agent completed but produced empty response"
+            mark_job_run(j["id"], success, error, delivery_error=delivery_error)
+        except Exception as e:
+            logger.error("Immediate run of job %s failed: %s", j["id"], e)
+            mark_job_run(j["id"], False, str(e))
+        finally:
+            with _running_lock:
+                _running_job_ids.discard(j["id"])
+
+    pool.submit(_run_and_release)
+    return True, None
+
+
 def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
