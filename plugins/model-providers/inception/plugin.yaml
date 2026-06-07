@@ -1,0 +1,5 @@
+name: inception-provider
+kind: model-provider
+version: 1.0.0
+description: Inception (direct Inception API) — Mercury diffusion LLMs
+author: Inception Labs
