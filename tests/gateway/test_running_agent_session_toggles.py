@@ -1,4 +1,4 @@
-"""Regression tests: /yolo and /verbose dispatch mid-agent-run.
+"""Regression tests: /yolo, /verbose and /footer dispatch mid-agent-run.
 
 When an agent is running, the gateway's running-agent guard rejects most
 slash commands with "⏳ Agent is running — /{cmd} can't run mid-turn"
@@ -8,6 +8,8 @@ slash commands with "⏳ Agent is running — /{cmd} can't run mid-turn"
     pending approval prompt without waiting for the agent to finish.
   * /verbose — cycles the per-platform tool-progress display mode;
     affects the ongoing stream.
+  * /footer — toggles the runtime-metadata footer appended to replies;
+    a display-only toggle like /verbose.
 
 Commands whose handlers say "takes effect on next message" stay on the
 catch-all by design:
@@ -132,6 +134,25 @@ async def test_verbose_dispatches_mid_run(monkeypatch):
 
     runner._handle_verbose_command.assert_awaited_once()
     assert result == "tool progress: new"
+    assert "can't run mid-turn" not in (result or "")
+
+
+@pytest.mark.asyncio
+async def test_footer_dispatches_mid_run(monkeypatch):
+    """/footer mid-run must dispatch to its handler, not hit the catch-all.
+
+    /footer is a display-only toggle (like /verbose). Its dispatch branch
+    lived in the running-agent fast-path but the membership gate only
+    listed {"yolo", "verbose"}, leaving the branch unreachable so /footer
+    fell through to the busy catch-all. Adding "footer" to the gate fixes it.
+    """
+    runner = _make_runner()
+    runner._handle_footer_command = AsyncMock(return_value="footer: on")
+
+    result = await runner._handle_message(_make_event("/footer"))
+
+    runner._handle_footer_command.assert_awaited_once()
+    assert result == "footer: on"
     assert "can't run mid-turn" not in (result or "")
 
 
