@@ -1551,3 +1551,19 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     if not sections:
         return ""
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+
+# --- Spanish Prompt Translation Helper ---
+def get_prompt_translation(name: str) -> str:
+    from agent.i18n import get_language
+    lang = get_language()
+    if lang == "es":
+        try:
+            import agent.prompt_builder_es as p_es
+            val = getattr(p_es, f"{name}_ES", None)
+            if val is not None:
+                return val
+        except Exception:
+            pass
+    # Fallback to default English constant from globals
+    return globals().get(name, "")

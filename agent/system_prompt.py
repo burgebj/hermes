@@ -40,6 +40,7 @@ from agent.prompt_builder import (
     TASK_COMPLETION_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    get_prompt_translation,
 )
 from agent.runtime_cwd import resolve_context_cwd
 
@@ -97,10 +98,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     if not _soul_loaded:
         # Fallback to hardcoded identity
-        stable_parts.append(DEFAULT_AGENT_IDENTITY)
+        stable_parts.append(get_prompt_translation("DEFAULT_AGENT_IDENTITY"))
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    stable_parts.append(get_prompt_translation("HERMES_AGENT_HELP_GUIDANCE"))
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
@@ -109,16 +110,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # config.yaml ``agent.task_completion_guidance`` (default True) so
     # users who want a leaner prompt can turn it off.
     if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
-        stable_parts.append(TASK_COMPLETION_GUIDANCE)
+        stable_parts.append(get_prompt_translation("TASK_COMPLETION_GUIDANCE"))
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []
     if "memory" in agent.valid_tool_names:
-        tool_guidance.append(MEMORY_GUIDANCE)
+        tool_guidance.append(get_prompt_translation("MEMORY_GUIDANCE"))
     if "session_search" in agent.valid_tool_names:
-        tool_guidance.append(SESSION_SEARCH_GUIDANCE)
+        tool_guidance.append(get_prompt_translation("SESSION_SEARCH_GUIDANCE"))
     if "skill_manage" in agent.valid_tool_names:
-        tool_guidance.append(SKILLS_GUIDANCE)
+        tool_guidance.append(get_prompt_translation("SKILLS_GUIDANCE"))
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
@@ -128,7 +129,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(_kanban_guidance)
     elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
         # Fallback for code paths that bypass agent_init (rare).
-        tool_guidance.append(KANBAN_GUIDANCE)
+        tool_guidance.append(get_prompt_translation("KANBAN_GUIDANCE"))
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
@@ -140,8 +141,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Computer-use (macOS) — goes in as its own block rather than being
     # merged into tool_guidance because the content is multi-paragraph.
     if "computer_use" in agent.valid_tool_names:
-        from agent.prompt_builder import COMPUTER_USE_GUIDANCE
-        stable_parts.append(COMPUTER_USE_GUIDANCE)
+        stable_parts.append(get_prompt_translation("COMPUTER_USE_GUIDANCE"))
 
     nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
     if nous_subscription_prompt:
@@ -168,19 +168,19 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             model_lower = (agent.model or "").lower()
             _inject = any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
         if _inject:
-            stable_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
+            stable_parts.append(get_prompt_translation("TOOL_USE_ENFORCEMENT_GUIDANCE"))
             _model_lower = (agent.model or "").lower()
             # Google model operational guidance (conciseness, absolute
             # paths, parallel tool calls, verify-before-edit, etc.)
             if "gemini" in _model_lower or "gemma" in _model_lower:
-                stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+                stable_parts.append(get_prompt_translation("GOOGLE_MODEL_OPERATIONAL_GUIDANCE"))
             # OpenAI GPT/Codex execution discipline (tool persistence,
             # prerequisite checks, verification, anti-hallucination).
             # Also applied to xAI Grok — same failure modes (claims completion
             # without tool calls, suggests workarounds instead of using
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
-                stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                stable_parts.append(get_prompt_translation("OPENAI_MODEL_EXECUTION_GUIDANCE"))
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
