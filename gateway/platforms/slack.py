@@ -908,7 +908,10 @@ class SlackAdapter(BasePlatformAdapter):
             from hermes_cli.commands import slack_native_slashes
             import re as _re
 
+            _slash_prefix = os.getenv("SLACK_SLASH_PREFIX", "").rstrip("-")
             _slash_names = [name for name, _d, _h in slack_native_slashes()]
+            if _slash_prefix:
+                _slash_names = [_slash_prefix + "-" + n for n in _slash_names]
             if _slash_names:
                 _slash_pattern = _re.compile(
                     r"^/(?:" + "|".join(_re.escape(n) for n in _slash_names) + r")$"
@@ -3276,6 +3279,9 @@ class SlackAdapter(BasePlatformAdapter):
         message).
         """
         slash_name = (command.get("command") or "").lstrip("/").strip()
+        _prefix = os.getenv("SLACK_SLASH_PREFIX", "").rstrip("-")
+        if _prefix and slash_name.startswith(_prefix + "-"):
+            slash_name = slash_name[len(_prefix) + 1:]
         text = command.get("text", "").strip()
         user_id = command.get("user_id", "")
         channel_id = command.get("channel_id", "")
