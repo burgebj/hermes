@@ -406,7 +406,7 @@ def _schedule_ws_orphan_reap(sid: str) -> None:
         return
 
     def _reap() -> None:
-        with _session_resume_lock:
+        with _sessions_lock:
             session = _sessions.get(sid)
             if not _ws_session_is_orphaned(session):
                 return
