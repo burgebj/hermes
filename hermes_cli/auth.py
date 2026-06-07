@@ -5698,6 +5698,7 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
         base_url = env_url
     else:
         base_url = pconfig.inference_base_url
+    base_url = _normalize_api_key_provider_base_url(provider_id, base_url)
 
     return {
         "configured": bool(api_key),
@@ -5889,6 +5890,7 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
         base_url = env_url.rstrip("/")
     else:
         base_url = pconfig.inference_base_url
+    base_url = _normalize_api_key_provider_base_url(provider_id, base_url)
 
     return {
         "provider": provider_id,
@@ -5896,6 +5898,21 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
         "base_url": base_url.rstrip("/"),
         "source": key_source or "default",
     }
+
+
+def _normalize_api_key_provider_base_url(provider_id: str, base_url: str) -> str:
+    """Normalize provider-owned API endpoints without touching custom proxies."""
+    candidate = (base_url or "").strip().rstrip("/")
+    if provider_id != "deepseek":
+        return candidate
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return candidate
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme.lower() == "http" and host == "api.deepseek.com":
+        return parsed._replace(scheme="https").geturl().rstrip("/")
+    return candidate
 
 
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
