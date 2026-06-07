@@ -18,17 +18,19 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.helpers import MessageDeduplicator
+from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     SendResult,
 )
+from gateway.session import build_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,10 @@ class MattermostAdapter(BasePlatformAdapter):
 
         # Dedup cache (prevent reprocessing)
         self._dedup = MessageDeduplicator()
+
+        # Disk-persisted set of thread root_ids where bot has participated.
+        # Survives gateway restarts; allows thread replies without @mention.
+        self._bot_threads = ThreadParticipationTracker("mattermost")
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -249,23 +255,6 @@ class MattermostAdapter(BasePlatformAdapter):
 
         logger.info("Mattermost: disconnected")
 
-
-    async def _resolve_root_id(self, post_id: str) -> str:
-        """Resolve a post_id to the thread root_id for Mattermost.
-
-        Mattermost requires root_id to be the *root* post of a thread.
-        If the post is a reply (has its own root_id), we must use that
-        root_id instead.  Using a reply's own ID as root_id causes
-        "Invalid RootId parameter" errors.
-        """
-        if not post_id:
-            return post_id
-        # Check if this post has a root_id (meaning it's a reply)
-        data = await self._api_get(f"posts/{post_id}")
-        if data and data.get("root_id"):
-            return data["root_id"]
-        return post_id
-
     async def send(
         self,
         chat_id: str,
@@ -277,6 +266,18 @@ class MattermostAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=True)
 
+        # Determine effective root_id for threading:
+        # 1. metadata["thread_id"] for existing threads
+        # 2. metadata["reply_to_message_id"] for replying to a specific message
+        # 3. reply_to parameter (event.message_id) for channel replies
+        effective_root_id = None
+        if metadata and metadata.get("thread_id"):
+            effective_root_id = metadata["thread_id"]
+        elif metadata and metadata.get("reply_to_message_id"):
+            effective_root_id = metadata["reply_to_message_id"]
+        elif reply_to:
+            effective_root_id = reply_to
+
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
 
@@ -286,17 +287,21 @@ class MattermostAdapter(BasePlatformAdapter):
                 "channel_id": chat_id,
                 "message": chunk,
             }
-            # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                # Ensure root_id points to the thread root, not a reply.
-                # Mattermost rejects non-root post IDs as root_id.
-                resolved_root = await self._resolve_root_id(reply_to)
-                payload["root_id"] = resolved_root
+            # Thread support: set root_id to nest replies.
+            if effective_root_id and self._reply_mode == "thread":
+                payload["root_id"] = effective_root_id
 
             data = await self._api_post("posts", payload)
             if not data or "id" not in data:
                 return SendResult(success=False, error="Failed to create post")
             last_id = data["id"]
+
+        # Track bot-created threads (disk-persisted) so future replies
+        # in those threads are allowed without requiring @mention.
+        if effective_root_id and effective_root_id not in self._bot_threads:
+            is_new_thread = not (metadata and metadata.get("thread_id"))
+            if is_new_thread:
+                self._bot_threads.mark(effective_root_id)
 
         return SendResult(success=True, message_id=last_id)
 
@@ -346,7 +351,7 @@ class MattermostAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Download an image and upload it as a file attachment."""
         return await self._send_url_as_file(
-            chat_id, image_url, caption, reply_to, "image"
+            chat_id, image_url, caption, reply_to, "image", metadata=metadata
         )
 
     async def send_image_file(
@@ -359,7 +364,7 @@ class MattermostAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Upload a local image file."""
         return await self._send_local_file(
-            chat_id, image_path, caption, reply_to
+            chat_id, image_path, caption, reply_to, metadata=metadata
         )
 
     async def send_document(
@@ -373,7 +378,7 @@ class MattermostAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Upload a local file as a document."""
         return await self._send_local_file(
-            chat_id, file_path, caption, reply_to, file_name
+            chat_id, file_path, caption, reply_to, file_name, metadata=metadata
         )
 
     async def send_voice(
@@ -386,7 +391,7 @@ class MattermostAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Upload an audio file."""
         return await self._send_local_file(
-            chat_id, audio_path, caption, reply_to
+            chat_id, audio_path, caption, reply_to, metadata=metadata
         )
 
     async def send_video(
@@ -399,7 +404,7 @@ class MattermostAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Upload a video file."""
         return await self._send_local_file(
-            chat_id, video_path, caption, reply_to
+            chat_id, video_path, caption, reply_to, metadata=metadata
         )
 
     def format_message(self, content: str) -> str:
@@ -423,12 +428,13 @@ class MattermostAdapter(BasePlatformAdapter):
         caption: Optional[str],
         reply_to: Optional[str],
         kind: str = "file",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Download a URL and upload it as a file attachment."""
         from tools.url_safety import is_safe_url
         if not is_safe_url(url):
             logger.warning("Mattermost: blocked unsafe URL (SSRF protection)")
-            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata)
 
         import aiohttp
 
@@ -446,7 +452,7 @@ class MattermostAdapter(BasePlatformAdapter):
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                     if resp.status >= 400:
-                        return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+                        return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata)
                     file_data = await resp.read()
                     ct = resp.content_type or "application/octet-stream"
                     break
@@ -455,23 +461,32 @@ class MattermostAdapter(BasePlatformAdapter):
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
                 logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
-                return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+                return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata)
 
         if file_data is None:
             logger.warning("Mattermost: download returned no data for %s", url)
-            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata)
 
         file_id = await self._upload_file(chat_id, file_data, fname, ct)
         if not file_id:
-            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata)
+
+        # Derive effective root_id the same way send() does.
+        effective_root_id = None
+        if metadata and metadata.get("thread_id"):
+            effective_root_id = metadata["thread_id"]
+        elif metadata and metadata.get("reply_to_message_id"):
+            effective_root_id = metadata["reply_to_message_id"]
+        elif reply_to:
+            effective_root_id = reply_to
 
         payload: Dict[str, Any] = {
             "channel_id": chat_id,
             "message": caption or "",
             "file_ids": [file_id],
         }
-        if reply_to and self._reply_mode == "thread":
-            payload["root_id"] = await self._resolve_root_id(reply_to)
+        if effective_root_id and self._reply_mode == "thread":
+            payload["root_id"] = effective_root_id
 
         data = await self._api_post("posts", payload)
         if not data or "id" not in data:
@@ -485,16 +500,16 @@ class MattermostAdapter(BasePlatformAdapter):
         caption: Optional[str],
         reply_to: Optional[str],
         file_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload a local file and attach it to a post."""
         import mimetypes
 
         p = Path(file_path)
         if not p.exists():
-            logger.warning(
-                "Mattermost: local file not found, skipping: %s", file_path
+            return await self.send(
+                chat_id, f"{caption or ''}\n(file not found: {file_path})", reply_to, metadata
             )
-            return SendResult(success=True, message_id=None)
 
         fname = file_name or p.name
         ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
@@ -504,13 +519,22 @@ class MattermostAdapter(BasePlatformAdapter):
         if not file_id:
             return SendResult(success=False, error="File upload failed")
 
+        # Derive effective root_id the same way send() does.
+        effective_root_id = None
+        if metadata and metadata.get("thread_id"):
+            effective_root_id = metadata["thread_id"]
+        elif metadata and metadata.get("reply_to_message_id"):
+            effective_root_id = metadata["reply_to_message_id"]
+        elif reply_to:
+            effective_root_id = reply_to
+
         payload: Dict[str, Any] = {
             "channel_id": chat_id,
             "message": caption or "",
             "file_ids": [file_id],
         }
-        if reply_to and self._reply_mode == "thread":
-            payload["root_id"] = await self._resolve_root_id(reply_to)
+        if effective_root_id and self._reply_mode == "thread":
+            payload["root_id"] = effective_root_id
 
         data = await self._api_post("posts", payload)
         if not data or "id" not in data:
@@ -726,15 +750,26 @@ class MattermostAdapter(BasePlatformAdapter):
         # For DMs, user_id is sufficient.  For channels, check for @mention.
         message_text = post.get("message", "")
 
-        # Mention-gating for non-DM channels.
+        # Mention-gating and thread routing for non-DM channels.
+        #
+        # Discord-parity design:
+        #   - @mention in channel  → message becomes root of a new thread session
+        #                            (thread_id = post_id, bot replies into that thread)
+        #   - Thread reply in bot thread → allowed without @mention; any user may reply
+        #   - Thread reply with @other_user (not bot) → ignored
+        #   - Free-response channels without @mention → channel session (unchanged)
+        #
         # Config (config.yaml `mattermost.*` with env-var fallback):
-        #   require_mention / MATTERMOST_REQUIRE_MENTION: Require @mention in channels (default: true)
-        #   free_response_channels / MATTERMOST_FREE_RESPONSE_CHANNELS: Channel IDs where bot responds without mention
-        #   allowed_channels / MATTERMOST_ALLOWED_CHANNELS: If set, bot ONLY responds in these channels (whitelist)
+        #   require_mention / MATTERMOST_REQUIRE_MENTION      (default: true)
+        #   free_response_channels / MATTERMOST_FREE_RESPONSE_CHANNELS
+        #   allowed_channels / MATTERMOST_ALLOWED_CHANNELS
+
+        # Extract root_id early — used in both the gating and source-building sections.
+        root_id = post.get("root_id") or None
+        has_bot_mention = False  # updated inside the non-DM block below
+
         if channel_type_raw != "D":
-            # allowed_channels check (whitelist — must pass before other gating).
-            # When set, messages from channels NOT in this list are silently
-            # ignored, even if @mentioned.  DMs are already excluded above.
+            # ── Allowed-channels whitelist ────────────────────────────────────
             allowed_raw = self.config.extra.get("allowed_channels") if self.config.extra else None
             if allowed_raw is None:
                 allowed_raw = os.getenv("MATTERMOST_ALLOWED_CHANNELS", "")
@@ -751,48 +786,118 @@ class MattermostAdapter(BasePlatformAdapter):
                 )
                 return
 
+            # ── Config: require_mention and free_response_channels ────────────
             require_mention = os.getenv(
                 "MATTERMOST_REQUIRE_MENTION", "true"
             ).lower() not in {"false", "0", "no"}
 
-            free_channels_raw = os.getenv("MATTERMOST_FREE_RESPONSE_CHANNELS", "")
-            free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
+            _free_ch_cfg = self.config.extra.get("free_response_channels") if self.config.extra else None
+            if _free_ch_cfg is not None:
+                if isinstance(_free_ch_cfg, list):
+                    free_channels = {str(c).strip() for c in _free_ch_cfg if str(c).strip()}
+                else:
+                    free_channels = {c.strip() for c in str(_free_ch_cfg).split(",") if c.strip()}
+            else:
+                free_channels_raw = os.getenv("MATTERMOST_FREE_RESPONSE_CHANNELS", "")
+                free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
             is_free_channel = channel_id in free_channels
 
             mention_patterns = [
                 f"@{self._bot_username}",
                 f"@{self._bot_user_id}",
             ]
-            has_mention = any(
+            has_bot_mention = any(
                 pattern.lower() in message_text.lower()
                 for pattern in mention_patterns
             )
 
-            if require_mention and not is_free_channel and not has_mention:
-                logger.debug(
-                    "Mattermost: skipping non-DM message without @mention (channel=%s)",
-                    channel_id,
-                )
-                return
+            if root_id:
+                # ── Thread reply ──────────────────────────────────────────────
+                is_bot_thread = root_id in self._bot_threads
 
-            # Strip @mention from the message text so the agent sees clean input.
-            if has_mention:
+                # API fallback: on gateway restart _bot_threads may be empty;
+                # verify by checking whether the root post was authored by the bot.
+                if not is_bot_thread:
+                    root_post = await self._api_get(f"posts/{root_id}")
+                    if root_post.get("user_id") == self._bot_user_id:
+                        is_bot_thread = True
+                        self._bot_threads.mark(root_id)
+
+                if is_bot_thread:
+                    # Requirement: if the reply @mentions another user (not the
+                    # bot, not Mattermost system keywords) the bot stays silent —
+                    # the message is directed at a human participant.
+                    text_no_bot = message_text
+                    for _p in mention_patterns:
+                        text_no_bot = re.sub(re.escape(_p), "", text_no_bot, flags=re.IGNORECASE)
+                    _SYSTEM_MENTIONS = {"@channel", "@all", "@here"}
+                    other_mentions = [
+                        m for m in re.findall(r"@\w+", text_no_bot)
+                        if m.lower() not in _SYSTEM_MENTIONS
+                    ]
+                    if other_mentions and not has_bot_mention:
+                        logger.debug(
+                            "Mattermost: ignoring thread message directed at other user(s): %s",
+                            other_mentions,
+                        )
+                        return
+                    # Bot thread: no @mention required — fall through.
+                else:
+                    # Non-bot thread: apply normal mention / free-channel rules.
+                    if require_mention and not is_free_channel and not has_bot_mention:
+                        logger.debug(
+                            "Mattermost: skipping non-bot thread reply without @mention (channel=%s)",
+                            channel_id,
+                        )
+                        return
+            else:
+                # ── Channel message (no root_id) ──────────────────────────────
+                if require_mention and not is_free_channel and not has_bot_mention:
+                    logger.debug(
+                        "Mattermost: skipping channel message without @mention (channel=%s)",
+                        channel_id,
+                    )
+                    return
+
+            # Strip bot @mention so agent receives clean text.
+            if has_bot_mention:
                 for pattern in mention_patterns:
                     message_text = re.sub(
                         re.escape(pattern), "", message_text, flags=re.IGNORECASE
                     ).strip()
 
-        # Resolve sender info.
+        # ── Resolve sender and determine thread_id / chat_type ────────────────
         sender_id = post.get("user_id", "")
         sender_name = data.get("sender_name", "").lstrip("@") or sender_id
 
-        # Thread support: if the post is in a thread, use root_id.
-        thread_id = post.get("root_id") or None
+        if channel_type_raw != "D":
+            if root_id:
+                # Ongoing thread reply → use existing thread session.
+                thread_id = root_id
+                chat_type = "thread"
+            elif has_bot_mention:
+                # New @mention in channel → this post becomes the thread root.
+                # Both this message and all subsequent thread replies share a
+                # single session keyed by post_id (Discord auto-thread parity).
+                thread_id = post_id
+                chat_type = "thread"
+                self._bot_threads.mark(post_id)
+            else:
+                # Free-channel message without @mention → channel session.
+                thread_id = None
+                # chat_type already set from _CHANNEL_TYPE_MAP
+        else:
+            thread_id = None  # DMs do not use thread sessions
 
         # Determine message type.
+        # Mattermost intercepts /-prefixed messages client-side as slash
+        # commands — they never reach the bot via WebSocket.  Use a
+        # backslash prefix (\command) instead so users can explicitly
+        # invoke gateway commands without them being intercepted.
         file_ids = post.get("file_ids") or []
         msg_type = MessageType.TEXT
-        if message_text.startswith("/"):
+        if message_text.startswith("\\"):
+            message_text = "/" + message_text[1:]
             msg_type = MessageType.COMMAND
 
         # Download file attachments immediately (URLs require auth headers
@@ -867,6 +972,21 @@ class MattermostAdapter(BasePlatformAdapter):
             media_types=media_types if media_types else None,
             channel_prompt=_channel_prompt,
         )
+
+        # Send instant "thinking..." acknowledgment before processing.
+        # This gives the user immediate feedback that their message was received
+        # while the agent processes the request in the background.
+        if msg_type != MessageType.COMMAND:
+            _think_root_id = (
+                thread_id
+                if self._reply_mode == "thread"
+                else (root_id or None)
+            )
+            await self._api_post("posts", {
+                "channel_id": channel_id,
+                "message": "thinking...",
+                **({"root_id": _think_root_id} if _think_root_id else {}),
+            })
 
         await self.handle_message(msg_event)
 

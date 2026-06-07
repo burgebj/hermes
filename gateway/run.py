@@ -16606,6 +16606,16 @@ class GatewayRunner:
         running_agent = self._running_agents.get(session_key)
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             running_agent.interrupt(interrupt_reason)
+        # Cancel any pending clarify entries for this session so blocked
+        # agent threads don't stay alive through the 10-minute timeout.
+        # clear_session() sets entry.event.set() which unblocks
+        # wait_for_response() — the thread unwinds promptly instead of
+        # waiting for the full 10-minute timeout.
+        try:
+            from tools.clarify_gateway import clear_session as _clear_clarify_session
+            _clear_clarify_session(session_key)
+        except Exception:
+            pass
         self._invalidate_session_run_generation(session_key, reason=invalidation_reason)
         adapter = self.adapters.get(source.platform)
         if adapter and hasattr(adapter, "interrupt_session_activity"):
@@ -17396,7 +17406,7 @@ class GatewayRunner:
         # - Feishu only honors reply_in_thread when sending a reply, so topic
         #   progress uses the triggering event message as the reply target
         # - Other platforms should use explicit source.thread_id only
-        if source.platform == Platform.SLACK:
+        if source.platform in (Platform.SLACK, Platform.MATTERMOST):
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id

@@ -175,8 +175,7 @@ def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
             entry = _entries.get(cid)
             if entry is None:
                 continue
-            if entry.awaiting_text:
-                return entry
+            return entry
         return None
 
 
