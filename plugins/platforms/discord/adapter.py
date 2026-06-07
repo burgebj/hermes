@@ -2500,7 +2500,10 @@ class DiscordAdapter(BasePlatformAdapter):
             m_roles = getattr(m, "roles", None) or []
             return any(getattr(r, "id", None) in allowed_roles for r in m_roles)
 
-        # Guild path: role check is scoped to THIS guild only.
+        # Guild path: if dm_role_auth_guild is configured, the role allowlist
+        # only applies to DMs — guild messages are not role-gated.
+        if _read_dm_role_auth_guild() is not None:
+            return True
         # 1) Prefer the direct Member object passed in (correct guild by construction).
         direct_roles = getattr(author, "roles", None) if author is not None else None
         author_guild = getattr(author, "guild", None)
@@ -2599,6 +2602,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 ignored = {c.strip() for c in ignored_raw.split(",") if c.strip()}
                 if "*" in ignored or (channel_ids & ignored):
                     return (False, "channel in DISCORD_IGNORED_CHANNELS")
+
+        # ── Slash-specific user allowlist ──
+        # Separate from on_message allowlist: restricts slash commands without
+        # affecting who can @mention the bot. If unset, falls through to the
+        # regular user/role allowlist below.
+        slash_users_raw = os.getenv("DISCORD_ALLOWED_SLASH_USERS", "")
+        if slash_users_raw:
+            slash_users = {s.strip() for s in slash_users_raw.split(",") if s.strip()}
+            user = getattr(interaction, "user", None)
+            if user is None or str(getattr(user, "id", "")) not in slash_users:
+                return (False, "user not in DISCORD_ALLOWED_SLASH_USERS")
 
         # ── User / role allowlist (mirrors on_message line 681) ──
         user = getattr(interaction, "user", None)
