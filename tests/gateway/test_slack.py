@@ -1194,6 +1194,83 @@ class TestBangPrefixCommands:
         assert msg_event.text.startswith("/queue")
         assert msg_event.message_type == MessageType.COMMAND
 
+    @pytest.mark.asyncio
+    async def test_mention_prefixed_bang_is_rewritten(self, adapter):
+        """``@bot !new`` (mention prefix) still rewrites to ``/new``.
+
+        The earlier check at message ingress fires only when "!" is the
+        *first* character. With a leading bot mention, the rewrite has to
+        run again after mention-stripping or the command silently becomes
+        plain text.
+        """
+        evt = self._make_event(
+            "<@U_BOT> !new",
+            thread_ts="1111111111.000001",
+            channel_type="channel",
+            channel="C123",
+        )
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text.startswith("/new")
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_mention_prefixed_bang_no_space(self, adapter):
+        """``@bot!new`` (no space between mention and bang) also rewrites."""
+        evt = self._make_event(
+            "<@U_BOT>!new",
+            thread_ts="1111111111.000001",
+            channel_type="channel",
+            channel="C123",
+        )
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text.startswith("/new")
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_mention_prefixed_bang_unknown_token_unchanged(self, adapter):
+        """``@bot !nice work`` is a casual message — must NOT be rewritten."""
+        evt = self._make_event(
+            "<@U_BOT> !nice work",
+            channel_type="channel",
+            channel="C123",
+        )
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert not msg_event.text.startswith("/")
+        assert msg_event.message_type != MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_thread_command_skips_context_prefix(self, adapter):
+        """``@bot !new`` in a fresh thread must NOT have thread-context
+        prepended to ``text`` — that would break ``is_command()`` which
+        requires ``text`` to start with "/".
+        """
+        # Force the "no active session" branch and make context-fetch
+        # blow up if it's reached — the test fails if the gate is missing.
+        adapter._has_active_session_for_thread = MagicMock(return_value=False)
+        adapter._fetch_thread_context = AsyncMock(
+            side_effect=AssertionError(
+                "_fetch_thread_context must not be called for slash commands"
+            )
+        )
+
+        evt = self._make_event(
+            "<@U_BOT> !new",
+            thread_ts="1111111111.000001",
+            channel_type="channel",
+            channel="C123",
+        )
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text.startswith("/new")
+        assert msg_event.message_type == MessageType.COMMAND
+
 
 # ---------------------------------------------------------------------------
 # TestIncomingDocumentHandling

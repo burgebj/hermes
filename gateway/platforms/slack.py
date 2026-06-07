@@ -2343,6 +2343,22 @@ class SlackAdapter(BasePlatformAdapter):
         if is_mentioned:
             # Strip the bot mention from the text
             text = text.replace(f"<@{bot_uid}>", "").strip()
+            # If the stripped text now starts with "!cmd" and "cmd" is a
+            # known gateway command, mirror the !→/ rewrite (the earlier
+            # check at line ~1825 only fires when "!" is the *first*
+            # character, so "@bot !new" / "@bot !reset" fell through to
+            # plain-text dispatch). Update original_text too so the
+            # COMMAND msg_type tag below fires.
+            if text.startswith("!"):
+                try:
+                    from hermes_cli.commands import is_gateway_known_command
+                    _first_token = text[1:].split(maxsplit=1)[0]
+                    _cmd_name = _first_token.split("@", 1)[0].lower()
+                    if _cmd_name and "/" not in _cmd_name and is_gateway_known_command(_cmd_name):
+                        text = "/" + text[1:]
+                        original_text = text
+                except Exception:  # pragma: no cover - defensive
+                    pass
             # Register this thread so all future messages auto-trigger the bot.
             # Skipped in strict mode: strict_mention=true bots must be
             # re-mentioned every turn, so remembering the thread would
@@ -2358,10 +2374,18 @@ class SlackAdapter(BasePlatformAdapter):
 
         # When entering a thread for the first time (no existing session),
         # fetch thread context so the agent understands the conversation.
-        if is_thread_reply and not self._has_active_session_for_thread(
-            channel_id=channel_id,
-            thread_ts=event_thread_ts,
-            user_id=user_id,
+        # Skip for slash commands: ``is_command()`` requires ``text`` to
+        # start with "/", but prepending a context block would break that
+        # check and the command would silently fall through to plain-text
+        # dispatch. Commands don't need conversational context anyway.
+        if (
+            is_thread_reply
+            and not text.startswith("/")
+            and not self._has_active_session_for_thread(
+                channel_id=channel_id,
+                thread_ts=event_thread_ts,
+                user_id=user_id,
+            )
         ):
             thread_context = await self._fetch_thread_context(
                 channel_id=channel_id,
