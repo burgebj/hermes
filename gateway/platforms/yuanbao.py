@@ -4444,10 +4444,8 @@ class MessageSender:
             return content
 
         divider = "\n-------------\n\n"
-        footer_prefix = '\n\nTo stop or manage this job, send me a new message (e.g. "stop reminder '
         divider_pos = content.find(divider)
-        footer_pos = content.rfind(footer_prefix)
-        if divider_pos < 0 or footer_pos < 0 or footer_pos <= divider_pos:
+        if divider_pos < 0:
             return content
 
         header = content[:divider_pos]
@@ -4455,7 +4453,16 @@ class MessageSender:
             return content
 
         body_start = divider_pos + len(divider)
-        body = content[body_start:footer_pos].strip()
+        body = content[body_start:].strip()
+
+        # Strip trailing footer text — match either the recurring footer
+        # or the one-shot footer.  Used to match by hardcoded prefix;
+        # now strips any text after the last newline pair (the footer is
+        # always the last block separated by \n\n).
+        last_double_newline = body.rfind("\n\n")
+        if last_double_newline > 0:
+            body = body[:last_double_newline].strip()
+
         return body or content
 
     # -- Cleanup on disconnect ---------------------------------------------
