@@ -203,19 +203,120 @@ export function appendAssistantTextPart(parts: ChatMessagePart[], delta: string)
   return next
 }
 
-export function appendReasoningPart(parts: ChatMessagePart[], delta: string): ChatMessagePart[] {
-  const next = [...parts]
-  const last = next.at(-1)
+function mergeAdjacentTextParts(parts: ChatMessagePart[]): ChatMessagePart[] {
+  const next: ChatMessagePart[] = []
 
-  if (last?.type === 'reasoning') {
-    next[next.length - 1] = { ...last, text: `${last.text}${delta}` }
+  for (const part of parts) {
+    const prev = next.at(-1)
 
-    return next
+    if (prev?.type === 'text' && part.type === 'text') {
+      next[next.length - 1] = { ...prev, text: `${prev.text}${part.text}` }
+
+      continue
+    }
+
+    next.push(part)
   }
 
-  next.push(reasoningPart(delta))
-
   return next
+}
+
+function nonReasoningIndexForOriginalIndex(parts: ChatMessagePart[], originalIndex: number): number {
+  return parts.slice(0, originalIndex).filter(part => part.type !== 'reasoning').length
+}
+
+function firstTextInsertIndex(parts: ChatMessagePart[]): number {
+  const index = parts.findIndex(part => part.type === 'text')
+
+  return index === -1 ? 0 : index
+}
+
+export function normalizeAssistantParts(parts: ChatMessagePart[]): ChatMessagePart[] {
+  const reasoningTexts: string[] = []
+  let firstReasoningIndex = -1
+
+  parts.forEach((part, index) => {
+    if (part.type !== 'reasoning') {
+      return
+    }
+
+    if (!part.text.trim()) {
+      return
+    }
+
+    firstReasoningIndex = firstReasoningIndex === -1 ? index : firstReasoningIndex
+    reasoningTexts.push(part.text)
+  })
+
+  const withoutReasoning = parts.filter(part => part.type !== 'reasoning')
+  const merged = mergeAdjacentTextParts(withoutReasoning)
+  const reasoningText = reasoningTexts.join('').trim()
+
+  if (!reasoningText) {
+    return merged
+  }
+
+  const insertIndex =
+    firstReasoningIndex === -1
+      ? firstTextInsertIndex(merged)
+      : Math.min(nonReasoningIndexForOriginalIndex(parts, firstReasoningIndex), merged.length)
+  const next = [...merged]
+  next.splice(insertIndex, 0, reasoningPart(reasoningText))
+
+  return mergeAdjacentTextParts(next)
+}
+
+export function replaceReasoningPart(parts: ChatMessagePart[], text: string): ChatMessagePart[] {
+  const withoutReasoning = mergeAdjacentTextParts(parts.filter(part => part.type !== 'reasoning'))
+  const trimmed = text.trim()
+
+  if (!trimmed) {
+    return withoutReasoning
+  }
+
+  const firstReasoningIndex = parts.findIndex(part => part.type === 'reasoning')
+  const insertIndex =
+    firstReasoningIndex === -1
+      ? firstTextInsertIndex(withoutReasoning)
+      : Math.min(nonReasoningIndexForOriginalIndex(parts, firstReasoningIndex), withoutReasoning.length)
+  const next = [...withoutReasoning]
+  next.splice(insertIndex, 0, reasoningPart(trimmed))
+
+  return mergeAdjacentTextParts(next)
+}
+
+export function appendReasoningPart(parts: ChatMessagePart[], delta: string): ChatMessagePart[] {
+  const next = [...parts]
+  const text = delta.trim()
+
+  if (!text) {
+    return normalizeAssistantParts(next)
+  }
+
+  // Coalesce into the existing reasoning part wherever it lives in the array,
+  // not just when it is the trailing part. Some proxies (e.g. Kiro/9router in
+  // front of Claude) interleave reasoning and content deltas within a single
+  // turn. If we only merged with the *last* part, an interleaved reasoning
+  // delta arriving after assistant text began would push a brand-new reasoning
+  // part between two text fragments, splitting a sentence and shoving the
+  // Thinking box mid-answer. Merging into the first reasoning part keeps
+  // reasoning as one stable block and lets text fragments stay contiguous.
+  const idx = next.findIndex(part => part.type === 'reasoning')
+
+  if (idx !== -1) {
+    const existing = next[idx]
+
+    if (existing.type === 'reasoning') {
+      next[idx] = { ...existing, text: `${existing.text}${delta}` }
+    }
+
+    return normalizeAssistantParts(next)
+  }
+
+  const insertIndex = firstTextInsertIndex(next)
+  next.splice(insertIndex, 0, reasoningPart(delta))
+
+  return normalizeAssistantParts(next)
 }
 
 export function hasToolPart(message: ChatMessage): boolean {
@@ -804,8 +905,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
   })
   flushPendingTools(messages.length)
 
+  const normalized = result.map(message =>
+    message.role === 'assistant' ? { ...message, parts: normalizeAssistantParts(message.parts) } : message
+  )
+
   return withUniqueToolCallIds(
-    result.filter(m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text'))
+    normalized.filter(m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text'))
   )
 }
 

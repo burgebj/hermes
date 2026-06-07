@@ -9,6 +9,7 @@ import {
   type ChatMessagePart,
   chatMessageText,
   type GatewayEventPayload,
+  replaceReasoningPart,
   reasoningPart,
   renderMediaTags,
   upsertToolPart
@@ -274,19 +275,19 @@ export function useMessageStream({
 
         queue.delete(id)
 
-        if (queued.assistant) {
-          mutateStream(
-            id,
-            parts => appendAssistantTextPart(parts, queued.assistant),
-            () => [assistantTextPart(queued.assistant)]
-          )
-        }
-
         if (queued.reasoning) {
           mutateStream(
             id,
             parts => appendReasoningPart(parts, queued.reasoning),
             () => [reasoningPart(queued.reasoning)]
+          )
+        }
+
+        if (queued.assistant) {
+          mutateStream(
+            id,
+            parts => appendAssistantTextPart(parts, queued.assistant),
+            () => [assistantTextPart(queued.assistant)]
           )
         }
       }
@@ -391,11 +392,7 @@ export function useMessageStream({
             return parts
           }
 
-          if (replace) {
-            return [...parts.filter(part => part.type !== 'reasoning'), reasoningPart(delta)]
-          }
-
-          return appendReasoningPart(parts, delta)
+          return replace ? replaceReasoningPart(parts, delta) : appendReasoningPart(parts, delta)
         },
         () => [reasoningPart(delta)]
       )

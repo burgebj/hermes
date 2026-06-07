@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChatMessage, ChatMessagePart } from './chat-messages'
 import {
   appendAssistantTextPart,
+  appendReasoningPart,
   chatMessageText,
   preserveLocalAssistantErrors,
   renderMediaTags,
@@ -66,6 +67,41 @@ describe('toChatMessages', () => {
     expect(assistantMessages[0].parts.filter(part => part.type === 'tool-call')).toHaveLength(2)
     expect(chatMessageText(assistantMessages[0])).toContain("Let me also check if there's a top-level lint workflow.")
     expect(chatMessageText(assistantMessages[0])).toContain('Now let me check git status and commit.')
+  })
+
+  it('coalesces interleaved reasoning into one thinking block without splitting text', () => {
+    const messages = toChatMessages([
+      { role: 'assistant', content: 'De toi xem tinh hinh git truoc da.', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: '',
+        reasoning_content: 'Looking at the branch divergence.',
+        timestamp: 2,
+        tool_calls: [{ id: 'tc-1', function: { name: 'terminal', arguments: '{"command":"git status"}' } }]
+      },
+      { role: 'assistant', content: 'x', timestamp: 3 },
+      {
+        role: 'assistant',
+        content: '',
+        reasoning_content: 'The local commit is related.',
+        timestamp: 4
+      },
+      { role: 'assistant', content: 'em repo.', timestamp: 5 }
+    ])
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0].parts.map(part => part.type)).toEqual(['text', 'reasoning', 'tool-call', 'text'])
+    expect(messages[0].parts.filter(part => part.type === 'reasoning')).toHaveLength(1)
+    expect(chatMessageText(messages[0])).toBe('De toi xem tinh hinh git truoc da.xem repo.')
+  })
+
+  it('inserts late reasoning before existing text so following text deltas stay contiguous', () => {
+    const parts = appendAssistantTextPart([], 'x')
+    const withReasoning = appendReasoningPart(parts, 'thinking')
+    const withText = appendAssistantTextPart(withReasoning, 'em')
+
+    expect(withText.map(part => part.type)).toEqual(['reasoning', 'text'])
+    expect(chatMessageText({ id: 'a', role: 'assistant', parts: withText })).toBe('xem')
   })
 
   it('hides attached context payloads from user message display', () => {
