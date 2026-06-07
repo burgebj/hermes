@@ -151,6 +151,21 @@ class TestHostHeaderMiddleware:
 class TestWebSocketHostOriginGuard:
     """WebSocket upgrades must enforce the same dashboard boundary as HTTP."""
 
+    def test_non_loopback_bind_allows_non_loopback_peer(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        class _Client:
+            host = "100.91.63.10"
+
+        class _Socket:
+            client = _Client()
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "100.91.63.99", raising=False)
+        monkeypatch.setattr(ws.app.state, "auth_required", False, raising=False)
+
+        assert ws._ws_client_is_allowed(_Socket())
+        assert ws._ws_client_reason(_Socket()) is None
+
     def test_rebinding_websocket_host_is_rejected(self, monkeypatch):
         from fastapi.testclient import TestClient
         from starlette.websockets import WebSocketDisconnect
