@@ -129,6 +129,11 @@ class TodoStore:
         Ensures required fields exist and status is valid.
         Returns a clean dict with only {id, content, status}.
         """
+        if not isinstance(item, dict):
+            # Defensive: a non-dict item slipped through (LLM schema violation).
+            # Coerce to a minimal placeholder instead of crashing on .get().
+            return {"id": "?", "content": str(item)[:200], "status": "pending"}
+
         item_id = str(item.get("id", "")).strip()
         if not item_id:
             item_id = "?"
@@ -148,6 +153,11 @@ class TodoStore:
         """Collapse duplicate ids, keeping the last occurrence in its position."""
         last_index: Dict[str, int] = {}
         for i, item in enumerate(todos):
+            if not isinstance(item, dict):
+                # Defensive: skip .get() on non-dict; keep the slot via a
+                # synthetic key so _validate() can still coerce it downstream.
+                last_index[f"__nondict_{i}"] = i
+                continue
             item_id = str(item.get("id", "")).strip() or "?"
             last_index[item_id] = i
         return [todos[i] for i in sorted(last_index.values())]
@@ -169,8 +179,29 @@ def todo_tool(
     Returns:
         JSON string with the full current list and summary metadata.
     """
+    from tools.registry import tool_error as _tool_error
+
     if store is None:
-        return tool_error("TodoStore not initialized")
+        return _tool_error("TodoStore not initialized")
+
+    # --- Defensive type coercion for LLM schema violations ---
+    # LLMs occasionally emit `todos` as a JSON-encoded string instead of the
+    # declared array (e.g. after a prior tool_call failure triggers an
+    # over-defensive self-correction that wraps the list in json.dumps).
+    # Parse if it's a string; reject non-list types with a clear error
+    # instead of crashing downstream in _dedupe_by_id / _validate.
+    if isinstance(todos, str):
+        try:
+            todos = json.loads(todos)
+        except (json.JSONDecodeError, ValueError):
+            return _tool_error(
+                "todos must be an array; got a non-JSON string. "
+                "Pass todos as a native JSON array, not a stringified one."
+            )
+    if todos is not None and not isinstance(todos, list):
+        return _tool_error(
+            f"todos must be an array; got {type(todos).__name__}"
+        )
 
     if todos is not None:
         items = store.write(todos, merge)
