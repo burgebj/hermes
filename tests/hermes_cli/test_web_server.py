@@ -3061,6 +3061,23 @@ class TestStatusRemoteGateway:
         assert data["gateway_state"] == "running"
         assert data["gateway_health_url"] == "http://gw:8642"
 
+    def test_status_treats_pid_probe_error_as_not_running(self, monkeypatch):
+        """Unexpected local PID probe errors should not make /api/status fail."""
+        import hermes_cli.web_server as ws
+
+        def fail_pid_probe():
+            raise SystemError("OSError returned a result with an exception set")
+
+        monkeypatch.setattr(ws, "get_running_pid", fail_pid_probe)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", None)
+
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gateway_running"] is False
+        assert data["gateway_pid"] is None
+
     def test_status_remote_probe_not_attempted_when_local_pid_found(self, monkeypatch):
         """When local PID check succeeds, the remote probe is never called."""
         import hermes_cli.web_server as ws
