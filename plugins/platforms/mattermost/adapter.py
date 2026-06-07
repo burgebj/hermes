@@ -596,6 +596,17 @@ class MattermostAdapter(BasePlatformAdapter):
                     "message": "\n".join(caption_parts),
                     "file_ids": file_ids,
                 }
+                # Thread support: propagate thread_id from metadata
+                # (set by the Gateway runner's _thread_meta) so batch
+                # images appear in the correct Thread.
+                if (
+                    metadata
+                    and metadata.get("thread_id")
+                    and self._reply_mode == "thread"
+                ):
+                    payload["root_id"] = await self._resolve_root_id(
+                        metadata["thread_id"]
+                    )
                 logger.info(
                     "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
                     len(file_ids), chunk_idx + 1, len(chunks),
