@@ -1361,7 +1361,10 @@ class SessionDB:
             cursor = self._conn.execute(
                 "SELECT * FROM sessions WHERE id = ?", (session_id,)
             )
-            row = cursor.fetchone()
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
         return dict(row) if row else None
 
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
@@ -1386,7 +1389,10 @@ class SessionDB:
                 "SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\\' ORDER BY started_at DESC LIMIT 2",
                 (f"{escaped}%",),
             )
-            matches = [row["id"] for row in cursor.fetchall()]
+            try:
+                matches = [row["id"] for row in cursor.fetchall()]
+            finally:
+                cursor.close()
         if len(matches) == 1:
             return matches[0]
         return None
@@ -1473,7 +1479,10 @@ class SessionDB:
             cursor = self._conn.execute(
                 "SELECT title FROM sessions WHERE id = ?", (session_id,)
             )
-            row = cursor.fetchone()
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
         return row["title"] if row else None
 
     def set_session_archived(self, session_id: str, archived: bool) -> bool:
@@ -1498,7 +1507,10 @@ class SessionDB:
             cursor = self._conn.execute(
                 "SELECT * FROM sessions WHERE title = ?", (title,)
             )
-            row = cursor.fetchone()
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
         return dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
@@ -1794,7 +1806,10 @@ class SessionDB:
             params.extend([limit, offset])
         with self._lock:
             cursor = self._conn.execute(query, params)
-            rows = cursor.fetchall()
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
         sessions = []
         for row in rows:
             s = dict(row)
@@ -2129,7 +2144,10 @@ class SessionDB:
                 f"{active_clause} ORDER BY id",
                 (session_id,),
             )
-            rows = cursor.fetchall()
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
         result = []
         for row in rows:
             msg = dict(row)
@@ -2173,27 +2191,39 @@ class SessionDB:
             window = 0
         with self._lock:
             # Confirm the anchor exists in this session.
-            anchor_exists = self._conn.execute(
+            anchor_cur = self._conn.execute(
                 "SELECT 1 FROM messages WHERE id = ? AND session_id = ? LIMIT 1",
                 (around_message_id, session_id),
-            ).fetchone()
+            )
+            try:
+                anchor_exists = anchor_cur.fetchone()
+            finally:
+                anchor_cur.close()
             if not anchor_exists:
                 return {"window": [], "messages_before": 0, "messages_after": 0}
 
             # Two queries: anchor + before (DESC, take window+1), and after
             # (ASC, take window). Final order is id ASC.
-            before_rows = self._conn.execute(
+            before_cur = self._conn.execute(
                 "SELECT * FROM messages "
                 "WHERE session_id = ? AND id <= ? "
                 "ORDER BY id DESC LIMIT ?",
                 (session_id, around_message_id, window + 1),
-            ).fetchall()
-            after_rows = self._conn.execute(
+            )
+            try:
+                before_rows = before_cur.fetchall()
+            finally:
+                before_cur.close()
+            after_cur = self._conn.execute(
                 "SELECT * FROM messages "
                 "WHERE session_id = ? AND id > ? "
                 "ORDER BY id ASC LIMIT ?",
                 (session_id, around_message_id, window),
-            ).fetchall()
+            )
+            try:
+                after_rows = after_cur.fetchall()
+            finally:
+                after_cur.close()
 
         # before_rows is DESC; reverse so it's ASC, then concatenate after_rows.
         rows = list(reversed(before_rows)) + list(after_rows)
@@ -2428,14 +2458,18 @@ class SessionDB:
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
-            rows = self._conn.execute(
+            cursor = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
                 "codex_reasoning_items, codex_message_items, platform_message_id, observed "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 f"{active_clause} ORDER BY id",
                 tuple(session_ids),
-            ).fetchall()
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
 
         messages = []
         for row in rows:
@@ -3185,7 +3219,10 @@ class SessionDB:
                     "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
-            return [dict(row) for row in cursor.fetchall()]
+            try:
+                return [dict(row) for row in cursor.fetchall()]
+            finally:
+                cursor.close()
 
     # =========================================================================
     # Utility
@@ -3237,7 +3274,10 @@ class SessionDB:
 
         with self._lock:
             cursor = self._conn.execute(f"SELECT COUNT(*) FROM sessions s{where_sql}", params)
-            return cursor.fetchone()[0]
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
 
     def message_count(self, session_id: str = None) -> int:
         """Count messages, optionally for a specific session."""
@@ -3248,7 +3288,10 @@ class SessionDB:
                 )
             else:
                 cursor = self._conn.execute("SELECT COUNT(*) FROM messages")
-            return cursor.fetchone()[0]
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
 
     # =========================================================================
     # Export and cleanup
@@ -3450,7 +3493,10 @@ class SessionDB:
                 "AND ended_at IS NOT NULL "
                 "AND archived = 0"
             )
-            return cursor.fetchone()[0]
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
 
     def delete_empty_sessions(
         self,
