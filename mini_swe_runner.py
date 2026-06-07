@@ -116,7 +116,7 @@ TERMINAL_TOOL_DEFINITION = {
 
 def create_environment(
     env_type: str = "local",
-    image: str = "python:3.11-slim",
+    image: str = "m.daocloud.io/docker.io/library/python:3.11-slim",
     cwd: str = "/tmp",
     timeout: int = 60,
     **kwargs
@@ -166,7 +166,7 @@ class MiniSWERunner:
         base_url: str = None,
         api_key: str = None,
         env_type: str = "local",
-        image: str = "python:3.11-slim",
+        image: str = "m.daocloud.io/docker.io/library/python:3.11-slim",
         cwd: str = "/tmp",
         max_iterations: int = 15,
         command_timeout: int = 60,
@@ -641,7 +641,7 @@ def main(
     base_url: str = None,
     api_key: str = None,
     env: str = "local",
-    image: str = "python:3.11-slim",
+    image: str = "m.daocloud.io/docker.io/library/python:3.11-slim",
     cwd: str = "/tmp",
     max_iterations: int = 15,
     timeout: int = 60,
