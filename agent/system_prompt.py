@@ -334,7 +334,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # session resume without a stored prompt).  The model can still query the
     # exact wall-clock time via tools when it actually needs it.
     # Credit: @iamfoz (PR #20451).
-    timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y')}"
+    from hermes_time import get_timezone_name as _get_tz_name
+    _tz_name = _get_tz_name()
+    timestamp_line = f"Session started: {now.strftime('%A, %B %d, %Y')} {_tz_name}"
     if agent.pass_session_id and agent.session_id:
         timestamp_line += f"\nSession ID: {agent.session_id}"
     if agent.model:

@@ -758,6 +758,20 @@ def run_conversation(
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
+    # ── Per-turn time context ─────────────────────────────────────
+    # Inject current time + timezone into the user message on every
+    # turn so the agent has an accurate sense of "now".  This preserves
+    # the prompt cache prefix — the system prompt stays frozen while
+    # the dynamic timestamp goes into the per-turn user message.
+    from hermes_time import now as _turn_now, get_timezone_name as _turn_tz
+    _t_now = _turn_now()
+    _t_tz = _turn_tz()
+    _time_context = "\u23f0 Current time: " + _t_now.strftime('%A, %B %d, %Y %I:%M %p') + " " + _t_tz
+    if _plugin_user_context:
+        _plugin_user_context = _time_context + "\n\n" + _plugin_user_context
+    else:
+        _plugin_user_context = _time_context
+
     # Main conversation loop
     api_call_count = 0
     final_response = None

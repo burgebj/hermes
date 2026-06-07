@@ -1085,8 +1085,8 @@ class TestBuildSystemPrompt:
 
     def test_includes_datetime(self, agent):
         prompt = agent._build_system_prompt()
-        # Should contain current date info like "Conversation started:"
-        assert "Conversation started:" in prompt
+        # Should contain current date info like "Session started:"
+        assert "Session started:" in prompt
 
     def test_datetime_is_date_only_not_minute_precision(self, agent):
         """Timestamp must be date-only (no HH:MM) so the system prompt
@@ -1096,7 +1096,7 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         # Find the line and strip it for inspection
         for line in prompt.splitlines():
-            if line.startswith("Conversation started:"):
+            if line.startswith("Session started:"):
                 # Must NOT contain AM/PM indicator (minute precision had %I:%M %p)
                 assert " AM" not in line and " PM" not in line, (
                     f"Timestamp line has time-of-day, breaks daily cache stability: {line!r}"
@@ -1108,7 +1108,16 @@ class TestBuildSystemPrompt:
                 )
                 break
         else:
-            assert False, "Expected a 'Conversation started:' line in the system prompt"
+            assert False, "Expected a 'Session started:' line in the system prompt"
+
+    def test_excludes_current_time_from_cached_prompt(self, agent):
+        """System prompt must NOT contain 'Current time:' — that belongs
+        in the per-turn user message, not the cached system prompt."""
+        prompt = agent._build_system_prompt()
+        assert "Current time:" not in prompt, (
+            "System prompt contains 'Current time:' — this breaks the prompt cache prefix. "
+            "Per-turn time must be injected into the user message, not the system prompt."
+        )
 
     def test_includes_nous_subscription_prompt(self, agent, monkeypatch):
         monkeypatch.setattr(run_agent, "build_nous_subscription_prompt", lambda tool_names: "NOUS SUBSCRIPTION BLOCK")
@@ -3350,6 +3359,23 @@ class TestHandleMaxIterations:
             "call_123"
         ]
 
+    def test_summary_injects_current_time_into_user_message(self, agent):
+        """Max-iterations summary request must include 'Current time:' in
+        the user message so the agent knows when it's wrapping up."""
+        resp = _mock_response(content="Here is a summary.")
+        agent.client.chat.completions.create.return_value = resp
+        agent._cached_system_prompt = "You are helpful."
+        messages = [{"role": "user", "content": "do stuff"}]
+        agent._handle_max_iterations(messages, 60)
+
+        # Find the user message that contains the summary request
+        summary_msgs = [m for m in messages if m.get("role") == "user" and "summarizing" in str(m.get("content", ""))]
+        assert len(summary_msgs) >= 1, "No user message contains the summary request."
+        assert "Current time:" in summary_msgs[0]["content"], (
+            "Max-iterations summary request should include current time context "
+            "so the agent knows when it's summarizing."
+        )
+
 
 class TestRunConversation:
     """Tests for the main run_conversation method.
@@ -3365,6 +3391,36 @@ class TestRunConversation:
         agent.tool_delay = 0
         agent.compression_enabled = False
         agent.save_trajectories = False
+
+    def test_turn_level_time_injected_into_user_message(self, agent):
+        """Per-turn 'Current time:' must appear in user messages, not in the
+        cached system prompt.  This verifies the two-layer timestamp design:
+        frozen 'Session started:' in system prompt, dynamic 'Current time:'
+        in user message — preserving the prompt cache prefix."""
+        self._setup_agent(agent)
+        resp = _mock_response(content="Done", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            agent.run_conversation("Hello")
+
+        # Check that the API was called with 'Current time:' in a user message
+        call_kwargs = agent.client.chat.completions.create.call_args
+        messages = call_kwargs.kwargs.get("messages") or call_kwargs[1].get("messages", [])
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        time_msgs = [m for m in user_msgs if "Current time:" in str(m.get("content", ""))]
+        assert len(time_msgs) >= 1, (
+            "No user message contains 'Current time:' — per-turn time injection failed."
+        )
+        # System prompt must NOT contain 'Current time:'
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        for sm in system_msgs:
+            assert "Current time:" not in str(sm.get("content", "")), (
+                "System prompt contains 'Current time:' — breaks prompt cache!"
+            )
 
     def test_stop_finish_reason_returns_response(self, agent):
         self._setup_agent(agent)
