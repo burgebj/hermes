@@ -1004,6 +1004,40 @@ def test_triggered_voice_message_uses_shared_session_in_observe_mode():
         assert event.source.user_id is None
         assert "[Alice Example|111]" in event.text
 
+
+# ---------------------------------------------------------------------------
+# Observe + attribution parity: command messages (#30062 follow-up)
+# ---------------------------------------------------------------------------
+
+def test_unmentioned_command_message_observed_in_group():
+    """Commands addressed to another bot must be observed, not silently dropped."""
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            allowed_chats=["-100"],
+            group_allowed_chats=["-100"],
+            observe_unmentioned_group_messages=True,
+        )
+        store = _FakeSessionStore()
+        adapter._session_store = store
+        # /start@otherbot — not addressed to hermes_bot, so _should_process_message
+        # returns False; the observe path must still fire.
+        update = SimpleNamespace(
+            update_id=4001,
+            message=_group_message(text="/start@otherbot"),
+            effective_message=None,
+        )
+
+        await adapter._handle_command(update, SimpleNamespace())
+
+        adapter._message_handler.assert_not_awaited()
+        assert len(store.messages) == 1, "command to other bot must be observed"
+        _, message, _ = store.messages[0]
+        assert message["observed"] is True
+        assert store.sources[0].user_id is None
+
+    asyncio.run(_run())
+
     asyncio.run(_run())
 
 

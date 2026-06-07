@@ -5207,6 +5207,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not msg or not msg.text:
             return
         if not self._should_process_message(msg, is_command=True):
+            if self._should_observe_unmentioned_group_message(msg):
+                self._observe_unmentioned_group_message(msg, MessageType.COMMAND, update_id=update.update_id)
             return
         await self._ensure_forum_commands(msg)
 
