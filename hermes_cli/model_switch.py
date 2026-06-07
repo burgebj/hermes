@@ -35,6 +35,7 @@ from hermes_cli.providers import (
 from hermes_cli.model_normalize import (
     normalize_model_for_provider,
 )
+from hermes_cli.config import get_env_value
 from agent.models_dev import (
     ModelCapabilities,
     ModelInfo,
@@ -917,7 +918,7 @@ def switch_model(
             if not _ukey:
                 _kenv = str(_ucfg.get("key_env", "") or "").strip()
                 if _kenv:
-                    _ukey = os.environ.get(_kenv, "").strip()
+                    _ukey = (get_env_value(_kenv) or "").strip()
             try:
                 runtime = resolve_runtime_provider(
                     requested=target_provider,
