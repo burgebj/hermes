@@ -3,11 +3,15 @@
 import json
 from unittest.mock import patch, MagicMock
 
+import pytest
 
 from agent.anthropic_adapter import (
     _read_claude_code_credentials_from_keychain,
     read_claude_code_credentials,
 )
+
+
+pytestmark = pytest.mark.allow_macos_keychain
 
 
 class TestReadClaudeCodeCredentialsFromKeychain:
