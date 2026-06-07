@@ -3990,7 +3990,23 @@ def _(rid, params: dict) -> dict:
             session = _sessions.pop(sid, None)
         if not session:
             return _ok(rid, {"closed": False})
-        _teardown_session(session)
+        # Detach from _sessions (already done above) then finalize in a
+        # background thread so that slow work — memory commit, DB write, hook
+        # execution — does not block the JSON-RPC response.  The frontend is
+        # waiting on this response before it can call session.create for the
+        # new session; any latency here makes /clear feel stuck and leaves old
+        # context visible. (#23642)
+        #
+        # _teardown_session is the shared teardown path (also used by the
+        # orphaned-WS-session reaper); it is idempotent, so running it off the
+        # response thread is safe.
+        t = threading.Thread(
+            target=_teardown_session,
+            args=(session,),
+            daemon=True,
+            name=f"session-close-{sid[:8]}",
+        )
+        t.start()
     return _ok(rid, {"closed": True})
 
 
