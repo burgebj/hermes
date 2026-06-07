@@ -486,6 +486,18 @@ def _get_inherit_mcp_toolsets() -> bool:
     return is_truthy_value(cfg.get("inherit_mcp_toolsets"), default=True)
 
 
+def _get_codex_native_orchestrators_enabled() -> bool:
+    """Whether Codex app-server may own orchestrator children natively.
+
+    Default False keeps Hermes as the reliable nested-orchestration control
+    plane while still using Codex app-server for leaf workers. Set
+    delegation.codex_native_orchestrators=true only for experimental dogfood of
+    Codex's native spawn_agent/wait_agent collaboration layer.
+    """
+    cfg = _load_config()
+    return is_truthy_value(cfg.get("codex_native_orchestrators"), default=False)
+
+
 def _is_mcp_toolset_name(name: str) -> bool:
     """Return True for canonical MCP toolsets and their registered aliases."""
     if not name:
@@ -608,6 +620,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    collaboration_backend: str = "hermes",
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -643,36 +656,63 @@ def _build_child_system_prompt(
         "parent agent as a summary."
     )
     if role == "orchestrator":
+        codex_native = str(collaboration_backend).strip().lower() == "codex-app-server"
         child_note = (
             "Your own children MUST be leaves (cannot delegate further) "
-            "because they would be at the depth floor — you cannot pass "
-            "role='orchestrator' to your own delegate_task calls."
+            "because they would be at the depth floor — do not spawn "
+            "orchestrator children from this depth."
             if child_depth + 1 >= max_spawn_depth
             else "Your own children can themselves be orchestrators or leaves, "
-            "depending on the `role` you pass to delegate_task. Default is "
-            "'leaf'; pass role='orchestrator' explicitly when a child "
+            "depending on the role/capability you assign them. Default should be "
+            "leaf; only ask for orchestrator-style behavior when a child "
             "needs to further decompose its work."
         )
-        parts.append(
-            "\n## Subagent Spawning (Orchestrator Role)\n"
-            "You have access to the `delegate_task` tool and CAN spawn "
-            "your own subagents to parallelize independent work.\n\n"
-            "WHEN to delegate:\n"
-            "- The goal decomposes into 2+ independent subtasks that can "
-            "run in parallel (e.g. research A and B simultaneously).\n"
-            "- A subtask is reasoning-heavy and would flood your context "
-            "with intermediate data.\n\n"
-            "WHEN NOT to delegate:\n"
-            "- Single-step mechanical work — do it directly.\n"
-            "- Trivial tasks you can execute in one or two tool calls.\n"
-            "- Re-delegating your entire assigned goal to one worker "
-            "(that's just pass-through with no value added).\n\n"
-            "Coordinate your workers' results and synthesize them before "
-            "reporting back to your parent. You are responsible for the "
-            "final summary, not your workers.\n\n"
-            f"NOTE: You are at depth {child_depth}. The delegation tree "
-            f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
-        )
+        if codex_native:
+            parts.append(
+                "\n## Subagent Spawning (Codex-Native Orchestrator Role)\n"
+                "You are running inside Codex's native app-server harness. "
+                "Hermes `delegate_task` is NOT available inside this child. "
+                "If you need to spawn your own subagents, use the Codex-native "
+                "collaboration tools exposed in your harness, such as "
+                "`spawn_agent`, `send_input`, `wait_agent`, and `close_agent` "
+                "when those tools are available.\n\n"
+                "WHEN to spawn workers:\n"
+                "- The goal decomposes into 2+ independent subtasks that can "
+                "run in parallel (e.g. research A and B simultaneously).\n"
+                "- A subtask is reasoning-heavy and would flood your context "
+                "with intermediate data.\n\n"
+                "WHEN NOT to spawn workers:\n"
+                "- Single-step mechanical work — do it directly.\n"
+                "- Trivial tasks you can execute in one or two tool calls.\n"
+                "- Re-spawning your entire assigned goal to one worker "
+                "(that's just pass-through with no value added).\n\n"
+                "Coordinate your workers' results and synthesize them before "
+                "reporting back to your parent. You are responsible for the "
+                "final summary, not your workers.\n\n"
+                f"NOTE: You are at depth {child_depth}. The delegation tree "
+                f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
+            )
+        else:
+            parts.append(
+                "\n## Subagent Spawning (Orchestrator Role)\n"
+                "You have access to the `delegate_task` tool and CAN spawn "
+                "your own subagents to parallelize independent work.\n\n"
+                "WHEN to delegate:\n"
+                "- The goal decomposes into 2+ independent subtasks that can "
+                "run in parallel (e.g. research A and B simultaneously).\n"
+                "- A subtask is reasoning-heavy and would flood your context "
+                "with intermediate data.\n\n"
+                "WHEN NOT to delegate:\n"
+                "- Single-step mechanical work — do it directly.\n"
+                "- Trivial tasks you can execute in one or two tool calls.\n"
+                "- Re-delegating your entire assigned goal to one worker "
+                "(that's just pass-through with no value added).\n\n"
+                "Coordinate your workers' results and synthesize them before "
+                "reporting back to your parent. You are responsible for the "
+                "final summary, not your workers.\n\n"
+                f"NOTE: You are at depth {child_depth}. The delegation tree "
+                f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
+            )
     return "\n".join(parts)
 
 
@@ -1002,14 +1042,6 @@ def _build_child_agent(
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(
-        goal,
-        context,
-        workspace_path=workspace_hint,
-        role=effective_role,
-        max_spawn_depth=max_spawn,
-        child_depth=child_depth,
-    )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -1052,10 +1084,19 @@ def _build_child_agent(
         child_thinking_cb = _child_thinking
 
     # Resolve effective credentials: config override > parent inherit
-    effective_model = model or parent_agent.model
-    effective_provider = override_provider or getattr(parent_agent, "provider", None)
-    effective_base_url = override_base_url or parent_agent.base_url
+    parent_model = getattr(parent_agent, "model", None)
+    parent_provider = getattr(parent_agent, "provider", None)
+    parent_base_url = getattr(parent_agent, "base_url", None)
+    parent_api_mode = getattr(parent_agent, "api_mode", None)
+    parent_acp_command = getattr(parent_agent, "acp_command", None)
+    parent_acp_args = list(getattr(parent_agent, "acp_args", []) or [])
+
+    effective_model = model or parent_model
+    effective_provider = override_provider or parent_provider
+    effective_base_url = override_base_url or parent_base_url
     effective_api_key = override_api_key or parent_api_key
+    effective_api_mode = override_api_mode or parent_api_mode
+    effective_acp_command = override_acp_command or parent_acp_command
     # Bug #20558 / PR #20563: api_mode must NOT be inherited when the child uses a
     # different provider than the parent — each provider has its own API surface
     # (e.g. MiniMax uses anthropic_messages, DeepSeek uses chat_completions).
@@ -1072,24 +1113,55 @@ def _build_child_agent(
         parent_agent, "acp_command", None
     )
     effective_acp_args = list(
-        override_acp_args
-        if override_acp_args is not None
-        else (getattr(parent_agent, "acp_args", []) or [])
+        override_acp_args if override_acp_args is not None else parent_acp_args
     )
+
+    requested_codex_app_server = effective_provider == "codex-app-server"
+    use_codex_app_server_child = requested_codex_app_server and (
+        effective_role != "orchestrator" or _get_codex_native_orchestrators_enabled()
+    )
+
+    if requested_codex_app_server and not use_codex_app_server_child:
+        # Keep Hermes as the nested-orchestration control plane. Codex app-server
+        # remains the configured/default backend for leaf workers spawned by this
+        # Hermes-native orchestrator, but the orchestrator itself must expose the
+        # reliable Hermes `delegate_task` tool and aggregation semantics.
+        effective_model = parent_model
+        effective_provider = parent_provider
+        effective_base_url = parent_base_url
+        effective_api_key = parent_api_key
+        effective_api_mode = parent_api_mode
+        effective_acp_command = parent_acp_command
+        effective_acp_args = parent_acp_args
 
     # When override_provider is set (e.g. delegation.provider: minimax-cn),
     # the subagent must use direct API calls — not the parent's ACP transport.
     # Inheriting acp_command unconditionally causes run_agent.py to initialize
     # CopilotACPClient, bypassing override credentials entirely (issue #16816).
-    if override_provider and not override_acp_command:
+    if override_provider and not override_acp_command and not (
+        requested_codex_app_server and not use_codex_app_server_child
+    ):
         effective_acp_command = None
         effective_acp_args = []
 
-    if override_acp_command:
-        # If explicitly forcing an ACP transport override, the provider MUST be copilot-acp
-        # so run_agent.py initializes the CopilotACPClient.
+    if (
+        override_acp_command
+        and not (requested_codex_app_server and not use_codex_app_server_child)
+        and effective_provider != "codex-app-server"
+    ):
+        # Per-call ACP command override.
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
+
+    child_prompt = _build_child_system_prompt(
+        goal,
+        context,
+        workspace_path=workspace_hint,
+        role=effective_role,
+        max_spawn_depth=max_spawn,
+        child_depth=child_depth,
+        collaboration_backend=effective_provider or "hermes",
+    )
 
     # Resolve reasoning config: delegation override > parent inherit
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
@@ -1137,38 +1209,66 @@ def _build_child_agent(
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
 
-    child = AIAgent(
-        base_url=effective_base_url,
-        api_key=effective_api_key,
-        model=effective_model,
-        provider=effective_provider,
-        api_mode=effective_api_mode,
-        acp_command=effective_acp_command,
-        acp_args=effective_acp_args,
-        max_iterations=max_iterations,
-        max_tokens=getattr(parent_agent, "max_tokens", None),
-        reasoning_config=child_reasoning,
-        prefill_messages=getattr(parent_agent, "prefill_messages", None),
-        fallback_model=parent_fallback,
-        enabled_toolsets=child_toolsets,
-        quiet_mode=True,
-        ephemeral_system_prompt=child_prompt,
-        log_prefix=f"[subagent-{task_index}]",
-        platform=parent_agent.platform,
-        skip_context_files=True,
-        skip_memory=True,
-        clarify_callback=None,
-        thinking_callback=child_thinking_cb,
-        session_db=getattr(parent_agent, "_session_db", None),
-        parent_session_id=getattr(parent_agent, "session_id", None),
-        providers_allowed=child_providers_allowed,
-        providers_ignored=child_providers_ignored,
-        providers_order=child_providers_order,
-        provider_sort=child_provider_sort,
-        openrouter_min_coding_score=child_openrouter_min_coding_score,
-        tool_progress_callback=child_progress_cb,
-        iteration_budget=None,  # fresh budget per subagent
-    )
+    if use_codex_app_server_child:
+        from agent.codex_app_server_client import CodexAppServerSubagent
+
+        codex_reasoning_effort = None
+        delegation_effort_value = str(delegation_cfg.get("reasoning_effort") or "").strip()
+        if not delegation_effort_value:
+            codex_reasoning_effort = "low"
+        elif isinstance(child_reasoning, dict):
+            if child_reasoning.get("enabled") is False:
+                codex_reasoning_effort = "none"
+            else:
+                codex_reasoning_effort = child_reasoning.get("effort")
+        elif child_reasoning is not None:
+            codex_reasoning_effort = getattr(child_reasoning, "value", child_reasoning)
+
+        child = CodexAppServerSubagent(
+            model=effective_model,
+            cwd=workspace_hint or os.getcwd(),
+            context=child_prompt,
+            role=effective_role,
+            toolsets=child_toolsets,
+            max_iterations=max_iterations,
+            command=effective_acp_command,
+            args=effective_acp_args,
+            progress_callback=child_progress_cb,
+            reasoning_effort=codex_reasoning_effort,
+        )
+    else:
+        child = AIAgent(
+            base_url=effective_base_url,
+            api_key=effective_api_key,
+            model=effective_model,
+            provider=effective_provider,
+            api_mode=effective_api_mode,
+            acp_command=effective_acp_command,
+            acp_args=effective_acp_args,
+            max_iterations=max_iterations,
+            max_tokens=getattr(parent_agent, "max_tokens", None),
+            reasoning_config=child_reasoning,
+            prefill_messages=getattr(parent_agent, "prefill_messages", None),
+            fallback_model=parent_fallback,
+            enabled_toolsets=child_toolsets,
+            quiet_mode=True,
+            ephemeral_system_prompt=child_prompt,
+            log_prefix=f"[subagent-{task_index}]",
+            platform=parent_agent.platform,
+            skip_context_files=True,
+            skip_memory=True,
+            clarify_callback=None,
+            thinking_callback=child_thinking_cb,
+            session_db=getattr(parent_agent, "_session_db", None),
+            parent_session_id=getattr(parent_agent, "session_id", None),
+            providers_allowed=child_providers_allowed,
+            providers_ignored=child_providers_ignored,
+            providers_order=child_providers_order,
+            provider_sort=child_provider_sort,
+            openrouter_min_coding_score=child_openrouter_min_coding_score,
+            tool_progress_callback=child_progress_cb,
+            iteration_budget=None,  # fresh budget per subagent
+        )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = child_depth
@@ -2482,6 +2582,28 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": None,
             "api_key": None,
             "api_mode": None,
+        }
+
+    if configured_provider.lower() in {"codex-app-server", "codex-app", "codex-native", "openai-codex-app-server"}:
+        command = str(cfg.get("command") or "").strip() or None
+        raw_args = cfg.get("args")
+        if isinstance(raw_args, str):
+            import shlex as _shlex
+
+            args = _shlex.split(raw_args)
+        elif isinstance(raw_args, list):
+            args = [str(a) for a in raw_args]
+        else:
+            args = None
+        return {
+            "backend": "codex-app-server",
+            "model": configured_model or "gpt-5.5",
+            "provider": "codex-app-server",
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+            "command": command,
+            "args": args,
         }
 
     # Provider is configured — resolve full credentials

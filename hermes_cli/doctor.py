@@ -102,6 +102,20 @@ def _has_provider_env_config(content: str) -> bool:
     return any(key in content for key in _PROVIDER_ENV_HINTS)
 
 
+def _delegation_uses_codex_app_server(config: dict) -> bool:
+    delegation = config.get("delegation") if isinstance(config, dict) else None
+    if not isinstance(delegation, dict):
+        return False
+    return str(delegation.get("provider") or "").strip().lower() == "codex-app-server"
+
+
+def _delegation_codex_app_server_command(config: dict) -> str:
+    delegation = config.get("delegation") if isinstance(config, dict) else None
+    if not isinstance(delegation, dict):
+        return ""
+    return str(delegation.get("command") or "").strip()
+
+
 def _honcho_is_configured_for_doctor() -> bool:
     """Return True when Honcho is configured, even if this process has no active session."""
     try:
@@ -637,6 +651,9 @@ def run_doctor(args):
                 check_info("Run 'hermes setup' to create one")
                 issues.append("Run 'hermes setup' to create .env")
     
+    delegation_uses_codex_app_server = False
+    delegation_codex_app_server_command = ""
+
     # Check ~/.hermes/config.yaml (primary) or project cli-config.yaml (fallback)
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
@@ -646,6 +663,8 @@ def run_doctor(args):
         try:
             import yaml as _yaml
             cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            delegation_uses_codex_app_server = _delegation_uses_codex_app_server(cfg)
+            delegation_codex_app_server_command = _delegation_codex_app_server_command(cfg)
             model_section = cfg.get("model") or {}
             provider_raw = (model_section.get("provider") or "").strip()
             provider = provider_raw.lower()
@@ -812,6 +831,13 @@ def run_doctor(args):
         fallback_config = PROJECT_ROOT / 'cli-config.yaml'
         if fallback_config.exists():
             check_ok("cli-config.yaml exists (in project directory)")
+            try:
+                import yaml as _yaml
+                cfg = _yaml.safe_load(fallback_config.read_text(encoding="utf-8")) or {}
+                delegation_uses_codex_app_server = _delegation_uses_codex_app_server(cfg)
+                delegation_codex_app_server_command = _delegation_codex_app_server_command(cfg)
+            except Exception:
+                pass
         else:
             if should_fix:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1048,6 +1074,35 @@ def run_doctor(args):
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
 
+    codex_command_override = (
+        os.getenv("HERMES_CODEX_APP_SERVER_COMMAND", "").strip()
+        or os.getenv("CODEX_APP_SERVER_COMMAND", "").strip()
+        or delegation_codex_app_server_command
+    )
+    if _safe_which("codex"):
+        suffix = "(required by delegation.provider: codex-app-server)" if delegation_uses_codex_app_server else ""
+        check_ok("codex CLI", suffix)
+    elif delegation_uses_codex_app_server and codex_command_override:
+        check_ok("Codex app-server command configured", f"({codex_command_override})")
+    elif delegation_uses_codex_app_server:
+        check_warn(
+            "codex CLI not installed",
+            "(required by delegation.provider: codex-app-server)",
+        )
+        check_info("Install with: npm install -g @openai/codex")
+        issues.append(
+            "delegation.provider is set to codex-app-server, but the codex CLI is not on PATH. "
+            "Install it with 'npm install -g @openai/codex' or set HERMES_CODEX_APP_SERVER_COMMAND."
+        )
+    else:
+        # Native OAuth uses Hermes' own device-code flow — the Codex CLI is
+        # only needed if you want to import existing tokens from
+        # ~/.codex/auth.json.  Downgrade to info so users running
+        # `hermes auth openai-codex` aren't told they're missing something.
+        check_info(
+            "codex CLI not installed "
+            "(optional — only required to import tokens from an existing Codex CLI login)"
+        )
     # xAI OAuth — separate try/except so an import failure here cannot
     # disrupt the already-printed Nous/Codex/Gemini/MiniMax rows above.
     try:

@@ -69,6 +69,7 @@ DETECTED_BROWSER_EXECUTABLE=""
 # Options
 USE_VENV=true
 RUN_SETUP=true
+INSTALL_CODEX=false
 SKIP_BROWSER=false
 NO_SKILLS=false
 BRANCH="main"
@@ -101,6 +102,8 @@ while [[ $# -gt 0 ]]; do
             RUN_SETUP=false
             shift
             ;;
+        --install-codex)
+            INSTALL_CODEX=true
         --skip-browser|--no-playwright)
             SKIP_BROWSER=true
             shift
@@ -162,6 +165,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --no-venv      Don't create virtual environment"
             echo "  --skip-setup   Skip interactive setup wizard"
+            echo "  --install-codex Install Codex CLI for codex-app-server delegation"
             echo "  --skip-browser Skip Playwright/Chromium install (browser tools won't work)"
             echo "  --no-skills    Start with a blank slate — seed no bundled skills, and"
             echo "                   write \$HERMES_HOME/.no-bundled-skills so future"
@@ -1924,6 +1928,31 @@ install_node_deps() {
     restore_dirty_lockfiles "$INSTALL_DIR"
 }
 
+install_codex_cli() {
+    if [ "$INSTALL_CODEX" = false ]; then
+        return 0
+    fi
+
+    if [ "$HAS_NODE" = false ] || ! command -v npm &> /dev/null; then
+        log_warn "Cannot install Codex CLI because npm is not available"
+        log_info "After installing Node.js, run: npm install -g @openai/codex"
+        return 0
+    fi
+
+    if command -v codex &> /dev/null; then
+        log_success "Codex CLI already installed: $(command -v codex)"
+        return 0
+    fi
+
+    log_info "Installing Codex CLI for codex-app-server delegation..."
+    if npm install -g @openai/codex; then
+        log_success "Codex CLI installed"
+    else
+        log_warn "Codex CLI install failed"
+        log_info "Install manually: npm install -g @openai/codex"
+    fi
+}
+
 run_setup_wizard() {
     if [ "$RUN_SETUP" = false ]; then
         log_info "Skipping setup wizard (--skip-setup)"
@@ -2565,6 +2594,7 @@ main() {
     setup_venv
     install_deps
     install_node_deps
+    install_codex_cli
     setup_path
     copy_config_templates
     run_setup_wizard
