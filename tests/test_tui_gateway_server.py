@@ -708,7 +708,7 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
 
-def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
+def test_session_resume_uses_parent_lineage_for_display_and_live_history(monkeypatch):
     captured = {}
 
     class FakeDB:
@@ -744,18 +744,25 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
         lambda agent, *a: {"model": "test", "tools": {}, "skills": {}},
     )
     monkeypatch.setattr(
-        server, "_init_session", lambda sid, key, agent, history, cols=80: None
+        server,
+        "_init_session",
+        lambda sid, key, agent, history, cols=80: captured.setdefault("init_history", history),
     )
 
     resp = server.handle_request(
         {"id": "1", "method": "session.resume", "params": {"session_id": "tip"}}
     )
 
+    expected_history = [
+        {"role": "user", "content": "root prompt"},
+        {"role": "assistant", "content": "root answer"},
+    ]
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "root prompt"},
         {"role": "assistant", "text": "root answer"},
     ]
-    assert captured["history_calls"] == [("tip", False), ("tip", True)]
+    assert captured["init_history"] == expected_history
+    assert captured["history_calls"] == [("tip", True)]
 
 
 def test_status_callback_emits_kind_and_text():
