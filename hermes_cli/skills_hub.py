@@ -288,7 +288,7 @@ def do_search(query: str, source: str = "all", limit: int = 10,
 
     table = Table(title=f"Skills Hub — {len(results)} result(s)")
     table.add_column("Name", style="bold cyan")
-    table.add_column("Description", max_width=60)
+    table.add_column("Description", max_width=50)
     table.add_column("Source", style="dim")
     table.add_column("Trust", style="dim")
     # overflow="fold" keeps the full slug visible (wraps instead of
@@ -302,7 +302,7 @@ def do_search(query: str, source: str = "all", limit: int = 10,
         trust_label = "official" if r.source == "official" else r.trust_level
         table.add_row(
             r.name,
-            r.description[:60] + ("..." if len(r.description) > 60 else ""),
+            r.description[:50] + ("..." if len(r.description) > 50 else ""),
             r.source,
             f"[{trust_style}]{trust_label}[/]",
             r.identifier,
