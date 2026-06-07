@@ -79,6 +79,7 @@ Thread safety:
 
 import asyncio
 import concurrent.futures
+import hashlib
 import inspect
 import json
 import logging
@@ -262,6 +263,8 @@ _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
+_MCP_KEEPALIVE_INTERVAL = 180.0  # seconds; shorter than common LB/NAT idle timeouts
+_MCP_KEEPALIVE_MAX_JITTER_SECONDS = 15.0
 
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
@@ -292,6 +295,22 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 # ---------------------------------------------------------------------------
 # Security helpers
 # ---------------------------------------------------------------------------
+
+def _mcp_keepalive_jitter_seconds(server_name: str) -> float:
+    """Return a stable per-server delay before idle keepalive probes.
+
+    Laptop sleep/wake can resume every MCP server's expired keepalive timer in
+    the same event-loop tick. A small deterministic delay spreads the follow-up
+    ``list_tools`` probes and any reconnects without making behavior random.
+    """
+    if _MCP_KEEPALIVE_MAX_JITTER_SECONDS <= 0:
+        return 0.0
+    digest = hashlib.blake2s(
+        str(server_name).encode("utf-8", errors="replace"),
+        digest_size=4,
+    ).digest()
+    bucket = int.from_bytes(digest, "big") / 0xFFFFFFFF
+    return bucket * _MCP_KEEPALIVE_MAX_JITTER_SECONDS
 
 def _build_safe_env(user_env: Optional[dict]) -> dict:
     """Build a filtered environment dict for stdio subprocesses.
@@ -1306,24 +1325,33 @@ class MCPServerTask:
         prevent TCP connections from going stale during long idle
         periods (#17003).  If the keepalive fails, triggers a reconnect.
         """
-        # Keepalive interval in seconds.  Must be shorter than typical
-        # LB / NAT idle-timeout (commonly 300-600s).
-        _KEEPALIVE_INTERVAL = 180  # 3 minutes
-
         shutdown_task = asyncio.create_task(self._shutdown_event.wait())
         reconnect_task = asyncio.create_task(self._reconnect_event.wait())
         try:
             while True:
                 done, _pending = await asyncio.wait(
                     {shutdown_task, reconnect_task},
-                    timeout=_KEEPALIVE_INTERVAL,
+                    timeout=_MCP_KEEPALIVE_INTERVAL,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if done:
                     break
 
                 # Timeout — no lifecycle event fired.  Send a keepalive
-                # to exercise the connection and detect stale sockets.
+                # to exercise the connection and detect stale sockets. When a
+                # laptop resumes after sleep, all expired timers can wake in
+                # the same loop tick; spread probes by server name to avoid a
+                # reconnect storm.
+                jitter = _mcp_keepalive_jitter_seconds(self.name)
+                if jitter > 0:
+                    done, _pending = await asyncio.wait(
+                        {shutdown_task, reconnect_task},
+                        timeout=jitter,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if done:
+                        break
+
                 if self.session:
                     try:
                         await asyncio.wait_for(
