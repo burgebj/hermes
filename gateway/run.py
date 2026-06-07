@@ -1192,7 +1192,12 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(
+    *,
+    requested_provider: Optional[str] = None,
+    explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None,
+) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     Provider is read from ``config.yaml`` ``model.provider`` (the single
@@ -1213,7 +1218,11 @@ def _resolve_runtime_agent_kwargs() -> dict:
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
     try:
-        runtime = resolve_runtime_provider()
+        runtime = resolve_runtime_provider(
+            requested=requested_provider or os.getenv("HERMES_INFERENCE_PROVIDER"),
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+        )
     except AuthError as auth_exc:
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked
@@ -1556,6 +1565,41 @@ def _teams_pipeline_plugin_enabled() -> bool:
     return "teams_pipeline" in enabled or "teams-pipeline" in enabled
 
 
+def _get_platform_model_overrides(
+    config: dict | None = None,
+    *,
+    platform: Optional["Platform"] = None,
+    platform_key: Optional[str] = None,
+) -> dict:
+    """Return per-platform model/runtime overrides from config.yaml.
+
+    Supported keys live under ``platforms.<platform>.extra`` and currently include
+    ``model``, ``provider``, ``api_key``, ``base_url``, and ``api_mode``.
+    """
+    cfg = config if config is not None else _load_gateway_config()
+    resolved_platform_key = platform_key or (
+        _platform_config_key(platform) if platform is not None else None
+    )
+    if not resolved_platform_key:
+        return {}
+
+    platforms_cfg = cfg.get("platforms") or {}
+    if not isinstance(platforms_cfg, dict):
+        return {}
+    platform_cfg = platforms_cfg.get(resolved_platform_key) or {}
+    if not isinstance(platform_cfg, dict):
+        return {}
+    extra = platform_cfg.get("extra") or {}
+    if not isinstance(extra, dict):
+        return {}
+
+    overrides = {}
+    for key in ("model", "provider", "api_key", "base_url", "api_mode"):
+        if key in extra:
+            overrides[key] = extra.get(key)
+    return overrides
+
+
 def _load_gateway_config() -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error.
 
@@ -1605,14 +1649,30 @@ def _load_gateway_runtime_config() -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def _resolve_gateway_model(config: dict | None = None) -> str:
-    """Read model from config.yaml — single source of truth.
+def _resolve_gateway_model(
+    config: dict | None = None,
+    *,
+    platform: Optional["Platform"] = None,
+    platform_key: Optional[str] = None,
+) -> str:
+    """Read model from config.yaml, preferring per-platform defaults when present.
 
     Without this, temporary AIAgent instances (e.g. /compress) fall
     back to the hardcoded default which fails when the active provider is
     openai-codex.
+
+    Precedence: platform override → global ``model.default``/``model.model``.
     """
     cfg = config if config is not None else _load_gateway_config()
+    platform_override = _get_platform_model_overrides(
+        cfg,
+        platform=platform,
+        platform_key=platform_key,
+    )
+    platform_model = platform_override.get("model")
+    if isinstance(platform_model, str) and platform_model.strip():
+        return platform_model.strip()
+
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
         return model_cfg
@@ -2638,7 +2698,14 @@ class GatewayRunner:
             except Exception:
                 resolved_session_key = None
 
-        model = _resolve_gateway_model(user_config)
+        platform_override = _get_platform_model_overrides(
+            user_config,
+            platform=source.platform if source is not None else None,
+        )
+        model = _resolve_gateway_model(
+            user_config,
+            platform=source.platform if source is not None else None,
+        )
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
         if override:
             override_model = override.get("model", model)
@@ -2669,7 +2736,16 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        requested_provider = platform_override.get("provider")
+        runtime_kwargs = _resolve_runtime_agent_kwargs(
+            requested_provider=requested_provider,
+            explicit_api_key=platform_override.get("api_key"),
+            explicit_base_url=platform_override.get("base_url"),
+        )
+        if requested_provider:
+            runtime_kwargs["provider"] = requested_provider
+        if "api_mode" in platform_override and platform_override.get("api_mode") is not None:
+            runtime_kwargs["api_mode"] = platform_override.get("api_mode")
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
@@ -9071,7 +9147,7 @@ class GatewayRunner:
                             f"Adjust reset timing in config.yaml under session_reset."
                         )
                         try:
-                            session_info = self._format_session_info()
+                            session_info = self._format_session_info(platform=source.platform)
                             if session_info:
                                 notice = f"{notice}\n\n{session_info}"
                         except Exception:
@@ -10042,7 +10118,7 @@ class GatewayRunner:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 
-    def _format_session_info(self) -> str:
+    def _format_session_info(self, *, platform: "Platform | None" = None) -> str:
         """Resolve current model config and return a formatted info block.
 
         Surfaces model, provider, context length, and endpoint so gateway
@@ -10051,11 +10127,15 @@ class GatewayRunner:
         """
         from agent.model_metadata import get_model_context_length, DEFAULT_FALLBACK_CONTEXT
 
-        model = _resolve_gateway_model()
+        # Apply platform overrides when available (e.g. Telegram uses a
+        # different default model than the global one).
+        plat_overrides = _get_platform_model_overrides(platform=platform)
+
+        model = _resolve_gateway_model(platform=platform)
         config_context_length = None
-        provider = None
-        base_url = None
-        api_key = None
+        provider = plat_overrides.get("provider") or None
+        base_url = plat_overrides.get("base_url") or None
+        api_key = plat_overrides.get("api_key") or None
         custom_provs = None
         data = None
 
@@ -10117,7 +10197,11 @@ class GatewayRunner:
 
         # Resolve runtime credentials for probing
         try:
-            runtime = _resolve_runtime_agent_kwargs()
+            runtime = _resolve_runtime_agent_kwargs(
+                requested_provider=plat_overrides.get("provider"),
+                explicit_api_key=plat_overrides.get("api_key"),
+                explicit_base_url=plat_overrides.get("base_url"),
+            )
             provider = provider or runtime.get("provider")
             base_url = base_url or runtime.get("base_url")
             api_key = runtime.get("api_key")
@@ -10257,7 +10341,7 @@ class GatewayRunner:
 
         # Resolve session config info to surface to the user
         try:
-            session_info = self._format_session_info()
+            session_info = self._format_session_info(platform=source.platform)
         except Exception:
             session_info = ""
 
@@ -11154,6 +11238,7 @@ class GatewayRunner:
         user_provs = None
         custom_provs = None
         config_path = _hermes_home / "config.yaml"
+        cfg = None
         try:
             cfg = _load_gateway_config()
             if cfg:
@@ -11171,8 +11256,21 @@ class GatewayRunner:
         except Exception:
             pass
 
-        # Check for session override
+        # Check for platform override (before session override — lower priority)
         source = event.source
+        platform_override = _get_platform_model_overrides(
+            cfg, platform=source.platform if source else None,
+        )
+        if platform_override.get("model"):
+            current_model = platform_override["model"]
+        if platform_override.get("provider"):
+            current_provider = platform_override["provider"]
+        if platform_override.get("base_url"):
+            current_base_url = platform_override["base_url"]
+        if platform_override.get("api_key"):
+            current_api_key = platform_override["api_key"]
+
+        # Check for session override (highest priority)
         session_key = self._session_key_for_source(source)
         override = self._session_model_overrides.get(session_key, {})
         if override:
