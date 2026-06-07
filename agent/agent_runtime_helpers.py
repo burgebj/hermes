@@ -1069,6 +1069,62 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
     return None
 
 
+_REQUEST_DUMP_SENSITIVE_EXACT_KEYS = frozenset({
+    "authorization",
+    "proxy_authorization",
+    "cookie",
+    "set_cookie",
+    "x_api_key",
+    "api_key",
+    "apikey",
+})
+_REQUEST_DUMP_SENSITIVE_KEY_PARTS = (
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "auth_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "credential",
+    "private_key",
+)
+
+
+def _request_dump_key_is_sensitive(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+    if normalized in _REQUEST_DUMP_SENSITIVE_EXACT_KEYS:
+        return True
+    return any(part in normalized for part in _REQUEST_DUMP_SENSITIVE_KEY_PARTS)
+
+
+def _redact_request_dump_payload(value: Any, key: Any = None) -> Any:
+    """Redact secrets before persisting request debug dumps.
+
+    Request dumps are often copied into bug reports. Treat this as a hard
+    safety boundary: key-shaped fields are removed, and all string values are
+    run through the secret redactor regardless of the user's log-redaction
+    preference.
+    """
+    if isinstance(value, dict):
+        return {
+            item_key: _redact_request_dump_payload(item_value, item_key)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_request_dump_payload(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    text = value if isinstance(value, str) else str(value)
+    if key is not None and _request_dump_key_is_sensitive(key):
+        return "[REDACTED]" if text else text
+
+    from agent.redact import redact_sensitive_text
+    return redact_sensitive_text(text, force=True)
+
+
 
 def dump_api_request_debug(
     agent,
@@ -1133,6 +1189,8 @@ def dump_api_request_debug(
                     _ra().logger.debug("Could not extract error response details: %s", e)
 
             dump_payload["error"] = error_info
+
+        dump_payload = _redact_request_dump_payload(dump_payload)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         dump_file = agent.logs_dir / f"request_dump_{agent.session_id}_{timestamp}.json"
