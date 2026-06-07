@@ -633,6 +633,29 @@ class TestLoadGatewayConfig:
             "789": "Creative writing",
         }
 
+    def test_bridges_telegram_free_response_topics_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "telegram:\n"
+            "  free_response_topics:\n"
+            '    - "-1001234567:3"\n'
+            '    - "-1001234567:9"\n',
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("TELEGRAM_FREE_RESPONSE_TOPICS", raising=False)
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.TELEGRAM].extra["free_response_topics"] == [
+            "-1001234567:3",
+            "-1001234567:9",
+        ]
+        assert os.getenv("TELEGRAM_FREE_RESPONSE_TOPICS") == "-1001234567:3,-1001234567:9"
+
     def test_bridges_slack_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()

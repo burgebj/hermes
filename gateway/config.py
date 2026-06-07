@@ -1034,6 +1034,11 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(frc, list):
                         frc = ",".join(str(v) for v in frc)
                     os.environ["TELEGRAM_FREE_RESPONSE_CHATS"] = str(frc)
+                frt = telegram_cfg.get("free_response_topics")
+                if frt is not None and not os.getenv("TELEGRAM_FREE_RESPONSE_TOPICS"):
+                    if isinstance(frt, list):
+                        frt = ",".join(str(v) for v in frt)
+                    os.environ["TELEGRAM_FREE_RESPONSE_TOPICS"] = str(frt)
                 # allowed_chats: if set, bot ONLY responds in these group chats (whitelist)
                 ac = telegram_cfg.get("allowed_chats")
                 if ac is not None and not os.getenv("TELEGRAM_ALLOWED_CHATS"):
@@ -1079,7 +1084,7 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(group_allowed_chats, list):
                         group_allowed_chats = ",".join(str(v) for v in group_allowed_chats)
                     os.environ["TELEGRAM_GROUP_ALLOWED_CHATS"] = str(group_allowed_chats)
-                for _telegram_extra_key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages"):
+                for _telegram_extra_key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages", "free_response_topics"):
                     if _telegram_extra_key in telegram_cfg:
                         plat_data = platforms_data.setdefault(Platform.TELEGRAM.value, {})
                         if not isinstance(plat_data, dict):
