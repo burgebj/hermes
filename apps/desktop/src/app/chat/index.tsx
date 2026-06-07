@@ -15,7 +15,7 @@ import { Backdrop } from '@/components/Backdrop'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
+import { getGlobalModelOptions, MODEL_OPTIONS_TIMEOUT_MS, type HermesGateway } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
@@ -215,7 +215,11 @@ export function ChatView({
         throw new Error('Hermes gateway unavailable')
       }
 
-      return gateway.request<ModelOptionsResponse>('model.options', { session_id: activeSessionId })
+      return gateway.request<ModelOptionsResponse>(
+        'model.options',
+        { session_id: activeSessionId },
+        MODEL_OPTIONS_TIMEOUT_MS
+      )
     },
     enabled: gatewayOpen
   })

@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import type { HermesGateway } from '@/hermes'
-import { getGlobalModelOptions } from '@/hermes'
+import { getGlobalModelOptions, MODEL_OPTIONS_TIMEOUT_MS } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import {
@@ -43,7 +43,7 @@ export function ModelVisibilityDialog({
     queryKey: ['model-options', sessionId || 'global'],
     queryFn: (): Promise<ModelOptionsResponse> => {
       if (gw && sessionId) {
-        return gw.request<ModelOptionsResponse>('model.options', { session_id: sessionId })
+        return gw.request<ModelOptionsResponse>('model.options', { session_id: sessionId }, MODEL_OPTIONS_TIMEOUT_MS)
       }
 
       return getGlobalModelOptions()

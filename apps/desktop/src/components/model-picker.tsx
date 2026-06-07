@@ -5,7 +5,7 @@ import { useI18n } from '@/i18n'
 import type { ModelOptionProvider, ModelOptionsResponse, ModelPricing } from '@/types/hermes'
 
 import type { HermesGateway } from '../hermes'
-import { getGlobalModelOptions } from '../hermes'
+import { getGlobalModelOptions, MODEL_OPTIONS_TIMEOUT_MS } from '../hermes'
 import { cn } from '../lib/utils'
 import { startManualOnboarding } from '../store/onboarding'
 
@@ -57,9 +57,13 @@ export function ModelPickerDialog({
     queryKey: ['model-options', sessionId || 'global'],
     queryFn: () => {
       if (gw && sessionId) {
-        return gw.request<ModelOptionsResponse>('model.options', {
-          session_id: sessionId
-        })
+        return gw.request<ModelOptionsResponse>(
+          'model.options',
+          {
+            session_id: sessionId
+          },
+          MODEL_OPTIONS_TIMEOUT_MS
+        )
       }
 
       return getGlobalModelOptions()
