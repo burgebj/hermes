@@ -296,6 +296,117 @@ def test_exhausted_401_entry_resets_after_five_minutes(tmp_path, monkeypatch):
     assert entry.last_status == "ok"
 
 
+def test_terminal_token_invalidated_does_not_reset_after_five_minutes(tmp_path, monkeypatch):
+    """A revoked OAuth token must not rejoin rotation on the 401 cooldown.
+
+    Regression for #32849 — a Codex 401 with ``code: token_invalidated`` used
+    to inherit the transient 5-minute cooldown, so the same dead credential
+    kept getting picked back up every TTL window.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    # Prevent auto-seeding from Codex CLI tokens on the host.
+    monkeypatch.setattr(
+        "hermes_cli.auth._import_codex_cli_tokens",
+        lambda: None,
+    )
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "cred-revoked",
+                        "label": "Hermes Agent Codex",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "tok-revoked",
+                        "last_status": "exhausted",
+                        # Well past the 5-minute and 1-hour windows.
+                        "last_status_at": time.time() - 7 * 24 * 60 * 60,
+                        "last_error_code": 401,
+                        "last_error_reason": "token_invalidated",
+                    },
+                    {
+                        "id": "cred-healthy",
+                        "label": "secondary",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual:device_code",
+                        "access_token": "tok-healthy",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    entry = pool.select()
+
+    # The healthy entry should be chosen — the revoked one must stay out of
+    # rotation regardless of how much time has passed.
+    assert entry is not None
+    assert entry.id == "cred-healthy"
+    # And the revoked entry should still be flagged as exhausted in the pool.
+    revoked = next(e for e in pool.entries() if e.id == "cred-revoked")
+    assert revoked.last_status == "exhausted"
+    assert revoked.last_error_reason == "token_invalidated"
+
+
+def test_terminal_token_revoked_blocks_pool_availability(tmp_path, monkeypatch):
+    """A single-credential pool with a ``token_revoked`` reason has nothing to offer."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr(
+        "hermes_cli.auth._import_codex_cli_tokens",
+        lambda: None,
+    )
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "cred-1",
+                        "label": "primary",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "tok-1",
+                        "last_status": "exhausted",
+                        "last_status_at": time.time() - 30 * 24 * 60 * 60,
+                        "last_error_code": 401,
+                        "last_error_reason": "token_revoked",
+                    }
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    assert pool.has_credentials() is True
+    assert pool.has_available() is False
+    assert pool.select() is None
+
+
+def test_terminal_failure_reason_check_is_case_insensitive():
+    """Defensive — provider casing varies between SDKs and reverse proxies."""
+    from agent.credential_pool import _is_terminal_failure_reason
+
+    assert _is_terminal_failure_reason("token_invalidated") is True
+    assert _is_terminal_failure_reason("Token_Invalidated") is True
+    assert _is_terminal_failure_reason("  token_revoked  ") is True
+    assert _is_terminal_failure_reason("invalid_api_key") is False
+    assert _is_terminal_failure_reason("device_code_exhausted") is False
+    assert _is_terminal_failure_reason(None) is False
+    assert _is_terminal_failure_reason("") is False
+
+
 def test_explicit_reset_timestamp_overrides_default_429_ttl(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     # Prevent auto-seeding from Codex CLI tokens on the host

@@ -110,6 +110,17 @@ SUPPORTED_POOL_STRATEGIES = {
 EXHAUSTED_TTL_401_SECONDS = 5 * 60           # 5 minutes
 EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
 EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
+# Terminal OAuth failures (token_invalidated / token_revoked from the model
+# provider) cannot be recovered by waiting — the operator must re-auth.  A
+# 1-year cooldown keeps the credential out of rotation without introducing a
+# new state machine branch.  An explicit operator reset (e.g. `hermes auth`)
+# clears the entry's exhausted status the normal way.
+EXHAUSTED_TTL_TERMINAL_SECONDS = 365 * 24 * 60 * 60
+
+# Reasons that mark a credential as effectively dead.  Sourced from the
+# provider error body's `code` field — see ``extract_api_error_context`` in
+# ``agent.agent_runtime_helpers`` which normalises ``code`` into ``reason``.
+TERMINAL_FAILURE_REASONS = frozenset({"token_invalidated", "token_revoked"})
 
 # Pool key prefix for custom OpenAI-compatible endpoints.
 # Custom endpoints all share provider='custom' but are keyed by their
@@ -245,8 +256,27 @@ def _is_manual_source(source: str) -> bool:
     return normalized == SOURCE_MANUAL or normalized.startswith(f"{SOURCE_MANUAL}:")
 
 
-def _exhausted_ttl(error_code: Optional[int]) -> int:
-    """Return cooldown seconds based on the HTTP status that caused exhaustion."""
+def _is_terminal_failure_reason(error_reason: Optional[str]) -> bool:
+    """True when the provider's error body marked the credential as dead."""
+    if not isinstance(error_reason, str):
+        return False
+    return error_reason.strip().lower() in TERMINAL_FAILURE_REASONS
+
+
+def _exhausted_ttl(
+    error_code: Optional[int],
+    error_reason: Optional[str] = None,
+) -> int:
+    """Return cooldown seconds based on the HTTP status that caused exhaustion.
+
+    ``token_invalidated`` / ``token_revoked`` reasons override the status-code
+    based default: a revoked OAuth token will never recover on its own, so a
+    5-minute (401) cooldown lets it rejoin rotation and fail again on the next
+    request.  Returning a 1-year cooldown effectively retires the entry until
+    the operator re-auths.
+    """
+    if _is_terminal_failure_reason(error_reason):
+        return EXHAUSTED_TTL_TERMINAL_SECONDS
     if error_code == 401:
         return EXHAUSTED_TTL_401_SECONDS
     if error_code == 429:
@@ -335,11 +365,22 @@ def _normalize_error_context(error_context: Optional[Dict[str, Any]]) -> Dict[st
 def _exhausted_until(entry: PooledCredential) -> Optional[float]:
     if entry.last_status != STATUS_EXHAUSTED:
         return None
+    # Terminal OAuth failures cannot be recovered by waiting.  Honour the
+    # long cooldown regardless of any reset hint that may have been attached
+    # (token revocation responses occasionally inherit a Retry-After header
+    # from upstream proxies — that header is meaningless here).
+    error_reason = getattr(entry, "last_error_reason", None)
+    if _is_terminal_failure_reason(error_reason):
+        if entry.last_status_at is None:
+            return None
+        return entry.last_status_at + EXHAUSTED_TTL_TERMINAL_SECONDS
     reset_at = _parse_absolute_timestamp(getattr(entry, "last_error_reset_at", None))
     if reset_at is not None:
         return reset_at
     if entry.last_status_at:
-        return entry.last_status_at + _exhausted_ttl(entry.last_error_code)
+        return entry.last_status_at + _exhausted_ttl(
+            entry.last_error_code, error_reason
+        )
     return None
 
 
