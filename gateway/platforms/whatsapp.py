@@ -1373,6 +1373,16 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         except Exception as e:
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)
 
+            # Resolve per-channel prompt
+            from gateway.platforms.base import resolve_channel_prompt
+
+            chat_id = data.get("chatId", "")
+            _channel_prompt: Optional[str] = resolve_channel_prompt(
+                self.config.extra,
+                chat_id,
+                None,
+            )
+
             return MessageEvent(
                 text=body,
                 message_type=msg_type,
@@ -1381,6 +1391,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                channel_prompt=_channel_prompt,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
