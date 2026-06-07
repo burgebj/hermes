@@ -383,11 +383,26 @@ class EmailAdapter(BasePlatformAdapter):
                     if len(self._seen_uids) > self._seen_uids_max:
                         self._trim_seen_uids()
 
-                    status, msg_data = imap.uid("fetch", uid, "(RFC822)")
+                    status, msg_data = imap.uid("fetch", uid, "(BODY.PEEK[])")
                     if status != "OK":
                         continue
 
-                    raw_email = msg_data[0][1]
+                    # Parse the fetch response to extract the message literal.
+                    # iCloud and some other servers return the UID metadata
+                    # without the body data for (RFC822), so we must handle
+                    # responses that lack the literal (see issue #41340).
+                    raw_email = None
+                    if msg_data and isinstance(msg_data, list):
+                        for item in msg_data:
+                            if isinstance(item, tuple) and len(item) == 2:
+                                raw_email = item[1]
+                                break
+                    if raw_email is None:
+                        logger.debug(
+                            "[Email] No message body in fetch response for UID %s, skipping",
+                            uid,
+                        )
+                        continue
                     msg = email_lib.message_from_bytes(raw_email)
 
                     sender_raw = msg.get("From", "")
