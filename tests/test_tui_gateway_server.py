@@ -2876,6 +2876,30 @@ def test_command_dispatch_exec_allows_safe_commands(monkeypatch):
     assert "hello" in resp["result"]["output"]
 
 
+def test_command_dispatch_exec_quoted_operators_not_falsely_blocked(monkeypatch):
+    """Quoted shell operators (e.g., echo "hello && world") must not be
+    falsely flagged as dangerous by detect_dangerous_command."""
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"quick_commands": {"testq": {"type": "exec", "command": "echo \"hello && world\""}}},
+    )
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            returncode=0, stdout="hello && world\n", stderr=""
+        ),
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "command.dispatch", "params": {"name": "testq"}}
+    )
+
+    assert "result" in resp
+    assert "hello && world" in resp["result"]["output"]
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(
