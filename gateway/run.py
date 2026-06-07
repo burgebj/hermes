@@ -17745,6 +17745,7 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        previewed_response_texts: list[str] = []
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -17970,6 +17971,9 @@ class GatewayRunner:
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
                     return
+                _visible_text = str(text or "").strip()
+                if _visible_text:
+                    previewed_response_texts.append(_visible_text)
                 if _stream_consumer is not None:
                     if already_streamed:
                         _stream_consumer.on_segment_break()
@@ -19208,13 +19212,16 @@ class GatewayRunner:
                                 pass
                         except Exception as e:
                             logger.debug("Stream consumer wait before queued message failed: %s", e)
-                    _previewed = bool(result.get("response_previewed"))
+                    first_response = result.get("final_response", "")
+                    _previewed = bool(result.get("response_previewed")) and any(
+                        _preview.strip() == str(first_response or "").strip()
+                        for _preview in previewed_response_texts
+                    )
                     _already_streamed = bool(
                         (_sc and getattr(_sc, "final_response_sent", False))
                         or _previewed
                         or (_sc and getattr(_sc, "final_content_delivered", False))
                     )
-                    first_response = result.get("final_response", "")
                     if first_response and not _already_streamed:
                         try:
                             logger.info(
@@ -19389,8 +19396,14 @@ class GatewayRunner:
                 _sc and getattr(_sc, "final_response_sent", False)
             )
             # response_previewed means the interim_assistant_callback already
-            # sent the final text via the adapter (non-streaming path).
-            _previewed = bool(response.get("response_previewed"))
+            # sent the final text via the adapter (non-streaming path). Some
+            # providers also emit real interim acknowledgements before tool
+            # calls; those must not suppress the later tool result. Only trust
+            # response_previewed when the previewed text matches the final body.
+            _previewed = bool(response.get("response_previewed")) and any(
+                _preview.strip() == _final.strip()
+                for _preview in previewed_response_texts
+            )
             _content_delivered = bool(
                 _sc and getattr(_sc, "final_content_delivered", False)
             )
