@@ -26,8 +26,8 @@ engine plugins (e.g. hermes-lcm) rely on:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
+import os
+from unittest.mock import MagicMock, patch
 
 from run_agent import AIAgent
 
@@ -88,6 +88,27 @@ def test_transition_passes_conversation_id_from_gateway_session_key():
     assert captured.get("conversation_id") == "agent:main:telegram:dm:42"
     assert captured.get("old_session_id") == "old-sid"
     assert captured.get("platform") == "telegram"
+
+
+def test_transition_prefers_explicit_session_source():
+    """``--source`` metadata must stay consistent with the DB session source."""
+    engine = MagicMock()
+    engine.context_length = 200_000
+    captured: dict = {}
+    engine.on_session_start.side_effect = lambda sid, **kw: captured.update(kw)
+
+    agent = _bare_agent()
+    agent.platform = "cli"
+    agent.context_compressor = engine
+
+    with patch.dict(os.environ, {"HERMES_SESSION_SOURCE": "tool"}):
+        agent._transition_context_engine_session(
+            old_session_id="old-sid",
+            new_session_id="new-sid",
+            previous_messages=[{"role": "user", "content": "hi"}],
+        )
+
+    assert captured.get("platform") == "tool"
 
 
 def test_transition_skips_optional_hooks_when_engine_lacks_them():

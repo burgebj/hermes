@@ -502,11 +502,15 @@ class AIAgent:
             logger.debug("SessionDB unavailable for recall", exc_info=True)
             return None
 
+    def _resolve_session_source(self) -> str:
+        """Return the source tag used for DB rows and context metadata."""
+        return os.environ.get("HERMES_SESSION_SOURCE") or getattr(self, "platform", None) or "cli"
+
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
         if self._session_db_created or not self._session_db:
             return
-        source = self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli")
+        source = self._resolve_session_source()
         try:
             self._session_db.create_session(
                 session_id=self.session_id,
@@ -572,7 +576,7 @@ class AIAgent:
             start_context = {
                 "old_session_id": old_session_id,
                 "carry_over_context": carry_over_context,
-                "platform": getattr(self, "platform", None) or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                "platform": self._resolve_session_source(),
                 "model": getattr(self, "model", ""),
                 "context_length": getattr(engine, "context_length", None),
                 "conversation_id": getattr(self, "_gateway_session_key", None),

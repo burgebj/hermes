@@ -98,6 +98,39 @@ class TestFlushDeduplication:
             rows = db.get_messages(agent.session_id)
             assert len(rows) == 3, f"Expected 3 total messages, got {len(rows)}"
 
+    def test_ensure_db_session_prefers_explicit_session_source(self):
+        """Explicit source metadata must override the agent platform tag."""
+        from hermes_state import SessionDB
+        from run_agent import AIAgent
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENROUTER_API_KEY": "test-key",
+                    "HERMES_SESSION_SOURCE": "tool",
+                },
+            ):
+                agent = AIAgent(
+                    api_key="test-key",
+                    base_url="https://openrouter.ai/api/v1",
+                    model="test/model",
+                    platform="cli",
+                    quiet_mode=True,
+                    session_db=db,
+                    session_id="source-session",
+                    skip_context_files=True,
+                    skip_memory=True,
+                )
+                agent._ensure_db_session()
+
+            session = db.get_session("source-session")
+            assert session is not None
+            assert session["source"] == "tool"
+
     def test_persist_session_multiple_calls_no_duplication(self):
         """Multiple _persist_session calls don't duplicate DB entries."""
         from hermes_state import SessionDB
