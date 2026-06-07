@@ -436,6 +436,28 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
         env_values["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(
             _parse_int_setting(idle_timeout, _DEFAULT_IDLE_TIMEOUT)
         )
+
+    # Pass through Hindsight API tuning knobs needed by local embedded daemons.
+    # These are intentionally opt-in: default behavior is unchanged unless the
+    # profile config or environment defines an override.  The local vLLM/NIM
+    # endpoints used by Hermes can be much slower and smaller than hosted model
+    # defaults, so retain needs caps/concurrency to avoid long timeout storms.
+    passthrough_env = {
+        "retain_max_completion_tokens": "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS",
+        "retain_chunk_size": "HINDSIGHT_API_RETAIN_CHUNK_SIZE",
+        "retain_extract_causal_links": "HINDSIGHT_API_RETAIN_EXTRACT_CAUSAL_LINKS",
+        "llm_max_concurrent": "HINDSIGHT_API_LLM_MAX_CONCURRENT",
+        "retain_llm_max_concurrent": "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT",
+        "consolidation_llm_max_concurrent": "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT",
+        "retain_llm_timeout": "HINDSIGHT_API_RETAIN_LLM_TIMEOUT",
+        "consolidation_llm_timeout": "HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT",
+    }
+    for config_key, env_key in passthrough_env.items():
+        value = config.get(config_key)
+        if value is None or value == "":
+            value = os.environ.get(env_key)
+        if value is not None and value != "":
+            env_values[env_key] = str(value)
     return env_values
 
 
@@ -1230,10 +1252,15 @@ class HindsightMemoryProvider(MemoryProvider):
                      self._retain_async, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
                      self._tags, self._recall_tags)
 
-        # For local mode, start the embedded daemon in the background so it
-        # doesn't block the chat. Redirect stdout/stderr to a log file to
-        # prevent rich startup output from spamming the terminal.
-        if self._mode == "local_embedded":
+        # For local mode, start the embedded daemon in the background when
+        # automatic memory paths need it. Tools-only/manual mode starts the
+        # daemon on demand from the tool operation instead.
+        should_auto_start_daemon = (
+            self._memory_mode != "tools"
+            or self._auto_recall
+            or self._auto_retain
+        )
+        if self._mode == "local_embedded" and should_auto_start_daemon:
             def _start_daemon():
                 import traceback
                 log_dir = get_hermes_home() / "logs"
