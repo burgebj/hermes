@@ -1082,6 +1082,45 @@ def _skill_should_show(
     return True
 
 
+def _positive_int(value, default: "int | None" = None) -> "int | None":
+    """Return a positive int from user config, or *default* if unset/invalid."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _get_skills_system_prompt_limits() -> tuple["int | None", "int | None", "int | None"]:
+    """Read optional skills-system-prompt compacting limits from config.yaml."""
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        skills_cfg = cfg.get("skills", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(skills_cfg, dict):
+            skills_cfg = {}
+    except Exception as exc:
+        logger.debug("Could not load skills prompt limits: %s", exc)
+        skills_cfg = {}
+
+    return (
+        _positive_int(skills_cfg.get("system_prompt_max_chars")),
+        _positive_int(skills_cfg.get("system_prompt_max_skills_per_category")),
+        _positive_int(skills_cfg.get("system_prompt_description_max_chars")),
+    )
+
+
+def _truncate_skill_prompt_description(description: str, max_chars: "int | None") -> str:
+    """Trim long skill/category descriptions without changing unset behavior."""
+    description = str(description or "").strip()
+    if not max_chars or len(description) <= max_chars:
+        return description
+    if max_chars <= 1:
+        return "…"[:max_chars]
+    return description[: max_chars - 1].rstrip() + "…"
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -1116,6 +1155,7 @@ def build_skills_system_prompt(
         or ""
     )
     disabled = get_disabled_skill_names()
+    max_prompt_chars, max_skills_per_category, desc_max_chars = _get_skills_system_prompt_limits()
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
@@ -1123,6 +1163,9 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        max_prompt_chars,
+        max_skills_per_category,
+        desc_max_chars,
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1260,24 +1303,37 @@ def build_skills_system_prompt(
         result = ""
     else:
         index_lines = []
+        omitted_count = 0
         for category in sorted(skills_by_category.keys()):
-            cat_desc = category_descriptions.get(category, "")
+            cat_desc = _truncate_skill_prompt_description(
+                category_descriptions.get(category, ""), desc_max_chars
+            )
             if cat_desc:
                 index_lines.append(f"  {category}: {cat_desc}")
             else:
                 index_lines.append(f"  {category}:")
             # Deduplicate and sort skills within each category
             seen = set()
+            emitted_in_category = 0
+            category_omitted = 0
             for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
                 if name in seen:
                     continue
                 seen.add(name)
+                if max_skills_per_category and emitted_in_category >= max_skills_per_category:
+                    category_omitted += 1
+                    continue
+                emitted_in_category += 1
+                desc = _truncate_skill_prompt_description(desc, desc_max_chars)
                 if desc:
                     index_lines.append(f"    - {name}: {desc}")
                 else:
                     index_lines.append(f"    - {name}")
+            if category_omitted:
+                omitted_count += category_omitted
+                index_lines.append(f"    - … {category_omitted} more skill(s) omitted")
 
-        result = (
+        prompt_prefix = (
             "## Skills (mandatory)\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant "
             "to your task, you MUST load it with skill_view(name) and follow its instructions. "
@@ -1300,10 +1356,40 @@ def build_skills_system_prompt(
             "pitfalls you discovered, update it before finishing.\n"
             "\n"
             "<available_skills>\n"
-            + "\n".join(index_lines) + "\n"
+        )
+        prompt_suffix = (
             "</available_skills>\n"
             "\n"
             "Only proceed without loading a skill if genuinely none are relevant to the task."
+        )
+
+        if max_prompt_chars:
+            marker = (
+                f"  [... skills index compacted to fit skills.system_prompt_max_chars={max_prompt_chars}; "
+                "use skills_list/skill_view to inspect omitted skills ...]"
+            )
+            budget = max_prompt_chars - len(prompt_prefix) - len(prompt_suffix) - len(marker) - 2
+            compacted_lines: list[str] = []
+            used = 0
+            if budget > 0:
+                for line in index_lines:
+                    line_len = len(line) + (1 if compacted_lines else 0)
+                    if used + line_len > budget:
+                        omitted_count += 1
+                        break
+                    compacted_lines.append(line)
+                    used += line_len
+            if omitted_count or "\n".join(index_lines) != "\n".join(compacted_lines):
+                if compacted_lines:
+                    compacted_lines.append(marker)
+                else:
+                    compacted_lines = [marker]
+                index_lines = compacted_lines
+
+        result = (
+            prompt_prefix
+            + "\n".join(index_lines) + "\n"
+            + prompt_suffix
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────

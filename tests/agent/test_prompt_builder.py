@@ -276,6 +276,32 @@ class TestBuildSkillsSystemPrompt:
         # "search" should appear only once per category
         assert result.count("- search") == 1
 
+    def test_honors_skills_system_prompt_limits(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n"
+            "  system_prompt_max_chars: 2600\n"
+            "  system_prompt_max_skills_per_category: 2\n"
+            "  system_prompt_description_max_chars: 12\n"
+        )
+        cat_dir = tmp_path / "skills" / "tools"
+        for idx in range(5):
+            skill_dir = cat_dir / f"skill-{idx}"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                f"name: skill-{idx}\n"
+                "description: This description is intentionally long\n"
+                "---\n"
+            )
+
+        result = build_skills_system_prompt()
+
+        assert len(result) <= 2600
+        assert "skills index compacted" in result
+        assert result.count("    - skill-") == 2
+        assert "This description is intentionally long" not in result
+
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
