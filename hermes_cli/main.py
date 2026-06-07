@@ -10636,6 +10636,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
                     )
                     print(f"  Restore manually with: git stash apply")
+                elif current_branch not in {branch, "HEAD"}:
+                    # User started on a feature branch — stash will be
+                    # restored after switching back (below). Don't restore
+                    # it here on main where it would dirty the wrong tree.
+                    pass
                 elif discard_local_changes:
                     # Non-interactive update + user opted into discarding local
                     # source edits (updates.non_interactive_local_changes:
@@ -10653,6 +10658,93 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         prompt_user=prompt_for_restore,
                         input_fn=gw_input_fn,
                     )
+
+        # If we moved off the user's branch to pull ``branch`` (default: main),
+        # switch back and rebase their feature branch onto the new tip.
+        # Without this, ``hermes update`` updates ``main`` but leaves a
+        # long-lived feature branch stale — so the next TUI check still
+        # reports the same "X commits behind" and the user thinks the
+        # update was a no-op.
+        if update_succeeded and current_branch not in {branch, "HEAD"}:
+            print(
+                f"  → Returning to '{current_branch}' and rebasing onto the new {branch}..."
+            )
+            checkout_back = subprocess.run(
+                git_cmd + ["checkout", current_branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if checkout_back.returncode == 0:
+                # Restore stash on the feature branch (not on main).
+                # This must happen before the rebase so the working tree
+                # matches what the user had before the update.
+                if auto_stash_ref is not None:
+                    if discard_local_changes:
+                        _discard_stashed_changes(
+                            git_cmd,
+                            PROJECT_ROOT,
+                            auto_stash_ref,
+                        )
+                    else:
+                        _restore_stashed_changes(
+                            git_cmd,
+                            PROJECT_ROOT,
+                            auto_stash_ref,
+                            prompt_user=prompt_for_restore,
+                            input_fn=gw_input_fn,
+                        )
+                rebase_result = subprocess.run(
+                    git_cmd + ["rebase", f"origin/{branch}"],
+                    cwd=PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                if rebase_result.returncode != 0:
+                    # Rebase conflict. Abort and warn — don't fail the
+                    # entire update, since the user already has a fresh
+                    # main checked out and the syntax guard passed.
+                    print(
+                        f"  ⚠ Rebase of '{current_branch}' onto {branch} hit conflicts."
+                    )
+                    print(
+                        f"    Resolve manually: cd {PROJECT_ROOT} && git rebase {branch}"
+                    )
+                    print(
+                        f"    Or skip the rebase: cd {PROJECT_ROOT} && git rebase --abort"
+                    )
+                    if rebase_result.stderr.strip():
+                        for line in rebase_result.stderr.strip().splitlines()[:6]:
+                            print(f"      {line}")
+                    # Best-effort: leave the user on main so the next
+                    # ``hermes update`` runs against a clean tree.
+                    subprocess.run(
+                        git_cmd + ["rebase", "--abort"],
+                        cwd=PROJECT_ROOT,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    # The stash was restored on feat/X before the rebase
+                    # attempt. Save any uncommitted state before switching
+                    # to main so nothing is lost.
+                    _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+                    subprocess.run(
+                        git_cmd + ["checkout", branch],
+                        cwd=PROJECT_ROOT,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    print(
+                        f"    Your changes are in a stash. To apply on {branch}:"
+                    )
+                    print(f"    cd {PROJECT_ROOT} && git stash pop")
+            else:
+                print(
+                    f"  ⚠ Could not check out '{current_branch}' after update: "
+                    f"{checkout_back.stderr.strip().splitlines()[0] if checkout_back.stderr.strip() else 'unknown error'}"
+                )
 
         _invalidate_update_cache()
 
