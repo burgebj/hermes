@@ -621,7 +621,8 @@ def cmd_mcp_test(args):
     # Attempt connection
     start = time.monotonic()
     try:
-        tools = _probe_single_server(name, cfg)
+        timeout = float(cfg.get("timeout", cfg.get("connect_timeout", 30)))
+        tools = _probe_single_server(name, cfg, connect_timeout=timeout)
         elapsed_ms = (time.monotonic() - start) * 1000
     except Exception as exc:
         elapsed_ms = (time.monotonic() - start) * 1000
