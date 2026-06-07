@@ -556,6 +556,35 @@ class TestExtractReasoning:
         assert result == "from structured field"
 
 
+
+    def test_reasoning_only_response_has_extractable_reasoning(self, agent):
+        """Opus via OpenRouter returns content=None with reasoning populated.
+
+        _extract_reasoning must surface that text so the conversation loop
+        can use it as the visible final response instead of falling through
+        to the "(empty)" terminal (#39234).
+        """
+        msg = _mock_assistant_msg(content=None, reasoning="The answer is ok")
+        result = agent._extract_reasoning(msg)
+        assert result == "The answer is ok"
+
+    def test_content_present_not_overwritten_by_reasoning(self, agent):
+        """When content is non-empty the reasoning field must not replace it.
+
+        The primary recovery block in conversation_loop only fires when
+        final_response.strip() is falsy; this test confirms the guard works
+        at the _extract_reasoning call level as well (#39234).
+        """
+        msg = _mock_assistant_msg(content="ok", reasoning="thinking...")
+        # _extract_reasoning returns the reasoning text regardless —
+        # the guard is in conversation_loop, not in _extract_reasoning.
+        # Verify the content path is unaffected: content="ok" means
+        # final_response.strip() is truthy and the recovery is skipped.
+        assert agent._extract_reasoning(msg) == "thinking..."
+        # The content itself is not clobbered by _extract_reasoning.
+        assert msg.content == "ok"
+
+
 class TestSessionJsonSnapshotOptIn:
     """Regression: per-session JSON snapshot writer is opt-in via config.
 

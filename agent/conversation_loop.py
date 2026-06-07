@@ -4201,6 +4201,36 @@ def run_conversation(
                 # final response path.
                 agent._mute_post_response = False
                 
+                # -- Primary reasoning recovery ----------------------------
+                # When Opus (via OpenRouter) puts its entire answer in the
+                # top-level `reasoning` API field and returns content=None,
+                # the streaming think_scrubber leaves
+                # _current_streamed_assistant_text empty so no visible text
+                # reaches the user.  Recover immediately using the reasoning
+                # field.  Guard: only fire for the direct `reasoning` field
+                # (OpenRouter Opus style).  Providers that use
+                # `reasoning_content` (DeepSeek, Moonshot) already have a
+                # prefill-retry path; letting this block fire for them would
+                # bypass that path and skip prefill continuation.
+                _direct_reasoning = getattr(assistant_message, "reasoning", None)
+                _has_reasoning_content = bool(getattr(assistant_message, "reasoning_content", None))
+                if (
+                    not final_response.strip()
+                    and _direct_reasoning
+                    and _direct_reasoning.strip()
+                    and not _has_reasoning_content
+                ):
+                    logger.info(
+                        "Content empty but API reasoning present (%d chars) "
+                        "-- using reasoning as final response",
+                        len(_direct_reasoning),
+                    )
+                    agent._buffer_status(
+                        "Reasoning-only response from model "
+                        "-- using reasoning as response"
+                    )
+                    final_response = _direct_reasoning.strip()
+
                 # Check if response only has think block with no actual content after it
                 if not agent._has_content_after_think_block(final_response):
                     # ── Partial stream recovery ─────────────────────
@@ -4370,6 +4400,29 @@ def run_conversation(
                         _has_structured
                         and agent._thinking_prefill_retries >= 2
                     )
+                    # -- Secondary reasoning recovery after prefill exhaustion ------
+                    # Catches the edge case where a later retry produces a direct
+                    # `reasoning` field (OpenRouter Opus style) but no content
+                    # after prefill retries are exhausted.  Uses the same guard
+                    # as the primary block: only the top-level `reasoning` field
+                    # (not `reasoning_content`) to avoid intercepting the
+                    # existing DeepSeek/Moonshot empty-response sentinel path.
+                    _sec_direct_reasoning = getattr(assistant_message, "reasoning", None)
+                    _sec_has_rc = bool(getattr(assistant_message, "reasoning_content", None))
+                    if (_truly_empty and _has_structured
+                            and _prefill_exhausted
+                            and _sec_direct_reasoning
+                            and _sec_direct_reasoning.strip()
+                            and not _sec_has_rc):
+                        final_response = _sec_direct_reasoning.strip()
+                        _turn_exit_reason = "reasoning_content_recovery"
+                        logger.info(
+                            "Recovered final response from reasoning content "
+                            "(%d chars) after prefill exhaustion",
+                            len(final_response),
+                        )
+                        break
+
                     if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
                         agent._empty_content_retries += 1
                         logger.warning(
