@@ -46,16 +46,29 @@ class MessageDeduplicator:
         self._ttl = ttl_seconds
 
     def is_duplicate(self, msg_id: str) -> bool:
-        """Return True if *msg_id* was already seen within the TTL window."""
+        """Return True if *msg_id* was already seen within the TTL window.
+
+        NOTE: the seen-entry is written at FIRST call (upfront write), not after
+        processing finishes.  This prevents a race where the same message arrives
+        again (e.g. Weixin retry) while the first instance is still processing —
+        without the upfront write the retry would pass the dedup check because the
+        first call hasn't returned yet.
+        """
         if not msg_id:
             return False
         now = time.time()
+
         if msg_id in self._seen:
             if now - self._seen[msg_id] < self._ttl:
-                return True
+                return True  # duplicate
             # Entry has expired — remove it and treat as new
             del self._seen[msg_id]
+
+        # Write the entry BEFORE processing starts (upfront write).
+        # This blocks the race condition where a retry arrives while the
+        # first instance is still handling the message.
         self._seen[msg_id] = now
+
         if len(self._seen) > self._max_size:
             cutoff = now - self._ttl
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
