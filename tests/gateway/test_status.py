@@ -20,6 +20,37 @@ class TestGatewayPidState:
         assert isinstance(payload["argv"], list)
         assert payload["argv"]
 
+    def test_pid_record_uses_start_time_us_and_tombstones_legacy(self, monkeypatch):
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1_748_600_000_123_456)
+        rec = status._build_pid_record()
+        assert rec["start_time_us"] == 1_748_600_000_123_456
+        # Tombstone must be present-but-null so pre-fix readers skip the guard
+        # instead of KeyError-ing or misreading microseconds as /proc jiffies.
+        assert rec["start_time"] is None
+
+    def test_pre_fix_reader_does_not_false_evict_new_record(self, monkeypatch):
+        # Downgrade safety: replay the pre-fix binary's exact stale predicate
+        # against our NEW record. A pre-fix reader on a later boot sees a
+        # mismatching live start time; it evicts only when the record's
+        # start_time is a non-None int that differs. Because we tombstone
+        # start_time to None, the guard short-circuits and the live lock survives
+        # — the whole reason we tombstone instead of omit.
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 111)
+        record = status._build_pid_record()
+
+        def pre_fix_marks_stale(existing_start_time, current_start):
+            return (
+                existing_start_time is not None
+                and current_start is not None
+                and current_start != existing_start_time
+            )
+
+        current_start = 999  # the live (reused-PID / post-reboot) process
+        assert pre_fix_marks_stale(record.get("start_time"), current_start) is False
+        # Teeth: the tombstone is load-bearing. Had start_time kept a real int,
+        # that same pre-fix predicate WOULD have falsely evicted the live lock.
+        assert pre_fix_marks_stale(30_000_000, current_start) is True
+
     def test_write_pid_file_is_atomic_against_concurrent_writers(self, tmp_path, monkeypatch):
         """Regression: two concurrent --replace invocations must not both win.
 
@@ -43,6 +74,20 @@ class TestGatewayPidState:
         # Original record is preserved.
         payload = json.loads((tmp_path / "gateway.pid").read_text())
         assert payload["pid"] == os.getpid()
+
+    def test_get_running_pid_skips_reused_pid_via_start_time_us(self, monkeypatch):
+        record = {
+            "pid": 4321, "kind": status._GATEWAY_KIND,
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
+            "start_time": None, "start_time_us": 111,
+        }
+        monkeypatch.setattr(status, "_read_pid_record", lambda p: record)
+        monkeypatch.setattr(status, "_read_gateway_lock_record", lambda p: None)
+        monkeypatch.setattr(status, "is_gateway_runtime_lock_active", lambda p: True)
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_cleanup_invalid_pid_path", lambda *a, **k: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 999)  # reused -> mismatch
+        assert status.get_running_pid() is None
 
     def test_get_running_pid_rejects_live_non_gateway_pid(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -281,11 +326,15 @@ class TestGatewayRuntimeStatus:
             "updated_at": "2025-01-01T00:00:00Z",
         }))
 
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 2000)
         status.write_runtime_status(gateway_state="running")
 
         payload = status.read_runtime_status()
         assert payload["pid"] == os.getpid(), "PID should be overwritten, not preserved via setdefault"
-        assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
+        # Stale 1000.0 must be gone: the live time now lives in start_time_us and
+        # the legacy field is tombstoned to None.
+        assert payload["start_time_us"] == 2000
+        assert payload["start_time"] is None
 
     def test_write_runtime_status_overwrites_stale_argv_on_restart(self, tmp_path, monkeypatch):
         """Regression: gateway_state.json must not keep the previous launch argv."""
@@ -309,7 +358,8 @@ class TestGatewayRuntimeStatus:
         payload = status.read_runtime_status()
         assert payload["argv"] == ["/new/path/hermes", "gateway", "run"]
         assert payload["pid"] == os.getpid()
-        assert payload["start_time"] == 2000
+        assert payload["start_time_us"] == 2000
+        assert payload["start_time"] is None
 
     def test_write_runtime_status_records_platform_failure(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -424,18 +474,69 @@ class TestScopedLocks:
         ]
         assert lock_path.read_text(encoding="utf-8") == "\n"
 
+    @staticmethod
+    def _seed_lock(tmp_path, monkeypatch, record, scope="telegram", identity="tok"):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        path = status._get_scope_lock_path(scope, identity)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return path
+
+    def test_acquire_scoped_lock_evicts_reused_pid_via_start_time_us(self, tmp_path, monkeypatch):
+        # Record left by a dead gateway (start_time_us=111); the PID is now a
+        # different LIVE process (start_time_us=999). Differ -> stale -> acquire.
+        path = self._seed_lock(tmp_path, monkeypatch, {
+            "pid": 4321, "kind": status._GATEWAY_KIND,
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
+            "start_time": None, "start_time_us": 111,
+        })
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 999)
+        acquired, _ = status.acquire_scoped_lock("telegram", "tok")
+        assert acquired is True
+        assert json.loads(path.read_text())["pid"] == os.getpid()
+
+    def test_acquire_scoped_lock_keeps_lock_for_same_incarnation(self, tmp_path, monkeypatch):
+        self._seed_lock(tmp_path, monkeypatch, {
+            "pid": 4321, "kind": status._GATEWAY_KIND,
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
+            "start_time": None, "start_time_us": 555,
+        })
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 555)
+        acquired, existing = status.acquire_scoped_lock("telegram", "tok")
+        assert acquired is False
+        assert existing["pid"] == 4321
+
+    def test_acquire_scoped_lock_legacy_record_uses_oracle_not_false_evict(self, tmp_path, monkeypatch):
+        # Pre-fix record (no start_time_us) + psutil unavailable -> incomparable.
+        # The live PID still looks like a gateway, so the oracle keeps the lock.
+        self._seed_lock(tmp_path, monkeypatch, {
+            "pid": 4321, "kind": status._GATEWAY_KIND,
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
+            "start_time": None,
+        })
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+        monkeypatch.setattr(status, "_looks_like_gateway_process", lambda pid: True)
+        acquired, existing = status.acquire_scoped_lock("telegram", "tok")
+        assert acquired is False
+        assert existing["pid"] == 4321
+
     def test_acquire_scoped_lock_rejects_live_other_process(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
         lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 99999,
-            "start_time": 123,
+            "start_time": None,
+            "start_time_us": 123,
             "kind": "hermes-gateway",
         }))
 
         # Post-#21561 the liveness probe routes through
         # ``gateway.status._pid_exists`` (psutil-first, safe on Windows).
+        # Live start_time_us equals the recorded one -> same incarnation -> live.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
 
@@ -579,6 +680,9 @@ class TestScopedLocks:
         assert payload["pid"] == os.getpid()
 
     def test_release_scoped_lock_only_removes_current_owner(self, tmp_path, monkeypatch):
+        # Guards the self-release lock LEAK: release must compare start_time_us,
+        # not the tombstoned legacy start_time (None) — comparing the latter
+        # against this process's live epoch-us value would refuse to unlink.
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
 
         acquired, _ = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
@@ -598,12 +702,14 @@ class TestScopedLocks:
         other_lock = lock_dir / "slack-app-token-other.lock"
         target_lock.write_text(json.dumps({
             "pid": 111,
-            "start_time": 222,
+            "start_time": None,
+            "start_time_us": 222,
             "kind": "hermes-gateway",
         }))
         other_lock.write_text(json.dumps({
             "pid": 999,
-            "start_time": 333,
+            "start_time": None,
+            "start_time_us": 333,
             "kind": "hermes-gateway",
         }))
 
@@ -624,7 +730,8 @@ class TestScopedLocks:
         reused_pid_lock = lock_dir / "telegram-bot-token-reused.lock"
         reused_pid_lock.write_text(json.dumps({
             "pid": 111,
-            "start_time": 999,
+            "start_time": None,
+            "start_time_us": 999,
             "kind": "hermes-gateway",
         }))
 
@@ -657,7 +764,8 @@ class TestTakeoverMarker:
         assert marker.exists()
         payload = json.loads(marker.read_text())
         assert payload["target_pid"] == 12345
-        assert payload["target_start_time"] == 42
+        assert payload["target_start_time_us"] == 42
+        assert payload["target_start_time"] is None  # tombstone
         assert payload["replacer_pid"] == os.getpid()
         assert "written_at" in payload
 
@@ -727,7 +835,7 @@ class TestTakeoverMarker:
         ok = status.write_takeover_marker(target_pid=os.getpid())
         assert ok is True
         payload = json.loads((tmp_path / ".gateway-takeover.json").read_text())
-        assert payload["target_start_time"] is None
+        assert payload["target_start_time_us"] is None
 
         result = status.consume_takeover_marker_for_self()
 
@@ -856,7 +964,8 @@ class TestPlannedStopMarker:
         assert marker.exists()
         payload = json.loads(marker.read_text())
         assert payload["target_pid"] == 12345
-        assert payload["target_start_time"] == 42
+        assert payload["target_start_time_us"] == 42
+        assert payload["target_start_time"] is None  # tombstone
         assert payload["stopper_pid"] == os.getpid()
         assert "written_at" in payload
 
@@ -870,6 +979,22 @@ class TestPlannedStopMarker:
 
         assert result is True
         assert not (tmp_path / ".gateway-planned-stop.json").exists()
+
+    def test_probe_rejects_reused_pid_via_start_time_us(self, tmp_path, monkeypatch):
+        # Non-destructive probe: a marker naming our PID but recording a
+        # different start_time_us means the PID was reused -> must not match.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 111)
+        path = status._get_planned_stop_marker_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "target_pid": os.getpid(),
+            "target_start_time": None,
+            "target_start_time_us": 999,
+            "stopper_pid": 1,
+            "written_at": status._utc_now_iso(),
+        }), encoding="utf-8")
+        assert status.planned_stop_marker_targets_self() is False
 
     def test_consume_returns_false_for_different_pid(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -947,9 +1072,10 @@ class TestPlannedStopMarker:
 
         ok = status.write_planned_stop_marker(target_pid=os.getpid())
         assert ok is True
-        # Marker carries a null start_time, exactly as written on Windows.
+        # Marker carries a null start_time_us, exactly as written when psutil
+        # cannot read the process.
         payload = json.loads((tmp_path / ".gateway-planned-stop.json").read_text())
-        assert payload["target_start_time"] is None
+        assert payload["target_start_time_us"] is None
 
         result = status.consume_planned_stop_marker_for_self()
 

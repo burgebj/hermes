@@ -251,7 +251,8 @@ async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
         from gateway.status import _get_takeover_marker_path, _write_json_file
         _write_json_file(_get_takeover_marker_path(), {
             "target_pid": target_pid,
-            "target_start_time": 0,
+            "target_start_time": None,
+            "target_start_time_us": 0,
             "replacer_pid": 100,
             "written_at": "2026-04-17T00:00:00+00:00",
         })
@@ -322,7 +323,8 @@ async def test_start_gateway_replace_clears_marker_on_permission_denied(
         from gateway.status import _get_takeover_marker_path, _write_json_file
         _write_json_file(_get_takeover_marker_path(), {
             "target_pid": target_pid,
-            "target_start_time": 0,
+            "target_start_time": None,
+            "target_start_time_us": 0,
             "replacer_pid": 100,
             "written_at": "2026-04-17T00:00:00+00:00",
         })

@@ -109,12 +109,23 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return the kernel start time for a process when available."""
-    stat_path = Path(f"/proc/{pid}/stat")
+    """Return the process creation time in epoch microseconds, or None.
+
+    Uses ``psutil.Process(pid).create_time()``, supported on Linux, macOS and
+    Windows — unlike the historical ``/proc/<pid>/stat`` field-22 read, which
+    returned None on every platform without ``/proc`` and silently disabled the
+    PID-reuse guard there. Microsecond integers are exact-comparable across JSON
+    round-trips and, being epoch-based (not jiffies-since-boot), do not collide
+    across reboots. Returns None on any failure so callers fall back to the
+    cmdline/argv oracle rather than raising.
+    """
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        return int(stat_path.read_text(encoding="utf-8").split()[21])
-    except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        import psutil  # hard dependency (pyproject.toml); guarded for safety
+    except ImportError:
+        return None
+    try:
+        return round(psutil.Process(pid).create_time() * 1_000_000)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, ValueError):
         return None
 
 
@@ -205,7 +216,12 @@ def _build_pid_record() -> dict:
         "pid": os.getpid(),
         "kind": _GATEWAY_KIND,
         "argv": list(sys.argv),
-        "start_time": _get_process_start_time(os.getpid()),
+        # Legacy field, tombstoned: pre-fix binaries read this as /proc jiffies.
+        # Leaving it null (never an int) makes them skip the start-time guard and
+        # fall back to the cmdline/argv oracle instead of false-evicting a live lock.
+        "start_time": None,
+        # Cross-platform process creation time, epoch microseconds.
+        "start_time_us": _get_process_start_time(os.getpid()),
     }
 
 
@@ -519,12 +535,8 @@ def write_runtime_status(
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
     payload = _read_json_file(path) or _build_runtime_status_record()
-    current_record = _build_pid_record()
     payload.setdefault("platforms", {})
-    payload["kind"] = current_record["kind"]
-    payload["pid"] = current_record["pid"]
-    payload["argv"] = current_record["argv"]
-    payload["start_time"] = current_record["start_time"]
+    payload.update(_build_pid_record())  # overwrite stale pid/argv/start_time_us from a prior run
     payload["updated_at"] = _utc_now_iso()
 
     if gateway_state is not _UNSET:
@@ -611,7 +623,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         except (KeyError, TypeError, ValueError):
             existing_pid = None
 
-        if existing_pid == os.getpid() and existing.get("start_time") == record.get("start_time"):
+        if existing_pid == os.getpid() and existing.get("start_time_us") == record.get("start_time_us"):
             _write_json_file(lock_path, record)
             return True, existing
 
@@ -620,26 +632,18 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
             if not _pid_exists(existing_pid):
                 stale = True
             else:
+                existing_start = existing.get("start_time_us")
                 current_start = _get_process_start_time(existing_pid)
-                if (
-                    existing.get("start_time") is not None
-                    and current_start is not None
-                    and current_start != existing.get("start_time")
-                ):
-                    stale = True
-                # When start_time comparison is unavailable (macOS / Windows
-                # have no /proc, so both sides are None), fall back to
-                # checking the live process command line.  When cmdline is
-                # also unreadable (Windows has no ps), consult the lock
-                # record's own argv — the gateway writes it at startup and
-                # it's the only identity signal on platforms without ps.
-                # Both oracles must indicate "not a gateway" to mark stale.
-                if (
-                    not stale
-                    and existing.get("start_time") is None
-                    and current_start is None
-                    and not _looks_like_gateway_process(existing_pid)
-                ):
+                if existing_start is not None and current_start is not None:
+                    # Both incarnations have a comparable start time: a mismatch
+                    # means the PID was reused by a different process.
+                    stale = current_start != existing_start
+                elif not _looks_like_gateway_process(existing_pid):
+                    # start_time_us unavailable on one/both sides (legacy record
+                    # or psutil could not read the live process). Fall back to the
+                    # cmdline/argv oracle: when cmdline is also unreadable (Windows
+                    # has no ps), consult the record's own argv. Both oracles must
+                    # say "not a gateway" before we mark the lock stale.
                     live_cmdline = _read_process_cmdline(existing_pid)
                     if live_cmdline is not None or not _record_looks_like_gateway(existing):
                         stale = True
@@ -690,7 +694,7 @@ def release_scoped_lock(scope: str, identity: str) -> None:
         return
     if existing.get("pid") != os.getpid():
         return
-    if existing.get("start_time") != _get_process_start_time(os.getpid()):
+    if existing.get("start_time_us") != _get_process_start_time(os.getpid()):
         return
     try:
         lock_path.unlink(missing_ok=True)
@@ -732,7 +736,7 @@ def release_all_scoped_locks(
                     continue
                 if (
                     owner_start_time is not None
-                    and record.get("start_time") != owner_start_time
+                    and record.get("start_time_us") != owner_start_time
                 ):
                     continue
             try:
@@ -820,18 +824,15 @@ def _consume_pid_marker_for_self(
 
     our_pid = os.getpid()
     our_start_time = _get_process_start_time(our_pid)
-    # Start-time is a PID-reuse guard. It is only meaningful when both
-    # sides actually have it: ``_get_process_start_time`` returns None on
-    # platforms without ``/proc`` (macOS, native Windows — the very
-    # platform the planned-stop watcher exists for). Requiring a non-None
-    # match there would make every consume return False, so a legitimate
-    # ``hermes gateway stop`` on Windows would be misclassified as an
-    # unexpected ``UNKNOWN`` exit (exit 1) and revived by the service
-    # manager. So: when both start_times are known they must match; when
-    # either is unknown, fall back to PID equality alone (bounded by the
-    # marker's short TTL). This mirrors ``planned_stop_marker_targets_self``
-    # so the watcher's non-destructive probe and this authoritative
-    # consume agree on every platform (issue #34597).
+    # Start-time is a PID-reuse guard, meaningful only when both sides have it.
+    # ``_get_process_start_time`` returns None when psutil cannot read the
+    # process; requiring a non-None match would misclassify a legitimate
+    # ``hermes gateway stop`` as an unexpected ``UNKNOWN`` exit (exit 1) and let
+    # the service manager revive it. So: when both start times are known they
+    # must match; when either is unknown, fall back to PID equality alone
+    # (bounded by the marker's short TTL). Mirrors
+    # ``planned_stop_marker_targets_self`` so the watcher's non-destructive
+    # probe and this authoritative consume agree on every platform (#34597).
     if target_pid != our_pid:
         matches = False
     elif target_start_time is not None and our_start_time is not None:
@@ -859,10 +860,10 @@ def write_takeover_marker(target_pid: int) -> bool:
     is a best-effort signal, not a correctness requirement).
     """
     try:
-        target_start_time = _get_process_start_time(target_pid)
         record = {
             "target_pid": target_pid,
-            "target_start_time": target_start_time,
+            "target_start_time": None,  # tombstone (pre-fix readers)
+            "target_start_time_us": _get_process_start_time(target_pid),
             "replacer_pid": os.getpid(),
             "written_at": _utc_now_iso(),
         }
@@ -886,7 +887,7 @@ def consume_takeover_marker_for_self() -> bool:
     return _consume_pid_marker_for_self(
         _get_takeover_marker_path(),
         pid_field="target_pid",
-        start_time_field="target_start_time",
+        start_time_field="target_start_time_us",
         ttl_s=_TAKEOVER_MARKER_TTL_S,
     )
 
@@ -907,10 +908,10 @@ def write_planned_stop_marker(target_pid: int) -> bool:
     this short-lived marker first to let the target process exit cleanly.
     """
     try:
-        target_start_time = _get_process_start_time(target_pid)
         record = {
             "target_pid": target_pid,
-            "target_start_time": target_start_time,
+            "target_start_time": None,  # tombstone (pre-fix readers)
+            "target_start_time_us": _get_process_start_time(target_pid),
             "stopper_pid": os.getpid(),
             "written_at": _utc_now_iso(),
         }
@@ -925,7 +926,7 @@ def consume_planned_stop_marker_for_self() -> bool:
     return _consume_pid_marker_for_self(
         _get_planned_stop_marker_path(),
         pid_field="target_pid",
-        start_time_field="target_start_time",
+        start_time_field="target_start_time_us",
         ttl_s=_PLANNED_STOP_MARKER_TTL_S,
     )
 
@@ -955,7 +956,7 @@ def planned_stop_marker_targets_self() -> bool:
 
     try:
         target_pid = int(record["target_pid"])
-        target_start_time = record.get("target_start_time")
+        target_start_time = record.get("target_start_time_us")
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
         # Malformed marker can never match anyone — drop it.
@@ -978,14 +979,12 @@ def planned_stop_marker_targets_self() -> bool:
     if target_pid != our_pid:
         return False
 
-    # Start-time is a PID-reuse guard. It is only meaningful when both
-    # sides actually have it: ``_get_process_start_time`` returns None on
-    # platforms without ``/proc`` (macOS, native Windows — the very
-    # platform this watcher exists for). Requiring a non-None match there
-    # would make the watcher never fire and re-break the #33778 Windows
-    # session-resume path. So: when both start_times are known they must
-    # match; when either is unknown, fall back to PID equality alone
-    # (the marker is short-lived under a 60s TTL, bounding reuse risk).
+    # Start-time is a PID-reuse guard, meaningful only when both sides have it.
+    # ``_get_process_start_time`` returns None when psutil cannot read the
+    # process; requiring a non-None match would make the watcher never fire and
+    # re-break the #33778 session-resume path. So: when both start times are
+    # known they must match; when either is unknown, fall back to PID equality
+    # alone (the marker is short-lived under a 60s TTL, bounding reuse risk).
     our_start_time = _get_process_start_time(our_pid)
     if target_start_time is not None and our_start_time is not None:
         return target_start_time == our_start_time
@@ -1028,7 +1027,7 @@ def get_running_pid(
         if not _pid_exists(pid):
             continue
 
-        recorded_start = record.get("start_time")
+        recorded_start = record.get("start_time_us")
         current_start = _get_process_start_time(pid)
         if recorded_start is not None and current_start is not None and current_start != recorded_start:
             continue
