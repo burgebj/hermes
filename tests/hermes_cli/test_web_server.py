@@ -4017,6 +4017,33 @@ class TestPtyWebSocket:
         assert "channel=abc-123" in url
         assert "token=" in url
 
+    def test_pub_forwards_frames_to_broadcast_helper(self, monkeypatch):
+        """Frame written to /api/pub is passed to the channel broadcaster."""
+        import time
+        import uuid
+        from urllib.parse import urlencode
+        from hermes_cli import web_server as ws_mod
+
+        channel = f"broadcast-test-{uuid.uuid4().hex}"
+        payload = '{"type":"tool.start","payload":{"tool_id":"t1"}}'
+        received: list[tuple[object, str, str]] = []
+
+        async def fake_broadcast(app_arg: object, event_channel: str, event_payload: str) -> None:
+            received.append((app_arg, event_channel, event_payload))
+
+        monkeypatch.setattr(ws_mod, "_broadcast_event", fake_broadcast)
+
+        qs = urlencode({"token": self.token, "channel": channel})
+        with self.client.websocket_connect(f"/api/pub?{qs}") as pub:
+            pub.send_text(payload)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if received:
+                    break
+                time.sleep(0.01)
+
+        assert received == [(ws_mod.app, channel, payload)]
+
     def test_pub_broadcasts_to_events_subscribers(self):
         """A frame handed to _broadcast_event is sent verbatim to every
         subscriber registered on that channel — and not to subscribers on
