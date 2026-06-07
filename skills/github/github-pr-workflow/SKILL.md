@@ -1,7 +1,7 @@
 ---
 name: github-pr-workflow
-description: "GitHub PR lifecycle: branch, commit, open, CI, merge."
-version: 1.1.0
+description: "GitHub PR lifecycle: branch, CI, merge, post-merge verify."
+version: 1.2.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -276,6 +276,37 @@ When asked to auto-fix CI, follow this loop:
 
 ## 6. Merging
 
+### Pre-Merge Readiness Check
+
+Before merging, confirm the PR is actually ready — don't merge a red or stale
+branch. This is the proven pattern: check mergeability, review state, and that
+the branch is current with `main`.
+
+**With gh:**
+
+```bash
+# One JSON snapshot of everything that gates a merge.
+gh pr view <PR_NUMBER> --json \
+  state,mergeable,mergeStateStatus,reviewDecision,baseRefName,headRefName \
+  | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print('state            :', d['state'])
+print('mergeable        :', d['mergeable'])          # MERGEABLE / CONFLICTING / UNKNOWN
+print('mergeStateStatus :', d['mergeStateStatus'])   # CLEAN / BEHIND / BLOCKED / DIRTY
+print('reviewDecision   :', d['reviewDecision'] or '(none required)')
+ok = d['state']=='OPEN' and d['mergeable']=='MERGEABLE' and d['mergeStateStatus'] in ('CLEAN','HAS_HOOKS','UNSTABLE')
+print('READY            :', ok)
+"
+# Also confirm CI is green (Section 4) before merging.
+```
+
+If `mergeStateStatus` is `BEHIND`, update the branch first (`gh pr update-branch
+<PR_NUMBER>` or rebase locally). A stale branch silently reverts recent fixes on
+`main` when squashed — see the AGENTS.md pitfall on stale squash merges.
+
+### Squash Merge + Branch Cleanup
+
 **With gh:**
 
 ```bash
@@ -327,7 +358,66 @@ curl -s -X POST \
   -d "{\"query\": \"mutation { enablePullRequestAutoMerge(input: {pullRequestId: \\\"$PR_NODE_ID\\\", mergeMethod: SQUASH}) { clientMutationId } }\"}"
 ```
 
-## 7. Complete Workflow Example
+## 7. Post-Merge Verification
+
+Merging is not the finish line. The squash commit lands on the **base branch**,
+which kicks off a *fresh* set of CI / deploy runs — separate from the PR-branch
+checks you watched in Section 4. Verifying the merge means finding those
+base-branch runs **by the merge commit SHA**, watching them, and (for deploys)
+probing the live surface.
+
+### The Helper Script (recommended)
+
+`scripts/post_merge_verify.py` does the whole loop with `gh` and Python JSON
+parsing — no `jq`, no token handling, nothing secret printed:
+
+```bash
+PR=123
+
+# One-shot summary of base-branch runs for the merge commit
+python3 scripts/post_merge_verify.py $PR
+
+# Watch until those runs finish (15 min default), then probe the deploy
+python3 scripts/post_merge_verify.py $PR --watch \
+  --probe https://app.example.com/healthz
+
+# Machine-readable report for chaining
+python3 scripts/post_merge_verify.py $PR --watch --json
+```
+
+Exit codes: `0` runs (and probes) succeeded · `1` a run/probe failed · `2`
+PR not merged / `gh` missing · `3` still pending after `--timeout`. Pass
+`-R owner/repo` when not running inside the repo checkout.
+
+### Doing It By Hand
+
+If you can't run the script, the same steps with raw `gh`:
+
+```bash
+PR=123
+
+# 1. Get the merge commit SHA (empty until the PR is actually merged)
+SHA=$(gh pr view $PR --json mergeCommit -q .mergeCommit.oid)
+echo "merge commit: $SHA"
+
+# 2. Find base-branch workflow runs triggered by that exact commit
+gh api "repos/$OWNER/$REPO/actions/runs?head_sha=$SHA" \
+  | python3 -c "
+import sys, json
+for r in json.load(sys.stdin)['workflow_runs']:
+    print(f\"  [{r['conclusion'] or r['status']}] {r['name']}  {r['html_url']}\")"
+
+# 3. Watch a specific run to completion
+gh run watch <RUN_ID>
+
+# 4. Probe the deployment surface once runs are green
+curl -fsS -o /dev/null -w "%{http_code}\n" https://app.example.com/healthz
+```
+
+See `references/post-merge-verification.md` for the full rationale, the
+`mergeStateStatus` cheat sheet, and the gateway/deploy probe checklist.
+
+## 8. Complete Workflow Example
 
 ```bash
 # 1. Start from clean main
@@ -352,7 +442,10 @@ git push -u origin HEAD
 
 # 7. Monitor CI (see Section 4)
 
-# 8. Merge when green (see Section 6)
+# 8. Pre-merge readiness check, then squash merge (see Section 6)
+
+# 9. Verify the merge on the base branch (see Section 7)
+python3 scripts/post_merge_verify.py <PR_NUMBER> --watch
 ```
 
 ## Useful PR Commands Reference
