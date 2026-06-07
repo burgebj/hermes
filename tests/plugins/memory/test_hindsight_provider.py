@@ -493,6 +493,22 @@ class TestToolHandlers:
         call_kwargs = provider._client.aretain.call_args.kwargs
         assert "tags" not in call_kwargs
 
+    def test_retain_applies_active_route_tags(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "tags": ["topic:memory"],
+                    "retain_tags": ["topic:memory", "target:memory"],
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p.handle_tool_call("hindsight_retain", {"content": "memory governance note"})
+        call_kwargs = p._client.aretain.call_args.kwargs
+        assert call_kwargs["tags"] == ["topic:memory", "target:memory"]
+
     def test_retain_missing_content(self, provider):
         result = json.loads(provider.handle_tool_call(
             "hindsight_retain", {}
@@ -525,6 +541,147 @@ class TestToolHandlers:
         call_kwargs = p._client.arecall.call_args.kwargs
         assert call_kwargs["types"] == ["world", "experience"]
 
+    def test_recall_applies_active_route_and_filters_excluded_tags(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_max_results=1,
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "query_prefix": "Only retrieve Memory optimization workspace context.",
+                    "tags": ["topic:memory", "project:hermes-memory"],
+                    "tags_match": "any_strict",
+                    "exclude_tags": ["project:digiplus"],
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p._client.arecall.return_value = SimpleNamespace(
+            results=[
+                SimpleNamespace(text="wrong project", tags=["project:digiplus"]),
+                SimpleNamespace(text="right memory", tags=["topic:memory"]),
+                SimpleNamespace(text="also memory", tags=["project:hermes-memory"]),
+            ]
+        )
+
+        result = json.loads(p.handle_tool_call("hindsight_recall", {"query": "routing"}))
+        call_kwargs = p._client.arecall.call_args.kwargs
+        assert call_kwargs["tags"] == ["topic:memory", "project:hermes-memory"]
+        assert call_kwargs["tags_match"] == "any_strict"
+        assert call_kwargs["types"] == ["observation"]
+        assert call_kwargs["query"].startswith("Only retrieve Memory optimization workspace context.")
+        assert result["result"] == "1. right memory"
+
+    def test_recall_route_can_match_chat_name_or_keyword(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_routes={
+                "family": {"chat_names": ["family"], "tags": ["topic:family"]},
+                "measurement": {"keywords": ["digiplus"], "tags": ["project:digiplus-measurement"]},
+            },
+        )
+        p._chat_name = "Family"
+        kwargs, route = p._build_recall_kwargs("family plans")
+        assert route is not None
+        assert kwargs["tags"] == ["topic:family"]
+
+        p._chat_name = ""
+        kwargs, route = p._build_recall_kwargs("DigiPlus attribution")
+        assert route is not None
+        assert kwargs["tags"] == ["project:digiplus-measurement"]
+
+    def test_recall_route_real_config_shape_exact_chat_wins_over_keyword(self, provider_with_config):
+        """Live recall_routes are dict-shaped; exact chat must beat broad keywords."""
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_routes={
+                "Memory 优化": {
+                    "chat_ids": ["memory-chat"],
+                    "keywords": ["digiplus", "memory"],
+                    "tags": ["topic:memory"],
+                },
+                "measurement-chat": {
+                    "chat_ids": ["measurement-chat"],
+                    "keywords": ["digiplus"],
+                    "tags": ["topic:measurement"],
+                },
+            },
+        )
+        p._chat_id = "measurement-chat"
+        kwargs, route = p._build_recall_kwargs("DigiPlus memory routing")
+        assert route is p._recall_routes["measurement-chat"]
+        assert kwargs["tags"] == ["topic:measurement"]
+
+    def test_recall_route_tag_groups_are_passed_instead_of_tags(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "tags": ["topic:memory"],
+                    "tag_groups": [{"operator": "all", "tags": ["topic:memory", "memory_kind:guardrail"]}],
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p.handle_tool_call("hindsight_recall", {"query": "guardrail"})
+        call_kwargs = p._client.arecall.call_args.kwargs
+        assert call_kwargs["tag_groups"] == [{"operator": "all", "tags": ["topic:memory", "memory_kind:guardrail"]}]
+        assert "tags" not in call_kwargs
+        assert "tags_match" not in call_kwargs
+
+    def test_recall_priority_tags_are_prepended_and_filtered_to_route(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_max_results=3,
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "tags": ["topic:memory"],
+                    "priority_tags": ["memory_kind:guardrail", "memory_kind:correction"],
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p._client.arecall.side_effect = [
+            SimpleNamespace(results=[SimpleNamespace(text="normal memory", tags=["topic:memory"])]),
+            SimpleNamespace(results=[
+                SimpleNamespace(text="other route guardrail", tags=["memory_kind:guardrail", "topic:other"]),
+                SimpleNamespace(text="memory guardrail", tags=["memory_kind:guardrail", "topic:memory"]),
+            ]),
+        ]
+
+        result = json.loads(p.handle_tool_call("hindsight_recall", {"query": "routing"}))
+        first_call = p._client.arecall.call_args_list[0].kwargs
+        second_call = p._client.arecall.call_args_list[1].kwargs
+        assert first_call["tags"] == ["topic:memory"]
+        assert first_call["types"] == ["observation"]
+        assert second_call["tags"] == ["memory_kind:guardrail", "memory_kind:correction"]
+        assert "types" not in second_call
+        assert result["result"].splitlines() == ["1. memory guardrail", "2. normal memory"]
+
+    def test_recall_min_results_fallback_requires_explicit_fallback_true(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "tags": ["topic:memory"],
+                    "min_results": 1,
+                    "fallback": True,
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p._client.arecall.side_effect = [
+            SimpleNamespace(results=[]),
+            SimpleNamespace(results=[SimpleNamespace(text="fallback memory", tags=["topic:memory"])]),
+        ]
+        result = json.loads(p.handle_tool_call("hindsight_recall", {"query": "routing"}))
+        assert p._client.arecall.call_args_list[0].kwargs["tags"] == ["topic:memory"]
+        assert "tags" not in p._client.arecall.call_args_list[1].kwargs
+        assert result["result"] == "1. fallback memory"
+
     def test_recall_no_results(self, provider):
         provider._client.arecall.return_value = SimpleNamespace(results=[])
         result = json.loads(provider.handle_tool_call(
@@ -543,6 +700,48 @@ class TestToolHandlers:
             "hindsight_reflect", {"query": "summarize"}
         ))
         assert result["result"] == "Synthesized answer"
+
+    def test_reflect_applies_active_route_filters(self, provider_with_config):
+        p = provider_with_config(
+            recall_domain_routing=True,
+            recall_types=["observation"],
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "query_prefix": "Route: Memory Optimization.",
+                    "tags": ["topic:memory"],
+                    "tags_match": "all_strict",
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p.handle_tool_call("hindsight_reflect", {"query": "summarize"})
+        call_kwargs = p._client.areflect.call_args.kwargs
+        assert call_kwargs["query"].startswith("Route: Memory Optimization.")
+        assert call_kwargs["tags"] == ["topic:memory"]
+        assert call_kwargs["tags_match"] == "all_strict"
+        assert call_kwargs["fact_types"] == ["observation"]
+
+    def test_reflect_prefers_route_tag_groups_over_tags(self, provider_with_config):
+        p = provider_with_config(
+            recall_tags=["global"],
+            recall_domain_routing=True,
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "tag_groups": [
+                        {"tags": ["topic:memory", "source:telegram"], "match": "all_strict"},
+                    ],
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p.handle_tool_call("hindsight_reflect", {"query": "summarize"})
+        call_kwargs = p._client.areflect.call_args.kwargs
+        assert call_kwargs["tag_groups"] == [
+            {"tags": ["topic:memory", "source:telegram"], "match": "all_strict"},
+        ]
+        assert "tags" not in call_kwargs
 
     def test_reflect_missing_query(self, provider):
         result = json.loads(provider.handle_tool_call(
@@ -664,6 +863,71 @@ class TestPrefetch:
         assert call_kwargs["tags"] == ["t1"]
         assert call_kwargs["tags_match"] == "all"
         assert call_kwargs["types"] == ["world"]
+
+    def test_queue_prefetch_skips_low_signal_short_queries(self, provider_with_config):
+        p = provider_with_config(
+            recall_skip_low_signal_queries=True,
+            recall_low_signal_min_chars=12,
+            recall_domain_signal_keywords=["hindsight", "memory", "记忆"],
+        )
+        p.queue_prefetch("继续")
+        assert p._prefetch_thread is None
+        p._client.arecall.assert_not_called()
+
+    def test_queue_prefetch_allows_short_domain_signal_queries(self, provider_with_config):
+        p = provider_with_config(
+            recall_skip_low_signal_queries=True,
+            recall_low_signal_min_chars=12,
+            recall_domain_signal_keywords=["hindsight", "memory", "记忆"],
+        )
+        p.queue_prefetch("记忆乱")
+        if p._prefetch_thread:
+            p._prefetch_thread.join(timeout=5.0)
+        p._client.arecall.assert_called_once()
+
+    def test_queue_prefetch_allows_short_route_keyword_queries(self, provider_with_config):
+        p = provider_with_config(
+            recall_skip_low_signal_queries=True,
+            recall_low_signal_min_chars=12,
+            recall_domain_signal_keywords=["hindsight", "memory", "记忆"],
+            recall_domain_routing=True,
+            recall_routes={
+                "family": {
+                    "chat_ids": ["family-chat"],
+                    "keywords": ["家庭", "出行"],
+                    "tags": ["topic:family"],
+                }
+            },
+        )
+        p._chat_id = "family-chat"
+        p.queue_prefetch("家庭出行")
+        if p._prefetch_thread:
+            p._prefetch_thread.join(timeout=5.0)
+        p._client.arecall.assert_called_once()
+
+    def test_queue_prefetch_reflect_uses_route_filters(self, provider_with_config):
+        p = provider_with_config(
+            recall_prefetch_method="reflect",
+            recall_domain_routing=True,
+            recall_types=["observation"],
+            recall_routes={
+                "memory": {
+                    "chat_ids": ["chat-1"],
+                    "query_prefix": "Route: Memory Optimization.",
+                    "tags": ["topic:memory"],
+                    "tags_match": "all_strict",
+                }
+            },
+        )
+        p._chat_id = "chat-1"
+        p.queue_prefetch("summarize")
+        if p._prefetch_thread:
+            p._prefetch_thread.join(timeout=5.0)
+        call_kwargs = p._client.areflect.call_args.kwargs
+        assert call_kwargs["query"].startswith("Route: Memory Optimization.")
+        assert call_kwargs["tags"] == ["topic:memory"]
+        assert call_kwargs["tags_match"] == "all_strict"
+        assert call_kwargs["fact_types"] == ["observation"]
 
 
 # ---------------------------------------------------------------------------

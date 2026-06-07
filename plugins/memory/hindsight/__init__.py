@@ -38,6 +38,7 @@ import queue
 import threading
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -563,10 +564,13 @@ class HindsightMemoryProvider(MemoryProvider):
         self._parent_session_id = ""
         self._document_id = ""
 
-        # Tags
+        # Tags / routing
         self._tags: list[str] | None = None
         self._recall_tags: list[str] | None = None
         self._recall_tags_match = "any"
+        self._recall_domain_routing = False
+        self._recall_routes: dict[str, dict[str, Any]] = {}
+        self._recall_max_results = 0
 
         # Retain controls
         self._auto_retain = True
@@ -590,6 +594,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_types: list[str] = ["observation"]
         self._recall_prompt_preamble = ""
         self._recall_max_input_chars = 800
+        self._recall_skip_low_signal_queries = False
+        self._recall_low_signal_min_chars = 0
+        self._recall_domain_signal_keywords: list[str] = []
 
         # Bank
         self._bank_mission = ""
@@ -1179,6 +1186,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._tags = self._retain_tags or None
         self._recall_tags = self._config.get("recall_tags") or None
         self._recall_tags_match = self._config.get("recall_tags_match", "any")
+        self._recall_domain_routing = bool(self._config.get("recall_domain_routing", False))
+        raw_routes = self._config.get("recall_routes") or {}
+        self._recall_routes = raw_routes if isinstance(raw_routes, dict) else {}
         self._retain_source = str(
             self._config.get("retain_source") or os.environ.get("HINDSIGHT_RETAIN_SOURCE", "")
         ).strip()
@@ -1210,6 +1220,13 @@ class HindsightMemoryProvider(MemoryProvider):
             self._recall_types = list(configured_types) or ["observation"]
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         self._recall_max_input_chars = int(self._config.get("recall_max_input_chars", 800))
+        self._recall_max_results = max(0, int(self._config.get("recall_max_results", 0) or 0))
+        self._recall_skip_low_signal_queries = bool(self._config.get("recall_skip_low_signal_queries", False))
+        self._recall_low_signal_min_chars = max(0, int(self._config.get("recall_low_signal_min_chars", 0) or 0))
+        domain_keywords = self._config.get("recall_domain_signal_keywords") or []
+        if isinstance(domain_keywords, str):
+            domain_keywords = [kw.strip() for kw in domain_keywords.split(",") if kw.strip()]
+        self._recall_domain_signal_keywords = [str(kw).strip().lower() for kw in domain_keywords if str(kw).strip()]
         self._retain_async = self._config.get("retain_async", True)
 
         _client_version = "unknown"
@@ -1276,6 +1293,225 @@ class HindsightMemoryProvider(MemoryProvider):
             t = threading.Thread(target=_start_daemon, daemon=True, name="hindsight-daemon-start")
             t.start()
 
+    def _active_recall_route(self, query: str = "") -> dict[str, Any] | None:
+        """Resolve the current chat/query to a configured Hindsight recall route."""
+        if not self._recall_domain_routing or not self._recall_routes:
+            return None
+        chat_id = str(self._chat_id or "").strip()
+        chat_name = str(self._chat_name or "").strip().lower()
+        query_l = str(query or "").lower()
+
+        for route_name, route in self._recall_routes.items():
+            if not isinstance(route, dict):
+                continue
+            ids = [str(v).strip() for v in route.get("chat_ids") or []]
+            if chat_id and (chat_id in ids or chat_id == str(route_name).strip()):
+                return route
+
+        for route in self._recall_routes.values():
+            if not isinstance(route, dict):
+                continue
+            names = [str(v).strip().lower() for v in route.get("chat_names") or []]
+            if chat_name and chat_name in names:
+                return route
+
+        for route in self._recall_routes.values():
+            if not isinstance(route, dict):
+                continue
+            for keyword in route.get("keywords") or []:
+                kw = str(keyword or "").strip().lower()
+                if kw and kw in query_l:
+                    return route
+        return None
+
+    def _should_skip_recall_query(self, query: str) -> bool:
+        """Return True when automatic prefetch should ignore low-signal text.
+
+        The gate is intentionally applied to automatic prefetch only, not to
+        explicit ``hindsight_recall`` tool calls. A model-initiated tool call
+        may intentionally ask about a short token, but Telegram continuation
+        turns such as ``嗯嗯`` / ``继续`` should not pull long-memory context
+        into an otherwise local continuation.
+        """
+        if not self._recall_skip_low_signal_queries:
+            return False
+        text = str(query or "").strip()
+        if not text:
+            return True
+        if self._recall_low_signal_min_chars and len(text) >= self._recall_low_signal_min_chars:
+            return False
+        text_l = text.lower()
+        if any(keyword and keyword in text_l for keyword in self._recall_domain_signal_keywords):
+            return False
+        route = self._active_recall_route(text)
+        if route:
+            for keyword in route.get("keywords") or []:
+                kw = str(keyword or "").strip().lower()
+                if kw and kw in text_l:
+                    return False
+        return True
+
+    @staticmethod
+    def _result_tags(result: Any) -> set[str]:
+        tags = getattr(result, "tags", None)
+        if tags is None and isinstance(result, dict):
+            tags = result.get("tags")
+        if tags is None:
+            metadata = getattr(result, "metadata", None)
+            if metadata is None and isinstance(result, dict):
+                metadata = result.get("metadata")
+            if isinstance(metadata, dict):
+                tags = metadata.get("tags")
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        return {str(t).strip() for t in (tags or []) if str(t).strip()}
+
+    def _build_recall_kwargs(self, query: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Build Hindsight recall kwargs, applying chat/workspace route config."""
+        route = self._active_recall_route(query)
+        recall_kwargs: dict[str, Any] = {
+            "bank_id": self._bank_id,
+            "query": str(query or ""),
+            "budget": self._budget,
+            "max_tokens": self._recall_max_tokens,
+        }
+        tags = self._recall_tags
+        tags_match = self._recall_tags_match
+        if route:
+            prefix = str(route.get("query_prefix") or "").strip()
+            if prefix:
+                recall_kwargs["query"] = f"{prefix}\n\n{recall_kwargs['query']}"
+            route_tag_groups = route.get("tag_groups") or []
+            route_tags = route.get("tags") or []
+            if route_tag_groups:
+                recall_kwargs["tag_groups"] = route_tag_groups
+                tags = None
+            elif route_tags:
+                tags = list(route_tags)
+                tags_match = str(route.get("tags_match") or tags_match or "any")
+        if tags:
+            recall_kwargs["tags"] = tags
+            recall_kwargs["tags_match"] = tags_match
+        if self._recall_types:
+            recall_kwargs["types"] = self._recall_types
+        return recall_kwargs, route
+
+    def _build_reflect_kwargs(self, query: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Build Hindsight reflect kwargs, applying the same active route filter.
+
+        Current Hindsight clients support ``tags``/``tag_groups``/``fact_types``
+        on reflect. Passing route filters prevents synthesis from blending facts
+        across Telegram workspaces. Older clients that lack these kwargs will
+        fail loudly in tests/smokes rather than silently falling back to broad
+        reflect.
+        """
+        route = self._active_recall_route(query)
+        reflect_kwargs: dict[str, Any] = {
+            "bank_id": self._bank_id,
+            "query": str(query or ""),
+            "budget": self._budget,
+            "max_tokens": self._recall_max_tokens,
+        }
+        tags = self._recall_tags
+        tags_match = self._recall_tags_match
+        if route:
+            prefix = str(route.get("query_prefix") or "").strip()
+            if prefix:
+                reflect_kwargs["query"] = f"{prefix}\n\n{reflect_kwargs['query']}"
+            route_tag_groups = route.get("tag_groups") or []
+            route_tags = route.get("tags") or []
+            if route_tag_groups:
+                reflect_kwargs["tag_groups"] = route_tag_groups
+                tags = None
+            elif route_tags:
+                tags = list(route_tags)
+                tags_match = str(route.get("tags_match") or tags_match or "any")
+        if tags:
+            reflect_kwargs["tags"] = tags
+            reflect_kwargs["tags_match"] = tags_match
+        if self._recall_types:
+            reflect_kwargs["fact_types"] = self._recall_types
+        return reflect_kwargs, route
+
+    def _filter_recall_results(self, results: Any, route: dict[str, Any] | None) -> list[Any]:
+        rows = list(results or [])
+        if route:
+            exclude_tags = {str(t).strip() for t in (route.get("exclude_tags") or []) if str(t).strip()}
+            if exclude_tags:
+                rows = [r for r in rows if not (self._result_tags(r) & exclude_tags)]
+        if self._recall_max_results:
+            rows = rows[: self._recall_max_results]
+        return rows
+
+    def _route_positive_tags(self, route: dict[str, Any] | None) -> set[str]:
+        if not route:
+            return set()
+        return set(_normalize_retain_tags(route.get("tags") or []))
+
+    def _merge_recall_results(self, priority_results: Any, normal_results: Any, route: dict[str, Any] | None) -> list[Any]:
+        """Merge priority and normal recall results without duplicates."""
+        route_tags = self._route_positive_tags(route)
+        merged: list[Any] = []
+        seen: set[str] = set()
+
+        def add_rows(rows: Any, *, require_route_tag: bool = False) -> None:
+            for row in rows or []:
+                row_tags = self._result_tags(row)
+                if require_route_tag and route_tags and not (row_tags & route_tags):
+                    continue
+                key = str(
+                    getattr(row, "id", "")
+                    or (row.get("id") if isinstance(row, dict) else "")
+                    or getattr(row, "text", "")
+                    or (row.get("text") if isinstance(row, dict) else "")
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(row)
+
+        add_rows(priority_results, require_route_tag=True)
+        add_rows(normal_results, require_route_tag=False)
+        return self._filter_recall_results(merged, route)
+
+    def _recall_with_priority(self, recall_kwargs: dict[str, Any], route: dict[str, Any] | None) -> Any:
+        """Run recall, prepending route-scoped priority guardrail/correction hits."""
+        normal_resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
+        if not route or route.get("tag_groups"):
+            return normal_resp
+
+        priority_tags = list(route.get("priority_tags") or [])
+        route_tags = list(route.get("tags") or [])
+        if priority_tags and route_tags:
+            priority_kwargs = dict(recall_kwargs)
+            priority_kwargs.pop("tag_groups", None)
+            # Priority guardrails/corrections must be allowed to surface before
+            # Hindsight consolidation turns them into observations.  Normal
+            # recall remains observation-only by default, but the priority pass
+            # intentionally searches all fact layers and then client-side
+            # filters back to the active route tags in _merge_recall_results().
+            priority_kwargs.pop("types", None)
+            priority_kwargs["tags"] = priority_tags
+            priority_kwargs["tags_match"] = "any_strict"
+            base_query = str(recall_kwargs.get("query") or "")
+            if "\n\n" in base_query:
+                base_query = base_query.split("\n\n", 1)[1]
+            priority_kwargs["query"] = f"current correction guardrail supersedes older rules\n\n{base_query}"
+            priority_resp = self._run_hindsight_operation(lambda client: client.arecall(**priority_kwargs))
+            merged = self._merge_recall_results(priority_resp.results, normal_resp.results, route)
+        else:
+            merged = self._filter_recall_results(normal_resp.results, route)
+
+        min_results = max(0, int(route.get("min_results", 0) or 0))
+        if min_results and len(merged) < min_results and route.get("fallback") is True:
+            fallback_kwargs = dict(recall_kwargs)
+            fallback_kwargs.pop("tags", None)
+            fallback_kwargs.pop("tags_match", None)
+            fallback_kwargs.pop("tag_groups", None)
+            fallback_resp = self._run_hindsight_operation(lambda client: client.arecall(**fallback_kwargs))
+            merged = self._merge_recall_results(merged, fallback_resp.results, route)
+        return SimpleNamespace(results=merged)
+
     def system_prompt_block(self) -> str:
         if self._memory_mode == "context":
             return (
@@ -1326,6 +1562,9 @@ class HindsightMemoryProvider(MemoryProvider):
         if self._shutting_down.is_set():
             logger.debug("Prefetch: skipped (shutting down)")
             return
+        if self._should_skip_recall_query(query):
+            logger.debug("Prefetch: skipped low-signal query (len=%d)", len(str(query or "").strip()))
+            return
         # Truncate query to max chars
         if self._recall_max_input_chars and len(query) > self._recall_max_input_chars:
             query = query[:self._recall_max_input_chars]
@@ -1333,25 +1572,19 @@ class HindsightMemoryProvider(MemoryProvider):
         def _run():
             try:
                 if self._prefetch_method == "reflect":
-                    logger.debug("Prefetch: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
-                    resp = self._run_hindsight_operation(lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget))
+                    reflect_kwargs, route = self._build_reflect_kwargs(query)
+                    logger.debug("Prefetch: calling reflect (bank=%s, query_len=%d, route=%s)", self._bank_id, len(reflect_kwargs.get("query", "")), bool(route))
+                    resp = self._run_hindsight_operation(lambda client: client.areflect(**reflect_kwargs))
                     text = resp.text or ""
                 else:
-                    recall_kwargs: dict = {
-                        "bank_id": self._bank_id, "query": query,
-                        "budget": self._budget, "max_tokens": self._recall_max_tokens,
-                    }
-                    if self._recall_tags:
-                        recall_kwargs["tags"] = self._recall_tags
-                        recall_kwargs["tags_match"] = self._recall_tags_match
-                    if self._recall_types:
-                        recall_kwargs["types"] = self._recall_types
-                    logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s)",
-                                 self._bank_id, len(query), self._budget)
-                    resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-                    num_results = len(resp.results) if resp.results else 0
-                    logger.debug("Prefetch: recall returned %d results", num_results)
-                    text = "\n".join(f"- {r.text}" for r in resp.results if r.text) if resp.results else ""
+                    recall_kwargs, route = self._build_recall_kwargs(query)
+                    logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s, route=%s)",
+                                 self._bank_id, len(recall_kwargs.get("query", "")), self._budget, bool(route))
+                    resp = self._recall_with_priority(recall_kwargs, route)
+                    results = self._filter_recall_results(resp.results, route)
+                    num_results = len(results)
+                    logger.debug("Prefetch: recall returned %d routed results", num_results)
+                    text = "\n".join(f"- {r.text}" for r in results if getattr(r, "text", "")) if results else ""
                 if text:
                     with self._prefetch_lock:
                         self._prefetch_result = text
@@ -1426,6 +1659,11 @@ class HindsightMemoryProvider(MemoryProvider):
         if retain_async is not None:
             kwargs["retain_async"] = retain_async
         merged_tags = _normalize_retain_tags(self._retain_tags)
+        route = self._active_recall_route(content)
+        if route:
+            for tag in _normalize_retain_tags(route.get("retain_tags") or route.get("tags") or []):
+                if tag not in merged_tags:
+                    merged_tags.append(tag)
         for tag in _normalize_retain_tags(tags):
             if tag not in merged_tags:
                 merged_tags.append(tag)
@@ -1541,23 +1779,16 @@ class HindsightMemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             try:
-                recall_kwargs: dict = {
-                    "bank_id": self._bank_id, "query": query, "budget": self._budget,
-                    "max_tokens": self._recall_max_tokens,
-                }
-                if self._recall_tags:
-                    recall_kwargs["tags"] = self._recall_tags
-                    recall_kwargs["tags_match"] = self._recall_tags_match
-                if self._recall_types:
-                    recall_kwargs["types"] = self._recall_types
-                logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
-                resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-                num_results = len(resp.results) if resp.results else 0
-                logger.debug("Tool hindsight_recall: %d results", num_results)
-                if not resp.results:
+                recall_kwargs, route = self._build_recall_kwargs(query)
+                logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s, route=%s",
+                             self._bank_id, len(recall_kwargs.get("query", "")), self._budget, bool(route))
+                resp = self._recall_with_priority(recall_kwargs, route)
+                results = self._filter_recall_results(resp.results, route)
+                num_results = len(results)
+                logger.debug("Tool hindsight_recall: %d routed results", num_results)
+                if not results:
                     return json.dumps({"result": "No relevant memories found."})
-                lines = [f"{i}. {r.text}" for i, r in enumerate(resp.results, 1)]
+                lines = [f"{i}. {r.text}" for i, r in enumerate(results, 1) if getattr(r, "text", "")]
                 return json.dumps({"result": "\n".join(lines)})
             except Exception as e:
                 logger.warning("hindsight_recall failed: %s", e, exc_info=True)
@@ -1568,12 +1799,11 @@ class HindsightMemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             try:
-                logger.debug("Tool hindsight_reflect: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
+                reflect_kwargs, route = self._build_reflect_kwargs(query)
+                logger.debug("Tool hindsight_reflect: bank=%s, query_len=%d, budget=%s, route=%s",
+                             self._bank_id, len(reflect_kwargs.get("query", "")), self._budget, bool(route))
                 resp = self._run_hindsight_operation(
-                    lambda client: client.areflect(
-                        bank_id=self._bank_id, query=query, budget=self._budget
-                    )
+                    lambda client: client.areflect(**reflect_kwargs)
                 )
                 logger.debug("Tool hindsight_reflect: response_len=%d", len(resp.text or ""))
                 return json.dumps({"result": resp.text or "No relevant memories found."})
