@@ -159,6 +159,8 @@ _PROVIDER_ALIASES = {
     "tokenhub": "tencent-tokenhub",
     "tencent-cloud": "tencent-tokenhub",
     "tencentmaas": "tencent-tokenhub",
+    "nvidia-nim": "nvidia",
+    "nvidia": "nvidia",
 }
 
 
@@ -4611,6 +4613,8 @@ def _resolve_task_provider_model(
     if task:
         task_config = _get_auxiliary_task_config(task)
         cfg_provider = str(task_config.get("provider", "")).strip() or None
+        if cfg_provider:
+            cfg_provider = _normalize_aux_provider(cfg_provider)
         cfg_model = str(task_config.get("model", "")).strip() or None
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
