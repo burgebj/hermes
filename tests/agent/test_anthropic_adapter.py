@@ -13,6 +13,7 @@ from agent.anthropic_adapter import (
     _is_azure_anthropic_endpoint,
     _is_oauth_token,
     _refresh_oauth_token,
+    _sanitize_oauth_system_text,
     _to_plain_data,
     _write_claude_code_credentials,
     build_anthropic_client,
@@ -1101,6 +1102,203 @@ class TestBuildAnthropicKwargs:
         assert "claude-code-20250219" in betas
         assert "interleaved-thinking-2025-05-14" in betas
 
+    def test_oauth_tool_names_use_claude_code_mcp_prefix(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__terminal"
+        assert "mcp_terminal" not in str(kwargs["tools"])
+
+    def test_oauth_concrete_tool_choice_uses_encoded_tool_name(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="terminal",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__terminal"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "mcp__terminal"}
+
+    def test_oauth_concrete_tool_choice_escapes_embedded_underscores(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "browser_get_images",
+                    "description": "List browser images",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="browser_get_images",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        encoded = "mcp__browser__get__images"
+        assert kwargs["tools"][0]["name"] == encoded
+        assert kwargs["tool_choice"] == {"type": "tool", "name": encoded}
+
+    def test_non_oauth_concrete_tool_choice_keeps_local_tool_name(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="terminal",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=False,
+        )
+
+        assert kwargs["tools"][0]["name"] == "terminal"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "terminal"}
+
+    def test_oauth_tool_name_encoding_escapes_embedded_underscores(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "mcp_filesystem_read_file",
+                    "description": "Read a file via MCP",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        encoded = kwargs["tools"][0]["name"]
+        assert encoded == "mcp__mcp__filesystem__read__file"
+        assert "mcp_filesystem" not in encoded
+
+    def test_oauth_tool_name_encoding_handles_already_encoded_names_idempotently(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "mcp__browser__get__images",
+                    "description": "Already encoded browser image tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="mcp__browser__get__images",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__browser__get__images"
+        assert kwargs["tool_choice"] == {
+            "type": "tool",
+            "name": "mcp__browser__get__images",
+        }
+
+    def test_oauth_tool_name_encoding_converts_legacy_mcp_prefix_losslessly(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "mcp_terminal",
+                    "description": "Legacy single-underscore MCP-like name",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="mcp_terminal",
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        assert kwargs["tools"][0]["name"] == "mcp__mcp__terminal"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "mcp__mcp__terminal"}
+
+    def test_oauth_history_encodes_local_tool_names_consistently(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "toolu_1",
+                        "function": {
+                            "name": "mcp_terminal",
+                            "arguments": "{}",
+                        },
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "toolu_1", "content": "done"},
+            ],
+            tools=None,
+            max_tokens=1024,
+            reasoning_config=None,
+            is_oauth=True,
+        )
+
+        tool_block = kwargs["messages"][0]["content"][0]
+        assert tool_block["name"] == "mcp__mcp__terminal"
+
+    def test_oauth_system_text_sanitizes_proxy_classifier_triggers(self):
+        text = (
+            "Hermes Agent from Nous Research can use session_search, "
+            "skill_manage(action='patch'), MEDIA:/tmp/file.png, and "
+            "reply HEARTBEAT_OK when idle."
+        )
+
+        sanitized = _sanitize_oauth_system_text(text)
+
+        assert "Claude Code" in sanitized
+        assert "Anthropic" in sanitized
+        for trigger in (
+            "Hermes",
+            "Nous Research",
+            "session_search",
+            "skill_manage",
+            "MEDIA:",
+            "HEARTBEAT_OK",
+        ):
+            assert trigger not in sanitized
+
     def test_reasoning_config_maps_to_manual_thinking_for_pre_4_6_models(self):
         kwargs = build_anthropic_kwargs(
             model="claude-sonnet-4-20250514",
@@ -1483,6 +1681,38 @@ class TestNormalizeResponse:
         assert len(nr.tool_calls) == 1
         assert nr.tool_calls[0].name == "search"
         assert json.loads(nr.tool_calls[0].arguments) == {"query": "test"}
+
+    def test_oauth_response_strips_double_underscore_mcp_prefix(self):
+        blocks = [
+            SimpleNamespace(
+                type="tool_use",
+                id="tc_1",
+                name="mcp__browser__get__images",
+                input={},
+            ),
+        ]
+
+        nr = get_transport("anthropic_messages").normalize_response(
+            self._make_response(blocks, "tool_use"), strip_tool_prefix=True
+        )
+
+        assert nr.tool_calls[0].name == "browser_get_images"
+
+    def test_oauth_response_strips_legacy_single_underscore_mcp_prefix(self):
+        blocks = [
+            SimpleNamespace(
+                type="tool_use",
+                id="tc_1",
+                name="mcp_terminal",
+                input={"command": "pwd"},
+            ),
+        ]
+
+        nr = get_transport("anthropic_messages").normalize_response(
+            self._make_response(blocks, "tool_use"), strip_tool_prefix=True
+        )
+
+        assert nr.tool_calls[0].name == "terminal"
 
     def test_thinking_response(self):
         blocks = [

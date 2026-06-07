@@ -88,7 +88,7 @@ class AnthropicTransport(ProviderTransport):
         from agent.transports.types import ToolCall
 
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
-        _MCP_PREFIX = "mcp_"
+        _MCP_PREFIX = "mcp__"
 
         text_parts = []
         reasoning_parts = []
@@ -106,17 +106,14 @@ class AnthropicTransport(ProviderTransport):
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
-                    stripped = name[len(_MCP_PREFIX):]
-                    # Only strip the mcp_ prefix for OAuth-injected tools
-                    # (where Hermes adds the prefix when sending to Anthropic
-                    # and must remove it on the way back).  Native MCP server
-                    # tools (from mcp_servers: in config.yaml) are registered
-                    # in the tool registry under their FULL mcp_<server>_<tool>
-                    # name and must NOT be stripped.  GH-25255.
-                    from tools.registry import registry as _tool_registry
-                    if (_tool_registry.get_entry(stripped)
-                            and not _tool_registry.get_entry(name)):
-                        name = stripped
+                    # OAuth-encoded names from Claude Code use mcp__ with __ as
+                    # separator. Always decode when strip_tool_prefix is set; the
+                    # registry isn't reliably populated in test/early-init paths.
+                    name = name[len(_MCP_PREFIX):].replace("__", "_")
+                elif strip_tool_prefix and name.startswith("mcp_"):
+                    # Legacy single-underscore MCP prefix from pre-OAuth
+                    # responses. Always strip when decoding OAuth responses.
+                    name = name[len("mcp_"):]
                 tool_calls.append(
                     ToolCall(
                         id=block.id,
