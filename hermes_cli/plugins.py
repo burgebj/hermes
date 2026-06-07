@@ -1184,10 +1184,23 @@ class PluginManager:
             # services calls) is driven by ``<category>.provider`` config,
             # enforced by the tool wrapper.
             #
-            # Bundled platform plugins (gateway adapters like IRC) auto-load
-            # for the same reason: every platform Hermes ships must be
-            # available out of the box without the user having to opt in.
-            if manifest.source == "bundled" and manifest.kind in {"backend", "platform"}:
+            # Bundled platform plugins (gateway adapters like IRC) must be
+            # available out of the box without the user opting in.  But
+            # importing every adapter module here eagerly pulls in heavy
+            # SDKs (discord.py, microsoft_teams, aiohttp) at
+            # ``import gateway.run`` time — even for a gateway running no
+            # messaging platform at all (e.g. api_server-only on Modal).
+            # Instead, register a cheap import-free LAZY placeholder; the
+            # adapter module is imported on first real use via
+            # ``platform_registry.get()`` / ``create_adapter()``.  Mirrors the
+            # model-provider deferral above.
+            if manifest.source == "bundled" and manifest.kind == "platform":
+                self._register_lazy_platform(manifest)
+                continue
+
+            # Bundled backends auto-load eagerly — they ship with hermes and
+            # must just work; selection is driven by ``<category>.provider``.
+            if manifest.source == "bundled" and manifest.kind == "backend":
                 self._load_plugin(manifest)
                 continue
 
@@ -1428,6 +1441,53 @@ class PluginManager:
     # -----------------------------------------------------------------------
     # Loading
     # -----------------------------------------------------------------------
+
+    def _register_lazy_platform(self, manifest: PluginManifest) -> None:
+        """Register an import-free placeholder for a bundled platform plugin.
+
+        Builds a :class:`~gateway.platform_registry.LazyPlatformEntry` from
+        cheap manifest/path metadata so the gateway never imports the heavy
+        adapter module (and its SDK) until the platform is actually used.
+
+        The registry key (platform value, e.g. ``discord``) is the plugin
+        directory name by convention.  The auth/cron env-var names follow the
+        mechanical ``<PLATFORM_UPPER>_{ALLOWED_USERS,ALLOW_ALL_USERS,HOME_CHANNEL}``
+        pattern shared by every bundled adapter, so they can be derived
+        without importing.  The ``loader`` imports the module and calls its
+        ``register(ctx)``, which registers the real ``PlatformEntry`` and
+        thereby materialises the placeholder in place.
+        """
+        from gateway.platform_registry import platform_registry, LazyPlatformEntry
+
+        # Platform value == plugin directory name.
+        plat = Path(manifest.path).name if manifest.path else (manifest.key or manifest.name)
+        upper = plat.upper()
+
+        def _loader(_man: PluginManifest = manifest) -> None:
+            # Import the adapter module and run its register(ctx); this calls
+            # ctx.register_platform(...) → platform_registry.register(real),
+            # superseding the lazy placeholder.
+            self._load_plugin(_man)
+
+        platform_registry.register_lazy(
+            LazyPlatformEntry(
+                name=plat,
+                label=getattr(manifest, "label", "") or plat.replace("_", " ").title(),
+                loader=_loader,
+                required_env=list(manifest.requires_env or []),
+                install_hint="pip install 'hermes-agent[messaging]'",
+                plugin_name=manifest.name,
+                source="plugin",
+                allowed_users_env=f"{upper}_ALLOWED_USERS",
+                allow_all_env=f"{upper}_ALLOW_ALL_USERS",
+                cron_deliver_env_var=f"{upper}_HOME_CHANNEL",
+            )
+        )
+        self._plugin_platform_names.add(plat)
+        logger.debug(
+            "Registered lazy platform placeholder for bundled plugin '%s' (%s)",
+            manifest.name, plat,
+        )
 
     def _load_plugin(self, manifest: PluginManifest) -> None:
         """Import a plugin module and call its ``register(ctx)`` function."""

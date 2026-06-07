@@ -462,9 +462,13 @@ def show_status(args):
     try:
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
-            configured = entry.check_fn()
+            # ``entry`` may be a lazy placeholder; status display needs the
+            # real ``check_fn`` to report configured/not — materialise it.
+            real = platform_registry.get(entry.name) or entry
+            check_fn = getattr(real, "check_fn", None)
+            configured = bool(check_fn()) if callable(check_fn) else False
             status_str = "configured" if configured else "not configured"
-            label = entry.label
+            label = real.label
             print(f"  {label:<12}  {check_mark(configured)} {status_str} (plugin)")
     except Exception:
         pass

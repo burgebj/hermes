@@ -939,8 +939,13 @@ def load_gateway_config() -> GatewayConfig:
             # ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
             if _pr is not None:
                 for entry in _pr.all_entries():
-                    if entry.apply_yaml_config_fn is None:
-                        continue
+                    # ``entry`` may be a cheap LazyPlatformEntry placeholder.
+                    # Determine the platform's config block from its NAME
+                    # (available without importing the adapter) and only
+                    # materialise the real entry — via ``get(name)`` — when
+                    # the user has actually configured this platform.  This
+                    # keeps unconfigured platforms lazy so load_gateway_config
+                    # doesn't import every adapter SDK.
                     platform_cfg = yaml_cfg.get(entry.name)
                     # Fall back to the platform's block under ``platforms`` /
                     # ``gateway.platforms`` so adapter hooks still run when the
@@ -956,8 +961,13 @@ def load_gateway_config() -> GatewayConfig:
                                     break
                     if not isinstance(platform_cfg, dict):
                         continue
+                    # Configured → materialise (no-op if already real) so the
+                    # live apply_yaml_config_fn hook is available.
+                    real = _pr.get(entry.name)
+                    if real is None or real.apply_yaml_config_fn is None:
+                        continue
                     try:
-                        seeded = entry.apply_yaml_config_fn(yaml_cfg, platform_cfg)
+                        seeded = real.apply_yaml_config_fn(yaml_cfg, platform_cfg)
                     except Exception as e:
                         logger.debug(
                             "apply_yaml_config_fn for %s raised: %s",
@@ -1896,6 +1906,26 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         discover_plugins()  # idempotent
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
+            # ``entry`` may be a lazy placeholder.  This registry-driven
+            # auto-enable gate fundamentally needs the adapter's real
+            # ``check_fn`` / ``env_enablement_fn`` / ``is_connected`` to decide
+            # whether the user configured the platform — and a plugin can be
+            # auto-enabled purely via ``env_enablement_fn`` (which may read
+            # non-conventional env vars, files, etc.), so we cannot soundly
+            # pre-filter on credential env-var presence without importing.
+            # Materialise the real entry here.
+            #
+            # NOTE: this runs at config-load (gateway start), NOT at
+            # ``import gateway.run`` — so the import-time win (no adapter SDKs
+            # pulled in by merely importing the gateway module) is preserved.
+            # At ``start()`` the probe still imports every plugin adapter to
+            # evaluate auto-enablement; see the spike writeup for why a sound
+            # lazy auto-enable gate needs a declarative manifest-level
+            # ``enable_when`` predicate (deferred).
+            real = platform_registry.get(entry.name)
+            if real is None:
+                continue
+            entry = real
             try:
                 if not entry.check_fn():
                     continue

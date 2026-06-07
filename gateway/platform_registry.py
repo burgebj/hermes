@@ -159,22 +159,121 @@ class PlatformEntry:
     standalone_sender_fn: Optional[Callable[..., Awaitable[dict]]] = None
 
 
+@dataclass
+class LazyPlatformEntry:
+    """Import-free placeholder for a bundled platform adapter.
+
+    Holds only the cheap, manifest-derived metadata the gateway/setup UI
+    needs *before* a platform is actually used (name, label, required_env,
+    install_hint, emoji, plugin_name).  The heavy adapter module — and the
+    SDK it pulls in (e.g. ``discord.py``, ``microsoft_teams``, aiohttp) — is
+    NOT imported until the first time a *live* capability is required:
+    ``create_adapter()``, ``check_fn``, ``setup_fn``, ``apply_yaml_config_fn``,
+    ``standalone_sender_fn``, etc.
+
+    The ``loader`` callable imports the adapter module and calls its
+    ``register(ctx)`` entry point, which re-registers a real
+    :class:`PlatformEntry` under the same ``name`` (last-writer-wins), thereby
+    materialising the lazy entry in place.  See ``PlatformRegistry.get`` /
+    ``_materialise``.
+
+    This mirrors the model-provider deferral already used in
+    ``hermes_cli/plugins.py`` (manifest recorded at discovery, module imported
+    on first real use) so that a gateway running without any messaging
+    platform (e.g. api_server-only on Modal) never pays the adapter import
+    cost at ``import gateway.run`` time.
+    """
+
+    # Registry key (platform value, e.g. "discord") — equals the plugin
+    # directory name by convention.
+    name: str
+    # Human-readable label for status/setup display.
+    label: str = ""
+    # Imports the adapter module and triggers its register(ctx); raises on
+    # failure (callers wrap in try/except and fall through to legacy paths).
+    loader: Callable[[], None] = lambda: None
+    # Cheap metadata mirrored from the manifest so status/setup UIs don't
+    # force a load.  Names intentionally match PlatformEntry fields.
+    required_env: list = field(default_factory=list)
+    install_hint: str = ""
+    emoji: str = "🔌"
+    plugin_name: str = ""
+    source: str = "plugin"
+    # Auth/cron env-var names — derived mechanically from the platform value
+    # (``<PLATFORM_UPPER>_ALLOWED_USERS`` etc.) so the gateway's startup
+    # allowlist-warning scan and cron deliver-target enumeration work off the
+    # placeholder without importing the adapter.  Mirror PlatformEntry.
+    allowed_users_env: str = ""
+    allow_all_env: str = ""
+    cron_deliver_env_var: str = ""
+
+
 class PlatformRegistry:
     """Central registry of platform adapters.
 
     Thread-safe for reads (dict lookups are atomic under GIL).
     Writes happen at startup during sequential discovery.
+
+    Entries are either fully-materialised :class:`PlatformEntry` objects or
+    cheap :class:`LazyPlatformEntry` placeholders.  Lazy entries are
+    transparently materialised on first access that needs a live callable.
     """
 
     def __init__(self) -> None:
         self._entries: dict[str, PlatformEntry] = {}
+        # Lazy placeholders keyed by platform name.  Kept separate from
+        # ``_entries`` so metadata-only enumeration (status, setup) never
+        # triggers a materialisation.
+        self._lazy: dict[str, LazyPlatformEntry] = {}
+
+    # -- lazy registration ---------------------------------------------------
+
+    def register_lazy(self, lazy: LazyPlatformEntry) -> None:
+        """Register an import-free placeholder for a bundled platform.
+
+        A subsequent ``register()`` of a real :class:`PlatformEntry` with the
+        same name supersedes the placeholder (materialisation).  Conversely a
+        placeholder never overwrites an already-materialised entry.
+        """
+        if lazy.name in self._entries:
+            # Already materialised — keep the real entry.
+            return
+        self._lazy[lazy.name] = lazy
+        logger.debug("Registered lazy platform placeholder: %s", lazy.name)
+
+    def _materialise(self, name: str) -> Optional[PlatformEntry]:
+        """Force-load a lazy entry's adapter module and return the real entry.
+
+        Returns the materialised :class:`PlatformEntry`, or ``None`` if the
+        name is unknown or the loader failed.  Idempotent: once materialised
+        the lazy placeholder is dropped.
+        """
+        if name in self._entries:
+            return self._entries[name]
+        lazy = self._lazy.get(name)
+        if lazy is None:
+            return None
+        try:
+            lazy.loader()  # imports adapter module; its register() repopulates _entries
+        except Exception as e:
+            logger.error(
+                "Failed to materialise platform '%s' (lazy import): %s",
+                lazy.label or name, e, exc_info=True,
+            )
+            return None
+        finally:
+            self._lazy.pop(name, None)
+        return self._entries.get(name)
 
     def register(self, entry: PlatformEntry) -> None:
         """Register a platform adapter entry.
 
         If an entry with the same name exists, it is replaced (last writer
         wins -- this lets plugins override built-in adapters if desired).
+        Registering a real entry supersedes any lazy placeholder for the
+        same name.
         """
+        self._lazy.pop(entry.name, None)
         if entry.name in self._entries:
             prev = self._entries[entry.name]
             logger.info(
@@ -188,22 +287,52 @@ class PlatformRegistry:
 
     def unregister(self, name: str) -> bool:
         """Remove a platform entry.  Returns True if it existed."""
-        return self._entries.pop(name, None) is not None
+        had_lazy = self._lazy.pop(name, None) is not None
+        had_real = self._entries.pop(name, None) is not None
+        return had_real or had_lazy
 
     def get(self, name: str) -> Optional[PlatformEntry]:
-        """Look up a platform entry by name."""
-        return self._entries.get(name)
+        """Look up a platform entry by name, materialising if lazy.
 
-    def all_entries(self) -> list[PlatformEntry]:
-        """Return all registered platform entries."""
-        return list(self._entries.values())
+        Callers read live attributes (``standalone_sender_fn``,
+        ``apply_yaml_config_fn``, ``adapter_factory`` …) off the returned
+        entry, so a lazy placeholder must be force-loaded here.
+        """
+        if name in self._entries:
+            return self._entries[name]
+        if name in self._lazy:
+            return self._materialise(name)
+        return None
 
-    def plugin_entries(self) -> list[PlatformEntry]:
-        """Return only plugin-registered platform entries."""
-        return [e for e in self._entries.values() if e.source == "plugin"]
+    def all_entries(self) -> list:
+        """Return all registered platform entries (materialised + lazy).
+
+        Materialised :class:`PlatformEntry` objects and import-free
+        :class:`LazyPlatformEntry` placeholders are returned side by side.
+        Enumeration intentionally does NOT materialise — callers that only
+        read cheap metadata (name, label, required_env, install_hint, emoji,
+        plugin_name, the auth/cron env-var names) work against either type.
+        Code that needs a live callable should call ``get(name)`` to force a
+        load for that specific platform.
+        """
+        merged: dict[str, Any] = dict(self._lazy)
+        merged.update(self._entries)  # materialised wins over placeholder
+        return list(merged.values())
+
+    def plugin_entries(self) -> list:
+        """Return only plugin-registered platform entries (materialised + lazy).
+
+        See :meth:`all_entries` for the no-materialise contract.
+        """
+        return [e for e in self.all_entries() if getattr(e, "source", "plugin") == "plugin"]
 
     def is_registered(self, name: str) -> bool:
-        return name in self._entries
+        """True if *name* is registered — does NOT materialise a lazy entry.
+
+        A cheap existence check (used to decide whether the gateway handles a
+        platform at all) must not pay the adapter import cost.
+        """
+        return name in self._entries or name in self._lazy
 
     def create_adapter(self, name: str, config: Any) -> Optional[Any]:
         """Create an adapter instance for the given platform name.
@@ -213,8 +342,12 @@ class PlatformRegistry:
         - check_fn() returns False (missing deps)
         - validate_config() returns False (misconfigured)
         - The factory raises an exception
+
+        Materialises a lazy entry on demand — this is the canonical "the
+        platform is actually being used now" path, so importing the adapter
+        module (and its SDK) here is exactly the intended cost.
         """
-        entry = self._entries.get(name)
+        entry = self.get(name)
         if entry is None:
             return None
 
