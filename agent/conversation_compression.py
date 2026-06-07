@@ -40,6 +40,82 @@ from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
 
+_PERSISTENT_SUMMARY_SECTIONS = {
+    "## Active Task",
+    "## Constraints & Preferences",
+    "## Key Decisions",
+    "## Critical Context",
+    "## Pending User Asks",
+}
+
+
+def _persist_summary_to_memory_file(agent, summary):
+    """Parse key sections from a compression summary and append them to
+    MEMORY.md so critical facts survive session restarts.
+    """
+    from hermes_constants import get_hermes_home
+
+    hermes_home = str(get_hermes_home())
+    memory_path = Path(hermes_home) / "memories" / "MEMORY.md"
+
+    if not memory_path.parent.exists():
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_tail = ""
+    if memory_path.exists():
+        try:
+            all_lines = memory_path.read_text("utf-8", errors="replace").split("\n")
+            tail = [l.strip() for l in all_lines[-6:] if l.strip()]
+            existing_tail = "\n".join(tail[-3:])
+        except Exception:
+            pass
+
+    date_tag = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+    new_entries = []
+
+    current_section = None
+    current_lines = []
+
+    for line in summary.split("\n"):
+        stripped = line.rstrip()
+        if stripped.startswith("## "):
+            if current_section and current_section in _PERSISTENT_SUMMARY_SECTIONS:
+                body = "\n".join(current_lines).strip()
+                if body and body != "None.":
+                    entry = f"[compression-{date_tag}] {{}}: {{}}".format(current_section[3:], body)
+                    if entry not in existing_tail:
+                        new_entries.append(entry)
+            current_section = stripped
+            current_lines = []
+        elif current_section:
+            current_lines.append(stripped)
+
+    if current_section and current_section in _PERSISTENT_SUMMARY_SECTIONS:
+        body = "\n".join(current_lines).strip()
+        if body and body != "None.":
+            entry = f"[compression-{date_tag}] {{}}: {{}}".format(current_section[3:], body)
+            if entry not in existing_tail:
+                new_entries.append(entry)
+
+    if not new_entries:
+        return
+
+    try:
+        with open(memory_path, "a", encoding="utf-8") as f:
+            for entry in new_entries:
+                f.write("\n\u00a7\n")
+                f.write(entry)
+                f.write("\n")
+        logging.getLogger(__name__).info(
+            "Persisted %d compression summary section(s) to %s",
+            len(new_entries), memory_path,
+        )
+    except Exception as e:
+        logging.getLogger(__name__).debug(
+            "Failed to write compression summary to MEMORY.md: %s", e
+        )
+
+
 
 def _compression_lock_holder(agent: Any) -> str:
     """Build a unique holder id for the lock: pid:tid:agent-instance:uuid.
@@ -493,6 +569,19 @@ def compress_context(
     todo_snapshot = agent._todo_store.format_for_injection()
     if todo_snapshot:
         compressed.append({"role": "user", "content": todo_snapshot})
+
+    summary_text = getattr(agent.context_compressor, "_previous_summary", None)
+    if summary_text and agent._memory_manager:
+        try:
+            agent._memory_manager.on_post_compress(summary_text)
+        except Exception as _mpc_err:
+            logger.debug("on_post_compress failed (non-fatal): %s", _mpc_err)
+
+    if summary_text:
+        try:
+            _persist_summary_to_memory_file(agent, summary_text)
+        except Exception as _psp_err:
+            logger.debug("persist_summary_to_memory_file failed (non-fatal): %s", _psp_err)
 
     agent._invalidate_system_prompt()
     new_system_prompt = agent._build_system_prompt(system_message)

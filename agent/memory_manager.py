@@ -552,6 +552,26 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
+    def on_post_compress(self, summary: str) -> None:
+        """Notify all providers after context compression succeeds.
+
+        The summary follows the structured template with sections like
+        ``## Active Task``, ``## Critical Context``, ``## Key Decisions``,
+        ``## Constraints & Preferences``, ``## Pending User Asks``.
+
+        Providers should extract and persist actionable facts from these
+        sections so they survive session restarts.  Failures in one provider
+        don't block others.
+        """
+        for provider in self._providers:
+            try:
+                provider.on_post_compress(summary)
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' on_post_compress failed: %s",
+                    provider.name, e,
+                )
+
     @staticmethod
     def _provider_memory_write_metadata_mode(provider: MemoryProvider) -> str:
         """Return how to pass metadata to a provider's memory-write hook."""

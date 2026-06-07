@@ -943,6 +943,50 @@ class ContextCompressor(ContextEngine):
     _TOOL_ARGS_MAX = 1500     # tool call argument chars
     _TOOL_ARGS_HEAD = 1200    # kept from the start of tool args
 
+    _TABLE_ROW_RE = re.compile(r"^\|.*\|\s*$")
+    _TABLE_DIVIDER_RE = re.compile(r"^\|[\s:]-{3,}[\s:]*(?:\|[\s:]-{3,}[\s:]*)*\|\s*$")
+
+    @staticmethod
+    def _truncate_preserve_tables(content: str, max_chars: int, head_chars: int, tail_chars: int) -> str:
+        """Truncate content while preserving markdown table structure.
+
+        If the content exceeds ``max_chars`` and contains markdown tables
+        (rows beginning with ``|`` that form a table block with a divider),
+        the truncation boundary is adjusted to the nearest clean line boundary
+        so tables are never split mid-row.
+
+        Falls back to the standard head+tail cut when no tables are detected
+        or the content is short enough to keep intact.
+        """
+        if len(content) <= max_chars:
+            return content
+
+        lines = content.split("\n")
+        table_detected = False
+        for i, line in enumerate(lines):
+            if i + 1 < len(lines) and ContextCompressor._TABLE_ROW_RE.match(line) and ContextCompressor._TABLE_DIVIDER_RE.match(lines[i + 1]):
+                table_detected = True
+                break
+
+        if not table_detected:
+            return content[:head_chars] + "\n...[truncated]...\n" + content[-tail_chars:]
+
+        head_end = content.rfind("\n", 0, head_chars)
+        if head_end == -1 or head_end < head_chars // 2:
+            head_end = head_chars
+        else:
+            head_end += 1
+
+        tail_start = content.rfind("\n", 0, len(content) - tail_chars)
+        if tail_start == -1 or tail_start > len(content) - tail_chars // 2:
+            tail_start = len(content) - tail_chars
+
+        if tail_start <= head_end:
+            mid = len(content) // 2
+            tail_start = content.index("\n", mid) + 1 if "\n" in content[mid:] else len(content)
+
+        return content[:head_end] + "\n...[truncated]...\n" + content[tail_start:]
+
     def _serialize_for_summary(self, turns: List[Dict[str, Any]]) -> str:
         """Serialize conversation turns into labeled text for the summarizer.
 
@@ -963,14 +1007,14 @@ class ContextCompressor(ContextEngine):
             if role == "tool":
                 tool_id = msg.get("tool_call_id", "")
                 if len(content) > self._CONTENT_MAX:
-                    content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
+                    content = self._truncate_preserve_tables(content, self._CONTENT_MAX, self._CONTENT_HEAD, self._CONTENT_TAIL)
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
                 continue
 
             # Assistant messages: include tool call names AND arguments
             if role == "assistant":
                 if len(content) > self._CONTENT_MAX:
-                    content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
+                    content = self._truncate_preserve_tables(content, self._CONTENT_MAX, self._CONTENT_HEAD, self._CONTENT_TAIL)
                 tool_calls = msg.get("tool_calls", [])
                 if tool_calls:
                     tc_parts = []
@@ -993,7 +1037,7 @@ class ContextCompressor(ContextEngine):
 
             # User and other roles
             if len(content) > self._CONTENT_MAX:
-                content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
+                content = self._truncate_preserve_tables(content, self._CONTENT_MAX, self._CONTENT_HEAD, self._CONTENT_TAIL)
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
