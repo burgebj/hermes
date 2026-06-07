@@ -40,6 +40,10 @@ _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # downstream adapters (signal, etc.) expect.
 _PHONE_PLATFORMS = frozenset({"signal", "sms", "whatsapp"})
 _E164_TARGET_RE = re.compile(r"^\s*\+(\d{7,15})\s*$")
+# WhatsApp JID patterns: group (@g.us), DM (@s.whatsapp.net), LID (@lid)
+_WHATSAPP_JID_RE = re.compile(
+    r"^\s*(\d+@(?:g\.us|s\.whatsapp\.net|lid))\s*$"
+)
 # Email addresses — a valid email like "user@domain.com" should be treated as
 # an explicit target for the email platform, not fall through to channel-name
 # resolution which has no way to resolve a raw address.
@@ -409,6 +413,14 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             # Preserve the leading '+' — signal-cli and sms/whatsapp adapters
             # expect E.164 format for direct recipients.
             return target_ref.strip(), None, True
+    if platform_name == "whatsapp":
+        match = _WHATSAPP_JID_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), None, True
+        # Bare digits without JID suffix are invalid for WhatsApp — reject
+        # to prevent the Baileys bridge from crashing on jidDecode().
+        if target_ref.strip().isdigit():
+            return None, None, False
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
