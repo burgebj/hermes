@@ -34,7 +34,7 @@ from agent.message_sanitization import (
     _repair_tool_call_arguments,
 )
 from tools.terminal_tool import is_persistent_env
-from utils import base_url_host_matches, base_url_hostname
+from utils import base_url_host_matches, base_url_hostname, env_int
 
 logger = logging.getLogger(__name__)
 
@@ -1296,7 +1296,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
                 api_msg.pop(internal_key, None)
             if _needs_sanitize:
-                agent._sanitize_tool_calls_for_strict_api(api_msg)
+                agent._sanitize_tool_calls_for_strict_api(api_msg, model=agent.model)
             api_messages.append(api_msg)
 
         effective_system = agent._cached_system_prompt or ""
@@ -1733,6 +1733,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # The OpenAI SDK Stream object exposes the underlying httpx
         # response via .response before any chunks are consumed.
         agent._capture_rate_limits(getattr(stream, "response", None))
+        agent._capture_credits(getattr(stream, "response", None))
         # Snapshot diagnostic headers (cf-ray, x-openrouter-provider, etc.)
         # so they survive even when the stream dies before any chunk
         # arrives.  Best-effort; never raises.
@@ -1750,12 +1751,6 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # call starting at the same index and redirect it to a fresh slot.
         _last_id_at_idx: dict = {}      # raw_index -> last seen non-empty id
         _active_slot_by_idx: dict = {}  # raw_index -> current slot in tool_calls_acc
-        # Per-slot latch: set once a slot is positively identified as a
-        # cumulative-resend stream (a delta that is a strict superset of the
-        # accumulated buffer).  Until latched, deltas are appended normally;
-        # after latching, the buffer is replaced and exact-duplicate deltas
-        # are dropped.  See the argument-accumulation block below (#35592).
-        _cumulative_args_slot: set = set()
         finish_reason = None
         model_name = None
         role = "assistant"
@@ -1873,44 +1868,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             # Vercel AI patterns) is immune to this.
                             entry["function"]["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
-                            # Argument deltas are normally incremental
-                            # fragments (OpenAI spec), so the default is to
-                            # concatenate.  But some OpenAI-compatible
-                            # providers (DeepSeek / Baidu Qianfan, #35592)
-                            # operate in *cumulative* mode: each chunk
-                            # resends the full arguments-so-far instead of
-                            # the new fragment.  Blind += turns that into
-                            # '{...}{...}{...}', corrupting the tool call.
-                            #
-                            # Detect cumulative mode per-slot: in cumulative
-                            # mode the new delta is a superset that starts
-                            # with everything accumulated so far (monotonic
-                            # growth), and an exact resend equals it.
-                            # Incremental fragments are JSON suffixes that do
-                            # NOT restate the accumulated prefix, so this is
-                            # unambiguous on the full buffer (not a partial
-                            # per-chunk guess).
-                            _new = tc_delta.function.arguments
-                            _prev = entry["function"]["arguments"]
-                            if not _prev:
-                                entry["function"]["arguments"] = _new
-                            elif len(_new) > len(_prev) and _new.startswith(_prev):
-                                # Strict superset of the accumulated buffer —
-                                # the unambiguous cumulative-resend signature.
-                                # Latch the slot and replace (don't append).
-                                _cumulative_args_slot.add(idx)
-                                entry["function"]["arguments"] = _new
-                            elif idx in _cumulative_args_slot and _new == _prev:
-                                # Already a confirmed cumulative slot and this
-                                # is an exact full resend — drop the duplicate.
-                                pass
-                            else:
-                                # Incremental fragment — normal append.  Note
-                                # an exact-equal delta on a NON-latched slot is
-                                # treated as a real fragment, never silently
-                                # dropped, so genuine incremental streams are
-                                # untouched.
-                                entry["function"]["arguments"] = _prev + _new
+                            entry["function"]["arguments"] += tc_delta.function.arguments
                     extra = getattr(tc_delta, "extra_content", None)
                     if extra is None and hasattr(tc_delta, "model_extra"):
                         extra = (tc_delta.model_extra or {}).get("extra_content")
@@ -1977,6 +1935,20 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         arguments=arguments,
                     ),
                 ))
+
+        # Zero-chunk guard: stream yielded nothing usable — a provider/upstream
+        # error or malformed SSE, not a legitimate empty completion. Raise so the
+        # retry machinery handles it instead of fabricating a successful turn.
+        if (
+            finish_reason is None
+            and not content_parts
+            and not reasoning_parts
+            and not tool_calls_acc
+        ):
+            raise RuntimeError(
+                "Provider returned an empty stream with no finish_reason "
+                "(possible upstream error or malformed SSE response)."
+            )
 
         effective_finish_reason = finish_reason or "stop"
         if has_truncated_tool_args:
@@ -2086,7 +2058,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _call():
         import httpx as _httpx
 
-        _max_stream_retries = int(os.getenv("HERMES_STREAM_RETRIES", 2))
+        _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)
 
         try:
             for _stream_attempt in range(_max_stream_retries + 1):
