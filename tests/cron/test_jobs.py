@@ -20,7 +20,10 @@ from cron.jobs import (
     pause_job,
     resume_job,
     remove_job,
+    mark_job_started,
+    heartbeat_job_run,
     mark_job_run,
+    recover_stale_running_jobs,
     advance_next_run,
     get_due_jobs,
     save_job_output,
@@ -447,6 +450,43 @@ class TestMarkJobRun:
         assert updated["last_status"] == "error"
         assert updated["last_error"] == "timeout"
 
+    def test_active_run_state_is_recorded_and_cleared(self, tmp_cron_dir):
+        job = create_job(prompt="Visible run", schedule="every 1h")
+
+        run_id = mark_job_started(job["id"])
+        running = get_job(job["id"])
+
+        assert run_id
+        assert running["state"] == "running"
+        assert running["active_run_id"] == run_id
+        assert running["active_run_started_at"]
+        assert running["active_run_heartbeat_at"]
+
+        assert heartbeat_job_run(job["id"], run_id) is True
+        mark_job_run(job["id"], success=True, run_id=run_id)
+
+        finished = get_job(job["id"])
+        assert finished["state"] == "scheduled"
+        assert finished["last_status"] == "ok"
+        assert finished["active_run_id"] is None
+        assert finished["active_run_started_at"] is None
+        assert finished["active_run_heartbeat_at"] is None
+        assert finished["last_run_duration_seconds"] is not None
+
+    def test_mark_job_run_ignores_stale_run_id(self, tmp_cron_dir):
+        job = create_job(prompt="Run collision", schedule="every 1h")
+        old_run_id = mark_job_started(job["id"])
+        jobs = load_jobs()
+        jobs[0]["active_run_id"] = "newer-run"
+        save_jobs(jobs)
+
+        mark_job_run(job["id"], success=True, run_id=old_run_id)
+
+        updated = get_job(job["id"])
+        assert updated["state"] == "running"
+        assert updated["active_run_id"] == "newer-run"
+        assert updated["last_status"] is None
+
     def test_delivery_error_tracked_separately(self, tmp_cron_dir):
         """Agent succeeds but delivery fails — both tracked independently."""
         job = create_job(prompt="Report", schedule="every 1h")
@@ -558,6 +598,66 @@ class TestMarkJobRun:
         assert updated["next_run_at"] is None
         assert updated["enabled"] is False
         assert updated["state"] == "completed"
+
+
+class TestJobActiveRunRecovery:
+    def test_get_due_jobs_skips_currently_running_job(self, tmp_cron_dir):
+        job = create_job(prompt="Still running", schedule="every 1h")
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (datetime.now() - timedelta(minutes=5)).isoformat()
+        save_jobs(jobs)
+        mark_job_started(job["id"])
+
+        due = get_due_jobs()
+
+        assert due == []
+        assert get_job(job["id"])["state"] == "running"
+
+    def test_recover_stale_running_job_releases_state(self, tmp_cron_dir, monkeypatch):
+        now = datetime(2026, 6, 7, 20, 0, 0, tzinfo=timezone.utc)
+        stale_heartbeat = now - timedelta(minutes=20)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        job = create_job(prompt="Stale run", schedule="every 1h")
+        jobs = load_jobs()
+        jobs[0]["state"] = "running"
+        jobs[0]["active_run_id"] = "stale-run"
+        jobs[0]["active_run_started_at"] = stale_heartbeat.isoformat()
+        jobs[0]["active_run_heartbeat_at"] = stale_heartbeat.isoformat()
+        jobs[0]["active_run_pid"] = 12345
+        jobs[0]["active_run_host"] = "old-host"
+        save_jobs(jobs)
+
+        recovered = recover_stale_running_jobs(stale_after_seconds=60)
+
+        assert [j["id"] for j in recovered] == [job["id"]]
+        updated = get_job(job["id"])
+        assert updated["state"] == "scheduled"
+        assert updated["last_status"] == "error"
+        assert "Recovered stale active cron run" in updated["last_error"]
+        assert updated["last_recovered_at"] == now.isoformat()
+        assert updated["last_run_duration_seconds"] == 1200
+        assert updated["active_run_id"] is None
+        assert updated["active_run_heartbeat_at"] is None
+
+    def test_recent_running_job_is_not_recovered(self, tmp_cron_dir, monkeypatch):
+        now = datetime(2026, 6, 7, 20, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        job = create_job(prompt="Fresh run", schedule="every 1h")
+        jobs = load_jobs()
+        jobs[0]["state"] = "running"
+        jobs[0]["active_run_id"] = "fresh-run"
+        jobs[0]["active_run_started_at"] = (now - timedelta(seconds=30)).isoformat()
+        jobs[0]["active_run_heartbeat_at"] = (now - timedelta(seconds=30)).isoformat()
+        save_jobs(jobs)
+
+        recovered = recover_stale_running_jobs(stale_after_seconds=60)
+
+        assert recovered == []
+        updated = get_job(job["id"])
+        assert updated["state"] == "running"
+        assert updated["active_run_id"] == "fresh-run"
 
 
 class TestAdvanceNextRun:

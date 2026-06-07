@@ -13,6 +13,7 @@ import tempfile
 import threading
 import os
 import re
+import socket
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,36 @@ JOBS_FILE = CRON_DIR / "jobs.json"
 _jobs_file_lock = threading.Lock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+DEFAULT_STALE_RUN_SECONDS = 15 * 60
+MAX_STALE_RUN_SECONDS = 24 * 60 * 60
+
+
+def _parse_positive_seconds(value: Any, default: int, *, max_seconds: int = MAX_STALE_RUN_SECONDS) -> int:
+    """Parse an operator supplied seconds value with conservative bounds."""
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    if seconds <= 0:
+        return default
+    return min(seconds, max_seconds)
+
+
+def _cron_stale_run_seconds() -> int:
+    """How long a persisted active cron run can go without a heartbeat."""
+    return _parse_positive_seconds(
+        os.getenv("HERMES_CRON_STALE_RUN_SECONDS"),
+        DEFAULT_STALE_RUN_SECONDS,
+    )
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return _ensure_aware(datetime.fromisoformat(str(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -671,6 +702,13 @@ def create_job(
         "last_status": None,
         "last_error": None,
         "last_delivery_error": None,
+        "last_recovered_at": None,
+        "last_run_duration_seconds": None,
+        "active_run_id": None,
+        "active_run_started_at": None,
+        "active_run_heartbeat_at": None,
+        "active_run_pid": None,
+        "active_run_host": None,
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
@@ -850,6 +888,121 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     )
 
 
+def mark_job_started(job_id: str) -> Optional[str]:
+    """Persist that a cron job has started and return the active run id."""
+    with _jobs_file_lock:
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+
+            now = _hermes_now().isoformat()
+            run_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+            job["state"] = "running"
+            job["active_run_id"] = run_id
+            job["active_run_started_at"] = now
+            job["active_run_heartbeat_at"] = now
+            job["active_run_pid"] = os.getpid()
+            try:
+                job["active_run_host"] = socket.gethostname()
+            except OSError:
+                job["active_run_host"] = None
+            save_jobs(jobs)
+            return run_id
+
+    logger.warning("mark_job_started: job_id %s not found, skipping save", job_id)
+    return None
+
+
+def heartbeat_job_run(job_id: str, run_id: Optional[str]) -> bool:
+    """Refresh the persisted heartbeat for an active cron run."""
+    if not run_id:
+        return False
+
+    with _jobs_file_lock:
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+            if job.get("active_run_id") != run_id:
+                return False
+            job["active_run_heartbeat_at"] = _hermes_now().isoformat()
+            save_jobs(jobs)
+            return True
+
+    return False
+
+
+def _clear_active_run_fields(job: Dict[str, Any]):
+    job["active_run_id"] = None
+    job["active_run_started_at"] = None
+    job["active_run_heartbeat_at"] = None
+    job["active_run_pid"] = None
+    job["active_run_host"] = None
+
+
+def recover_stale_running_jobs(stale_after_seconds: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Release jobs left in running state after a crash or hard scheduler stall.
+
+    The scheduler writes a heartbeat while a cron run is alive.  If the gateway
+    process dies mid-run, jobs.json can otherwise keep showing the job as
+    running forever and operators have to infer the failure from logs.
+    """
+    stale_after = _parse_positive_seconds(
+        stale_after_seconds,
+        _cron_stale_run_seconds(),
+    )
+    now = _hermes_now()
+    recovered: List[Dict[str, Any]] = []
+
+    with _jobs_file_lock:
+        jobs = load_jobs()
+        for job in jobs:
+            if job.get("state") != "running":
+                continue
+
+            heartbeat_at = (
+                _parse_iso_datetime(job.get("active_run_heartbeat_at"))
+                or _parse_iso_datetime(job.get("active_run_started_at"))
+            )
+            if heartbeat_at and (now - heartbeat_at).total_seconds() < stale_after:
+                continue
+
+            started_at = _parse_iso_datetime(job.get("active_run_started_at"))
+            duration = None
+            if started_at:
+                duration = max(0, int((now - started_at).total_seconds()))
+
+            reason = (
+                "Recovered stale active cron run with no heartbeat for "
+                f"{stale_after}s"
+            )
+            job["last_status"] = "error"
+            job["last_error"] = reason
+            job["last_recovered_at"] = now.isoformat()
+            job["last_run_duration_seconds"] = duration
+            _clear_active_run_fields(job)
+
+            if job.get("enabled", True):
+                job["state"] = "scheduled"
+                if not job.get("next_run_at"):
+                    job["next_run_at"] = compute_next_run(job.get("schedule", {}), now.isoformat())
+            else:
+                job["state"] = "paused"
+
+            recovered.append(_normalize_job_record(copy.deepcopy(job)))
+            logger.error(
+                "Job '%s' recovered from stale running state: %s",
+                job.get("name", job["id"]),
+                reason,
+            )
+
+        if recovered:
+            save_jobs(jobs)
+
+    return recovered
+
+
 def remove_job(job_id: str) -> bool:
     """Remove a job by ID or name."""
     job = resolve_job_ref(job_id)
@@ -870,7 +1023,8 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 run_id: Optional[str] = None):
     """
     Mark a job as having been run.
     
@@ -884,12 +1038,29 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                if run_id and job.get("active_run_id") != run_id:
+                    logger.warning(
+                        "mark_job_run: stale completion for job_id %s run_id %s "
+                        "ignored; active_run_id is %s",
+                        job_id,
+                        run_id,
+                        job.get("active_run_id"),
+                    )
+                    return
+
                 now = _hermes_now().isoformat()
+                started_at = _parse_iso_datetime(job.get("active_run_started_at"))
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                if started_at:
+                    job["last_run_duration_seconds"] = max(
+                        0,
+                        int((_ensure_aware(datetime.fromisoformat(now)) - started_at).total_seconds()),
+                    )
+                _clear_active_run_fields(job)
                 
                 # Increment completed count
                 if job.get("repeat"):
@@ -993,6 +1164,15 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
 
     for job in jobs:
         if not job.get("enabled", True):
+            continue
+
+        if job.get("state") == "running":
+            logger.info(
+                "Job '%s' is already running (run_id=%s, heartbeat=%s); skipping this tick",
+                job.get("name", job["id"]),
+                job.get("active_run_id"),
+                job.get("active_run_heartbeat_at"),
+            )
             continue
 
         next_run = job.get("next_run_at")

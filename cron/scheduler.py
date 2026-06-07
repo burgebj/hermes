@@ -17,6 +17,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -124,7 +126,16 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, pause_job, save_job_output, advance_next_run
+from cron.jobs import (
+    advance_next_run,
+    get_due_jobs,
+    heartbeat_job_run,
+    mark_job_run,
+    mark_job_started,
+    pause_job,
+    recover_stale_running_jobs,
+    save_job_output,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -142,6 +153,49 @@ _CAPACITY_ERROR_MARKERS = (
     "quota exceeded",
     "resource_exhausted",
 )
+
+
+def _cron_heartbeat_interval_seconds() -> float:
+    """How often the scheduler refreshes persisted active-run heartbeats."""
+    raw = os.getenv("HERMES_CRON_HEARTBEAT_SECONDS", "").strip()
+    if not raw:
+        return 30.0
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid HERMES_CRON_HEARTBEAT_SECONDS=%r; using 30s", raw)
+        return 30.0
+    return max(1.0, min(seconds, 300.0))
+
+
+def _start_job_heartbeat(job_id: str, run_id: Optional[str]) -> tuple[threading.Event, threading.Thread | None]:
+    """Start a daemon thread that keeps the active run heartbeat fresh."""
+    stop_event = threading.Event()
+    if not run_id:
+        return stop_event, None
+
+    interval = _cron_heartbeat_interval_seconds()
+
+    def _beat() -> None:
+        while not stop_event.wait(interval):
+            try:
+                if not heartbeat_job_run(job_id, run_id):
+                    return
+            except Exception as exc:
+                logger.debug(
+                    "Job '%s': heartbeat update failed for run_id %s: %s",
+                    job_id,
+                    run_id,
+                    exc,
+                )
+
+    thread = threading.Thread(
+        target=_beat,
+        name=f"cron-heartbeat-{job_id}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
 
 
 def _cron_capacity_pause_enabled() -> bool:
@@ -175,7 +229,8 @@ def _pause_job_for_capacity_error(job: dict, error: Optional[str]) -> None:
     if job.get("no_agent"):
         return
 
-    schedule_kind = (job.get("schedule") or {}).get("kind")
+    schedule = job.get("schedule") or {}
+    schedule_kind = schedule.get("kind") if isinstance(schedule, dict) else None
     if schedule_kind not in {"cron", "interval"}:
         return
 
@@ -1884,6 +1939,14 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         return 0
 
     try:
+        recovered = recover_stale_running_jobs()
+        if recovered:
+            logger.error(
+                "Recovered %d stale cron job(s): %s",
+                len(recovered),
+                ", ".join(str(j.get("id")) for j in recovered),
+            )
+
         due_jobs = get_due_jobs()
 
         if verbose and not due_jobs:
@@ -1892,6 +1955,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
         if verbose:
             logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
+            logger.info(
+                "Due cron jobs: %s",
+                ", ".join(
+                    f"{job.get('id')}:{job.get('name', job.get('id'))}"
+                    for job in due_jobs
+                ) or "none",
+            )
 
         # Advance next_run_at for all recurring jobs FIRST, under the file lock,
         # before any execution begins.  This preserves at-most-once semantics.
@@ -1927,6 +1997,18 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
+            run_id = mark_job_started(job["id"])
+            heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job["id"], run_id)
+            started_monotonic = time.monotonic()
+            logger.info(
+                "Job '%s' started (run_id=%s, schedule=%s, next_run_at=%s)",
+                job.get("name", job["id"]),
+                run_id,
+                (job.get("schedule") or {}).get("kind")
+                if isinstance(job.get("schedule"), dict)
+                else job.get("schedule"),
+                job.get("next_run_at"),
+            )
             try:
                 success, output, final_response, error = run_job(job)
 
@@ -1961,16 +2043,31 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                mark_kwargs = {"delivery_error": delivery_error}
+                if run_id:
+                    mark_kwargs["run_id"] = run_id
+                mark_job_run(job["id"], success, error, **mark_kwargs)
+                logger.info(
+                    "Job '%s' finished (run_id=%s, success=%s, duration=%.1fs)",
+                    job.get("name", job["id"]),
+                    run_id,
+                    success,
+                    time.monotonic() - started_monotonic,
+                )
                 if not success:
                     _pause_job_for_capacity_error(job, error)
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
-                mark_job_run(job["id"], False, str(e))
+                mark_kwargs = {"run_id": run_id} if run_id else {}
+                mark_job_run(job["id"], False, str(e), **mark_kwargs)
                 _pause_job_for_capacity_error(job, str(e))
                 return False
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=1.0)
 
         # Partition due jobs: jobs with a per-job workdir and/or profile touch
         # process-global runtime state inside run_job. Workdir jobs temporarily
