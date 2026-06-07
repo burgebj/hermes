@@ -91,7 +91,16 @@ def _get_webhook_config() -> dict:
 
 
 def _is_webhook_enabled() -> bool:
-    return bool(_get_webhook_config().get("enabled"))
+    # Check config.yaml first
+    if _get_webhook_config().get("enabled"):
+        return True
+    # Fall back to WEBHOOK_ENABLED env var (matches gateway behavior)
+    try:
+        from hermes_cli.config import get_env_value
+        val = (get_env_value("WEBHOOK_ENABLED") or "").lower()
+        return val in {"true", "1", "yes"}
+    except Exception:
+        return False
 
 
 def _get_webhook_base_url() -> str:
