@@ -766,6 +766,8 @@ def _collect_auto_append_media_tags(
 
     return media_tags, has_voice_directive
 
+from gateway.response_filters import normalize_live_gateway_response
+
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
 # Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
@@ -9594,13 +9596,38 @@ class GatewayRunner:
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
 
-            response = agent_result.get("final_response") or ""
+            _raw_final_response = agent_result.get("final_response")
+            response = normalize_live_gateway_response(
+                _raw_final_response,
+                failed=bool(agent_result.get("failed")),
+            )
+
+            # Distinguish an INTENTIONAL silent turn from an empty-generation
+            # FAILURE. When the model emits a recognized silence marker
+            # (canonical NO_REPLY, [SILENT], etc.) on a non-failed turn,
+            # normalize_live_gateway_response() collapses it to "". That empty
+            # string must NOT be re-inflated by _normalize_empty_agent_response()
+            # below into "Processing completed but no response was generated" —
+            # doing so turns a deliberate "stay silent" decision into chat noise
+            # (root cause of #13248). Detect the suppression here so the empty
+            # normalizer is skipped for intentional silence only.
+            _intentional_silence = bool(
+                str(_raw_final_response or "").strip()
+                and not response
+                and not agent_result.get("failed")
+            )
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
             # produce visible content after exhausting all retries (nudge,
             # prefill, empty-retry, fallback).  Sending the raw sentinel
             # looks like a bug; a short explanation is more helpful.
+            #
+            # NOTE: normalize_live_gateway_response() canonicalizes "(empty)"
+            # into the silent-marker set and would return "" for it — but only
+            # when failed=False. A genuine empty-generation failure arrives with
+            # failed=True, so the sentinel survives normalization and is
+            # rewritten into the explanation below.
             if response == "(empty)":
                 response = (
                     "⚠️ The model returned no response after processing tool "
@@ -9637,9 +9664,13 @@ class GatewayRunner:
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
-            response = _normalize_empty_agent_response(
-                agent_result, response, history_len=len(history),
-            )
+            # Skip for intentional silence (#13248): a deliberate NO_REPLY turn
+            # already normalized to "" above and must stay empty, not be rewritten
+            # into a "no response was generated" notice.
+            if not _intentional_silence:
+                response = _normalize_empty_agent_response(
+                    agent_result, response, history_len=len(history),
+                )
             response = _sanitize_gateway_final_response(source.platform, response)
 
             # If the agent's session_id changed during compression, update
@@ -17976,6 +18007,7 @@ class GatewayRunner:
                     else:
                         _stream_consumer.on_commentary(text)
                     return
+                text = normalize_live_gateway_response(text)
                 if already_streamed or not _status_adapter or not str(text or "").strip():
                     return
                 safe_schedule_threadsafe(
@@ -19214,7 +19246,10 @@ class GatewayRunner:
                         or _previewed
                         or (_sc and getattr(_sc, "final_content_delivered", False))
                     )
-                    first_response = result.get("final_response", "")
+                    first_response = normalize_live_gateway_response(
+                        result.get("final_response"),
+                        failed=bool(result.get("failed")),
+                    )
                     if first_response and not _already_streamed:
                         try:
                             logger.info(
