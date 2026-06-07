@@ -812,6 +812,11 @@ DEFAULT_CONFIG = {
         # tools or receiving API responses.  Only fires when the agent has
         # been completely idle for this duration.  0 = unlimited.
         "gateway_timeout": 1800,
+        # Hard wall-clock limit for a single foreground gateway turn
+        # (seconds). This protects chat gateways from being pinned by a
+        # still-active but very long task. Use /background for deeper work
+        # that should continue without blocking the DM. 0 = unlimited.
+        "gateway_wall_timeout": 600,
         # Graceful drain timeout for gateway stop/restart (seconds).
         # The gateway stops accepting new work, waits for running agents
         # to finish, then interrupts any remaining runs after the timeout.

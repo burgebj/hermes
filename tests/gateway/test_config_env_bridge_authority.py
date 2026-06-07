@@ -43,6 +43,7 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
         for k in (
             "HERMES_MAX_ITERATIONS",
             "HERMES_AGENT_TIMEOUT",
+            "HERMES_AGENT_WALL_TIMEOUT",
             "HERMES_AGENT_TIMEOUT_WARNING",
             "HERMES_GATEWAY_BUSY_INPUT_MODE",
             "HERMES_GATEWAY_BUSY_TEXT_MODE",
@@ -122,16 +123,19 @@ def test_config_gateway_timeout_wins_over_stale_env(hermes_home: Path) -> None:
     """Every agent.* bridge key must be config-authoritative, not .env-authoritative."""
     _write_config(hermes_home, agent_cfg={
         "gateway_timeout": 1800,
+        "gateway_wall_timeout": 600,
         "gateway_timeout_warning": 900,
     })
     _write_env(hermes_home, {
         "HERMES_AGENT_TIMEOUT": "60",
+        "HERMES_AGENT_WALL_TIMEOUT": "120",
         "HERMES_AGENT_TIMEOUT_WARNING": "30",
     })
 
     env = _run_gateway_import(hermes_home, initial_env={})
 
     assert env.get("HERMES_AGENT_TIMEOUT") == "1800"
+    assert env.get("HERMES_AGENT_WALL_TIMEOUT") == "600"
     assert env.get("HERMES_AGENT_TIMEOUT_WARNING") == "900"
 
 

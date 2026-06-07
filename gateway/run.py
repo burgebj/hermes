@@ -1016,6 +1016,10 @@ if _config_path.exists():
                 os.environ["HERMES_MAX_ITERATIONS"] = str(_agent_cfg["max_turns"])
             if "gateway_timeout" in _agent_cfg:
                 os.environ["HERMES_AGENT_TIMEOUT"] = str(_agent_cfg["gateway_timeout"])
+            if "gateway_wall_timeout" in _agent_cfg:
+                os.environ["HERMES_AGENT_WALL_TIMEOUT"] = str(
+                    _agent_cfg["gateway_wall_timeout"]
+                )
             if "gateway_timeout_warning" in _agent_cfg:
                 os.environ["HERMES_AGENT_TIMEOUT_WARNING"] = str(_agent_cfg["gateway_timeout_warning"])
             if "gateway_notify_interval" in _agent_cfg:
@@ -1390,6 +1394,7 @@ def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
 _INTERRUPT_REASON_STOP = "Stop requested"
 _INTERRUPT_REASON_RESET = "Session reset requested"
 _INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
+_INTERRUPT_REASON_WALL_TIMEOUT = "Execution timed out (wall-clock)"
 _INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
 _INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
 _INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
@@ -1399,6 +1404,7 @@ _CONTROL_INTERRUPT_MESSAGES = frozenset(
         _INTERRUPT_REASON_STOP.lower(),
         _INTERRUPT_REASON_RESET.lower(),
         _INTERRUPT_REASON_TIMEOUT.lower(),
+        _INTERRUPT_REASON_WALL_TIMEOUT.lower(),
         _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
         _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
         _INTERRUPT_REASON_GATEWAY_RESTART.lower(),
@@ -18824,6 +18830,15 @@ class GatewayRunner:
             # Default 1800s (30 min inactivity).  0 = unlimited.
             _agent_timeout_raw = _float_env("HERMES_AGENT_TIMEOUT", 1800)
             _agent_timeout = _agent_timeout_raw if _agent_timeout_raw > 0 else None
+            # Hard foreground-turn wall-clock cap. Unlike the inactivity
+            # timeout above, this fires even when the agent is still making
+            # progress. Chat gateways need this so one deep task cannot pin
+            # a DM forever; use /background for long-running work.
+            _agent_wall_timeout_raw = _float_env("HERMES_AGENT_WALL_TIMEOUT", 600)
+            _agent_wall_timeout = (
+                _agent_wall_timeout_raw if _agent_wall_timeout_raw > 0 else None
+            )
+            _wall_start = time.time()
             _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False
@@ -18832,7 +18847,17 @@ class GatewayRunner:
             )
 
             _inactivity_timeout = False
+            _wall_timeout = False
             _POLL_INTERVAL = 5.0
+
+            def _wall_elapsed() -> float:
+                return time.time() - _wall_start
+
+            def _wall_timeout_reached() -> bool:
+                return (
+                    _agent_wall_timeout is not None
+                    and _wall_elapsed() >= _agent_wall_timeout
+                )
 
             if _agent_timeout is None:
                 # Unlimited — still poll periodically for backup interrupt
@@ -18844,6 +18869,9 @@ class GatewayRunner:
                     )
                     if done:
                         response = _executor_task.result()
+                        break
+                    if _wall_timeout_reached():
+                        _wall_timeout = True
                         break
                     # Backup interrupt check: if the monitor task died or
                     # missed the interrupt, catch it here.
@@ -18874,6 +18902,9 @@ class GatewayRunner:
                     )
                     if done:
                         response = _executor_task.result()
+                        break
+                    if _wall_timeout_reached():
+                        _wall_timeout = True
                         break
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
@@ -18987,6 +19018,67 @@ class GatewayRunner:
                     "failed": True,
                 }
 
+            if _wall_timeout:
+                _timed_out_agent = agent_holder[0]
+                _activity = {}
+                if _timed_out_agent and hasattr(_timed_out_agent, "get_activity_summary"):
+                    try:
+                        _activity = _timed_out_agent.get_activity_summary()
+                    except Exception:
+                        pass
+
+                _elapsed = _wall_elapsed()
+                _last_desc = _activity.get("last_activity_desc", "unknown")
+                _cur_tool = _activity.get("current_tool")
+                _iter_n = _activity.get("api_call_count", 0)
+                _iter_max = _activity.get("max_iterations", 0)
+
+                logger.error(
+                    "Agent wall-clock timeout after %.0fs (limit %.0fs) in session %s "
+                    "| last_activity=%s | iteration=%s/%s | tool=%s",
+                    _elapsed,
+                    _agent_wall_timeout or 0,
+                    session_key,
+                    _last_desc,
+                    _iter_n,
+                    _iter_max,
+                    _cur_tool or "none",
+                )
+
+                if _timed_out_agent and hasattr(_timed_out_agent, "interrupt"):
+                    _timed_out_agent.interrupt(_INTERRUPT_REASON_WALL_TIMEOUT)
+                if not _executor_task.done():
+                    _executor_task.cancel()
+
+                _timeout_mins = int((_agent_wall_timeout or 0) // 60) or 1
+                _diag_lines = [
+                    f"⏱️ Foreground turn reached the {_timeout_mins} min gateway limit, so I stopped it to keep this chat responsive."
+                ]
+                if _cur_tool:
+                    _diag_lines.append(
+                        f"It was still working on `{_cur_tool}` "
+                        f"(iteration {_iter_n}/{_iter_max})."
+                    )
+                else:
+                    _diag_lines.append(
+                        f"Last activity: {_last_desc} "
+                        f"(iteration {_iter_n}/{_iter_max})."
+                    )
+                _diag_lines.append(
+                    "For deeper maintenance, start it with /background so the DM stays usable, "
+                    "or raise agent.gateway_wall_timeout in config.yaml."
+                )
+
+                response = {
+                    "final_response": "\n".join(_diag_lines),
+                    "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
+                    "api_calls": _iter_n,
+                    "tools": tools_holder[0] or [],
+                    "history_offset": 0,
+                    "failed": True,
+                    "error": "gateway wall-clock timeout",
+                }
+
             # Track fallback model state: if the agent switched to a
             # fallback model during this run, persist it so /model shows
             # the actually-active model instead of the config default.
@@ -19006,7 +19098,7 @@ class GatewayRunner:
                     self._evict_cached_agent(session_key)
 
             # Check if we were interrupted OR have a queued message (/queue).
-            result = result_holder[0]
+            result = result_holder[0] or (response if isinstance(response, dict) else None)
             adapter = self.adapters.get(source.platform)
             
             # Get pending message from adapter.
