@@ -16,16 +16,17 @@ Both are configured through a single backend selection. Providers are chosen via
 
 ## Backends
 
-| Provider | Env Var | Search | Extract | Free tier |
-|----------|---------|--------|---------|-----------|
-| **Firecrawl** (default) | `FIRECRAWL_API_KEY` | ✔ | ✔ | 500 credits/mo |
-| **SearXNG** | `SEARXNG_URL` | ✔ | — | ✔ Free (self-hosted) |
-| **Brave Search (free tier)** | `BRAVE_SEARCH_API_KEY` | ✔ | — | 2 000 queries/mo |
-| **DDGS (DuckDuckGo)** | — (no key) | ✔ | — | ✔ Free |
-| **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
-| **Exa** | `EXA_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
-| **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | Paid |
-| **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
+| Provider | Env Var | Search | Extract | Crawl | Free tier |
+|----------|---------|--------|---------|-------|-----------|
+| **Firecrawl** (default) | `FIRECRAWL_API_KEY` | ✔ | ✔ | ✔ | 500 credits/mo |
+| **SearXNG** | `SEARXNG_URL` | ✔ | — | — | ✔ Free (self-hosted) |
+| **Brave Search (free tier)** | `BRAVE_SEARCH_API_KEY` | ✔ | — | — | 2 000 queries/mo |
+| **DDGS (DuckDuckGo)** | — (no key) | ✔ | — | — | ✔ Free |
+| **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | ✔ | 1 000 searches/mo |
+| **Exa** | `EXA_API_KEY` | ✔ | ✔ | — | 1 000 searches/mo |
+| **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | — | Paid |
+| **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | — | Paid (SuperGrok or per-token) |
+| **Gemini** | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | ✔ | ✔ | — | ✔ Free tier available |
 
 Brave Search, DDGS, and xAI are **search-only** — pair any of them with Firecrawl/Tavily/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
 
@@ -321,6 +322,28 @@ Unlike index-backed providers (Brave, Tavily, Exa) which return verbatim search-
 
 ---
 
+### Gemini
+
+Google Search Grounding via the Gemini API. This provides high-quality web search and extraction using Google's live index.
+
+```bash
+# ~/.hermes/.env
+GEMINI_API_KEY=your-gemini-key-here
+# or
+# GOOGLE_API_KEY=your-google-key-here
+```
+
+Get a key at [Google AI Studio](https://aistudio.google.com/app/apikey). Both `GEMINI_API_KEY` and `GOOGLE_API_KEY` are supported.
+
+By default, the Gemini provider uses `gemini-3.1-flash-lite` for search grounding. You can configure a different model in `config.yaml`:
+
+```yaml
+# ~/.hermes/config.yaml
+web:
+  gemini_model: "gemini-3.1-flash-lite"
+```
+---
+
 ## Configuration
 
 ### Single backend
@@ -361,6 +384,7 @@ If no backend is explicitly configured, Hermes picks the first available one bas
 | `PARALLEL_API_KEY` | parallel |
 | `TAVILY_API_KEY` | tavily |
 | `EXA_API_KEY` | exa |
+| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | gemini |
 | `SEARXNG_URL` | searxng |
 
 xAI Web Search is **not** in the auto-detection chain — having `XAI_API_KEY` set (or being signed in via xAI Grok OAuth) does not automatically route web traffic through xAI, since those credentials are also used for inference / TTS / image gen and the user may want a different backend for web. Opt in explicitly with `web.backend: "xai"`.
