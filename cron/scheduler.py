@@ -222,10 +222,18 @@ atexit.register(_shutdown_parallel_pool)
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
 
+# Context-local override for per-job Hermes home isolation (#39886).
+# A profile job sets this via _job_profile_context so that its
+# mutation is confined to the job's own contextvars.copy_context()
+# slice, preventing concurrent non-profile jobs from seeing a stale
+# profile path.
+_hermes_home_ctx: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "_hermes_home_ctx", default=None,
+)
 
 def _get_hermes_home() -> Path:
     """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
-    return _hermes_home or get_hermes_home()
+    return _hermes_home_ctx.get() or _hermes_home or get_hermes_home()
 
 
 def _get_lock_paths() -> tuple[Path, Path]:
@@ -256,8 +264,6 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
         yield None
         return
 
-    global _hermes_home
-    prior_override = _hermes_home
     env_snapshot = os.environ.copy()
 
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
@@ -278,7 +284,7 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
     override_token = None
     try:
         override_token = set_hermes_home_override(profile_home)
-        _hermes_home = profile_home
+        _home_token = _hermes_home_ctx.set(profile_home)
         logger.info(
             "Job '%s': using Hermes profile '%s' (%s)",
             job_id,
@@ -287,7 +293,7 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
         )
         yield normalized_profile
     finally:
-        _hermes_home = prior_override
+        _hermes_home_ctx.reset(_home_token)
         if override_token is not None:
             reset_hermes_home_override(override_token)
         # Delta-based restore: remove added keys, restore changed keys.
