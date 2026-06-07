@@ -8,6 +8,45 @@ from types import SimpleNamespace
 import pytest
 
 
+class TestIsNativeGeminiBaseUrl:
+    """Regression tests for bug #35454.
+
+    When base_url ends with /openai (OpenAI-compatible endpoint),
+    is_native_gemini_base_url must return False so the vision module
+    routes through the standard OpenAI chat completions path instead
+    of the native Gemini REST adapter.
+    """
+
+    def test_openai_compatible_endpoint_returns_false(self):
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+
+        assert is_native_gemini_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        ) is False
+
+    def test_openai_compatible_endpoint_trailing_slash(self):
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+
+        assert is_native_gemini_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/openai/"
+        ) is False
+
+    def test_native_gemini_endpoint_returns_true(self):
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+
+        assert (
+            is_native_gemini_base_url(
+                "https://generativelanguage.googleapis.com/v1beta"
+            )
+            is True
+        )
+
+    def test_non_gemini_url_returns_false(self):
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+
+        assert is_native_gemini_base_url("https://api.openai.com/v1") is False
+
+
 class DummyResponse:
     def __init__(self, status_code=200, payload=None, headers=None, text=None):
         self.status_code = status_code
