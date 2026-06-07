@@ -266,6 +266,70 @@ class MattermostAdapter(BasePlatformAdapter):
             return data["root_id"]
         return post_id
 
+    @staticmethod
+    def _clip_thread_text(text: str, limit: int) -> str:
+        """Bound Mattermost thread context before injecting it into the agent."""
+        cleaned = (text or "").strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: max(0, limit - 1)].rstrip() + "…"
+
+    async def _build_thread_context(
+        self,
+        root_id: str,
+        current_post_id: str,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Fetch a compact Mattermost thread-root context block.
+
+        Mattermost WebSocket events for replies only contain the new reply and
+        its root_id.  Without fetching the root post, prompts like "diagnose
+        this failure" arrive with no failure artifact even though the alert is
+        visible directly above the reply in the Mattermost UI.
+        """
+        if not root_id:
+            return None, None
+
+        try:
+            thread = await self._api_get(f"posts/{root_id}/thread")
+        except Exception as exc:  # noqa: BLE001 - context is best-effort
+            logger.debug("Mattermost: failed to fetch thread %s: %s", root_id, exc)
+            return None, None
+
+        posts = thread.get("posts") if isinstance(thread, dict) else None
+        if not isinstance(posts, dict) or not posts:
+            return None, None
+
+        order = thread.get("order") if isinstance(thread, dict) else None
+        if not isinstance(order, list) or not order:
+            order = list(posts.keys())
+
+        root_post = posts.get(root_id) or {}
+        root_text = self._clip_thread_text(root_post.get("message", ""), 1800)
+        if not root_text:
+            return None, None
+
+        lines = ["[Mattermost thread context]", f"Thread root:\n{root_text}"]
+
+        prior_reply_ids = [
+            str(pid) for pid in order
+            if str(pid) not in {str(root_id), str(current_post_id)}
+            and isinstance(posts.get(str(pid)), dict)
+            and (posts.get(str(pid), {}).get("message") or "").strip()
+        ]
+        if prior_reply_ids:
+            lines.append("Recent earlier replies:")
+            for pid in prior_reply_ids[-5:]:
+                reply_text = self._clip_thread_text(
+                    posts.get(pid, {}).get("message", ""),
+                    600,
+                )
+                if reply_text:
+                    lines.append(f"- {reply_text}")
+
+        context = "\n\n".join(lines)
+        context = self._clip_thread_text(context, 4000)
+        return context, root_text
+
     async def send(
         self,
         chat_id: str,
@@ -276,6 +340,16 @@ class MattermostAdapter(BasePlatformAdapter):
         """Send a message (or multiple chunks) to a channel."""
         if not content:
             return SendResult(success=True)
+
+        # Gateway-level helpers (typing, clarify prompts, final delivery, etc.)
+        # carry thread routing in metadata.  Normal final responses also pass a
+        # reply_to anchor, but default/fallback helpers such as send_clarify()
+        # may not.  Preserve the same Mattermost thread root when reply_mode is
+        # enabled instead of leaking those prompts into the parent channel.
+        if not reply_to and metadata and self._reply_mode == "thread":
+            meta_thread_id = metadata.get("thread_id")
+            if meta_thread_id:
+                reply_to = str(meta_thread_id)
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
@@ -788,6 +862,13 @@ class MattermostAdapter(BasePlatformAdapter):
 
         # Thread support: if the post is in a thread, use root_id.
         thread_id = post.get("root_id") or None
+        thread_context = None
+        reply_to_text = None
+        if thread_id:
+            thread_context, reply_to_text = await self._build_thread_context(
+                thread_id,
+                post_id,
+            )
 
         # Determine message type.
         file_ids = post.get("file_ids") or []
@@ -849,6 +930,7 @@ class MattermostAdapter(BasePlatformAdapter):
             user_id=sender_id,
             user_name=sender_name,
             thread_id=thread_id,
+            message_id=post_id,
         )
 
         # Per-channel ephemeral prompt
@@ -865,7 +947,10 @@ class MattermostAdapter(BasePlatformAdapter):
             message_id=post_id,
             media_urls=media_urls if media_urls else None,
             media_types=media_types if media_types else None,
+            reply_to_message_id=thread_id if reply_to_text else None,
+            reply_to_text=reply_to_text,
             channel_prompt=_channel_prompt,
+            channel_context=thread_context,
         )
 
         await self.handle_message(msg_event)

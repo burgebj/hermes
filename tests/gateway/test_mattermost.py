@@ -253,6 +253,46 @@ class TestMattermostSend:
 
         assert result.success is False
 
+    @pytest.mark.asyncio
+    async def test_send_clarify_uses_mattermost_thread_metadata(self):
+        """Clarify prompts in a Mattermost thread should be posted under that thread."""
+        from tools.clarify_gateway import clear_session
+
+        self.adapter._reply_mode = "thread"
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"id": "clarify_post"})
+        mock_resp.text = AsyncMock(return_value="")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_get_resp = AsyncMock()
+        mock_get_resp.status = 200
+        mock_get_resp.json = AsyncMock(return_value={"id": "root_failure", "root_id": ""})
+        mock_get_resp.text = AsyncMock(return_value="")
+        mock_get_resp.__aenter__ = AsyncMock(return_value=mock_get_resp)
+        mock_get_resp.__aexit__ = AsyncMock(return_value=False)
+
+        self.adapter._session.post = MagicMock(return_value=mock_resp)
+        self.adapter._session.get = MagicMock(return_value=mock_get_resp)
+
+        try:
+            result = await self.adapter.send_clarify(
+                chat_id="chan_456",
+                question="Need failure artifact?",
+                choices=["Paste logs"],
+                clarify_id="clarify123",
+                session_key="session123",
+                metadata={"thread_id": "root_failure"},
+            )
+        finally:
+            clear_session("session123")
+
+        assert result.success is True
+        payload = self.adapter._session.post.call_args[1]["json"]
+        assert payload["root_id"] == "root_failure"
+
 
 # ---------------------------------------------------------------------------
 # WebSocket event parsing
@@ -389,6 +429,57 @@ class TestMattermostWebSocketParsing:
         assert self.adapter.handle_message.called
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.source.thread_id == "root_post_123"
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_injects_root_post_context(self):
+        """A thread mention should include the Mattermost root post as agent context."""
+        post_data = {
+            "id": "post_reply",
+            "user_id": "user_123",
+            "channel_id": "chan_456",
+            "message": "@bot_user_id can you diagnose this failure?",
+            "root_id": "root_failure",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "O",
+                "sender_name": "@alice",
+            },
+        }
+        self.adapter._api_get = AsyncMock(return_value={
+            "order": ["root_failure", "older_reply", "post_reply"],
+            "posts": {
+                "root_failure": {
+                    "id": "root_failure",
+                    "user_id": "bot_user_id",
+                    "message": (
+                        "⚠️ Hermes nightly maintenance FAILURE\n"
+                        "Hermes update rc: 1\n"
+                        "Log: /home/adityargadgil/.local/state/hermes-maintenance/update-20260603T090001Z.log"
+                    ),
+                },
+                "older_reply": {
+                    "id": "older_reply",
+                    "user_id": "user_456",
+                    "message": "Earlier diagnostic hint",
+                    "root_id": "root_failure",
+                },
+                "post_reply": post_data,
+            },
+        })
+
+        await self.adapter._handle_ws_event(event)
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id == "root_failure"
+        assert msg_event.reply_to_message_id == "root_failure"
+        assert "Hermes nightly maintenance FAILURE" in msg_event.reply_to_text
+        assert "Hermes nightly maintenance FAILURE" in msg_event.channel_context
+        assert "update-20260603T090001Z.log" in msg_event.channel_context
+        assert "Earlier diagnostic hint" in msg_event.channel_context
 
     @pytest.mark.asyncio
     async def test_invalid_post_json_ignored(self):
