@@ -87,8 +87,26 @@ Rules:
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
+  - If the roster contains the GSD 5.5 sandwich profiles, mirror that process
+    in the graph instead of flattening everything into one generic builder card:
+      * gsd-planner-gpt55: use for high-risk/ambiguous planning, architecture,
+        spike synthesis, risk classification, and acceptance criteria.
+      * gsd-codex-builder: use for routine implementation, edits, tests, and
+        evidence collection after a plan/spec exists.
+      * gsd-debug-gpt55: use only when failure recovery or hard root-cause work
+        is likely; route it after a failed/uncertain build path when relevant.
+      * gsd-reviewer-gpt55: use as the final validation gate for high-stakes
+        closure; the reviewer task must depend on the evidence-producing
+        builder/debug task(s), never run parentless.
+  - For high-risk/high-stakes cards, create an explicit final review child with
+    `assignee: "gsd-reviewer-gpt55"` and parent indices pointing at all build,
+    debug, and evidence tasks. Its body must say that the card cannot be closed
+    without evidence plus final GPT-5.5 review.
+  - For low-risk one-step work, fanout=false is acceptable, but the body should
+    still include evidence requirements and when to escalate to final review.
   - Each child task body is what a fresh worker will read with no other
-    context — be specific about goal, approach, and acceptance criteria.
+    context — be specific about goal, approach, acceptance criteria, and the
+    exact evidence required for downstream review.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
