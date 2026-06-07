@@ -184,6 +184,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
+        app.router.add_head("/webhooks/{route_name}", self._handle_webhook_head)
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
 
         # Port conflict detection — fail fast if port is already in use
@@ -281,6 +282,75 @@ class WebhookAdapter(BasePlatformAdapter):
             self._delivery_info.pop(k, None)
             self._delivery_info_created.pop(k, None)
 
+    def _extract_delivery_id(self, request: Any, payload: dict) -> str:
+        """Return a stable provider delivery id for idempotency/session keys.
+
+        Provider retries should map to the same id even when transport-level
+        request headers change.  Precedence keeps existing provider ids for
+        GitHub/Svix, then handles Composio's v3 payload shape before falling
+        back to generic request ids and finally a timestamp.
+        """
+        github_delivery = request.headers.get("X-GitHub-Delivery", "")
+        if github_delivery:
+            return github_delivery
+
+        svix_id = request.headers.get("svix-id", "")
+        if svix_id:
+            return svix_id
+
+        if isinstance(payload, dict):
+            action = payload.get("action")
+            if isinstance(action, dict):
+                action_id = action.get("id")
+                if action_id:
+                    return f"trello-action:{action_id}"
+
+            event_type = payload.get("type") or payload.get("event_type")
+            if event_type == "composio.trigger.message":
+                payload_id = payload.get("id")
+                if payload_id:
+                    return f"composio:{payload_id}"
+
+                metadata = payload.get("metadata")
+                if isinstance(metadata, dict):
+                    log_id = metadata.get("log_id")
+                    if log_id:
+                        return f"composio-log:{log_id}"
+
+        composio_webhook_id = request.headers.get("webhook-id", "")
+        if composio_webhook_id:
+            return f"composio-webhook:{composio_webhook_id}"
+
+        request_id = request.headers.get("X-Request-ID", "")
+        if request_id:
+            return request_id
+
+        return str(int(time.time() * 1000))
+
+    def _extract_trello_action_type(self, payload: dict) -> str:
+        """Return Trello's action type for native board webhooks.
+
+        Trello board webhooks deliver board activity as an ``action`` object.
+        The action ``type`` is the useful event discriminator for route filters
+        (for example ``commentCard``, ``createCard``, ``updateCard``).  List
+        moves are represented as ``updateCard`` actions with ``data.listBefore``
+        and ``data.listAfter``; expose those as ``updateCard:idList`` so routes
+        can subscribe to moves without treating every field edit as equivalent.
+        """
+        if not isinstance(payload, dict):
+            return ""
+        action = payload.get("action")
+        if not isinstance(action, dict):
+            return ""
+        action_type = action.get("type")
+        if not action_type:
+            return ""
+        data = action.get("data")
+        if action_type == "updateCard" and isinstance(data, dict):
+            if "listBefore" in data or "listAfter" in data:
+                return "updateCard:idList"
+        return str(action_type)
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "webhook"}
 
@@ -291,6 +361,20 @@ class WebhookAdapter(BasePlatformAdapter):
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "webhook"})
+
+    async def _handle_webhook_head(self, request: "web.Request") -> "web.Response":
+        """HEAD /webhooks/{route_name} — provider callback validation.
+
+        Trello validates webhook callback URLs with a HEAD request at
+        registration time.  The validation request has no JSON body and no
+        webhook signature, so only confirm that the route exists; POSTs still
+        require the configured route signature.
+        """
+        self._reload_dynamic_routes()
+        route_name = request.match_info.get("route_name", "")
+        if route_name not in self._routes:
+            return web.Response(status=404)
+        return web.Response(status=200)
 
     def _reload_dynamic_routes(self) -> None:
         """Reload agent-created subscriptions from disk if the file changed."""
@@ -403,7 +487,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=403,
             )
         if secret != _INSECURE_NO_AUTH:
-            if not self._validate_signature(request, raw_body, secret):
+            if not self._validate_signature(request, raw_body, secret, route_config):
                 logger.warning(
                     "[webhook] Invalid signature for route %s", route_name
                 )
@@ -443,6 +527,7 @@ class WebhookAdapter(BasePlatformAdapter):
             or request.headers.get("X-GitLab-Event", "")
             or payload.get("event_type", "")
             or payload.get("type", "")
+            or self._extract_trello_action_type(payload)
             or "unknown"
         )
         allowed_events = route_config.get("events", [])
@@ -492,25 +577,24 @@ class WebhookAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
 
-        # Build a unique delivery ID
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get(
-                "svix-id",
-                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
-            ),
-        )
+        # Build a stable delivery ID before idempotency.  Prefer provider
+        # event identifiers over transport/request fallbacks so webhook retries
+        # don't wake a fresh agent session just because retry headers changed.
+        delivery_id = self._extract_delivery_id(request, payload)
 
         # ── Idempotency ─────────────────────────────────────────
-        # Skip duplicate deliveries (webhook retries).
+        # Skip duplicate deliveries (webhook retries).  Scope cache keys by
+        # route so two unrelated routes can receive the same provider id
+        # without suppressing each other.
         now = time.time()
+        idempotency_key = f"{route_name}:{delivery_id}"
         # Prune expired entries
         self._seen_deliveries = {
             k: v
             for k, v in self._seen_deliveries.items()
             if now - v < self._idempotency_ttl
         }
-        if delivery_id in self._seen_deliveries:
+        if idempotency_key in self._seen_deliveries:
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
@@ -518,7 +602,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "duplicate", "delivery_id": delivery_id},
                 status=200,
             )
-        self._seen_deliveries[delivery_id] = now
+        self._seen_deliveries[idempotency_key] = now
 
         # ── Direct delivery mode (deliver_only) ─────────────────
         # Skip the agent entirely — the rendered prompt IS the message we
@@ -641,15 +725,51 @@ class WebhookAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _validate_signature(
-        self, request: "web.Request", body: bytes, secret: str
+        self,
+        request: "web.Request",
+        body: bytes,
+        secret: str,
+        route_config: Optional[dict] = None,
     ) -> bool:
-        """Validate webhook signature (GitHub, GitLab, Svix, generic HMAC-SHA256)."""
+        """Validate webhook signature (GitHub, GitLab, Svix, Trello, generic HMAC-SHA256)."""
         def _header(name: str) -> str:
             return (
                 request.headers.get(name, "")
                 or request.headers.get(name.lower(), "")
                 or request.headers.get(name.upper(), "")
             )
+
+        # Trello: X-Trello-Webhook = base64(HMAC-SHA1(raw_body + callbackURL)).
+        # The callback URL must be byte-for-byte the same string used when the
+        # Trello webhook was registered, so routes that use Trello signatures
+        # must store it explicitly as callback_url/webhook_url.
+        trello_sig = _header("X-Trello-Webhook")
+        if trello_sig:
+            callback_url = ""
+            if isinstance(route_config, dict):
+                callback_url = (
+                    route_config.get("callback_url")
+                    or route_config.get("webhook_url")
+                    or route_config.get("trello_callback_url")
+                    or ""
+                )
+            if not callback_url:
+                logger.debug("[webhook] Trello signature route missing callback_url")
+                return False
+            expected = base64.b64encode(
+                hmac.new(
+                    secret.encode(),
+                    body + str(callback_url).encode(),
+                    hashlib.sha1,
+                ).digest()
+            ).decode()
+            return hmac.compare_digest(trello_sig, expected)
+        if (
+            isinstance(route_config, dict)
+            and str(route_config.get("signature_provider", "")).lower() == "trello"
+        ):
+            logger.debug("[webhook] Trello route missing X-Trello-Webhook signature")
+            return False
 
         # Svix / AgentMail:
         #   svix-id: msg_...
