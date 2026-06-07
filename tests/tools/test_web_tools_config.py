@@ -448,6 +448,109 @@ class TestParallelClientConfig:
             assert client1 is client2
 
 
+class TestParallelSearchAndExtractCompatibility:
+    """Parallel SDK compatibility across beta and GA clients."""
+
+    def test_parallel_search_uses_ga_client_and_maps_agentic_to_advanced(self):
+        from plugins.web.parallel.provider import ParallelWebSearchProvider
+
+        calls = {}
+
+        class FakeClient:
+            def search(self, **kwargs):
+                calls.update(kwargs)
+                return types.SimpleNamespace(
+                    results=[
+                        types.SimpleNamespace(
+                            title="Parallel docs",
+                            url="https://docs.parallel.ai",
+                            excerpts=["Excerpt"],
+                        )
+                    ]
+                )
+
+        with patch("plugins.web.parallel.provider._get_sync_client", return_value=FakeClient()), \
+             patch.dict(os.environ, {"PARALLEL_SEARCH_MODE": "agentic"}), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = ParallelWebSearchProvider().search("Parallel SDK", limit=3)
+
+        assert calls["mode"] == "advanced"
+        assert calls["advanced_settings"] == {"max_results": 3}
+        assert result["success"] is True
+        assert result["data"]["web"][0]["title"] == "Parallel docs"
+
+    def test_parallel_search_falls_back_to_beta_client_and_maps_advanced_to_agentic(self):
+        from plugins.web.parallel.provider import ParallelWebSearchProvider
+
+        calls = {}
+
+        class FakeClient:
+            class beta:
+                @staticmethod
+                def search(**kwargs):
+                    calls.update(kwargs)
+                    return types.SimpleNamespace(results=[])
+
+        with patch("plugins.web.parallel.provider._get_sync_client", return_value=FakeClient()), \
+             patch.dict(os.environ, {"PARALLEL_SEARCH_MODE": "advanced"}), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = ParallelWebSearchProvider().search("Parallel SDK", limit=3)
+
+        assert calls["mode"] == "agentic"
+        assert calls["max_results"] == 3
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_parallel_extract_uses_ga_client_with_advanced_settings(self):
+        from plugins.web.parallel.provider import ParallelWebSearchProvider
+
+        calls = {}
+
+        class FakeAsyncClient:
+            async def extract(self, **kwargs):
+                calls.update(kwargs)
+                return types.SimpleNamespace(
+                    results=[
+                        types.SimpleNamespace(
+                            title="Parallel docs",
+                            url="https://docs.parallel.ai",
+                            full_content="Full content",
+                            excerpts=["Excerpt"],
+                        )
+                    ],
+                    errors=[],
+                )
+
+        with patch("plugins.web.parallel.provider._get_async_client", return_value=FakeAsyncClient()), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = await ParallelWebSearchProvider().extract(["https://docs.parallel.ai"])
+
+        assert calls["advanced_settings"] == {"full_content": True}
+        assert result[0]["content"] == "Full content"
+
+    @pytest.mark.asyncio
+    async def test_parallel_extract_falls_back_to_beta_client(self):
+        from plugins.web.parallel.provider import ParallelWebSearchProvider
+
+        calls = {}
+
+        class Beta:
+            @staticmethod
+            async def extract(**kwargs):
+                calls.update(kwargs)
+                return types.SimpleNamespace(results=[], errors=[])
+
+        class FakeAsyncClient:
+            beta = Beta()
+
+        with patch("plugins.web.parallel.provider._get_async_client", return_value=FakeAsyncClient()), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            result = await ParallelWebSearchProvider().extract(["https://docs.parallel.ai"])
+
+        assert calls == {"urls": ["https://docs.parallel.ai"], "full_content": True}
+        assert result == []
+
+
 class TestWebSearchSchema:
     """Test suite for web_search tool schema and handler wiring."""
 
