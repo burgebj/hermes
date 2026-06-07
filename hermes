@@ -6,6 +6,54 @@ This wrapper should behave like the installed `hermes` command, including
 subcommands such as `gateway`, `cron`, and `doctor`.
 """
 
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _desktop_auto_gateway_disabled() -> bool:
+    """Return True when Desktop's local auto-gateway spawn should be suppressed."""
+    config_path = Path.home() / ".hermes" / "desktop.json"
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    except Exception:
+        data = {}
+    return bool(data.get("disableAutoGateway"))
+
+
+def _parent_is_hermes_desktop() -> bool:
+    """Detect the macOS Electron app as the direct parent, without affecting CLI use."""
+    test_cmd = os.environ.get("HERMES_DESKTOP_PARENT_CMD_TEST")
+    if test_cmd is not None:
+        return "Hermes Agent.app" in test_cmd or "/Applications/Hermes Agent.app/" in test_cmd
+    try:
+        parent_cmd = subprocess.check_output(
+            ["/bin/ps", "-p", str(os.getppid()), "-o", "command="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except Exception:
+        return False
+    return "Hermes Agent.app" in parent_cmd or "/Applications/Hermes Agent.app/" in parent_cmd
+
+
+def _maybe_suppress_desktop_auto_gateway() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] != "gateway":
+        return
+    if not _desktop_auto_gateway_disabled():
+        return
+    if not _parent_is_hermes_desktop():
+        return
+    print("Hermes Desktop auto gateway start suppressed by ~/.hermes/desktop.json disableAutoGateway=true")
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
+    _maybe_suppress_desktop_auto_gateway()
     from hermes_cli.main import main
     main()
