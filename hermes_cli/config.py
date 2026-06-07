@@ -1667,6 +1667,14 @@ DEFAULT_CONFIG = {
         # extras" without silently stripping MCP tools the parent already has.
         # Set to false for strict intersection.
         "inherit_mcp_toolsets": True,
+        # Optional escape hatch for lean parent/router sessions.  When set to a
+        # non-empty list of toolset names, delegate_task may grant an
+        # explicitly requested child toolset if it is present either on the
+        # parent OR in this allowlist.  This lets the parent expose only the
+        # small delegation/router surface while still spawning narrow subagents
+        # such as ["terminal", "file"] or ["web"] on demand.  Empty list keeps
+        # the historical strict parent-intersection behavior.
+        "allowed_child_toolsets": [],
         "max_iterations": 50,  # per-subagent iteration cap (each subagent gets its own budget,
                                # independent of the parent's max_iterations)
         "child_timeout_seconds": 600,  # wall-clock timeout for each child agent (floor 30s,
