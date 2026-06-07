@@ -98,6 +98,10 @@ _CHARS_PER_TOKEN = 4
 # high-detail 2048×2048, Gemini 258/tile), but 1600 is a realistic ceiling
 # that keeps compression budgeting honest for multi-image conversations.
 # Matches Claude Code's IMAGE_TOKEN_ESTIMATE constant.
+
+# Anti-thrashing threshold: compressions that save less than 10% each
+# immediately disable further compression once this count is reached.
+_INEFFECTIVE_THRESHOLD = 2
 _IMAGE_TOKEN_ESTIMATE = 1600
 # Same figure expressed in the char-budget currency the rest of the
 # compressor speaks in.  Used when accumulating message "content length"
@@ -553,6 +557,10 @@ class ContextCompressor(ContextEngine):
         self.last_rough_tokens_when_real_prompt_fit = 0
         self.awaiting_real_usage_after_compression = False
 
+    def reset_no_progress_guard(self) -> None:
+        """Reset the no-progress guard when real new content arrives."""
+        self._ineffective_compression_count = 0
+
     def update_model(
         self,
         model: str,
@@ -736,7 +744,7 @@ class ContextCompressor(ContextEngine):
         if tokens < self.threshold_tokens:
             return False
         # Anti-thrashing: back off if recent compressions were ineffective
-        if self._ineffective_compression_count >= 2:
+        if self._ineffective_compression_count >= _INEFFECTIVE_THRESHOLD:
             if not self.quiet_mode:
                 logger.warning(
                     "Compression skipped — last %d compressions saved <10%% each. "
@@ -2058,12 +2066,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         saved_estimate = display_tokens - new_estimate
 
         # Anti-thrashing: track compression effectiveness
-        savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
-        self._last_compression_savings_pct = savings_pct
-        if savings_pct < 10:
-            self._ineffective_compression_count += 1
+        # Special case: zero structural progress (N→N messages) immediately
+        # arms the guard, even if token savings aren't yet < 10%.
+        n_messages_after = len(compressed)
+        if n_messages_after >= n_messages:
+            # Zero structural progress — set count to threshold immediately
+            self._ineffective_compression_count = _INEFFECTIVE_THRESHOLD
         else:
-            self._ineffective_compression_count = 0
+            savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
+            self._last_compression_savings_pct = savings_pct
+            if savings_pct < 10:
+                self._ineffective_compression_count += 1
+            else:
+                self._ineffective_compression_count = 0
 
         if not self.quiet_mode:
             logger.info(

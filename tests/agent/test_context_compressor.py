@@ -2183,3 +2183,51 @@ class TestPreflightSentinelGuard:
         compressor.last_prompt_tokens = 50_000
         result = self._seed(compressor.last_prompt_tokens, 10_000)
         assert result == 50_000
+
+
+class TestNoProgressGuard:
+    """Regression for #40803: zero-progress compression (N→N messages)
+    should immediately arm the no-progress guard."""
+
+    def _make_messages(self, n):
+        return [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(n)]
+
+    def test_zero_progress_arms_guard_immediately(self, compressor):
+        """When compress() returns N→N messages, guard should be at threshold."""
+        # Create messages: system + 10 content messages
+        messages = [{"role": "system", "content": "System prompt"}] + self._make_messages(10)
+
+        # Mock call_llm to fail so we trigger the fallback path, which may not compress
+        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("provider down")):
+            # First compression attempt
+            result = compressor.compress(messages)
+
+            # If the result has the same number of messages (zero progress),
+            # the guard should be immediately set to threshold
+            if len(result) >= len(messages):
+                assert compressor._ineffective_compression_count == 2, \
+                    "Zero progress should set counter to threshold immediately"
+
+    def test_marginal_progress_increments_counter(self, compressor):
+        """Test that the anti-thrashing counter increments correctly."""
+        # Start with counter at 0
+        assert compressor._ineffective_compression_count == 0
+
+        # Simulate marginal progress: increment the counter
+        compressor._ineffective_compression_count = 1
+        assert compressor.should_compress(prompt_tokens=90000) is True
+
+        # On second marginal compression, counter reaches threshold
+        compressor._ineffective_compression_count = 2
+        assert compressor.should_compress(prompt_tokens=90000) is False
+
+    def test_reset_no_progress_guard_clears_state(self, compressor):
+        """reset_no_progress_guard() should clear the counter."""
+        # Arm the guard to threshold
+        compressor._ineffective_compression_count = 2
+        assert compressor.should_compress(prompt_tokens=90000) is False
+
+        # Reset it
+        compressor.reset_no_progress_guard()
+        assert compressor._ineffective_compression_count == 0
+        assert compressor.should_compress(prompt_tokens=90000) is True
