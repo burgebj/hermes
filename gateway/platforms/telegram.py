@@ -1001,6 +1001,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 self.name, attempt,
             )
             self._polling_network_error_count = 0
+            # Polling resumed — immediately restore the send path so
+            # outbound messages are not blocked for the 60-second
+            # heartbeat probe window (GH #35205).
+            if self._send_path_degraded:
+                logger.info(
+                    "[%s] Telegram send path restored after successful reconnect",
+                    self.name,
+                )
+                self._send_path_degraded = False
             # start_polling() returning is necessary but not sufficient:
             # PTB's Updater can be left in a state where `running` is True
             # but the underlying long-poll task is wedged on a stale httpx
