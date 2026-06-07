@@ -2195,6 +2195,60 @@ def _build_wsl_interop_paths(path_entries: list[str]) -> list[str]:
     return result
 
 
+_PACKAGED_RUNTIME_ENV_VARS: tuple[str, ...] = (
+    # Nix/packaged wrappers point Hermes at read-only bundled assets that are
+    # intentionally not importable from the sealed Python environment alone.
+    "HERMES_BUNDLED_SKILLS",
+    "HERMES_BUNDLED_PLUGINS",
+    "HERMES_WEB_DIST",
+    "HERMES_TUI_DIR",
+    "HERMES_PYTHON",
+    "HERMES_NODE",
+    # Wrappers may also expose native libraries (e.g. libopus for Discord
+    # voice) or extra Python plugin paths. A systemd unit that bypasses the
+    # wrapper still needs those paths.
+    "LD_LIBRARY_PATH",
+    "PYTHONPATH",
+)
+
+
+def _escape_systemd_env_value(value: str) -> str:
+    """Escape a value for a quoted systemd ``Environment=`` assignment."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _remap_colon_separated_paths_for_user(value: str, target_home_dir: str) -> str:
+    """Remap each path component in a colon-separated environment value."""
+    return os.pathsep.join(
+        _remap_path_for_user(part, target_home_dir) if part else part
+        for part in value.split(os.pathsep)
+    )
+
+
+def _packaged_runtime_environment_lines(target_home_dir: str | None = None) -> str:
+    """Return systemd Environment= lines for wrapper-provided runtime paths.
+
+    ``hermes gateway install`` writes a service unit that launches the Python
+    module directly. Packaged launchers (notably Nix wrappers) set environment
+    variables that locate bundled plugins/skills/web assets and native library
+    paths before execing that Python module. Persist those variables into the
+    unit so the background gateway sees the same runtime layout as the CLI that
+    generated it.
+    """
+    lines: list[str] = []
+    for key in _PACKAGED_RUNTIME_ENV_VARS:
+        value = os.environ.get(key)
+        if not value:
+            continue
+        if target_home_dir:
+            if key in {"LD_LIBRARY_PATH", "PYTHONPATH"}:
+                value = _remap_colon_separated_paths_for_user(value, target_home_dir)
+            elif value.startswith(("/", "~")):
+                value = _remap_path_for_user(value, target_home_dir)
+        lines.append(f'Environment="{key}={_escape_systemd_env_value(value)}"')
+    return "\n".join(lines)
+
+
 def _remap_path_for_user(path: str, target_home_dir: str) -> str:
     """Remap *path* from the current user's home to *target_home_dir*.
 
@@ -2357,6 +2411,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         path_entries.extend(_build_wsl_interop_paths(path_entries))
         path_entries.extend(common_bin_paths)
         sane_path = ":".join(path_entries)
+        packaged_runtime_env = _packaged_runtime_environment_lines(home_dir)
         return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2375,6 +2430,7 @@ Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
+{packaged_runtime_env}
 Restart=always
 RestartSec=5
 RestartMaxDelaySec=300
@@ -2397,6 +2453,7 @@ WantedBy=multi-user.target
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(common_bin_paths)
     sane_path = ":".join(path_entries)
+    packaged_runtime_env = _packaged_runtime_environment_lines()
     return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2410,6 +2467,7 @@ WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
+{packaged_runtime_env}
 Restart=always
 RestartSec=5
 RestartMaxDelaySec=300

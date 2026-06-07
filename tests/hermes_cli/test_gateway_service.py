@@ -395,6 +395,60 @@ class TestGeneratedSystemdUnits:
         assert self._expected_timeout_stop_sec() in unit
         assert "WantedBy=multi-user.target" in unit
 
+    def test_user_unit_preserves_packaged_runtime_environment(self, monkeypatch):
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", "/nix/store/hermes/share/plugins")
+        monkeypatch.setenv("HERMES_BUNDLED_SKILLS", "/nix/store/hermes/share/skills")
+        monkeypatch.setenv("HERMES_WEB_DIST", "/nix/store/hermes/share/web_dist")
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/nix/store/libopus/lib")
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert (
+            'Environment="HERMES_BUNDLED_PLUGINS=/nix/store/hermes/share/plugins"'
+            in unit
+        )
+        assert (
+            'Environment="HERMES_BUNDLED_SKILLS=/nix/store/hermes/share/skills"'
+            in unit
+        )
+        assert 'Environment="HERMES_WEB_DIST=/nix/store/hermes/share/web_dist"' in unit
+        assert 'Environment="LD_LIBRARY_PATH=/nix/store/libopus/lib"' in unit
+
+    def test_system_unit_remaps_packaged_runtime_environment_for_target_user(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: Path("/root"))
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_hermes_home_for_target_user",
+            lambda home: "/home/alice/.hermes",
+        )
+        monkeypatch.setenv(
+            "HERMES_BUNDLED_PLUGINS",
+            "/root/.nix-profile/share/hermes/plugins",
+        )
+        monkeypatch.setenv(
+            "LD_LIBRARY_PATH",
+            "/root/.nix-profile/lib:/nix/store/libopus/lib",
+        )
+
+        unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
+
+        assert (
+            'Environment="HERMES_BUNDLED_PLUGINS='
+            '/home/alice/.nix-profile/share/hermes/plugins"' in unit
+        )
+        assert (
+            'Environment="LD_LIBRARY_PATH='
+            '/home/alice/.nix-profile/lib:/nix/store/libopus/lib"' in unit
+        )
+        assert "/root/.nix-profile" not in unit
+
 
 class TestGatewayStopCleanup:
     def test_stop_only_kills_current_profile_by_default(self, tmp_path, monkeypatch):
