@@ -377,6 +377,59 @@ class TestInferHostPath:
         expected = str(tmp_path / "host" / "skills" / "b.py")
         assert result == expected
 
+    def test_infer_remote_prefix_uses_posix_separators_on_windows_host(
+        self, tmp_path
+    ):
+        """The remote directory prefix must use POSIX separators even when the
+        host process renders paths Windows-style, so sync-back can still infer
+        the host path for a newly-created remote file.
+
+        ``remote`` is always a remote (Linux) path. Deriving its prefix with
+        ``str(Path(remote).parent)`` renders backslashes on a Windows host
+        (``\\root\\.hermes\\skills``); the subsequent
+        ``startswith(remote_dir + "/")`` then never matches a forward-slash
+        remote path and the file is silently dropped. This test simulates a
+        Windows host by pointing the module's ``Path`` at ``PureWindowsPath``
+        and asserts the OBSERVABLE behavior (a sibling remote file resolves)
+        rather than which helper is called.
+
+        Sibling of commit 46abf0401, which fixed the identical
+        ``str(Path(remote).parent)`` separator bug in ``unique_parent_dirs()``
+        but left ``_infer_host_path()`` unconverted.
+        """
+        from pathlib import PureWindowsPath
+
+        # Host paths expressed Windows-style so the simulated PureWindowsPath
+        # parent/str round-trip stays correct for the host side.
+        mapping = [(r"C:\Users\me\.hermes\skills\a.py", "/root/.hermes/skills/a.py")]
+        mgr = _make_manager(tmp_path, file_mapping=mapping, seed_pushed_state=False)
+
+        # Simulate a Windows host: pathlib.Path renders backslashes. With the
+        # old remote-prefix code this makes startswith() fail; the fix routes
+        # the remote prefix through posixpath, which is separator-stable.
+        with patch("tools.environments.file_sync.Path", PureWindowsPath):
+            result = mgr._infer_host_path(
+                "/root/.hermes/skills/b.py",
+                file_mapping=mapping,
+            )
+
+        assert result == r"C:\Users\me\.hermes\skills/b.py"
+
+    def test_infer_matching_prefix_remote_root(self, tmp_path):
+        """A remote file directly under the POSIX root resolves correctly.
+
+        Guards the ``remote_dir == "/"`` edge: the prefix must not become
+        ``"//"`` and the suffix must keep its leading separator.
+        """
+        host_file = tmp_path / "host" / "a.py"
+        _write_file(host_file, b"content")
+        mapping = [(str(host_file), "/a.py")]
+
+        mgr = _make_manager(tmp_path, file_mapping=mapping)
+        result = mgr._infer_host_path("/b.py", file_mapping=mapping)
+        expected = str(tmp_path / "host" / "b.py")
+        assert result == expected
+
 
 class TestSyncBackSIGINT:
     """SIGINT deferral during sync-back."""

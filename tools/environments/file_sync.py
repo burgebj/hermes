@@ -395,9 +395,19 @@ class FileSyncManager:
         """
         mapping = file_mapping if file_mapping is not None else []
         for host, remote in mapping:
-            remote_dir = str(Path(remote).parent)
-            if remote_path.startswith(remote_dir + "/"):
+            # `remote` is always a remote (POSIX) path; use posixpath so the
+            # prefix keeps forward slashes even when the host is Windows.
+            remote_dir = posixpath.dirname(remote)
+            # ``remote_dir`` is "/" when the mapped file sits directly under
+            # the POSIX root; the directory separator is then already part of
+            # the prefix, so don't append a second one (which would yield
+            # "//" and never match, and would mis-slice the suffix).
+            base = remote_dir.rstrip("/")
+            if remote_path.startswith(base + "/"):
                 host_dir = str(Path(host).parent)
-                suffix = remote_path[len(remote_dir):]
+                # Slice off only the directory portion (without any trailing
+                # slash) so the suffix always keeps its leading "/" separator,
+                # including when ``remote_dir`` is the POSIX root.
+                suffix = remote_path[len(base):]
                 return host_dir + suffix
         return None
