@@ -27,6 +27,39 @@ def _patch_common_status_deps(monkeypatch, status_mod, tmp_path, *, openai_base_
     )
 
 
+def test_show_status_all_redacts_api_keys(monkeypatch, capsys, tmp_path):
+    from hermes_cli import status as status_mod
+    import hermes_cli.auth as auth_mod
+
+    raw_openrouter = "openrouter-test-key-abcdefghijklmnopqrstuvwxyz1234567890"
+    raw_anthropic = "anthropic-test-key-abcdefghijklmnopqrstuvwxyz1234567890"
+
+    _patch_common_status_deps(monkeypatch, status_mod, tmp_path)
+
+    def _get_env_value(name: str):
+        if name == "OPENROUTER_API_KEY":
+            return raw_openrouter
+        return ""
+
+    monkeypatch.setattr(status_mod, "get_env_value", _get_env_value, raising=False)
+    monkeypatch.setattr(auth_mod, "get_anthropic_key", lambda: raw_anthropic, raising=False)
+    monkeypatch.setattr(status_mod, "load_config", lambda: {"model": {"default": "gpt-5"}}, raising=False)
+    monkeypatch.setattr(status_mod, "resolve_requested_provider", lambda requested=None: "openrouter", raising=False)
+    monkeypatch.setattr(status_mod, "resolve_provider", lambda requested=None, **kwargs: "openrouter", raising=False)
+    monkeypatch.setattr(status_mod, "provider_label", lambda provider: "OpenRouter", raising=False)
+
+    status_mod.show_status(SimpleNamespace(all=True, deep=False))
+
+    out = capsys.readouterr().out
+    assert raw_openrouter not in out
+    assert raw_anthropic not in out
+    assert "open...7890" in out
+    assert "anth...7890" in out
+    assert "OpenRouter" in out
+    assert "Anthropic" in out
+
+
+
 def test_show_status_displays_configured_dict_model_and_provider_label(monkeypatch, capsys, tmp_path):
     from hermes_cli import status as status_mod
 
