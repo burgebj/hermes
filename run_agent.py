@@ -4947,6 +4947,7 @@ class AIAgent:
             context=function_args.get("context"),
             toolsets=function_args.get("toolsets"),
             tasks=function_args.get("tasks"),
+            tier=function_args.get("tier"),
             max_iterations=function_args.get("max_iterations"),
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),

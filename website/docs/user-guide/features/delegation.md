@@ -14,21 +14,29 @@ The `delegate_task` tool spawns child AIAgent instances with isolated context, r
 delegate_task(
     goal="Debug why tests fail",
     context="Error: assertion in test_foo.py line 42",
-    toolsets=["terminal", "file"]
+    toolsets=["terminal", "file"],
+    tier="small",
 )
 ```
+
+Top-level `tier` is optional and bounded to `small`, `medium`, or `large`. Omitted or blank behaves like `medium`. When configured, `delegation.tiers.small`, `delegation.tiers.medium`, and `delegation.tiers.large` override their respective tiers by merging onto the base `delegation` config. If the requested tier has no nested override, Hermes falls back to the base `delegation` config before inheriting the parent model/provider path.
 
 ## Parallel Batch
 
 Up to 3 concurrent subagents by default (configurable, no hard ceiling):
 
 ```python
-delegate_task(tasks=[
-    {"goal": "Research topic A", "toolsets": ["web"]},
-    {"goal": "Research topic B", "toolsets": ["web"]},
-    {"goal": "Fix the build", "toolsets": ["terminal", "file"]}
-])
+delegate_task(
+    tier="large",
+    tasks=[
+        {"goal": "Research topic A", "toolsets": ["web"]},
+        {"goal": "Research topic B", "toolsets": ["web"]},
+        {"goal": "Fix the build", "toolsets": ["terminal", "file"]},
+    ],
+)
 ```
+
+Batch mode applies one top-level tier to the whole delegation call. `tasks[]` does not support per-task tier overrides.
 
 ## How Subagent Context Works
 

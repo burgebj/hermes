@@ -632,16 +632,20 @@ here; full developer notes live in `AGENTS.md`, user-facing docs under
 Synchronous subagent spawn — the parent waits for the child's summary
 before continuing its own loop. Isolated context + terminal session.
 
-- **Single:** `delegate_task(goal, context, toolsets)`.
-- **Batch:** `delegate_task(tasks=[{goal, ...}, ...])` runs children in
+- **Single:** `delegate_task(goal, context, toolsets, tier)`.
+- **Batch:** `delegate_task(tasks=[{goal, ...}, ...], tier=...)` runs children in
   parallel, capped by `delegation.max_concurrent_children` (default 3).
+- **Tier routing:** top-level `tier` is bounded to `small`, `medium`, or `large`,
+  with `medium` being the default. This determines which model is used and which
+  which level of reasoning.
 - **Roles:** `leaf` (default; cannot re-delegate) vs `orchestrator`
   (can spawn its own workers, bounded by `delegation.max_spawn_depth`).
 - **Not durable.** If the parent is interrupted, the child is
   cancelled. For work that must outlive the turn, use `cronjob` or
   `terminal(background=True, notify_on_complete=True)`.
 
-Config: `delegation.*` in `config.yaml`.
+Config: `delegation.*` in `config.yaml`, plus optional `delegation_small.*`
+and `delegation_large.*` routing blocks.
 
 ### Cron (scheduled jobs)
 

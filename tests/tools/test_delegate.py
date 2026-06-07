@@ -16,6 +16,8 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+from run_agent import AIAgent
+
 from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
     DELEGATE_TASK_SCHEMA,
@@ -32,6 +34,8 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    _merge_delegation_config_for_tier,
+    _load_delegation_config_for_tier,
 )
 
 
@@ -69,6 +73,9 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("tier", props)
+        self.assertEqual(props["tier"]["enum"], ["small", "medium", "large"])
+        self.assertNotIn("tier", props["tasks"]["items"]["properties"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -179,6 +186,12 @@ class TestDelegateTask(unittest.TestCase):
         result = json.loads(delegate_task(goal="  ", parent_agent=parent))
         self.assertIn("error", result)
 
+    def test_invalid_tier_returns_tool_error(self):
+        parent = _make_mock_parent()
+        result = json.loads(delegate_task(goal="test", tier="huge", parent_agent=parent))
+        self.assertIn("error", result)
+        self.assertIn("Invalid delegation tier", result["error"])
+
     def test_task_missing_goal(self):
         parent = _make_mock_parent()
         result = json.loads(delegate_task(tasks=[{"context": "no goal here"}], parent_agent=parent))
@@ -215,6 +228,61 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["summary"], "Result A")
         self.assertEqual(result["results"][1]["summary"], "Result B")
         self.assertIn("total_duration_seconds", result)
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    def test_batch_mode_uses_top_level_tier_once(self, mock_cfg, mock_creds, mock_run):
+        mock_cfg.return_value = {"max_iterations": 50}
+        mock_creds.return_value = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        mock_run.side_effect = [
+            {"task_index": 0, "status": "completed", "summary": "Result A", "api_calls": 2, "duration_seconds": 3.0},
+            {"task_index": 1, "status": "completed", "summary": "Result B", "api_calls": 4, "duration_seconds": 6.0},
+        ]
+        parent = _make_mock_parent()
+
+        result = json.loads(
+            delegate_task(
+                tasks=[{"goal": "Research topic A"}, {"goal": "Research topic B"}],
+                tier="large",
+                parent_agent=parent,
+            )
+        )
+
+        self.assertIn("results", result)
+        mock_creds.assert_called_once_with(mock_cfg.return_value, parent)
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    def test_blank_tier_behaves_like_medium(self, mock_cfg, mock_creds, mock_run):
+        mock_cfg.return_value = {"max_iterations": 50}
+        mock_creds.return_value = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "Done!",
+            "api_calls": 1,
+            "duration_seconds": 1.0,
+        }
+        parent = _make_mock_parent()
+
+        result = json.loads(delegate_task(goal="Fix tests", tier="  ", parent_agent=parent))
+
+        self.assertIn("results", result)
+        mock_creds.assert_called_once_with(mock_cfg.return_value, parent)
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode_accepts_json_string_tasks(self, mock_run):
@@ -936,7 +1004,6 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["provider"])
         self.assertIsNone(creds["base_url"])
         self.assertIsNone(creds["api_key"])
-
 
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
@@ -1937,6 +2004,24 @@ class TestDelegationReasoningEffort(unittest.TestCase):
 class TestDispatchDelegateTask(unittest.TestCase):
     """Tests for the _dispatch_delegate_task helper and full param forwarding."""
 
+    def test_tier_forwarded(self):
+        """The agent-loop dispatch helper must pass through the top-level tier."""
+        parent = object.__new__(AIAgent)
+        with patch("tools.delegate_tool.delegate_task", return_value='{"ok":true}') as mock_delegate:
+            result = AIAgent._dispatch_delegate_task(
+                parent,
+                {
+                    "goal": "test",
+                    "toolsets": [],
+                    "tier": "small",
+                },
+            )
+
+        self.assertEqual(result, '{"ok":true}')
+        _, kwargs = mock_delegate.call_args
+        self.assertEqual(kwargs["tier"], "small")
+        self.assertIs(kwargs["parent_agent"], parent)
+
     @patch("tools.delegate_tool._load_config", return_value={})
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     def test_acp_args_forwarded(self, mock_creds, mock_cfg):
@@ -2727,6 +2812,204 @@ class TestFallbackModelInheritance(unittest.TestCase):
         _, kwargs = MockAgent.call_args
         self.assertIsNone(kwargs["fallback_model"])
 
+class TestDelegationTierConfigMerge(unittest.TestCase):
+    def test_same_provider_tier_inherits_base_routing_fields(self):
+        merged = _merge_delegation_config_for_tier(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "api_mode": "chat_completions",
+                "max_iterations": 50,
+            },
+            {
+                "model": "google/gemini-3-flash-preview",
+                "provider": "openrouter",
+            },
+        )
+
+        self.assertEqual(merged["model"], "google/gemini-3-flash-preview")
+        self.assertEqual(merged["provider"], "openrouter")
+        self.assertEqual(merged["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(merged["api_key"], "base-key")
+        self.assertEqual(merged["api_mode"], "chat_completions")
+        self.assertEqual(merged["max_iterations"], 50)
+
+    def test_provider_switch_clears_inherited_routing_bundle(self):
+        merged = _merge_delegation_config_for_tier(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "api_mode": "chat_completions",
+                "command": "copilot",
+                "args": ["--acp", "--stdio"],
+                "max_iterations": 50,
+            },
+            {
+                "provider": "minimax",
+                "max_iterations": 20,
+            },
+        )
+
+        self.assertEqual(merged["provider"], "minimax")
+        self.assertNotIn("model", merged)
+        self.assertNotIn("base_url", merged)
+        self.assertNotIn("api_key", merged)
+        self.assertNotIn("api_mode", merged)
+        self.assertNotIn("command", merged)
+        self.assertNotIn("args", merged)
+        self.assertEqual(merged["max_iterations"], 20)
+
+    def test_base_url_switch_clears_inherited_provider_fields(self):
+        merged = _merge_delegation_config_for_tier(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "api_mode": "chat_completions",
+                "reasoning_effort": "medium",
+            },
+            {
+                "base_url": "http://localhost:1234/v1",
+                "api_mode": "anthropic_messages",
+            },
+        )
+
+        self.assertEqual(merged["base_url"], "http://localhost:1234/v1")
+        self.assertEqual(merged["api_mode"], "anthropic_messages")
+        self.assertNotIn("provider", merged)
+        self.assertNotIn("model", merged)
+        self.assertNotIn("api_key", merged)
+        self.assertEqual(merged["reasoning_effort"], "medium")
+
+    def test_blank_provider_override_is_ignored_and_model_override_still_applies(self):
+        merged = _merge_delegation_config_for_tier(
+            {
+                "provider": "openrouter",
+                "model": "google/gemini-2.5-pro",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "api_mode": "chat_completions",
+            },
+            {
+                "provider": "",
+                "model": "google/gemini-2.5-flash-lite",
+            },
+        )
+
+        self.assertEqual(merged["provider"], "openrouter")
+        self.assertEqual(merged["model"], "google/gemini-2.5-flash-lite")
+        self.assertEqual(merged["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(merged["api_key"], "base-key")
+        self.assertEqual(merged["api_mode"], "chat_completions")
+
+    def test_blank_base_url_override_is_ignored(self):
+        merged = _merge_delegation_config_for_tier(
+            {
+                "model": "anthropic/claude-sonnet-4",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "api_mode": "chat_completions",
+            },
+            {
+                "base_url": "",
+            },
+        )
+
+        self.assertEqual(merged["provider"], "openrouter")
+        self.assertEqual(merged["model"], "anthropic/claude-sonnet-4")
+        self.assertEqual(merged["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(merged["api_key"], "base-key")
+        self.assertEqual(merged["api_mode"], "chat_completions")
+
+
+class TestDelegationTierConfigLoad(unittest.TestCase):
+    def test_missing_delegation_block_returns_empty_config(self):
+        self.assertEqual(_load_delegation_config_for_tier({}, "small"), {})
+        self.assertEqual(_load_delegation_config_for_tier(None, "large"), {})
+
+    def test_without_requested_tier_returns_base_delegation_config(self):
+        full_cfg = {
+            "delegation": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4",
+                "tiers": {
+                    "small": {"model": "google/gemini-3-flash-preview"},
+                },
+            }
+        }
+
+        loaded = _load_delegation_config_for_tier(full_cfg)
+
+        self.assertEqual(loaded, full_cfg["delegation"])
+
+    def test_missing_requested_tier_falls_back_to_base_delegation_config(self):
+        full_cfg = {
+            "delegation": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4",
+                "tiers": {
+                    "small": {"model": "google/gemini-3-flash-preview"},
+                },
+            }
+        }
+
+        loaded = _load_delegation_config_for_tier(full_cfg, "large")
+
+        self.assertEqual(loaded, full_cfg["delegation"])
+
+    def test_requested_tier_returns_merged_delegation_config(self):
+        full_cfg = {
+            "delegation": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "tiers": {
+                    "small": {
+                        "model": "google/gemini-3-flash-preview",
+                    },
+                },
+            }
+        }
+
+        loaded = _load_delegation_config_for_tier(full_cfg, "small")
+
+        self.assertEqual(loaded["provider"], "openrouter")
+        self.assertEqual(loaded["model"], "google/gemini-3-flash-preview")
+        self.assertEqual(loaded["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(loaded["api_key"], "base-key")
+        self.assertIn("tiers", loaded)
+
+    def test_requested_tier_ignores_blank_string_route_overrides(self):
+        full_cfg = {
+            "delegation": {
+                "provider": "openrouter",
+                "model": "google/gemini-2.5-pro",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "base-key",
+                "tiers": {
+                    "small": {
+                        "provider": "",
+                        "base_url": "",
+                        "model": "google/gemini-2.5-flash-lite",
+                    },
+                },
+            }
+        }
+
+        loaded = _load_delegation_config_for_tier(full_cfg, "small")
+
+        self.assertEqual(loaded["provider"], "openrouter")
+        self.assertEqual(loaded["model"], "google/gemini-2.5-flash-lite")
+        self.assertEqual(loaded["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(loaded["api_key"], "base-key")
+        self.assertIn("tiers", loaded)
 
 if __name__ == "__main__":
     unittest.main()

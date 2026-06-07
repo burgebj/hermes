@@ -1690,6 +1690,11 @@ DEFAULT_CONFIG = {
         # Flip to true only if you trust delegated work to run dangerous cmds
         # without human review (cron pipelines, batch automation, etc.).
         "subagent_auto_approve": False,
+        # Overrides for model/provider/base_url/api_key/api_mode/reasoning_effort based on tier
+        # Valid tiers are: small/medium/large
+        # The tier is determined by the caller of `delegate_task`
+        # Non-configured tiers fallback to the top-level delegation config
+        "tiers": {},
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
