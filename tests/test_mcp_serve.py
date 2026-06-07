@@ -1236,3 +1236,88 @@ class TestEventBridgePollE2E:
         """Verify the poll interval constant."""
         from mcp_serve import POLL_INTERVAL
         assert POLL_INTERVAL == 0.2
+
+    def test_poll_processes_sessions_index_only_changes(self, tmp_path, monkeypatch):
+        """Regression for #36647: when sessions.json changes but state.db does not,
+        the poller must NOT early-return — it must refresh the cached sessions
+        index and pick up new sessions on the next tick.
+        """
+        import mcp_serve
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        session_a = "20260329_150000_idxA"
+        session_b = "20260329_150500_idxB"
+        db_path = tmp_path / "state.db"
+
+        # Initial sessions.json — only session A is known.
+        sessions_data = {
+            "agent:main:telegram:dm:idxA": {
+                "session_key": "agent:main:telegram:dm:idxA",
+                "session_id": session_a,
+                "platform": "telegram",
+                "updated_at": "2026-03-29T15:00:05",
+                "origin": {"platform": "telegram", "chat_id": "idxA"},
+            },
+        }
+        (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
+
+        # Pre-seed BOTH sessions' messages in the DB so a single state.db write
+        # is enough — we can hold state.db mtime constant for the rest of the test.
+        _create_test_db(db_path, session_a, [
+            {"role": "user", "content": "from A", "timestamp": "2026-03-29T15:00:01"},
+        ])
+        # Append session B's row to the same DB.
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (session_b, "user", "from B", "2026-03-29T15:05:01"),
+        )
+        conn.commit()
+        conn.close()
+
+        class TestDB:
+            def get_messages(self, sid):
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+                conn.close()
+                return [dict(r) for r in rows]
+
+        db = TestDB()
+        bridge = mcp_serve.EventBridge()
+
+        # First poll — sees only session A.
+        bridge._poll_once(db)
+        r1 = bridge.poll_events(after_cursor=0)
+        contents_1 = [e["content"] for e in r1["events"]]
+        assert contents_1 == ["from A"], contents_1
+
+        # Freeze state.db mtime: capture and re-pin after sessions.json write.
+        db_mtime_before = db_path.stat().st_mtime
+
+        # Add session B to sessions.json (rewrite triggers an mtime change on the
+        # index file). state.db is NOT touched.
+        sessions_data["agent:main:telegram:dm:idxB"] = {
+            "session_key": "agent:main:telegram:dm:idxB",
+            "session_id": session_b,
+            "platform": "telegram",
+            "updated_at": "2026-03-29T15:05:05",
+            "origin": {"platform": "telegram", "chat_id": "idxB"},
+        }
+        (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
+        # Ensure state.db mtime is unchanged from the first poll.
+        os.utime(db_path, (db_mtime_before, db_mtime_before))
+
+        # Second poll — must refresh sessions index and emit session B's message.
+        bridge._poll_once(db)
+        r2 = bridge.poll_events(after_cursor=r1["next_cursor"])
+        contents_2 = [e["content"] for e in r2["events"]]
+        assert "from B" in contents_2, (
+            f"Sessions-index-only change was skipped (bug #36647). Got: {contents_2}"
+        )
