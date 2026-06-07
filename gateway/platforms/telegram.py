@@ -4842,7 +4842,21 @@ class TelegramAdapter(BasePlatformAdapter):
         if not text or not self._bot or not getattr(self._bot, "username", None):
             return text
         username = re.escape(self._bot.username)
-        cleaned = re.sub(rf"(?i)@{username}\b[,:\-]*\s*", "", text).strip()
+
+        # Telegram group commands address a specific bot as one bot_command
+        # token, e.g. ``/steer@Charlie_bot Please ...``.  We strip the target
+        # suffix before gateway command dispatch, but must preserve a separator
+        # between the command and its payload.  A plain deletion turns that
+        # example into ``/steerPlease ...``, which the gateway reads as the
+        # unknown command ``/steerplease``.
+        command_target_re = re.compile(rf"(?i)(^|\s)(/[A-Za-z0-9_]+)@{username}\b[,:\-]*\s*")
+
+        def _strip_command_target(match: re.Match) -> str:
+            return f"{match.group(1)}{match.group(2)} "
+
+        cleaned = command_target_re.sub(_strip_command_target, text)
+        cleaned = re.sub(rf"(?i)@{username}\b[,:\-]*\s*", "", cleaned).strip()
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
         return cleaned or text
 
     def _should_observe_unmentioned_group_message(self, message: Message) -> bool:

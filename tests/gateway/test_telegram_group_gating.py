@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from gateway.config import Platform, PlatformConfig, load_gateway_config
-from gateway.platforms.base import MessageType
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 
@@ -468,6 +468,36 @@ def test_group_messages_can_require_direct_trigger_via_config():
     # And commands still pass unconditionally when require_mention is disabled
     adapter_no_mention = _make_adapter(require_mention=False)
     assert adapter_no_mention._should_process_message(_group_message("/status"), is_command=True) is True
+
+
+def test_clean_bot_trigger_text_preserves_space_after_command_target_suffix():
+    adapter = _make_adapter(require_mention=True, bot_username="Charlie_orgo_bot")
+
+    cleaned = adapter._clean_bot_trigger_text(
+        "/steer@Charlie_orgo_bot Please reply with exactly: Aye Aye Captain."
+    )
+
+    assert cleaned == "/steer Please reply with exactly: Aye Aye Captain."
+    event = MessageEvent(text=cleaned, message_type=MessageType.COMMAND)
+    assert event.get_command() == "steer"
+    assert event.get_command_args() == "Please reply with exactly: Aye Aye Captain."
+
+
+def test_clean_bot_trigger_text_preserves_addressed_alias_command_without_payload():
+    adapter = _make_adapter(require_mention=True, bot_username="Charlie_orgo_bot")
+
+    cleaned = adapter._clean_bot_trigger_text("/checkin@Charlie_orgo_bot")
+
+    assert cleaned == "/checkin"
+    event = MessageEvent(text=cleaned, message_type=MessageType.COMMAND)
+    assert event.get_command() == "checkin"
+    assert event.get_command_args() == ""
+
+
+def test_clean_bot_trigger_text_still_strips_plain_bot_mentions():
+    adapter = _make_adapter(require_mention=True, bot_username="Charlie_orgo_bot")
+
+    assert adapter._clean_bot_trigger_text("@Charlie_orgo_bot please reply") == "please reply"
 
 
 def test_explicit_multi_bot_mentions_route_only_to_named_bots():
