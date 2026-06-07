@@ -863,6 +863,19 @@ class TestExplicitProviderRouting:
             for record in caplog.records
         )
 
+    def test_missing_openrouter_credentials_logs_missing_credentials(self, monkeypatch, caplog):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
+            from agent.auxiliary_client import _try_openrouter
+
+            with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
+                client, model = _try_openrouter()
+
+        assert client is None
+        assert model is None
+        assert any("missing credentials" in record.message for record in caplog.records)
+        assert not any("payment / credit error" in record.message for record in caplog.records)
+
 class TestGetTextAuxiliaryClient:
     """Test the full resolution chain for get_text_auxiliary_client."""
 
@@ -1033,6 +1046,22 @@ class TestAuxiliaryPoolAwareness:
 
         assert client is not None
         assert model == "google/gemini-3-flash-preview"
+
+    def test_try_nous_missing_auth_logs_missing_credentials(self, caplog):
+        with (
+            patch("agent.auxiliary_client._read_nous_auth", return_value=None),
+            patch("agent.auxiliary_client._resolve_nous_runtime_api", return_value=None),
+        ):
+            from agent.auxiliary_client import _try_nous
+
+            with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
+                client, model = _try_nous()
+
+        assert client is None
+        assert model is None
+        assert any("no Nous authentication found" in record.message for record in caplog.records)
+        assert any("missing credentials" in record.message for record in caplog.records)
+        assert not any("payment / credit error" in record.message for record in caplog.records)
 
     def test_call_llm_retries_nous_after_401(self):
         class _Auth401(Exception):

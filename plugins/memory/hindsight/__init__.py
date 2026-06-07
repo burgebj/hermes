@@ -70,6 +70,16 @@ _PROVIDER_DEFAULT_MODELS = {
     "lmstudio": "local-model",
     "openai_compatible": "your-model-name",
 }
+_EMBEDDINGS_PROVIDER_DEFAULT_MODELS = {
+    "local": "BAAI/bge-small-en-v1.5",
+    "tei": "requires HINDSIGHT_API_EMBEDDINGS_TEI_URL",
+    "openai": "text-embedding-3-small",
+    "cohere": "embed-english-v3.0",
+    "google": "gemini-embedding-001",
+    "openrouter": "perplexity/pplx-embed-v1-0.6b",
+    "litellm": "text-embedding-3-small",
+    "litellm-sdk": "cohere/embed-english-v3.0",
+}
 
 
 def _parse_int_setting(value: Any, default: int) -> int:
@@ -427,6 +437,16 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     if current_base_url:
         env_values["HINDSIGHT_API_LLM_BASE_URL"] = str(current_base_url)
 
+    # Hindsight's embedded daemon reads embedding settings directly from the
+    # profile env file. Keep these in sync with Hermes's profile-scoped config
+    # without storing embedding API keys in config.json.
+    embeddings_provider = config.get("embeddings_provider")
+    if embeddings_provider:
+        env_values["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] = str(embeddings_provider)
+    embeddings_openai_model = config.get("embeddings_openai_model")
+    if embeddings_provider == "openai" and embeddings_openai_model:
+        env_values["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] = str(embeddings_openai_model)
+
     idle_timeout = (
         config.get("idle_timeout")
         if config.get("idle_timeout") is not None
@@ -446,15 +466,104 @@ def _embedded_profile_env_path(config: dict[str, Any]):
 
 
 def _materialize_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None):
-    """Write the profile-scoped env file that standalone hindsight-embed uses."""
+    """Write the profile-scoped env file that standalone hindsight-embed uses.
+
+    Preserve keys not managed by Hermes (notably embedding API keys) so daemon
+    startup/reconfiguration cannot erase user-provided secrets.
+    """
     profile_env = _embedded_profile_env_path(config)
     profile_env.parent.mkdir(parents=True, exist_ok=True)
     env_values = _build_embedded_profile_env(config, llm_api_key=llm_api_key)
+    existing_values = _load_simple_env(profile_env)
+
+    # If no new LLM key was provided, do not erase an existing profile-scoped
+    # daemon key. This is especially important for openai-codex: extraction uses
+    # OAuth, while OpenAI embeddings can still require a daemon-visible API key.
+    if (
+        env_values.get("HINDSIGHT_API_LLM_API_KEY") == ""
+        and existing_values.get("HINDSIGHT_API_LLM_API_KEY")
+    ):
+        env_values.pop("HINDSIGHT_API_LLM_API_KEY", None)
+
+    merged_values = {**existing_values, **env_values}
     profile_env.write_text(
-        "".join(f"{key}={value}\n" for key, value in env_values.items()),
+        "".join(f"{key}={value}\n" for key, value in merged_values.items()),
         encoding="utf-8",
     )
     return profile_env
+
+
+def _effective_embedded_profile_env(config: dict[str, Any]) -> dict[str, str]:
+    """Return the daemon env values Hermes can see for an embedded profile."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith("HINDSIGHT_") or key == "OPENAI_API_KEY"
+    }
+    env.update(_load_simple_env(_embedded_profile_env_path(config)))
+    expected = _build_embedded_profile_env(config)
+    if (
+        expected.get("HINDSIGHT_API_LLM_API_KEY") == ""
+        and env.get("HINDSIGHT_API_LLM_API_KEY")
+    ):
+        expected.pop("HINDSIGHT_API_LLM_API_KEY", None)
+    env.update(expected)
+    return env
+
+
+def _validate_embedded_profile_env(config: dict[str, Any]) -> None:
+    """Validate required embedded-daemon env before starting Hindsight."""
+    env = _effective_embedded_profile_env(config)
+    profile_env = _embedded_profile_env_path(config)
+    profile = _embedded_profile_name(config)
+    provider = str(env.get("HINDSIGHT_API_EMBEDDINGS_PROVIDER") or "local").strip().lower()
+    model = env.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL") or ""
+
+    missing: list[str] = []
+    if provider == "openai":
+        if not (
+            env.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY")
+            or env.get("HINDSIGHT_API_LLM_API_KEY")
+        ):
+            missing.append("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY")
+    elif provider == "tei":
+        if not env.get("HINDSIGHT_API_EMBEDDINGS_TEI_URL"):
+            missing.append("HINDSIGHT_API_EMBEDDINGS_TEI_URL")
+    elif provider == "cohere":
+        if not (
+            env.get("HINDSIGHT_API_EMBEDDINGS_COHERE_API_KEY")
+            or env.get("HINDSIGHT_API_COHERE_API_KEY")
+        ):
+            missing.append("HINDSIGHT_API_EMBEDDINGS_COHERE_API_KEY")
+    elif provider == "google":
+        if not (
+            env.get("HINDSIGHT_API_EMBEDDINGS_GEMINI_API_KEY")
+            or env.get("HINDSIGHT_API_LLM_API_KEY")
+            or env.get("HINDSIGHT_API_EMBEDDINGS_VERTEXAI_PROJECT_ID")
+        ):
+            missing.append("HINDSIGHT_API_EMBEDDINGS_GEMINI_API_KEY")
+    elif provider == "openrouter":
+        if not (
+            env.get("HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY")
+            or env.get("HINDSIGHT_API_OPENROUTER_API_KEY")
+            or env.get("HINDSIGHT_API_LLM_API_KEY")
+        ):
+            missing.append("HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY")
+    elif provider == "litellm-sdk":
+        if not env.get("HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_API_KEY"):
+            missing.append("HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_API_KEY")
+
+    if not missing:
+        return
+
+    model_text = f", model={model}" if model else ""
+    raise RuntimeError(
+        "Hindsight local_embedded profile is missing required embedding "
+        f"configuration: {', '.join(missing)}. "
+        f"profile={profile}, env_file={profile_env}, "
+        f"embeddings_provider={provider}{model_text}. "
+        f"Add the missing setting to {profile_env} or rerun `hermes memory setup`."
+    )
 
 def _sanitize_bank_segment(value: str) -> str:
     """Sanitize a bank_id_template placeholder value.
@@ -638,6 +747,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def post_setup(self, hermes_home: str, config: dict) -> None:
         """Custom setup wizard — installs only the deps needed for the selected mode."""
+        import getpass
         import subprocess
         import shutil
         import sys
@@ -669,6 +779,7 @@ class HindsightMemoryProvider(MemoryProvider):
         provider_config: dict = dict(existing_config)
         provider_config["mode"] = mode
         env_writes: dict = {}
+        profile_env_writes: dict[str, str] = {}
 
         # Step 2: Install/upgrade deps for selected mode
         _MIN_CLIENT_VERSION = "0.4.22"
@@ -772,6 +883,68 @@ class HindsightMemoryProvider(MemoryProvider):
                             break
                 env_writes["HINDSIGHT_LLM_API_KEY"] = existing_llm_key
 
+            embeddings_values = list(_EMBEDDINGS_PROVIDER_DEFAULT_MODELS.keys())
+            embeddings_items = [
+                (p, f"default model: {_EMBEDDINGS_PROVIDER_DEFAULT_MODELS[p]}")
+                for p in embeddings_values
+            ]
+            existing_embeddings_provider = provider_config.get("embeddings_provider")
+            embeddings_default_idx = (
+                embeddings_values.index(existing_embeddings_provider)
+                if existing_embeddings_provider in embeddings_values
+                else 0
+            )
+            embeddings_idx = _curses_select(
+                "  Select embeddings provider",
+                embeddings_items,
+                default=embeddings_default_idx,
+            )
+            embeddings_provider = embeddings_values[embeddings_idx]
+            provider_config["embeddings_provider"] = embeddings_provider
+
+            if embeddings_provider == "openai":
+                current_embeddings_model = (
+                    provider_config.get("embeddings_openai_model")
+                    or _EMBEDDINGS_PROVIDER_DEFAULT_MODELS["openai"]
+                )
+                val = input(f"  OpenAI embeddings model [{current_embeddings_model}]: ").strip()
+                provider_config["embeddings_openai_model"] = val or current_embeddings_model
+
+                existing_profile_env = _load_simple_env(_embedded_profile_env_path(provider_config))
+                existing_embeddings_key = (
+                    existing_profile_env.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY")
+                    or os.environ.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY", "")
+                )
+                if existing_embeddings_key:
+                    masked = (
+                        f"...{existing_embeddings_key[-4:]}"
+                        if len(existing_embeddings_key) > 4
+                        else "set"
+                    )
+                    sys.stdout.write(
+                        f"  OpenAI embeddings API key (current: {masked}, blank to keep): "
+                    )
+                else:
+                    sys.stdout.write("  OpenAI embeddings API key (blank to reuse LLM key when possible): ")
+                sys.stdout.flush()
+                embeddings_key = (
+                    getpass.getpass(prompt="")
+                    if sys.stdin.isatty()
+                    else sys.stdin.readline().strip()
+                )
+                if embeddings_key:
+                    profile_env_writes["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] = embeddings_key
+                elif not existing_embeddings_key and llm_provider == "openai":
+                    reusable_llm_key = env_writes.get("HINDSIGHT_LLM_API_KEY", "")
+                    if reusable_llm_key:
+                        profile_env_writes["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] = reusable_llm_key
+                elif not existing_embeddings_key:
+                    profile_env_path = _embedded_profile_env_path(provider_config)
+                    print(
+                        "  ⚠ OpenAI embeddings need "
+                        f"HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY in {profile_env_path}"
+                    )
+
         # Step 4: Save everything
         provider_config.setdefault("bank_id", "hermes")
         provider_config.setdefault("recall_budget", "mid")
@@ -832,6 +1005,18 @@ class HindsightMemoryProvider(MemoryProvider):
                 materialized_config,
                 llm_api_key=llm_api_key or None,
             )
+            if profile_env_writes:
+                profile_env = _embedded_profile_env_path(materialized_config)
+                merged_profile_env = _load_simple_env(profile_env)
+                merged_profile_env.update(profile_env_writes)
+                profile_env.write_text(
+                    "".join(f"{key}={value}\n" for key, value in merged_profile_env.items()),
+                    encoding="utf-8",
+                )
+            try:
+                _validate_embedded_profile_env(materialized_config)
+            except RuntimeError as exc:
+                print(f"  ⚠ {exc}")
 
         print(f"\n  ✓ Hindsight memory configured ({mode} mode)")
         if env_writes:
@@ -1247,7 +1432,6 @@ class HindsightMemoryProvider(MemoryProvider):
                     from rich.console import Console
                     dem.console = Console(file=open(log_path, "a", encoding="utf-8"), force_terminal=False)
 
-                    client = self._get_client()
                     profile = self._config.get("profile", "hermes")
 
                     # Update the profile .env to match our current config so
@@ -1256,14 +1440,28 @@ class HindsightMemoryProvider(MemoryProvider):
                     profile_env = _embedded_profile_env_path(self._config)
                     expected_env = _build_embedded_profile_env(self._config)
                     saved = _load_simple_env(profile_env)
-                    config_changed = saved != expected_env
+                    config_changed = any(
+                        saved.get(key) != value
+                        for key, value in expected_env.items()
+                        if not (
+                            key == "HINDSIGHT_API_LLM_API_KEY"
+                            and value == ""
+                            and saved.get(key)
+                        )
+                    )
 
                     if config_changed:
                         profile_env = _materialize_embedded_profile_env(self._config)
-                        if client._manager.is_running(profile):
-                            with open(log_path, "a", encoding="utf-8") as f:
-                                f.write("\n=== Config changed, restarting daemon ===\n")
-                            client._manager.stop(profile)
+                    else:
+                        _materialize_embedded_profile_env(self._config)
+
+                    _validate_embedded_profile_env(self._config)
+
+                    client = self._get_client()
+                    if config_changed and client._manager.is_running(profile):
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write("\n=== Config changed, restarting daemon ===\n")
+                        client._manager.stop(profile)
 
                     client._ensure_started()
                     with open(log_path, "a", encoding="utf-8") as f:

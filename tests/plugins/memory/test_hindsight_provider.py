@@ -22,6 +22,8 @@ from plugins.memory.hindsight import (
     RETAIN_SCHEMA,
     _load_config,
     _build_embedded_profile_env,
+    _materialize_embedded_profile_env,
+    _validate_embedded_profile_env,
     _normalize_retain_tags,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
@@ -297,6 +299,74 @@ class TestConfig:
 
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "42"
 
+    def test_materialize_embedded_profile_env_preserves_existing_daemon_api_key(self, tmp_path, monkeypatch):
+        user_home = tmp_path / "user-home"
+        profile_dir = user_home / ".hindsight" / "profiles"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(user_home))
+
+        profile_env = profile_dir / "hermes.env"
+        profile_env.write_text(
+            "HINDSIGHT_API_LLM_API_KEY=existing-secret\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=embedding-secret\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-large\n"
+        )
+
+        _materialize_embedded_profile_env({
+            "profile": "hermes",
+            "llm_provider": "openai-codex",
+            "llm_model": "gpt-5.4-mini",
+            "embeddings_provider": "openai",
+            "embeddings_openai_model": "text-embedding-3-small",
+        })
+
+        env_text = profile_env.read_text()
+        assert "HINDSIGHT_API_LLM_API_KEY=existing-secret\n" in env_text
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=embedding-secret\n" in env_text
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small\n" in env_text
+
+    def test_validate_embedded_profile_env_reports_missing_openai_embeddings_key(self, tmp_path, monkeypatch):
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.delenv("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("HINDSIGHT_API_LLM_API_KEY", raising=False)
+
+        config = {
+            "profile": "hermes",
+            "llm_provider": "openai-codex",
+            "llm_model": "gpt-5.4-mini",
+            "embeddings_provider": "openai",
+            "embeddings_openai_model": "text-embedding-3-small",
+        }
+
+        with pytest.raises(RuntimeError) as exc:
+            _validate_embedded_profile_env(config)
+
+        message = str(exc.value)
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY" in message
+        assert str(user_home / ".hindsight" / "profiles" / "hermes.env") in message
+        assert "embeddings_provider=openai" in message
+
+    def test_validate_embedded_profile_env_accepts_existing_openai_embeddings_key(self, tmp_path, monkeypatch):
+        user_home = tmp_path / "user-home"
+        profile_dir = user_home / ".hindsight" / "profiles"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.delenv("HINDSIGHT_API_LLM_API_KEY", raising=False)
+
+        (profile_dir / "hermes.env").write_text(
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=embedding-secret\n",
+            encoding="utf-8",
+        )
+
+        _validate_embedded_profile_env({
+            "profile": "hermes",
+            "llm_provider": "openai-codex",
+            "llm_model": "gpt-5.4-mini",
+            "embeddings_provider": "openai",
+        })
+
     def test_get_client_passes_idle_timeout_to_hindsight_embedded(self, monkeypatch):
         captured = {}
 
@@ -331,7 +401,7 @@ class TestPostSetup:
         user_home.mkdir()
         monkeypatch.setenv("HOME", str(user_home))
 
-        selections = iter([1, 0])  # local_embedded, openai
+        selections = iter([1, 0, 0])  # local_embedded, openai LLM, local embeddings
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
         monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
@@ -356,6 +426,7 @@ class TestPostSetup:
             "HINDSIGHT_API_LLM_API_KEY=sk-local-test\n"
             "HINDSIGHT_API_LLM_MODEL=gpt-4o-mini\n"
             "HINDSIGHT_API_LOG_LEVEL=info\n"
+            "HINDSIGHT_API_EMBEDDINGS_PROVIDER=local\n"
             "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT=300\n"
         )
 
@@ -365,7 +436,7 @@ class TestPostSetup:
         user_home.mkdir()
         monkeypatch.setenv("HOME", str(user_home))
 
-        selections = iter([1, 0])  # local_embedded, openai
+        selections = iter([1, 0, 0])  # local_embedded, openai LLM, local embeddings
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
         monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
@@ -388,7 +459,7 @@ class TestPostSetup:
         user_home.mkdir()
         monkeypatch.setenv("HOME", str(user_home))
 
-        selections = iter([1, 0])  # local_embedded, openai
+        selections = iter([1, 0, 0])  # local_embedded, openai LLM, local embeddings
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
         monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
@@ -406,6 +477,72 @@ class TestPostSetup:
         profile_env = user_home / ".hindsight" / "profiles" / "hermes.env"
         assert profile_env.exists()
         assert "HINDSIGHT_API_LLM_API_KEY=existing-key\n" in profile_env.read_text()
+
+    def test_local_embedded_setup_collects_openai_embeddings_key(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+
+        selections = iter([1, 0, 2])  # local_embedded, openai LLM, openai embeddings
+        secrets = iter(["sk-llm-test", "sk-embeddings-test"])
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": next(secrets))
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        saved = json.loads((hermes_home / "hindsight" / "config.json").read_text())
+        assert saved["embeddings_provider"] == "openai"
+        assert saved["embeddings_openai_model"] == "text-embedding-3-small"
+
+        profile_env = user_home / ".hindsight" / "profiles" / "hermes.env"
+        env_text = profile_env.read_text()
+        assert "HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai\n" in env_text
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small\n" in env_text
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=sk-embeddings-test\n" in env_text
+
+    def test_local_embedded_setup_blank_preserves_existing_tei_embeddings_provider(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.setattr("plugins.memory.hindsight.get_hermes_home", lambda: hermes_home)
+
+        provider = HindsightMemoryProvider()
+        provider.save_config({
+            "mode": "local_embedded",
+            "llm_provider": "openai",
+            "llm_model": "gpt-4o-mini",
+            "embeddings_provider": "tei",
+        }, str(hermes_home))
+
+        profile_env = user_home / ".hindsight" / "profiles" / "hermes.env"
+        profile_env.parent.mkdir(parents=True)
+        profile_env.write_text(
+            "HINDSIGHT_API_EMBEDDINGS_TEI_URL=http://localhost:8080\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: kwargs.get("default", 0))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        saved = json.loads((hermes_home / "hindsight" / "config.json").read_text())
+        assert saved["embeddings_provider"] == "tei"
+        env_text = profile_env.read_text()
+        assert "HINDSIGHT_API_EMBEDDINGS_PROVIDER=tei\n" in env_text
+        assert "HINDSIGHT_API_EMBEDDINGS_TEI_URL=http://localhost:8080\n" in env_text
 
 
     def test_local_embedded_setup_blank_inputs_preserve_existing_config(self, tmp_path, monkeypatch):
