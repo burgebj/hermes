@@ -326,7 +326,10 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
             print("  Running now (dispatched to background thread).")
         else:
             note = result.get("note", "")
-            print(f"  Scheduled for next tick.{(' ' + note) if note else ''}")
+            if note:
+                print(f"  Not dispatched: {note}")
+            else:
+                print("  Scheduled for next tick.")
     return 0
 
 

@@ -6,6 +6,7 @@ writing metadata and waiting for the next scheduled tick.
 """
 
 import json
+import tempfile
 import threading
 import time
 from unittest.mock import patch, MagicMock
@@ -223,6 +224,79 @@ class TestRunJobImmediate:
         assert "already running" in error.lower()
 
         sched._running_job_ids.discard(job_id)
+        sched._shutdown_parallel_pool()
+
+    def test_run_job_immediate_does_not_advance_when_already_running(self, monkeypatch):
+        """Already-running jobs must not consume the next scheduled run."""
+        import cron.scheduler as sched
+        import cron.jobs as jobsmod
+        from cron.jobs import create_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 5m",
+            name="already-running-no-advance"
+        )
+        job_id = job["id"]
+
+        advance_calls = []
+        monkeypatch.setattr(jobsmod, "advance_next_run", lambda *_a, **_kw: advance_calls.append(job_id))
+
+        sched._running_job_ids.add(job_id)
+        dispatched, error = sched.run_job_immediate(job_id)
+
+        assert dispatched is False
+        assert error is not None
+        assert advance_calls == []
+
+        sched._running_job_ids.discard(job_id)
+        sched._shutdown_parallel_pool()
+
+    def test_run_job_immediate_uses_sequential_pool_for_workdir_jobs(self, monkeypatch):
+        """Immediate runs must keep workdir/profile jobs on the serialized pool."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, update_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 5m",
+            name="sequential-pool-test"
+        )
+        job = update_job(job["id"], {"workdir": tempfile.mkdtemp(prefix="cron-workdir-")})
+        job_id = job["id"]
+
+        used = []
+
+        class _DummyPool:
+            def __init__(self, label):
+                self.label = label
+
+            def submit(self, fn):
+                used.append(self.label)
+                fn()
+                return MagicMock()
+
+        monkeypatch.setattr(sched, "_get_sequential_pool", lambda: _DummyPool("sequential"))
+        monkeypatch.setattr(sched, "_get_parallel_pool", lambda *_a, **_kw: _DummyPool("parallel"))
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        dispatched, error = sched.run_job_immediate(job_id)
+
+        assert dispatched is True
+        assert error is None
+        assert used == ["sequential"]
+
         sched._shutdown_parallel_pool()
 
     def test_run_job_immediate_cleans_up_on_job_failure(self, monkeypatch):
