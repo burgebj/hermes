@@ -9132,6 +9132,29 @@ def _safe_plugin_api_relpath(api_field: Any, *, dashboard_dir: Path) -> Optional
     return api_field
 
 
+def _dashboard_plugin_enabled(name: str, directory_name: str, *, source: str) -> bool:
+    """Return whether a dashboard plugin may load executable assets."""
+
+    if source != "user":
+        return True
+    try:
+        from hermes_cli.plugins_cmd import _get_disabled_set, _get_enabled_set
+
+        disabled = _get_disabled_set()
+        if name in disabled or directory_name in disabled:
+            return False
+        enabled = _get_enabled_set()
+        return name in enabled or directory_name in enabled
+    except Exception:
+        _log.warning(
+            "Plugin %s: could not read plugin enablement config; "
+            "dashboard extension will stay inactive",
+            name,
+            exc_info=True,
+        )
+        return False
+
+
 def _discover_dashboard_plugins() -> list:
     """Scan plugins/*/dashboard/manifest.json for dashboard extensions.
 
@@ -9175,6 +9198,8 @@ def _discover_dashboard_plugins() -> list:
                 data = json.loads(manifest_file.read_text(encoding="utf-8"))
                 name = data.get("name", child.name)
                 if name in seen_names:
+                    continue
+                if not _dashboard_plugin_enabled(str(name), child.name, source=source):
                     continue
                 seen_names.add(name)
                 # Tab options: ``path`` + ``position`` for a new tab, optional

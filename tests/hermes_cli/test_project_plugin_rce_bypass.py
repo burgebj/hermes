@@ -189,6 +189,11 @@ class TestDiscoveryScrubsApiField:
 
         def _make(name: str, manifest: dict) -> None:
             _write_plugin_manifest(tmp_path / "plugins", name, manifest)
+            (tmp_path / "config.yaml").write_text(
+                "plugins:\n"
+                "  enabled:\n"
+                f"    - {name}\n"
+            )
 
         return _make
 
@@ -232,6 +237,91 @@ class TestDiscoveryScrubsApiField:
         entry = next(p for p in plugins if p["name"] == "safe")
         assert entry["_api_file"] == "api.py"
         assert entry["has_api"] is True
+
+
+class TestUserDashboardPluginEnablement:
+    """User-installed dashboard extensions must honor plugins.enabled."""
+
+    @pytest.fixture
+    def isolated_user_plugins(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "home"
+        plugins_root = hermes_home / "plugins"
+        bundled_root = tmp_path / "empty-bundled"
+        bundled_root.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HERMES_ENABLE_PROJECT_PLUGINS", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_root,
+        )
+        return hermes_home, plugins_root
+
+    def _write_dashboard_plugin(self, plugins_root: Path, name: str) -> Path:
+        dashboard_dir = _write_plugin_manifest(
+            plugins_root,
+            name,
+            {
+                "name": name,
+                "label": name,
+                "api": "api.py",
+                "entry": "dist/index.js",
+            },
+        )
+        (dashboard_dir / "api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+        )
+        return dashboard_dir
+
+    def test_user_dashboard_plugin_api_stays_inactive_until_enabled(
+        self,
+        isolated_user_plugins,
+    ):
+        _hermes_home, plugins_root = isolated_user_plugins
+        self._write_dashboard_plugin(plugins_root, "disabled-dashboard")
+
+        plugins = web_server._get_dashboard_plugins(force_rescan=True)
+        assert "disabled-dashboard" not in {p["name"] for p in plugins}
+
+        with patch("importlib.util.spec_from_file_location") as spec:
+            web_server._mount_plugin_api_routes()
+        assert spec.call_count == 0
+
+    def test_user_dashboard_plugin_api_imports_after_explicit_enable(
+        self,
+        isolated_user_plugins,
+    ):
+        hermes_home, plugins_root = isolated_user_plugins
+        self._write_dashboard_plugin(plugins_root, "trusted-dashboard")
+        (hermes_home / "config.yaml").write_text(
+            "plugins:\n  enabled:\n    - trusted-dashboard\n"
+        )
+
+        plugins = web_server._get_dashboard_plugins(force_rescan=True)
+        trusted = next(p for p in plugins if p["name"] == "trusted-dashboard")
+        assert trusted["has_api"] is True
+
+        with patch("importlib.util.spec_from_file_location") as spec:
+            spec.return_value = None
+            web_server._mount_plugin_api_routes()
+        assert spec.call_count == 1
+        assert Path(spec.call_args.args[1]).name == "api.py"
+
+    def test_disabled_list_wins_over_enabled_for_dashboard_plugin(
+        self,
+        isolated_user_plugins,
+    ):
+        hermes_home, plugins_root = isolated_user_plugins
+        self._write_dashboard_plugin(plugins_root, "blocked-dashboard")
+        (hermes_home / "config.yaml").write_text(
+            "plugins:\n"
+            "  enabled:\n"
+            "    - blocked-dashboard\n"
+            "  disabled:\n"
+            "    - blocked-dashboard\n"
+        )
+
+        plugins = web_server._get_dashboard_plugins(force_rescan=True)
+        assert "blocked-dashboard" not in {p["name"] for p in plugins}
 
 
 # ---------------------------------------------------------------------------
