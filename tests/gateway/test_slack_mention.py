@@ -55,7 +55,13 @@ CHANNEL_ID = "C0AQWDLHY9M"
 OTHER_CHANNEL_ID = "C9999999999"
 
 
-def _make_adapter(require_mention=None, strict_mention=None, free_response_channels=None, allowed_channels=None):
+def _make_adapter(
+    require_mention=None,
+    strict_mention=None,
+    free_response_channels=None,
+    allowed_channels=None,
+    mention_patterns=None,
+):
     extra = {}
     if require_mention is not None:
         extra["require_mention"] = require_mention
@@ -65,12 +71,15 @@ def _make_adapter(require_mention=None, strict_mention=None, free_response_chann
         extra["free_response_channels"] = free_response_channels
     if allowed_channels is not None:
         extra["allowed_channels"] = allowed_channels
+    if mention_patterns is not None:
+        extra["mention_patterns"] = mention_patterns
 
     adapter = object.__new__(SlackAdapter)
     adapter.platform = Platform.SLACK
     adapter.config = PlatformConfig(enabled=True, extra=extra)
     adapter._bot_user_id = BOT_USER_ID
     adapter._team_bot_user_ids = {}
+    adapter._mention_patterns = adapter._compile_mention_patterns()
     return adapter
 
 
@@ -687,3 +696,129 @@ def test_config_bridges_slack_allowed_channels_env_takes_precedence(monkeypatch,
     import os as _os
     # env var must not be overwritten by config.yaml
     assert _os.environ["SLACK_ALLOWED_CHANNELS"] == OTHER_CHANNEL_ID
+
+
+# ---------------------------------------------------------------------------
+# Tests: mention_patterns (regex wake-words)
+# ---------------------------------------------------------------------------
+
+def test_mention_patterns_empty_by_default():
+    adapter = _make_adapter()
+    assert adapter._mention_patterns == []
+    assert adapter._message_matches_mention_patterns("hello") is False
+
+
+def test_mention_patterns_match_custom_wake_word():
+    adapter = _make_adapter(mention_patterns=[r"^\s*chompy\b"])
+    assert adapter._message_matches_mention_patterns("chompy status") is True
+    assert adapter._message_matches_mention_patterns("   chompy help") is True
+    # Pattern is anchored at start — middle/end matches do not trigger.
+    assert adapter._message_matches_mention_patterns("hey chompy") is False
+
+
+def test_mention_patterns_match_is_case_insensitive():
+    adapter = _make_adapter(mention_patterns=[r"\bhermes\b"])
+    assert adapter._message_matches_mention_patterns("Hey HERMES, ping") is True
+
+
+def test_mention_patterns_accept_string_form():
+    """A single string is normalised into a one-item list (mirrors telegram)."""
+    adapter = _make_adapter(mention_patterns=r"^\s*chompy\b")
+    assert adapter._message_matches_mention_patterns("chompy status") is True
+
+
+def test_mention_patterns_invalid_regex_is_ignored():
+    """An unparsable pattern is dropped; valid ones still compile."""
+    adapter = _make_adapter(mention_patterns=[r"(", r"^\s*chompy\b"])
+    assert adapter._message_matches_mention_patterns("chompy status") is True
+    assert adapter._message_matches_mention_patterns("hello everyone") is False
+
+
+def test_mention_patterns_non_list_logged_and_ignored(caplog):
+    import logging
+    caplog.set_level(logging.WARNING, logger="gateway.platforms.slack")
+    adapter = _make_adapter(mention_patterns={"not": "a list"})
+    assert adapter._mention_patterns == []
+    assert "must be a list or string" in caplog.text
+
+
+def test_mention_patterns_empty_text_returns_false():
+    adapter = _make_adapter(mention_patterns=[r"hermes"])
+    assert adapter._message_matches_mention_patterns("") is False
+
+
+def test_mention_patterns_env_var_fallback(monkeypatch):
+    import json as _json
+    monkeypatch.setenv("SLACK_MENTION_PATTERNS", _json.dumps([r"^\s*chompy\b"]))
+    adapter = _make_adapter()
+    assert adapter._message_matches_mention_patterns("chompy status") is True
+
+
+def test_mention_patterns_env_var_multiline_fallback(monkeypatch):
+    """Newline-separated env value falls back when JSON parse fails."""
+    monkeypatch.setenv("SLACK_MENTION_PATTERNS", "chompy\nhermes")
+    adapter = _make_adapter()
+    assert adapter._message_matches_mention_patterns("chompy status") is True
+    assert adapter._message_matches_mention_patterns("hey hermes there") is True
+
+
+def test_mention_patterns_config_extra_overrides_env(monkeypatch):
+    monkeypatch.setenv("SLACK_MENTION_PATTERNS", r"\bshould-not-trigger\b")
+    adapter = _make_adapter(mention_patterns=[r"^\s*chompy\b"])
+    assert adapter._message_matches_mention_patterns("chompy status") is True
+    assert adapter._message_matches_mention_patterns("should-not-trigger") is False
+
+
+def test_config_bridges_slack_mention_patterns(monkeypatch, tmp_path):
+    """yaml slack.mention_patterns flows into SLACK_MENTION_PATTERNS env var."""
+    from gateway.config import load_gateway_config
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "slack:\n"
+        "  mention_patterns:\n"
+        "    - \"^\\\\s*chompy\\\\b\"\n"
+        "    - \"\\\\bhermes\\\\b\"\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("SLACK_MENTION_PATTERNS", raising=False)
+
+    config = load_gateway_config()
+
+    import json as _json
+    import os as _os
+    assert _json.loads(_os.environ["SLACK_MENTION_PATTERNS"]) == [
+        r"^\s*chompy\b",
+        r"\bhermes\b",
+    ]
+    slack_cfg = config.platforms.get(Platform.SLACK)
+    assert slack_cfg is not None
+    assert slack_cfg.extra.get("mention_patterns") == [
+        r"^\s*chompy\b",
+        r"\bhermes\b",
+    ]
+
+
+def test_config_bridges_slack_mention_patterns_env_takes_precedence(monkeypatch, tmp_path):
+    """Pre-set SLACK_MENTION_PATTERNS is not overwritten by config.yaml."""
+    from gateway.config import load_gateway_config
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "slack:\n"
+        "  mention_patterns:\n"
+        "    - \"\\\\bfrom-yaml\\\\b\"\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("SLACK_MENTION_PATTERNS", r'["\\bfrom-env\\b"]')
+
+    load_gateway_config()
+
+    import os as _os
+    assert _os.environ["SLACK_MENTION_PATTERNS"] == r'["\\bfrom-env\\b"]'

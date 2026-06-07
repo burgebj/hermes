@@ -991,6 +991,8 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(ac, list):
                         ac = ",".join(str(v) for v in ac)
                     os.environ["SLACK_ALLOWED_CHANNELS"] = str(ac)
+                if "mention_patterns" in slack_cfg and not os.getenv("SLACK_MENTION_PATTERNS"):
+                    os.environ["SLACK_MENTION_PATTERNS"] = json.dumps(slack_cfg["mention_patterns"])
 
             # Bridge top-level require_mention to Telegram when the telegram: section
             # does not already provide one.  Users often write "require_mention: true"
