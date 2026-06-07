@@ -108,12 +108,33 @@ class TestRegistration:
         assert entry.toolset == "computer_use"
         assert entry.schema["name"] == "computer_use"
 
-    def test_check_fn_is_false_on_linux(self):
+    def test_check_fn_is_false_on_unsupported_platform(self):
+        """On Windows / BSD / etc. — neither cua-driver nor Linux X11 applies."""
         import tools.computer_use_tool  # noqa: F401
         from tools.registry import registry
         entry = registry._tools["computer_use"]
-        if sys.platform != "darwin":
+        with patch("tools.computer_use.tool.sys") as fake_sys, \
+             patch.dict(
+                 os.environ, {"HERMES_COMPUTER_USE_BACKEND": ""}, clear=False
+             ):
+            fake_sys.platform = "win32"
             assert entry.check_fn() is False
+
+    def test_check_fn_routes_to_linux_backend_on_linux(self):
+        """On Linux the check delegates to ``linux_backend_available``."""
+        import tools.computer_use_tool  # noqa: F401
+        from tools.registry import registry
+        entry = registry._tools["computer_use"]
+        with patch("tools.computer_use.tool.sys") as fake_sys, \
+             patch.dict(
+                 os.environ, {"HERMES_COMPUTER_USE_BACKEND": ""}, clear=False
+             ), \
+             patch(
+                 "tools.computer_use.linux_backend.linux_backend_available",
+                 return_value=True,
+             ):
+            fake_sys.platform = "linux"
+            assert entry.check_fn() is True
 
 
 # ---------------------------------------------------------------------------

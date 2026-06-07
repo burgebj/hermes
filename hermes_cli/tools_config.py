@@ -79,7 +79,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
-    ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
+    ("computer_use",     "🖱️  Computer Use",              "background desktop control (macOS via cua-driver, Linux/X11 via xdotool)"),
 ]
 
 
@@ -517,12 +517,14 @@ TOOL_CATEGORIES = {
         ],
     },
     "computer_use": {
-        "name": "Computer Use (macOS)",
+        "name": "Computer Use",
         "icon": "🖱️",
-        "platform_gate": "darwin",
+        # Supported platforms — macOS uses cua-driver, Linux/X11 uses
+        # xdotool+scrot+wmctrl. Windows and Wayland are not supported.
+        "platform_gate": ("darwin", "linux"),
         "providers": [
             {
-                "name": "cua-driver (background)",
+                "name": "cua-driver (background, macOS)",
                 "badge": "★ recommended · free · local",
                 "tag": (
                     "macOS background computer-use via SkyLight SPIs — does "
@@ -534,6 +536,18 @@ TOOL_CATEGORIES = {
                     # optional pin for reproducibility across macOS updates.
                 ],
                 "post_setup": "cua_driver",
+            },
+            {
+                "name": "xdotool + scrot + wmctrl (Linux/X11)",
+                "badge": "free · local",
+                "tag": (
+                    "Linux X11 desktop control via standard utilities. "
+                    "Wayland is unsupported — switch to X11 at your display "
+                    "manager. SOM-mode captures degrade to vision (no AT-SPI "
+                    "element tree)."
+                ),
+                "env_vars": [],
+                "post_setup": "linux_x11_tools",
             },
         ],
     },

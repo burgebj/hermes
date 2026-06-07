@@ -14844,16 +14844,20 @@ Examples:
     # =========================================================================
     computer_use_parser = subparsers.add_parser(
         "computer-use",
-        help="Manage the Computer Use (cua-driver) backend (macOS)",
+        help="Manage the Computer Use backend (macOS / Linux)",
         description=(
-            "Install or check the cua-driver binary used by the\n"
-            "`computer_use` toolset. macOS-only.\n\n"
-            "Use `hermes computer-use install` to fetch and run the\n"
-            "upstream cua-driver installer. This is equivalent to the\n"
-            "post-setup hook that `hermes tools` runs when you first\n"
-            "enable the Computer Use toolset, and is a stable target\n"
-            "for re-running the install if it didn't fire (e.g. when\n"
-            "toggling the toolset on a returning-user setup)."
+            "Install or check the platform driver used by the\n"
+            "`computer_use` toolset.\n\n"
+            "On macOS the backend is cua-driver (SkyLight-based). Run\n"
+            "`hermes computer-use install` to fetch and run the upstream\n"
+            "installer — this is equivalent to the post-setup hook that\n"
+            "`hermes tools` triggers when you first enable the toolset.\n\n"
+            "On Linux/X11 the backend uses standard utilities (xdotool,\n"
+            "scrot, wmctrl). Install them through your distro package\n"
+            "manager — e.g. on Arch:\n"
+            "  sudo pacman -S xdotool scrot wmctrl\n"
+            "Wayland sessions are not supported; switch to an X11\n"
+            "session at the display manager to use this toolset."
         ),
     )
     computer_use_sub = computer_use_parser.add_subparsers(dest="computer_use_action")
@@ -14879,12 +14883,40 @@ Examples:
     def cmd_computer_use(args):
         action = getattr(args, "computer_use_action", None)
         if action == "install":
+            if sys.platform.startswith("linux"):
+                print("On Linux, install dependencies through your distro:")
+                print("  Arch:    sudo pacman -S xdotool scrot wmctrl")
+                print("  Debian:  sudo apt install xdotool scrot wmctrl")
+                print("  Fedora:  sudo dnf install xdotool scrot wmctrl")
+                print("Then run `hermes computer-use status` to verify.")
+                return
             from hermes_cli.tools_config import install_cua_driver
             install_cua_driver(upgrade=bool(getattr(args, "upgrade", False)))
             return
         if action == "status":
             import shutil
             import subprocess
+            if sys.platform.startswith("linux"):
+                from tools.computer_use.linux_backend import (
+                    linux_backend_available,
+                    _REQUIRED_TOOLS,
+                    _OPTIONAL_TOOLS,
+                )
+                print(f"platform: linux (session: {os.environ.get('XDG_SESSION_TYPE', 'unknown')})")
+                for tool in _REQUIRED_TOOLS + _OPTIONAL_TOOLS:
+                    path = shutil.which(tool)
+                    marker = "✓" if path else ("✗" if tool in _REQUIRED_TOOLS else "·")
+                    label = "required" if tool in _REQUIRED_TOOLS else "optional"
+                    print(f"  {marker} {tool} ({label}): {path or 'not installed'}")
+                if linux_backend_available():
+                    print("computer_use: ready")
+                else:
+                    print("computer_use: not available")
+                    if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+                        print("  Wayland sessions cannot synthesize input — switch to X11.")
+                    if not os.environ.get("DISPLAY"):
+                        print("  $DISPLAY is not set — are you running over SSH without -X?")
+                return
             path = shutil.which("cua-driver")
             if path:
                 version = ""
