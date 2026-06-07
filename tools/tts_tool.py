@@ -10,6 +10,7 @@ Built-in TTS providers:
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
 - xAI TTS: Grok voices, uses xAI Grok OAuth credentials or XAI_API_KEY
+- Cloudflare Workers AI Aura TTS: Deepgram Aura voices, needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
 - NeuTTS (local, free, no API key): On-device TTS via neutts
 - KittenTTS (local, free, no API key): On-device 25MB model
 - Piper (local, free, no API key): OHF-Voice/piper1-gpl neural VITS, 44 languages
@@ -190,6 +191,10 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_CLOUDFLARE_TTS_MODEL = "@cf/deepgram/aura-2-en"
+DEFAULT_CLOUDFLARE_TTS_VOICE = "asteria"
+DEFAULT_CLOUDFLARE_TTS_ENCODING = "mp3"
+DEFAULT_CLOUDFLARE_WORKERS_AI_BASE_URL = "https://api.cloudflare.com/client/v4/accounts"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -215,6 +220,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
     "mistral": 4000,      # conservative; no published per-request cap
     "gemini": 5000,       # Gemini TTS caps at ~8k input tokens / ~655s audio
+    "cloudflare": 5000,   # Aura practical sync cap; Workers AI docs do not publish a hard cap
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
@@ -362,6 +368,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "xai",
     "mistral",
     "gemini",
+    "cloudflare",
     "neutts",
     "kittentts",
     "piper",
@@ -1524,6 +1531,96 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 
 
 # ===========================================================================
+# Provider: Cloudflare Workers AI (Deepgram Aura)
+# ===========================================================================
+def _generate_cloudflare_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using Cloudflare Workers AI TTS models.
+
+    Aura returns raw audio bytes from the Workers AI REST endpoint.
+    """
+    import requests
+
+    api_token = str(get_env_value("CLOUDFLARE_API_TOKEN") or "").strip()
+    account_id = str(get_env_value("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    if not api_token or not account_id:
+        raise ValueError(
+            "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set. "
+            "Create a Cloudflare API token with Workers AI access."
+        )
+
+    cf_config = tts_config.get("cloudflare", {}) if isinstance(tts_config, dict) else {}
+    if not isinstance(cf_config, dict):
+        cf_config = {}
+
+    model = str(cf_config.get("model") or DEFAULT_CLOUDFLARE_TTS_MODEL).strip()
+    base_url = str(
+        cf_config.get("base_url")
+        or DEFAULT_CLOUDFLARE_WORKERS_AI_BASE_URL
+    ).strip().rstrip("/")
+
+    voice = str(
+        cf_config.get("voice")
+        or cf_config.get("speaker")
+        or DEFAULT_CLOUDFLARE_TTS_VOICE
+    ).strip()
+    encoding = str(cf_config.get("encoding") or DEFAULT_CLOUDFLARE_TTS_ENCODING).strip()
+    payload: Dict[str, Any] = {
+        "text": text,
+        "speaker": voice,
+        "encoding": encoding,
+    }
+    for key in ("container", "sample_rate", "bit_rate"):
+        value = cf_config.get(key)
+        if value not in (None, ""):
+            payload[key] = value
+
+    response = requests.post(
+        f"{base_url}/{account_id}/ai/run/{model}",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+
+    status_code = getattr(response, "status_code", 200)
+    if not isinstance(status_code, int):
+        status_code = 200
+    if status_code != 200:
+        detail = ""
+        try:
+            body = response.json()
+            errors = body.get("errors") if isinstance(body, dict) else None
+            if errors:
+                first = errors[0] if isinstance(errors, list) else errors
+                detail = (
+                    first.get("message", "")
+                    if isinstance(first, dict)
+                    else str(first)
+                )
+            if not detail and isinstance(body, dict):
+                error = body.get("error")
+                detail = error.get("message", "") if isinstance(error, dict) else ""
+        except Exception:
+            detail = getattr(response, "text", "")[:300]
+        raise RuntimeError(
+            f"Cloudflare TTS API error (HTTP {status_code}): {detail or 'unknown error'}"
+        )
+
+    response.raise_for_status()
+    audio_bytes = response.content
+
+    if not audio_bytes:
+        raise RuntimeError("Cloudflare Aura TTS returned empty audio data")
+
+    with open(output_path, "wb") as f:
+        f.write(audio_bytes)
+
+    return output_path
+
+
+# ===========================================================================
 # NeuTTS (local, on-device TTS via neutts_cli)
 # ===========================================================================
 
@@ -2003,6 +2100,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
 
+        elif provider == "cloudflare":
+            logger.info("Generating speech with Cloudflare Workers AI Aura TTS...")
+            _generate_cloudflare_tts(text, file_str, tts_config)
+
         elif provider == "neutts":
             if not _check_neutts_available():
                 return json.dumps({
@@ -2191,6 +2292,8 @@ def check_tts_requirements() -> bool:
     except Exception:
         pass
     if get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY"):
+        return True
+    if get_env_value("CLOUDFLARE_API_TOKEN") and get_env_value("CLOUDFLARE_ACCOUNT_ID"):
         return True
     try:
         _import_mistral_client()
@@ -2528,7 +2631,7 @@ TTS_SCHEMA = {
         "properties": {
             "text": {
                 "type": "string",
-                "description": "The text to convert to speech. Provider-specific character caps apply and are enforced automatically (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k depending on model); over-long input is truncated."
+                "description": "The text to convert to speech. Provider-specific character caps apply and are enforced automatically (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k depending on model, Cloudflare 5000); over-long input is truncated."
             },
             "output_path": {
                 "type": "string",
