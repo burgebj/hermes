@@ -485,6 +485,12 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
+    # Resolve localhost to IPv4 to avoid 2s IPv6 timeout on Windows dual-stack.
+    server_url = server_url.replace("://localhost:", "://127.0.0.1:")
+    server_url = server_url.replace("://localhost/", "://127.0.0.1/")
+    if server_url.endswith("://localhost"):
+        server_url = server_url[:-len("localhost")] + "127.0.0.1"
+
     headers = _auth_headers(api_key)
 
     try:
