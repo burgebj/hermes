@@ -750,6 +750,7 @@ const sidebars: SidebarsConfig = {
             'developer-guide/browser-supervisor',
             'developer-guide/acp-internals',
             'developer-guide/cron-internals',
+            'developer-guide/kanban-task-scoped-skill-injection',
             'developer-guide/trajectory-format',
           ],
         },
