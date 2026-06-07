@@ -5732,6 +5732,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 image_url=cached_path,
                 user_prompt=STICKER_VISION_PROMPT,
             )
+            if not result_json:
+                logger.warning("[Telegram] Sticker vision returned empty result for %s", sticker.file_unique_id)
+                event.text = build_sticker_injection(
+                    f"a sticker with emoji {emoji}" if emoji else "a sticker",
+                    emoji, set_name,
+                )
+                return
             result = json.loads(result_json)
 
             if result.get("success"):
