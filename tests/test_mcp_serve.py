@@ -490,6 +490,187 @@ class TestEventBridge:
         r = EventBridge().respond_to_approval("nope", "deny")
         assert "error" in r
 
+    @staticmethod
+    def _make_sqlite_session_db(db_path):
+        class TestDB:
+            def __init__(self):
+                self._conn = sqlite3.connect(str(db_path))
+                self._conn.row_factory = sqlite3.Row
+                self._lock = threading.Lock()
+
+            def get_messages(self, session_id):
+                with self._lock:
+                    rows = self._conn.execute(
+                        "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+                        (session_id,),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+
+            def close(self):
+                self._conn.close()
+
+        return TestDB()
+
+    @staticmethod
+    def _write_sessions_json(sessions_dir, session_key, session_id):
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / "sessions.json").write_text(json.dumps({
+            session_key: {
+                "session_key": session_key,
+                "session_id": session_id,
+                "platform": "telegram",
+                "chat_type": "dm",
+                "display_name": "CursorTest",
+                "updated_at": "2026-03-29T15:00:05",
+                "origin": {"platform": "telegram", "chat_id": "cursor"},
+            }
+        }))
+
+    def test_cursor_starts_at_db_high_water_mark(self, tmp_path, monkeypatch):
+        import mcp_serve
+
+        session_id = "20260329_160000_cursor_start"
+        db_path = tmp_path / "state.db"
+        _create_test_db(db_path, session_id, [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ])
+        db = self._make_sqlite_session_db(db_path)
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: db)
+
+        try:
+            bridge = mcp_serve.EventBridge()
+            assert bridge._cursor == 3
+        finally:
+            db.close()
+
+    def test_cursor_survives_subprocess_restart(self, tmp_path, monkeypatch):
+        import mcp_serve
+
+        session_id = "20260329_160000_cursor_restart"
+        db_path = tmp_path / "state.db"
+        _create_test_db(db_path, session_id, [
+            {"role": "user", "content": "before restart"},
+            {"role": "assistant", "content": "persisted reply"},
+        ])
+        db = self._make_sqlite_session_db(db_path)
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: db)
+
+        try:
+            first_bridge = mcp_serve.EventBridge()
+            restarted_bridge = mcp_serve.EventBridge()
+
+            assert first_bridge._cursor == 2
+            assert restarted_bridge._cursor == 2
+
+            restarted_bridge._enqueue(mcp_serve.QueueEvent(
+                cursor=0,
+                type="approval_requested",
+                session_key="restart",
+            ))
+            assert restarted_bridge.poll_events(after_cursor=2)["events"][0]["cursor"] == 3
+        finally:
+            db.close()
+
+    def test_message_events_use_db_row_id_as_cursor(self, tmp_path, monkeypatch):
+        import mcp_serve
+
+        session_key = "agent:main:telegram:dm:row_id"
+        session_id = "20260329_160000_row_id"
+        sessions_dir = tmp_path / "sessions"
+        db_path = tmp_path / "state.db"
+        self._write_sessions_json(sessions_dir, session_key, session_id)
+        _create_test_db(db_path, session_id, [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ])
+        db = self._make_sqlite_session_db(db_path)
+        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: db)
+
+        try:
+            bridge = mcp_serve.EventBridge()
+            bridge._poll_once(db)
+
+            result = bridge.poll_events(after_cursor=0)
+            assert [e["cursor"] for e in result["events"]] == [1, 2]
+            assert [e["message_id"] for e in result["events"]] == ["1", "2"]
+        finally:
+            db.close()
+
+    def test_non_message_events_auto_increment_after_db_high_water_mark(
+        self, tmp_path, monkeypatch,
+    ):
+        import mcp_serve
+
+        session_id = "20260329_160000_non_message"
+        db_path = tmp_path / "state.db"
+        _create_test_db(db_path, session_id, [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+        ])
+        db = self._make_sqlite_session_db(db_path)
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: db)
+
+        try:
+            bridge = mcp_serve.EventBridge()
+            bridge._enqueue(mcp_serve.QueueEvent(
+                cursor=0,
+                type="approval_requested",
+                session_key="non-message",
+            ))
+            bridge._enqueue(mcp_serve.QueueEvent(
+                cursor=0,
+                type="approval_resolved",
+                session_key="non-message",
+            ))
+
+            result = bridge.poll_events(after_cursor=2)
+            assert [e["cursor"] for e in result["events"]] == [3, 4]
+            assert bridge._cursor == 4
+        finally:
+            db.close()
+
+    def test_poll_deduplicates_by_message_id_not_timestamp(self, tmp_path, monkeypatch):
+        import mcp_serve
+
+        session_key = "agent:main:telegram:dm:dedupe"
+        session_id = "20260329_160000_dedupe"
+        sessions_dir = tmp_path / "sessions"
+        db_path = tmp_path / "state.db"
+        timestamp = "2026-03-29T16:00:00"
+        self._write_sessions_json(sessions_dir, session_key, session_id)
+        _create_test_db(db_path, session_id, [
+            {"role": "user", "content": "first", "timestamp": timestamp},
+        ])
+        db = self._make_sqlite_session_db(db_path)
+        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: db)
+
+        try:
+            bridge = mcp_serve.EventBridge()
+            bridge._poll_once(db)
+            first = bridge.poll_events(after_cursor=0)
+            assert len(first["events"]) == 1
+
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (session_id, "assistant", "same timestamp reply", timestamp),
+            )
+            conn.commit()
+            conn.close()
+            bridge._state_db_mtime = 0.0
+
+            bridge._poll_once(db)
+            second = bridge.poll_events(after_cursor=first["next_cursor"])
+            assert len(second["events"]) == 1
+            assert second["events"][0]["cursor"] == 2
+            assert second["events"][0]["content"] == "same timestamp reply"
+        finally:
+            db.close()
+
 
 # ---------------------------------------------------------------------------
 # 3. END-TO-END TESTS — call MCP tools through FastMCP server

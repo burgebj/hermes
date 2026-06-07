@@ -211,18 +211,37 @@ class EventBridge:
 
     def __init__(self):
         self._queue: List[QueueEvent] = []
-        self._cursor = 0
+        self._cursor = self._load_db_high_water_mark()
         self._lock = threading.Lock()
         self._new_event = threading.Event()
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._last_poll_timestamps: Dict[str, float] = {}  # session_key -> unix timestamp
+        self._last_poll_ids: Dict[str, int] = {}
         # In-memory approval tracking (populated from events)
         self._pending_approvals: Dict[str, dict] = {}
         # mtime cache — skip expensive work when files haven't changed
         self._sessions_json_mtime: float = 0.0
         self._state_db_mtime: float = 0.0
         self._cached_sessions_index: dict = {}
+
+    def _load_db_high_water_mark(self) -> int:
+        try:
+            db = _get_session_db()
+            if db is None:
+                return 0
+            conn = getattr(db, '_conn', None)
+            lock = getattr(db, '_lock', None)
+            if conn is None:
+                return 0
+            if lock is not None:
+                with lock:
+                    row = conn.execute('SELECT MAX(id) FROM messages').fetchone()
+            else:
+                row = conn.execute('SELECT MAX(id) FROM messages').fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            logger.debug('EventBridge: could not read DB high-water mark', exc_info=True)
+            return 0
 
     def start(self):
         """Start the background polling thread."""
@@ -321,8 +340,11 @@ class EventBridge:
     def _enqueue(self, event: QueueEvent) -> None:
         """Add an event to the queue and wake any waiters."""
         with self._lock:
-            self._cursor += 1
-            event.cursor = self._cursor
+            if event.cursor == 0:
+                self._cursor += 1
+                event.cursor = self._cursor
+            else:
+                self._cursor = max(self._cursor, event.cursor)
             self._queue.append(event)
             # Trim queue to limit
             while len(self._queue) > QUEUE_LIMIT:
@@ -383,7 +405,7 @@ class EventBridge:
             if not session_id:
                 continue
 
-            last_seen = self._last_poll_timestamps.get(session_key, 0.0)
+            last_seen_id = self._last_poll_ids.get(session_key, 0)
 
             try:
                 messages = db.get_messages(session_id)
@@ -393,38 +415,18 @@ class EventBridge:
             if not messages:
                 continue
 
-            # Normalize timestamps to float for comparison
-            def _ts_float(ts) -> float:
-                if isinstance(ts, (int, float)):
-                    return float(ts)
-                if isinstance(ts, str) and ts:
-                    try:
-                        return float(ts)
-                    except ValueError:
-                        # ISO string — parse to epoch
-                        try:
-                            from datetime import datetime
-                            return datetime.fromisoformat(ts).timestamp()
-                        except Exception:
-                            return 0.0
-                return 0.0
-
-            # Find messages newer than our last seen timestamp
-            new_messages = []
-            for msg in messages:
-                ts = _ts_float(msg.get("timestamp", 0))
-                role = msg.get("role", "")
-                if role not in {"user", "assistant"}:
-                    continue
-                if ts > last_seen:
-                    new_messages.append(msg)
+            new_messages = [
+                msg for msg in messages
+                if msg.get('role') in {'user', 'assistant'}
+                and int(msg.get('id', 0)) > last_seen_id
+            ]
 
             for msg in new_messages:
                 content = _extract_message_content(msg)
                 if not content:
                     continue
                 self._enqueue(QueueEvent(
-                    cursor=0,
+                    cursor=int(msg.get("id", 0)),
                     type="message",
                     session_key=session_key,
                     data={
@@ -435,12 +437,9 @@ class EventBridge:
                     },
                 ))
 
-            # Update last seen to the most recent message timestamp
-            all_ts = [_ts_float(m.get("timestamp", 0)) for m in messages]
-            if all_ts:
-                latest = max(all_ts)
-                if latest > last_seen:
-                    self._last_poll_timestamps[session_key] = latest
+            if new_messages:
+                max_id = max(int(msg.get("id", 0)) for msg in new_messages)
+                self._last_poll_ids[session_key] = max_id
 
 
 # ---------------------------------------------------------------------------
