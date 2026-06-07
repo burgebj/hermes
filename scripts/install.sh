@@ -1106,7 +1106,33 @@ clone_repo() {
                 autostash_ref="stash@{0}"
             fi
 
-            git fetch origin
+            # Capture fetch output while still streaming to the terminal so a
+            # stale remote-tracking ref ("fatal: bad object
+            # refs/remotes/origin/<branch>") can be detected and auto-recovered
+            # via `git remote prune origin`. Without this, install.sh aborts
+            # under `set -e` and the user is left with a partly-fetched repo
+            # that even a re-run of install.sh cannot recover from — see #32384.
+            # `tee` always succeeds, so check ${PIPESTATUS[0]} for git's exit
+            # code rather than the pipeline's overall status.
+            local fetch_log
+            fetch_log=$(mktemp 2>/dev/null || mktemp -t hermes-install-fetch)
+            git fetch origin 2>&1 | tee "$fetch_log" || true
+            local fetch_rc=${PIPESTATUS[0]}
+            if [ "$fetch_rc" -ne 0 ]; then
+                if grep -q "bad object refs/remotes/origin/" "$fetch_log"; then
+                    rm -f "$fetch_log"
+                    log_warn "Detected stale remote-tracking ref; running 'git remote prune origin' and retrying..."
+                    git remote prune origin
+                    git fetch origin
+                    log_success "Stale refs cleaned up; fetch succeeded."
+                else
+                    rm -f "$fetch_log"
+                    log_error "git fetch origin failed"
+                    exit 1
+                fi
+            else
+                rm -f "$fetch_log"
+            fi
             git checkout "$BRANCH"
             git pull --ff-only origin "$BRANCH"
 
