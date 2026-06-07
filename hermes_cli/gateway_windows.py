@@ -1022,7 +1022,15 @@ def status(deep: bool = False) -> None:
 
 
 def start() -> None:
-    """Start the gateway. Prefers /Run on the scheduled task if present."""
+    """Start the gateway with a direct detached spawn to avoid flashing a cmd window.
+
+    Keep the Scheduled Task / Startup item for login persistence, but don't use
+    ``schtasks /Run`` for manual starts because that launches the wrapper
+    ``gateway.cmd`` through ``cmd.exe`` and can flash a visible console window.
+    ``_spawn_detached()`` already launches ``pythonw.exe`` directly with the
+    Windows no-console creation flags, matching the quieter install(start_now)
+    path.
+    """
     _assert_windows()
     running_pids = _gateway_pids()
     if running_pids:
@@ -1047,14 +1055,6 @@ def start() -> None:
             print("  If a UAC prompt opened, approve it, then run: hermes gateway start")
             return
 
-    if task_installed:
-        code, _out, err = _exec_schtasks(["/Run", "/TN", get_task_name()])
-        if code == 0:
-            _report_gateway_start(f"Scheduled Task {get_task_name()!r}")
-            return
-        print(f"⚠ schtasks /Run failed (code {code}): {err.strip()} — falling back to direct spawn")
-
-    # Startup fallback or failed /Run: direct spawn one foreground-detached gateway.
     pid = _spawn_detached()
     _report_gateway_start(f"direct spawn (PID {pid})")
 

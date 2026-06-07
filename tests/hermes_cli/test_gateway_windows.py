@@ -432,6 +432,26 @@ def test_start_noops_when_gateway_already_running(monkeypatch, capsys):
     assert "27128" in out
 
 
+def test_start_uses_direct_spawn_even_when_scheduled_task_is_installed(monkeypatch, capsys):
+    """Manual start should bypass schtasks /Run to avoid flashing gateway.cmd's console window."""
+    calls = []
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
+    monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: True)
+    monkeypatch.setattr(gateway_windows, "is_startup_entry_installed", lambda: False)
+    monkeypatch.setattr(gateway_windows, "_exec_schtasks", lambda args: calls.append(("schtasks", tuple(args))) or (0, "", ""))
+    monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda path=None: calls.append(("spawn", path)) or 12345)
+    monkeypatch.setattr(gateway_windows, "_report_gateway_start", lambda via: calls.append(("report_start", via)))
+
+    gateway_windows.start()
+
+    assert not any(call[0] == "schtasks" for call in calls)
+    assert ("spawn", None) in calls
+    assert ("report_start", "direct spawn (PID 12345)") in calls
+    out = capsys.readouterr().out
+    assert out == ""
+
+
 def test_install_startup_fallback_does_not_spawn_when_gateway_already_running(monkeypatch, tmp_path, capsys):
     """Repeated Windows fallback installs should not spawn duplicate gateways."""
     script_path, calls = _arrange_startup_fallback(monkeypatch, tmp_path, [24476])
