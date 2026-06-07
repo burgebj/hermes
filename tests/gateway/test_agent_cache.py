@@ -410,6 +410,127 @@ class TestExtractCacheBustingConfig:
         )
 
 
+class TestFallbackChainCacheBusting:
+    """Editing the fallback chain mid-gateway must rebuild the cached agent.
+
+    ``self._fallback_model`` is loaded once at ``__init__`` and frozen into
+    every AIAgent at construction.  Before this fix, neither the agent-cache
+    signature nor the cache-busting key set included the fallback chain, so an
+    operator who fixed a broken fallback (provider auth/rate-limit) saw the
+    gateway keep routing on the stale chain until a full restart — even on a
+    brand-new session — contradicting the documented "next agent session"
+    config-reload contract.  The fix folds the effective chain into the
+    signature and re-resolves it from each turn's fresh config.
+    """
+
+    def test_extract_includes_effective_fallback_chain(self):
+        from gateway.run import GatewayRunner
+
+        out = GatewayRunner._extract_cache_busting_config(
+            {
+                "fallback_providers": [
+                    {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+                ]
+            }
+        )
+        assert out["fallback.chain"] == [
+            {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        ]
+
+    def test_extract_fallback_chain_none_when_absent(self):
+        from gateway.run import GatewayRunner
+
+        out = GatewayRunner._extract_cache_busting_config({})
+        assert out["fallback.chain"] is None
+
+    def test_fallback_chain_change_busts_signature(self):
+        """Changing the fallback chain must produce a new agent signature."""
+        from gateway.run import GatewayRunner
+
+        runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
+        cfg_before = {
+            "fallback_providers": [
+                {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+            ]
+        }
+        cfg_after = {
+            "fallback_providers": [
+                {"provider": "anthropic", "model": "claude-opus-4.6"},
+            ]
+        }
+        sig_before = GatewayRunner._agent_config_signature(
+            "m", runtime, [], "",
+            cache_keys=GatewayRunner._extract_cache_busting_config(cfg_before),
+        )
+        sig_after = GatewayRunner._agent_config_signature(
+            "m", runtime, [], "",
+            cache_keys=GatewayRunner._extract_cache_busting_config(cfg_after),
+        )
+        assert sig_before != sig_after, (
+            "Editing the fallback chain in config.yaml must bust the gateway's "
+            "cached agent so the new chain takes effect on the next turn."
+        )
+
+    def test_fallback_chain_unchanged_keeps_signature(self):
+        """An identical chain must NOT bust the cache (no needless churn)."""
+        from gateway.run import GatewayRunner
+
+        runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
+        cfg = {
+            "fallback_providers": [
+                {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+            ]
+        }
+        sig1 = GatewayRunner._agent_config_signature(
+            "m", runtime, [], "",
+            cache_keys=GatewayRunner._extract_cache_busting_config(cfg),
+        )
+        sig2 = GatewayRunner._agent_config_signature(
+            "m", runtime, [], "",
+            cache_keys=GatewayRunner._extract_cache_busting_config(dict(cfg)),
+        )
+        assert sig1 == sig2
+
+    def test_legacy_fallback_model_merge_preserved_and_busts_signature(self):
+        """Both fallback_providers and legacy fallback_model feed the chain;
+        a change to the legacy key alone must still bust the signature."""
+        from gateway.run import GatewayRunner
+
+        cfg_before = {
+            "fallback_providers": [{"provider": "openrouter", "model": "x/y"}],
+            "fallback_model": [{"provider": "ollama", "model": "llama3"}],
+        }
+        cfg_after = {
+            "fallback_providers": [{"provider": "openrouter", "model": "x/y"}],
+            "fallback_model": [{"provider": "ollama", "model": "qwen2.5"}],
+        }
+        out_before = GatewayRunner._extract_cache_busting_config(cfg_before)
+        out_after = GatewayRunner._extract_cache_busting_config(cfg_after)
+
+        # fallback_providers stays first; legacy fallback_model is appended.
+        assert out_before["fallback.chain"][0]["provider"] == "openrouter"
+        assert any(e["provider"] == "ollama" for e in out_before["fallback.chain"])
+        assert out_before["fallback.chain"] != out_after["fallback.chain"]
+
+    def test_load_fallback_model_resolves_from_passed_config(self):
+        """_load_fallback_model(cfg) merges the effective chain without a disk read."""
+        from gateway.run import GatewayRunner
+
+        chain = GatewayRunner._load_fallback_model(
+            {
+                "fallback_providers": [{"provider": "openrouter", "model": "x/y"}],
+                "fallback_model": {"provider": "ollama", "model": "llama3"},
+            }
+        )
+        assert chain[0] == {"provider": "openrouter", "model": "x/y"}
+        assert {"provider": "ollama", "model": "llama3"} in chain
+
+    def test_load_fallback_model_none_when_no_chain(self):
+        from gateway.run import GatewayRunner
+
+        assert GatewayRunner._load_fallback_model({}) is None
+
+
 class TestAgentCacheLifecycle:
     """End-to-end cache behavior with real AIAgent construction."""
 

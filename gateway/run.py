@@ -3318,22 +3318,30 @@ class GatewayRunner:
         return {}
 
     @staticmethod
-    def _load_fallback_model() -> list | None:
-        """Load fallback provider chain from config.yaml.
+    def _load_fallback_model(cfg: dict | None = None) -> list | None:
+        """Load the effective fallback provider chain.
 
         Returns the merged effective chain from ``fallback_providers`` plus any
         legacy ``fallback_model`` entries. ``fallback_providers`` stays first
         when both keys are present.
+
+        Pass ``cfg`` to resolve from an already-loaded config dict — the
+        gateway re-resolves the chain from each turn's fresh config so an
+        operator edit takes effect without a restart (see ``_run_agent``).
+        When ``cfg`` is omitted (the ``__init__`` call), config.yaml is read
+        from disk.
         """
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
+            if cfg is None:
+                import yaml as _y
+                cfg_path = _hermes_home / "config.yaml"
+                if not cfg_path.exists():
+                    return None
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                fb = get_fallback_chain(cfg)
-                if fb:
-                    return fb
+            fb = get_fallback_chain(cfg)
+            if fb:
+                return fb
         except Exception:
             pass
         return None
@@ -12636,6 +12644,9 @@ class GatewayRunner:
 
         try:
             user_config = _load_gateway_config()
+            # Re-resolve the fallback chain from fresh config (see _run_agent)
+            # so background tasks honor operator edits without a restart.
+            self._fallback_model = self._load_fallback_model(user_config)
             model, runtime_kwargs = self._resolve_session_agent_runtime(
                 source=source,
                 user_config=user_config,
@@ -16256,6 +16267,17 @@ class GatewayRunner:
         except Exception:
             out["tools.registry_generation"] = None
 
+        # The fallback provider chain (fallback_providers + legacy
+        # fallback_model) is frozen into each AIAgent at construction. Fold the
+        # *effective* merged chain into the signature so an operator edit to
+        # either key busts the cached agent and the next turn rebuilds with the
+        # new chain — otherwise the gateway keeps routing on the chain captured
+        # at startup until a full restart, even on a brand-new session.
+        try:
+            out["fallback.chain"] = get_fallback_chain(cfg) or None
+        except Exception:
+            out["fallback.chain"] = None
+
         # Honcho identity-mapping keys live in honcho.json, not user_config.
         # Only read that file when Honcho is the active memory provider.
         provider = cfg_get(cfg, "memory", "provider")
@@ -17051,6 +17073,13 @@ class GatewayRunner:
             return self._is_session_run_current(session_key, run_generation)
         
         user_config = _load_gateway_config()
+        # Re-resolve the fallback chain from the freshly-loaded config so an
+        # operator edit to fallback_providers / fallback_model takes effect on
+        # the next turn without a gateway restart. The value loaded once at
+        # __init__ would otherwise pin the chain for the gateway's lifetime.
+        # The agent-cache signature folds this same chain in (via
+        # _extract_cache_busting_config), so a change rebuilds the cached agent.
+        self._fallback_model = self._load_fallback_model(user_config)
         platform_key = _platform_config_key(source.platform)
 
         from hermes_cli.tools_config import _get_platform_tools
