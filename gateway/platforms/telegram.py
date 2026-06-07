@@ -4266,6 +4266,14 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Send typing indicator."""
+        typing_indicators = self.config.extra.get("typing_indicators", True)
+        if isinstance(typing_indicators, str):
+            typing_indicators = typing_indicators.strip().lower() not in {"0", "false", "no", "off"}
+        env_override = os.getenv("TELEGRAM_TYPING_INDICATORS")
+        if env_override is not None:
+            typing_indicators = env_override.strip().lower() not in {"0", "false", "no", "off"}
+        if not typing_indicators:
+            return
         if self._bot:
             _is_dm_topic: bool = False
             message_thread_id: Optional[int] = None
