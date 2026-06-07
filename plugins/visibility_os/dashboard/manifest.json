@@ -1,0 +1,11 @@
+{
+  "name": "visibility-os",
+  "label": "Visibility OS",
+  "description": "Evidence-backed engineering impact feed and human approval queue",
+  "icon": "Eye",
+  "version": "0.1.0",
+  "tab": { "path": "/visibility-os", "position": "after:kanban" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
