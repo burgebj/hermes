@@ -894,6 +894,8 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["mention_patterns"] = platform_cfg["mention_patterns"]
                 if "exclusive_bot_mentions" in platform_cfg:
                     bridged["exclusive_bot_mentions"] = platform_cfg["exclusive_bot_mentions"]
+                if plat == Platform.TELEGRAM and "bot_reply_requires_mention" in platform_cfg:
+                    bridged["bot_reply_requires_mention"] = platform_cfg["bot_reply_requires_mention"]
                 if plat == Platform.TELEGRAM and "observe_unmentioned_group_messages" in platform_cfg:
                     bridged["observe_unmentioned_group_messages"] = platform_cfg["observe_unmentioned_group_messages"]
                 if "dm_policy" in platform_cfg:
@@ -1025,6 +1027,8 @@ def load_gateway_config() -> GatewayConfig:
                     os.environ["TELEGRAM_MENTION_PATTERNS"] = json.dumps(telegram_cfg["mention_patterns"])
                 if "exclusive_bot_mentions" in telegram_cfg and not os.getenv("TELEGRAM_EXCLUSIVE_BOT_MENTIONS"):
                     os.environ["TELEGRAM_EXCLUSIVE_BOT_MENTIONS"] = str(telegram_cfg["exclusive_bot_mentions"]).lower()
+                if "bot_reply_requires_mention" in telegram_cfg and not os.getenv("TELEGRAM_BOT_REPLY_REQUIRES_MENTION"):
+                    os.environ["TELEGRAM_BOT_REPLY_REQUIRES_MENTION"] = str(telegram_cfg["bot_reply_requires_mention"]).lower()
                 if "guest_mode" in telegram_cfg and not os.getenv("TELEGRAM_GUEST_MODE"):
                     os.environ["TELEGRAM_GUEST_MODE"] = str(telegram_cfg["guest_mode"]).lower()
                 if "observe_unmentioned_group_messages" in telegram_cfg and not os.getenv("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES"):
@@ -1079,7 +1083,7 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(group_allowed_chats, list):
                         group_allowed_chats = ",".join(str(v) for v in group_allowed_chats)
                     os.environ["TELEGRAM_GROUP_ALLOWED_CHATS"] = str(group_allowed_chats)
-                for _telegram_extra_key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages"):
+                for _telegram_extra_key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages", "bot_reply_requires_mention"):
                     if _telegram_extra_key in telegram_cfg:
                         plat_data = platforms_data.setdefault(Platform.TELEGRAM.value, {})
                         if not isinstance(plat_data, dict):

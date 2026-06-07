@@ -4551,6 +4551,15 @@ class TelegramAdapter(BasePlatformAdapter):
             return bool(configured)
         return os.getenv("TELEGRAM_EXCLUSIVE_BOT_MENTIONS", "true").lower() in {"true", "1", "yes", "on"}
 
+    def _telegram_bot_reply_requires_mention(self) -> bool:
+        """Return whether bot-authored replies must also @mention this bot."""
+        configured = self.config.extra.get("bot_reply_requires_mention")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in {"true", "1", "yes", "on"}
+            return bool(configured)
+        return os.getenv("TELEGRAM_BOT_REPLY_REQUIRES_MENTION", "false").lower() in {"true", "1", "yes", "on"}
+
     def _telegram_free_response_chats(self) -> set[str]:
         raw = self.config.extra.get("free_response_chats")
         if raw is None:
@@ -4684,6 +4693,11 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         reply_user = getattr(message.reply_to_message, "from_user", None)
         return bool(reply_user and getattr(reply_user, "id", None) == getattr(self._bot, "id", None))
+
+    @staticmethod
+    def _message_from_bot(message) -> bool:
+        from_user = getattr(message, "from_user", None)
+        return bool(from_user and getattr(from_user, "is_bot", False))
 
     @staticmethod
     def _extract_bot_mention_usernames(message: Message) -> set[str]:
@@ -5075,7 +5089,8 @@ class TelegramAdapter(BasePlatformAdapter):
           ``guest_mode`` is enabled and the bot is explicitly mentioned
         - the chat is explicitly allowlisted in ``free_response_chats``
         - ``require_mention`` is disabled
-        - the message replies to the bot
+        - the message replies to the bot (optionally requiring bot-authored
+          replies to also @mention this bot)
         - the bot is @mentioned
         - the text/caption matches a configured regex wake-word pattern
 
@@ -5138,6 +5153,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._telegram_require_mention():
             return True
         if self._is_reply_to_bot(message):
+            if self._telegram_bot_reply_requires_mention() and self._message_from_bot(message):
+                return self._message_mentions_bot(message)
             return True
         # When guest_mode is True, _is_guest_mention already called
         # _message_mentions_bot above — skip the redundant second call.
