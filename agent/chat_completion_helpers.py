@@ -1154,11 +1154,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             _pool_provider = (getattr(_existing_pool, "provider", "") or "").strip().lower()
             if _pool_provider and _pool_provider != fb_provider:
                 logger.info(
-                    "Fallback to %s/%s: clearing primary credential pool "
-                    "(pool_provider=%s) to prevent cross-provider contamination",
-                    fb_provider, fb_model, _pool_provider,
+                    "Fallback to %s/%s: reloading credential pool "
+                    "(old pool_provider=%s, new=%s)",
+                    fb_provider, fb_model, _pool_provider, fb_provider,
                 )
-                agent._credential_pool = None
+                from agent.agent_runtime_helpers import _reload_pool_for_provider
+                reloaded = _reload_pool_for_provider(agent, fb_provider)
+                if reloaded is None:
+                    agent._credential_pool = None
 
         # Honor per-provider / per-model request_timeout_seconds for the
         # fallback target (same knob the primary client uses).  None = use

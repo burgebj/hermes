@@ -67,3 +67,35 @@ def disable_lazy_stt_install():
     """
     with patch("tools.transcription_tools._try_lazy_install_stt", return_value=False):
         yield
+
+
+# ---------------------------------------------------------------------------
+# MoA config fixture — injects mock moa section when missing (CI compat)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=False)
+def moa_config(monkeypatch):
+    """Inject a mock moa config section for tests that need it."""
+    from hermes_cli.config import load_config as real_load
+
+    original = real_load()
+
+    if "moa" not in original:
+        mock_moa = {
+            "reference_models": [
+                {"provider": "opencode-go", "model": "kimi-k2.6"},
+                {"provider": "opencode-go", "model": "deepseek-v4-pro"},
+            ],
+            "aggregator": {"provider": "opencode-go", "model": "kimi-k2.6"},
+        }
+        original["moa"] = mock_moa
+
+        def _patched_load():
+            return original
+
+        monkeypatch.setattr("hermes_cli.config.load_config", _patched_load)
+
+        import tools.mixture_of_agents_tool as moa_mod
+        moa_mod._moa_config = None
+        moa_mod.REFERENCE_MODELS = []
+        moa_mod.AGGREGATOR_MODEL = None

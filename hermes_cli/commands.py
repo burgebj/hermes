@@ -125,6 +125,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("model", "Switch model for this session", "Configuration",
                args_hint="[model] [--provider name] [--global] [--refresh]"),
+    CommandDef("moac", "View or configure the MoA council lineup", "Configuration",
+               args_hint="[show|set] [--refs m1,m2,m3,m4] [--agg model]"),
     CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",
                "Configuration", aliases=("codex_runtime",),
                args_hint="[auto|codex_app_server]"),

@@ -9,7 +9,7 @@ import stat
 
 import pytest
 
-from plugins.memory.mem0 import Mem0MemoryProvider
+from plugins.memory.mem0 import EXTRACTION_PROMPT, Mem0MemoryProvider, _LocalMem0Client
 
 
 class FakeClientV2:
@@ -94,6 +94,7 @@ class TestMem0FiltersV2:
         call = client.captured_add[0]
         assert call["user_id"] == "u123"
         assert call["agent_id"] == "hermes"
+        assert call["prompt"] == EXTRACTION_PROMPT
 
     def test_conclude_uses_write_filters(self, monkeypatch):
         client = FakeClientV2()
@@ -178,6 +179,38 @@ class TestMem0ResponseUnwrapping:
         ))
         assert result["count"] == 1
 
+    def test_search_accepts_data_field_from_qdrant_shape(self, monkeypatch):
+        client = FakeClientV2(search_results={
+            "results": [{"data": "payload text", "score": 0.6, "metadata": {"session_date": "2026-05-31T00:00:00+00:00"}}]
+        })
+        provider = self._make_provider(monkeypatch, client)
+
+        result = json.loads(provider.handle_tool_call("mem0_search", {"query": "payload"}))
+
+        assert result["results"][0]["memory"] == "payload text"
+        assert result["results"][0]["timestamp"] == "2026-05-31T00:00:00+00:00"
+
+    def test_timeline_sorts_by_session_date(self, monkeypatch):
+        client = FakeClientV2(search_results={
+            "results": [
+                {"memory": "new", "metadata": {"session_date": "2026-05-31T00:00:00+00:00"}, "score": 0.8},
+                {"memory": "old", "metadata": {"session_date": "2026-03-18T00:00:00+00:00"}, "score": 0.7},
+            ]
+        })
+        provider = self._make_provider(monkeypatch, client)
+
+        result = json.loads(provider.handle_tool_call("mem0_timeline", {"topic": "project"}))
+
+        assert client.captured_search["query"] == "project"
+        assert client.captured_search["rerank"] is True
+        assert result["count"] == 2
+        assert [item["memory"] for item in result["timeline"]] == ["old", "new"]
+
+    def test_tool_schemas_include_timeline(self):
+        provider = Mem0MemoryProvider()
+        names = {schema["name"] for schema in provider.get_tool_schemas()}
+        assert "mem0_timeline" in names
+
     def test_unwrap_results_edge_cases(self):
         """_unwrap_results handles all shapes gracefully."""
         assert Mem0MemoryProvider._unwrap_results({"results": [1, 2]}) == [1, 2]
@@ -239,3 +272,87 @@ class TestMem0Defaults:
         provider.initialize("test")
 
         assert provider._agent_id == "hermes"
+
+    def test_explicit_user_id_wins_over_gateway_user_id(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("MEM0_API_KEY", "test-key")
+        monkeypatch.setenv("MEM0_USER_ID", "tanmay")
+
+        provider = Mem0MemoryProvider()
+        provider.initialize("test", user_id="@tanmay:matrix.tanmaychoudhary.com")
+
+        assert provider._user_id == "tanmay"
+
+    def test_gateway_user_id_used_when_config_user_id_default(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("MEM0_API_KEY", "test-key")
+        monkeypatch.delenv("MEM0_USER_ID", raising=False)
+
+        provider = Mem0MemoryProvider()
+        provider.initialize("test", user_id="discord-user-1")
+
+        assert provider._user_id == "discord-user-1"
+
+
+class TestMem0LocalHost:
+    """Self-hosted Mem0 must use MEM0_HOST instead of the cloud MemoryClient."""
+
+    def test_local_host_makes_provider_available_without_cloud_key(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("MEM0_HOST", "http://127.0.0.1:8888")
+        monkeypatch.delenv("MEM0_API_KEY", raising=False)
+
+        provider = Mem0MemoryProvider()
+
+        assert provider.is_available() is True
+
+    def test_get_client_prefers_local_host_over_api_key(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("MEM0_HOST", "http://127.0.0.1:8888")
+        monkeypatch.setenv("MEM0_API_KEY", "placeholder-cloud-key")
+
+        provider = Mem0MemoryProvider()
+        provider.initialize("test")
+        client = provider._get_client()
+
+        assert isinstance(client, _LocalMem0Client)
+        assert client.host == "http://127.0.0.1:8888"
+
+    def test_local_client_posts_memoryclient_compatible_payloads(self, monkeypatch):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"results":[{"memory":"ATLAS fact","score":0.9}]}'
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        monkeypatch.setattr("plugins.memory.mem0.urllib.request.urlopen", fake_urlopen)
+
+        client = _LocalMem0Client("http://127.0.0.1:8888/")
+        result = client.search(
+            query="ATLAS",
+            filters={"user_id": "tanmay"},
+            rerank=True,
+            top_k=3,
+        )
+
+        assert captured["url"] == "http://127.0.0.1:8888/v1/memories/search"
+        assert captured["payload"] == {
+            "query": "ATLAS",
+            "filters": {"user_id": "tanmay"},
+            "rerank": True,
+            "top_k": 3,
+        }
+        assert captured["timeout"] == 30.0
+        assert result["results"][0]["memory"] == "ATLAS fact"

@@ -952,9 +952,11 @@ class SessionDB:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, cwd, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO sessions
+                   (id, source, user_id, model, model_config,
+                    system_prompt, parent_session_id, cwd, started_at,
+                    input_tokens, output_tokens)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""",
                 (
                     session_id,
                     source,
@@ -1234,11 +1236,11 @@ class SessionDB:
                    WHERE id = ?"""
         else:
             sql = """UPDATE sessions SET
-                   input_tokens = input_tokens + ?,
-                   output_tokens = output_tokens + ?,
-                   cache_read_tokens = cache_read_tokens + ?,
-                   cache_write_tokens = cache_write_tokens + ?,
-                   reasoning_tokens = reasoning_tokens + ?,
+                   input_tokens = COALESCE(input_tokens, 0) + ?,
+                   output_tokens = COALESCE(output_tokens, 0) + ?,
+                   cache_read_tokens = COALESCE(cache_read_tokens, 0) + ?,
+                   cache_write_tokens = COALESCE(cache_write_tokens, 0) + ?,
+                   reasoning_tokens = COALESCE(reasoning_tokens, 0) + ?,
                    estimated_cost_usd = COALESCE(estimated_cost_usd, 0) + COALESCE(?, 0),
                    actual_cost_usd = CASE
                        WHEN ? IS NULL THEN actual_cost_usd

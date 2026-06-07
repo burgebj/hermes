@@ -24,16 +24,22 @@ Architecture:
 2. Aggregator model synthesizes responses into a high-quality output
 3. Multiple layers can be used for iterative refinement (future enhancement)
 
-Models Used (via OpenRouter):
-- Reference Models: claude-opus-4.6, gemini-3-pro-preview, gpt-5.4-pro, deepseek-v3.2
-- Aggregator Model: claude-opus-4.6 (highest capability for synthesis)
+Models Used (config-driven via config.yaml moa section):
+- Reference Models and Aggregator are loaded from config at import time.
+- Use `/moac` command to view or change the council lineup.
+- No hardcoded defaults — config is the single source of truth.
 
 Configuration:
-    To customize the MoA setup, modify the configuration constants at the top of this file:
-    - REFERENCE_MODELS: List of models for generating diverse initial responses
-    - AGGREGATOR_MODEL: Model used to synthesize the final response
-    - REFERENCE_TEMPERATURE/AGGREGATOR_TEMPERATURE: Sampling temperatures
-    - MIN_SUCCESSFUL_REFERENCES: Minimum successful models needed to proceed
+    MoA models are configured via the `moa` section in config.yaml:
+      moa:
+        reference_models:
+          - provider: opencode-go
+            model: kimi-k2.6
+          ...
+        aggregator:
+          provider: opencode-go
+          model: kimi-k2.6
+    Use `/moac` to view or change the council lineup.
 
 Usage:
     from mixture_of_agents_tool import mixture_of_agents_tool
@@ -50,27 +56,76 @@ import logging
 import os
 import asyncio
 import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Sequence, Union
 from tools.openrouter_client import get_async_client as _get_openrouter_client, check_api_key as check_openrouter_api_key
-from agent.auxiliary_client import extract_content_or_reasoning
+from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 from tools.debug_helpers import DebugSession
-import sys
 
 logger = logging.getLogger(__name__)
 
 # Configuration for MoA processing
 # Reference models - these generate diverse initial responses in parallel.
-# Keep this list aligned with current top-tier OpenRouter frontier options.
-REFERENCE_MODELS = [
-    "anthropic/claude-opus-4.6",
-    "google/gemini-2.5-pro",
-    "openai/gpt-5.4-pro",
-    "deepseek/deepseek-v3.2",
-]
+# A model spec is either:
+# - a legacy OpenRouter string ("provider/model"), or
+# - a provider-routed dict: {"provider": "...", "model": "...", ...}.
+ModelSpec = Union[str, Dict[str, Any]]
 
-# Aggregator model - synthesizes reference responses into final output.
-# Prefer the strongest synthesis model in the current OpenRouter lineup.
-AGGREGATOR_MODEL = "anthropic/claude-opus-4.6"
+# ---------------------------------------------------------------------------
+# Config-driven model loading — no hardcoded defaults.
+# REFERENCE_MODELS and AGGREGATOR_MODEL are loaded from config.yaml at import
+# time. Use /moac to view or change the council.
+# ---------------------------------------------------------------------------
+
+def _load_moa_config() -> Dict[str, Any]:
+    """Load MoA model configuration from config.yaml.
+
+    Returns a dict with 'reference_models' (list of ModelSpec) and
+    'aggregator' (ModelSpec). If the moa section is missing or malformed,
+    raises RuntimeError — there are no hardcoded fallbacks.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        moa_cfg = cfg.get("moa")
+        if not isinstance(moa_cfg, dict):
+            raise RuntimeError("No 'moa' section in config.yaml — use /moac to configure the council")
+        refs = moa_cfg.get("reference_models")
+        if not isinstance(refs, list) or len(refs) == 0:
+            raise RuntimeError("moa.reference_models must be a non-empty list in config.yaml")
+        agg = moa_cfg.get("aggregator")
+        if not isinstance(agg, dict):
+            raise RuntimeError("moa.aggregator must be a dict with provider and model in config.yaml")
+        # Validate each spec
+        for i, spec in enumerate(refs):
+            if isinstance(spec, str):
+                continue  # legacy OpenRouter string — allowed
+            if not isinstance(spec, dict):
+                raise RuntimeError(f"moa.reference_models[{i}] must be a dict or string, got {type(spec).__name__}")
+            if not spec.get("provider") or not spec.get("model"):
+                raise RuntimeError(f"moa.reference_models[{i}] missing provider or model")
+        if not agg.get("provider") or not agg.get("model"):
+            raise RuntimeError("moa.aggregator missing provider or model")
+        return {"reference_models": refs, "aggregator": agg}
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Failed to load MoA config from config.yaml: {e}") from e
+
+# Lazy-loaded on first use — defers config read so tests can import the module
+# without a full config.yaml.  Use get_reference_models() / get_aggregator_model().
+_moa_config: Optional[Dict[str, Any]] = None
+REFERENCE_MODELS: List[ModelSpec] = []       # populated on first access
+AGGREGATOR_MODEL: Optional[ModelSpec] = None  # populated on first access
+
+
+def _ensure_moa_config() -> None:
+    """Load MoA config on first use.  No-op if already loaded."""
+    global _moa_config, REFERENCE_MODELS, AGGREGATOR_MODEL
+    if _moa_config is not None:
+        return
+    _moa_config = _load_moa_config()
+    REFERENCE_MODELS = _moa_config["reference_models"]
+    AGGREGATOR_MODEL = _moa_config["aggregator"]
 
 # Temperature settings optimized for MoA performance
 REFERENCE_TEMPERATURE = 0.6  # Balanced creativity for diverse perspectives
@@ -80,11 +135,110 @@ AGGREGATOR_TEMPERATURE = 0.4  # Focused synthesis for consistency
 MIN_SUCCESSFUL_REFERENCES = 1  # Minimum successful reference models needed to proceed
 
 # System prompt for the aggregator model (from the research paper)
-AGGREGATOR_SYSTEM_PROMPT = """You have been provided with a set of responses from various open-source models to the latest user query. Your task is to synthesize these responses into a single, high-quality response. It is crucial to critically evaluate the information provided in these responses, recognizing that some of it may be biased or incorrect. Your response should not simply replicate the given answers but should offer a refined, accurate, and comprehensive reply to the instruction. Ensure your response is well-structured, coherent, and adheres to the highest standards of accuracy and reliability.
+AGGREGATOR_SYSTEM_PROMPT = """You have been provided with a set of responses from several frontier models to the latest user query. Your task is to synthesize these responses into a single, high-quality response. Critically evaluate every response: some may be biased, incomplete, overconfident, or wrong. Do not simply replicate the given answers; produce a refined, accurate, and comprehensive answer.
 
 Responses from models:"""
 
 _debug = DebugSession("moa_tools", env_var="MOA_TOOLS_DEBUG")
+
+
+
+def _model_provider(model_spec: ModelSpec) -> Optional[str]:
+    if isinstance(model_spec, dict):
+        provider = str(model_spec.get("provider") or "").strip()
+        return provider or None
+    return "openrouter"
+
+
+def _model_name(model_spec: ModelSpec) -> str:
+    if isinstance(model_spec, dict):
+        return str(model_spec.get("model") or "").strip()
+    return str(model_spec).strip()
+
+
+def _model_label(model_spec: ModelSpec) -> str:
+    if isinstance(model_spec, dict):
+        provider = _model_provider(model_spec) or "unknown"
+        model = _model_name(model_spec)
+        return f"{provider}/{model}" if model else provider
+    return _model_name(model_spec)
+
+
+def _model_stance(model_spec: ModelSpec) -> str:
+    return ""  # stances removed — all models get neutral treatment
+
+
+def _model_specs_require_openrouter(model_specs: Sequence[ModelSpec]) -> bool:
+    return any(not isinstance(spec, dict) or (_model_provider(spec) == "openrouter") for spec in model_specs)
+
+
+def _build_messages_for_reference(model_spec: ModelSpec, user_prompt: str) -> List[Dict[str, str]]:
+    # All reference models get the same neutral treatment — no adversarial stances.
+    return [{"role": "user", "content": user_prompt}]
+
+
+def _reasoning_extra_body_for_model(model_spec: ModelSpec) -> Dict[str, Any]:
+    provider = _model_provider(model_spec)
+    model_name = _model_name(model_spec).lower()
+    # Kimi rejects OpenRouter-style extra_body.reasoning, and Copilot Gemini
+    # frequently returns reasoning-only payloads for tiny smoke prompts. Keep
+    # maximum reasoning where it is known to work (Codex/OpenRouter/DeepSeek).
+    if provider == "opencode-go" and model_name.startswith("kimi-"):
+        return {}
+    if provider == "copilot" and model_name.startswith("gemini-"):
+        return {}
+    return {"reasoning": {"enabled": True, "effort": "xhigh"}}
+
+
+def _extract_content(response: Any) -> str:
+    content = extract_content_or_reasoning(response)
+    if content:
+        return content
+    try:
+        return str(response.choices[0].message.content or "")
+    except Exception:
+        return ""
+
+
+async def _dispatch_llm_call(
+    model_spec: ModelSpec,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Dispatch an LLM call to the correct backend based on model_spec.
+
+    Provider-routed specs (dict with non-openrouter provider) go through
+    ``async_call_llm``; OpenRouter strings and openrouter-routed dicts go
+    through the OpenRouter client.  Single helper, single decision point.
+    """
+    provider = _model_provider(model_spec)
+    model_name = _model_name(model_spec)
+
+    if isinstance(model_spec, dict) and provider and provider != "openrouter":
+        return await async_call_llm(
+            task="moa",
+            provider=provider,
+            model=model_name,
+            base_url=str(model_spec.get("base_url") or "") or None,
+            api_key=str(model_spec.get("api_key") or "") or None,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=float(model_spec.get("timeout") or 300),
+            extra_body=extra_body or {},
+        )
+
+    api_params: Dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "extra_body": extra_body or {},
+    }
+    if not model_name.lower().startswith("gpt-"):
+        api_params["temperature"] = temperature
+    return await _get_openrouter_client().chat.completions.create(**api_params)
 
 
 def _construct_aggregator_prompt(system_prompt: str, responses: List[str]) -> str:
@@ -103,7 +257,7 @@ def _construct_aggregator_prompt(system_prompt: str, responses: List[str]) -> st
 
 
 async def _run_reference_model_safe(
-    model: str,
+    model: ModelSpec,
     user_prompt: str,
     temperature: float = REFERENCE_TEMPERATURE,
     max_tokens: int = 32000,
@@ -124,48 +278,33 @@ async def _run_reference_model_safe(
     """
     for attempt in range(max_retries):
         try:
-            logger.info("Querying %s (attempt %s/%s)", model, attempt + 1, max_retries)
-            
-            # Build parameters for the API call
-            api_params = {
-                "model": model,
-                "messages": [{"role": "user", "content": user_prompt}],
-                "max_tokens": max_tokens,
-                "extra_body": {
-                    "reasoning": {
-                        "enabled": True,
-                        "effort": "xhigh"
-                    }
-                }
-            }
-            
-            # GPT models (especially gpt-4o-mini) don't support custom temperature values
-            # Only include temperature for non-GPT models
-            if not model.lower().startswith('gpt-'):
-                api_params["temperature"] = temperature
-            
-            response = await _get_openrouter_client().chat.completions.create(**api_params)
-            
-            content = extract_content_or_reasoning(response)
+            model_label = _model_label(model)
+            logger.info("Querying %s (attempt %s/%s)", model_label, attempt + 1, max_retries)
+
+            messages = _build_messages_for_reference(model, user_prompt)
+            extra_body = _reasoning_extra_body_for_model(model)
+            response = await _dispatch_llm_call(model, messages, temperature, max_tokens, extra_body)
+
+            content = _extract_content(response)
             if not content:
                 # Reasoning-only response — let the retry loop handle it
-                logger.warning("%s returned empty content (attempt %s/%s), retrying", model, attempt + 1, max_retries)
+                logger.warning("%s returned empty content (attempt %s/%s), retrying", _model_label(model), attempt + 1, max_retries)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(min(2 ** (attempt + 1), 60))
                     continue
-            logger.info("%s responded (%s characters)", model, len(content))
-            return model, content, True
+            logger.info("%s responded (%s characters)", _model_label(model), len(content))
+            return _model_label(model), content, True
             
         except Exception as e:
             error_str = str(e)
             # Keep retry-path logging concise; full tracebacks are reserved for
             # terminal failure paths so long-running MoA retries don't flood logs.
             if "invalid" in error_str.lower():
-                logger.warning("%s invalid request error (attempt %s): %s", model, attempt + 1, error_str)
+                logger.warning("%s invalid request error (attempt %s): %s", _model_label(model), attempt + 1, error_str)
             elif "rate" in error_str.lower() or "limit" in error_str.lower():
-                logger.warning("%s rate limit error (attempt %s): %s", model, attempt + 1, error_str)
+                logger.warning("%s rate limit error (attempt %s): %s", _model_label(model), attempt + 1, error_str)
             else:
-                logger.warning("%s unknown error (attempt %s): %s", model, attempt + 1, error_str)
+                logger.warning("%s unknown error (attempt %s): %s", _model_label(model), attempt + 1, error_str)
 
             if attempt < max_retries - 1:
                 # Exponential backoff for rate limiting: 2s, 4s, 8s, 16s, 32s, 60s
@@ -173,16 +312,17 @@ async def _run_reference_model_safe(
                 logger.info("Retrying in %ss...", sleep_time)
                 await asyncio.sleep(sleep_time)
             else:
-                error_msg = f"{model} failed after {max_retries} attempts: {error_str}"
+                error_msg = f"{_model_label(model)} failed after {max_retries} attempts: {error_str}"
                 logger.error("%s", error_msg, exc_info=True)
-                return model, error_msg, False
+                return _model_label(model), error_msg, False
 
 
 async def _run_aggregator_model(
     system_prompt: str,
     user_prompt: str,
     temperature: float = AGGREGATOR_TEMPERATURE,
-    max_tokens: int = None
+    max_tokens: Optional[int] = None,
+    aggregator_model: Optional[ModelSpec] = None
 ) -> str:
     """
     Run the aggregator model to synthesize the final response.
@@ -196,37 +336,22 @@ async def _run_aggregator_model(
     Returns:
         str: Synthesized final response
     """
-    logger.info("Running aggregator model: %s", AGGREGATOR_MODEL)
+    agg_spec = aggregator_model or AGGREGATOR_MODEL
+    logger.info("Running aggregator model: %s", _model_label(agg_spec))
 
-    # Build parameters for the API call
-    api_params = {
-        "model": AGGREGATOR_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": max_tokens,
-        "extra_body": {
-            "reasoning": {
-                "enabled": True,
-                "effort": "xhigh"
-            }
-        }
-    }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    extra_body = _reasoning_extra_body_for_model(agg_spec)
+    response = await _dispatch_llm_call(agg_spec, messages, temperature, max_tokens, extra_body)
 
-    # GPT models (especially gpt-4o-mini) don't support custom temperature values
-    # Only include temperature for non-GPT models
-    if not AGGREGATOR_MODEL.lower().startswith('gpt-'):
-        api_params["temperature"] = temperature
-
-    response = await _get_openrouter_client().chat.completions.create(**api_params)
-
-    content = extract_content_or_reasoning(response)
+    content = _extract_content(response)
 
     # Retry once on empty content (reasoning-only response)
     if not content:
         logger.warning("Aggregator returned empty content, retrying once")
-        response = await _get_openrouter_client().chat.completions.create(**api_params)
+        response = await _dispatch_llm_call(agg_spec, messages, temperature, max_tokens, extra_body)
         content = extract_content_or_reasoning(response)
 
     logger.info("Aggregation complete (%s characters)", len(content))
@@ -235,8 +360,8 @@ async def _run_aggregator_model(
 
 async def mixture_of_agents_tool(
     user_prompt: str,
-    reference_models: Optional[List[str]] = None,
-    aggregator_model: Optional[str] = None
+    reference_models: Optional[List[ModelSpec]] = None,
+    aggregator_model: Optional[ModelSpec] = None
 ) -> str:
     """
     Process a complex query using the Mixture-of-Agents methodology.
@@ -274,6 +399,7 @@ async def mixture_of_agents_tool(
     Raises:
         Exception: If MoA processing fails or API key is not set
     """
+    _ensure_moa_config()
     start_time = datetime.datetime.now()
     
     debug_call_data = {
@@ -299,13 +425,13 @@ async def mixture_of_agents_tool(
         logger.info("Starting Mixture-of-Agents processing...")
         logger.info("Query: %s", user_prompt[:100])
         
-        # Validate API key availability
-        if not os.getenv("OPENROUTER_API_KEY"):
-            raise ValueError("OPENROUTER_API_KEY environment variable not set")
-        
         # Use provided models or defaults
         ref_models = reference_models or REFERENCE_MODELS
         agg_model = aggregator_model or AGGREGATOR_MODEL
+
+        # Validate OpenRouter API key only when any selected spec needs OpenRouter.
+        if _model_specs_require_openrouter([*ref_models, agg_model]) and not os.getenv("OPENROUTER_API_KEY"):
+            raise ValueError("OPENROUTER_API_KEY environment variable not set for OpenRouter MoA model specs")
         
         logger.info("Using %s reference models in 2-layer MoA architecture", len(ref_models))
         
@@ -352,7 +478,8 @@ async def mixture_of_agents_tool(
         final_response = await _run_aggregator_model(
             aggregator_system_prompt,
             user_prompt,
-            AGGREGATOR_TEMPERATURE
+            AGGREGATOR_TEMPERATURE,
+            aggregator_model=agg_model
         )
         
         # Calculate processing time
@@ -366,8 +493,8 @@ async def mixture_of_agents_tool(
             "success": True,
             "response": final_response,
             "models_used": {
-                "reference_models": ref_models,
-                "aggregator_model": agg_model
+                "reference_models": [_model_label(m) for m in ref_models],
+                "aggregator_model": _model_label(agg_model)
             }
         }
         
@@ -395,8 +522,8 @@ async def mixture_of_agents_tool(
             "success": False,
             "response": "MoA processing failed. Please try again or use a single model for this query.",
             "models_used": {
-                "reference_models": reference_models or REFERENCE_MODELS,
-                "aggregator_model": aggregator_model or AGGREGATOR_MODEL
+                "reference_models": [_model_label(m) for m in (reference_models or REFERENCE_MODELS)],
+                "aggregator_model": _model_label(aggregator_model or AGGREGATOR_MODEL)
             },
             "error": error_msg
         }
@@ -416,7 +543,8 @@ def check_moa_requirements() -> bool:
     Returns:
         bool: True if requirements are met, False otherwise
     """
-    return check_openrouter_api_key()
+    _ensure_moa_config()
+    return True if not _model_specs_require_openrouter([*REFERENCE_MODELS, AGGREGATOR_MODEL]) else check_openrouter_api_key()
 
 
 
@@ -427,9 +555,12 @@ def get_moa_configuration() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Dictionary containing all configuration parameters
     """
+    _ensure_moa_config()
     return {
         "reference_models": REFERENCE_MODELS,
+        "reference_model_labels": [_model_label(m) for m in REFERENCE_MODELS],
         "aggregator_model": AGGREGATOR_MODEL,
+        "aggregator_model_label": _model_label(AGGREGATOR_MODEL),
         "reference_temperature": REFERENCE_TEMPERATURE,
         "aggregator_temperature": AGGREGATOR_TEMPERATURE,
         "min_successful_references": MIN_SUCCESSFUL_REFERENCES,
@@ -445,24 +576,23 @@ if __name__ == "__main__":
     print("🤖 Mixture-of-Agents Tool Module")
     print("=" * 50)
     
-    # Check if API key is available
-    api_available = check_openrouter_api_key()
-    
+    # Check if configured model specs are available.
+    api_available = check_moa_requirements()
+
     if not api_available:
-        print("❌ OPENROUTER_API_KEY environment variable not set")
-        print("Please set your API key: export OPENROUTER_API_KEY='your-key-here'")
-        print("Get API key at: https://openrouter.ai/")
-        sys.exit(1)
+        print("❌ MoA requirements not met")
+        print("OpenRouter model specs require OPENROUTER_API_KEY; provider-routed specs require their provider credentials.")
+        raise SystemExit(1)
     else:
-        print("✅ OpenRouter API key found")
+        print("✅ MoA requirements satisfied")
     
     print("🛠️  MoA tools ready for use!")
     
     # Show current configuration
     config = get_moa_configuration()
     print("\n⚙️  Current Configuration:")
-    print(f"  🤖 Reference models ({len(config['reference_models'])}): {', '.join(config['reference_models'])}")
-    print(f"  🧠 Aggregator model: {config['aggregator_model']}")
+    print(f"  🤖 Reference models ({len(config['reference_model_labels'])}): {', '.join(config['reference_model_labels'])}")
+    print(f"  🧠 Aggregator model: {config['aggregator_model_label']}")
     print(f"  🌡️  Reference temperature: {config['reference_temperature']}")
     print(f"  🌡️  Aggregator temperature: {config['aggregator_temperature']}")
     print(f"  🛡️  Failure tolerance: {config['failure_tolerance']}")
@@ -536,7 +666,9 @@ registry.register(
     schema=MOA_SCHEMA,
     handler=lambda args, **kw: mixture_of_agents_tool(user_prompt=args.get("user_prompt", "")),
     check_fn=check_moa_requirements,
-    requires_env=["OPENROUTER_API_KEY"],
+    # Provider-routed defaults can use profile/auth-backed providers without
+    # OpenRouter; check_moa_requirements() handles OpenRouter-only specs.
+    requires_env=[],
     is_async=True,
     emoji="🧠",
 )

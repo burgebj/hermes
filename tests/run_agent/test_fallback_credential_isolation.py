@@ -14,6 +14,9 @@ fallback calls, contaminating primary state with fallback-provider errors.
 import sys
 from unittest.mock import MagicMock
 
+from agent.error_classifier import FailoverReason
+from agent.agent_runtime_helpers import recover_with_credential_pool, switch_model
+
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -74,35 +77,68 @@ def _make_agent(provider="openai-codex", model="gpt-5.5",
     return agent
 
 
-# ── Test: _try_activate_fallback clears mismatched pool ──────────────
+# ── Test: _try_activate_fallback reloads mismatched pool ──────────────
 
 class TestFallbackCredentialIsolation:
-    """Test that _try_activate_fallback isolates the credential pool."""
+    """Test that _try_activate_fallback reloads the credential pool."""
 
-    def test_fallback_clears_primary_pool(self):
-        """When switching from openai-codex to openrouter, the codex pool is cleared."""
-        # Import the real method
-        sys.path.insert(0, "/mnt/g/knowledge/project/hermes-agent")
-        # We test the isolation logic directly, not the full _try_activate_fallback
-        # which has many dependencies. Instead we verify the pool-clearing guard.
+    def test_fallback_reloads_pool_for_new_provider(self, monkeypatch):
+        """When switching from openai-codex to openrouter, the codex pool is
+        replaced with the openrouter pool instead of being cleared to None."""
+        mock_new_pool = _make_pool("openrouter", n_entries=2)
+        monkeypatch.setattr(
+            "agent.credential_pool.load_pool",
+            lambda provider: mock_new_pool,
+        )
 
         agent = _make_agent(provider="openai-codex", base_url="https://chatgpt.com/backend-api/codex")
         agent._fallback_activated = True
         agent._credential_pool = _make_pool("openai-codex")
 
-        # Simulate: after fallback activation, provider is now openrouter
         fb_provider = "openrouter"
         fb_model = "openrouter/auto"
 
-        # The isolation code from _try_activate_fallback:
+        # Simulate the new reload logic from _try_activate_fallback
         pool = getattr(agent, "_credential_pool", None)
         if pool is not None:
-            pool_provider = getattr(pool, "provider", "") or ""
-            if pool_provider.lower() != fb_provider:
-                agent._credential_pool = None
+            pool_provider = (getattr(pool, "provider", "") or "").strip().lower()
+            if pool_provider and pool_provider != fb_provider:
+                try:
+                    from agent.credential_pool import load_pool
+                    new_pool = load_pool(fb_provider)
+                    if new_pool and new_pool.has_credentials():
+                        agent._credential_pool = new_pool
+                except Exception:
+                    pass
+
+        assert agent._credential_pool is not None, (
+            "Pool should be reloaded, not cleared"
+        )
+        assert getattr(agent._credential_pool, "provider", "") == fb_provider, (
+            f"Reloaded pool should be for {fb_provider}"
+        )
+
+    def test_fallback_clears_pool_when_no_credentials(self, monkeypatch):
+        """When the new provider has no credentials, pool is cleared to None."""
+        agent = _make_agent(provider="openai-codex", base_url="https://chatgpt.com/backend-api/codex")
+        agent._fallback_activated = True
+        # Pool has 0 entries → load_pool returns pool with has_credentials=False
+        agent._credential_pool = _make_pool("openai-codex", n_entries=0)
+
+        fb_provider = "openrouter"
+
+        pool = getattr(agent, "_credential_pool", None)
+        if pool is not None:
+            pool_provider = (getattr(pool, "provider", "") or "").strip().lower()
+            if pool_provider and pool_provider != fb_provider:
+                new_pool = _make_pool(fb_provider, n_entries=0)
+                if new_pool and new_pool.has_credentials():
+                    agent._credential_pool = new_pool
+                else:
+                    agent._credential_pool = None
 
         assert agent._credential_pool is None, (
-            "Pool should be cleared when fallback provider differs from pool provider"
+            "Pool should be None when new provider has no credentials"
         )
 
     def test_fallback_keeps_matching_pool(self):
@@ -177,6 +213,37 @@ class TestRecoveryProviderGuard:
         assert should_skip is True
         codex_pool.mark_exhausted_and_rotate.assert_not_called()
 
+    def test_recovery_reloads_mismatched_pool_then_rotates_on_usage_limit(self, monkeypatch):
+        """A mid-session provider switch must reload the active provider's pool
+        before handling a usage-limit shaped 429, then rotate that reloaded pool.
+        """
+        agent = _make_agent(provider="openai-codex")
+        # Stale pool from a previous provider/model lane.
+        stale_pool = _make_pool("opencode-go", n_entries=1)
+        agent._credential_pool = stale_pool
+        codex_pool = _make_pool("openai-codex", n_entries=2)
+        next_entry = codex_pool.current.return_value
+        codex_pool.mark_exhausted_and_rotate.return_value = next_entry
+        monkeypatch.setattr(
+            "agent.credential_pool.load_pool",
+            lambda provider: codex_pool if provider == "openai-codex" else None,
+        )
+
+        recovered, retried = recover_with_credential_pool(
+            agent,
+            status_code=429,
+            has_retried_429=False,
+            classified_reason=FailoverReason.rate_limit,
+            error_context={"reason": "usage_limit_reached"},
+        )
+
+        assert recovered is True
+        assert retried is False
+        assert agent._credential_pool is codex_pool
+        codex_pool.mark_exhausted_and_rotate.assert_called_once()
+        agent._swap_credential.assert_called_once_with(next_entry)
+        stale_pool.mark_exhausted_and_rotate.assert_not_called()
+
 
 # ── Test: base_url not overwritten after fallback ────────────────────
 
@@ -217,3 +284,132 @@ class TestBaseUrlLeak:
         # and _swap_credential is never called
         pool = agent._credential_pool
         assert pool is None, "Pool should be None — _swap_credential won't be reached"
+
+
+# ── Test: _reload_pool_for_provider ──────────────────────────────────
+
+class TestReloadPoolForProvider:
+    """Test the _reload_pool_for_provider helper."""
+
+    def test_reload_attaches_pool_to_agent(self, monkeypatch):
+        """A successful reload attaches the new pool to agent._credential_pool."""
+        from agent.agent_runtime_helpers import _reload_pool_for_provider
+
+        mock_pool = _make_pool("openai-codex", n_entries=2)
+        monkeypatch.setattr(
+            "agent.credential_pool.load_pool",
+            lambda provider: mock_pool,
+        )
+
+        agent = _make_agent(provider="openrouter")
+        agent._credential_pool = _make_pool("openrouter")
+
+        result = _reload_pool_for_provider(agent, "openai-codex")
+
+        assert result is mock_pool, "Should return the new pool"
+        assert agent._credential_pool is mock_pool, (
+            "Should attach pool to agent"
+        )
+
+    def test_reload_returns_none_when_no_credentials(self, monkeypatch):
+        """Returns None when load_pool succeeds but has no credentials."""
+        from agent.agent_runtime_helpers import _reload_pool_for_provider
+
+        mock_pool = _make_pool("openai-codex", n_entries=0)
+        monkeypatch.setattr(
+            "agent.credential_pool.load_pool",
+            lambda provider: mock_pool,
+        )
+
+        agent = _make_agent(provider="openrouter")
+        agent._credential_pool = _make_pool("openrouter")
+
+        result = _reload_pool_for_provider(agent, "openai-codex")
+
+        assert result is None, "Should return None when no credentials"
+
+    def test_reload_returns_none_on_load_error(self, monkeypatch):
+        """Returns None when load_pool raises an exception."""
+        from agent.agent_runtime_helpers import _reload_pool_for_provider
+
+        monkeypatch.setattr(
+            "agent.credential_pool.load_pool",
+            lambda provider: (_ for _ in ()).throw(RuntimeError("test error")),
+        )
+
+        agent = _make_agent(provider="openrouter")
+        agent._credential_pool = _make_pool("openrouter")
+
+        result = _reload_pool_for_provider(agent, "openai-codex")
+
+        assert result is None, "Should return None on load error"
+        # Agent pool should be unchanged
+        assert agent._credential_pool is not None, "Original pool should be preserved"
+
+
+# ── Test: switch_model pool reload across providers/models ───────────
+
+class TestSwitchModelCredentialPoolReload:
+    """Pin live /model-style provider switches to the correct credential pool."""
+
+    def _prepare_switchable_agent(self, agent):
+        agent._anthropic_prompt_cache_policy.return_value = (False, False)
+        agent._ensure_lmstudio_runtime_loaded.return_value = None
+        agent._create_openai_client.return_value = MagicMock()
+        agent.context_compressor = None
+        agent._cached_system_prompt = "cached"
+        agent._fallback_chain = []
+        return agent
+
+    def test_switch_model_reloads_pool_when_provider_changes(self, monkeypatch):
+        agent = self._prepare_switchable_agent(
+            _make_agent(
+                provider="opencode-go",
+                model="mimo-v2.5",
+                base_url="https://opencode.ai/zen/go/v1",
+                api_mode="chat_completions",
+            )
+        )
+        agent._credential_pool = _make_pool("opencode-go", n_entries=1)
+        codex_pool = _make_pool("openai-codex", n_entries=2)
+        monkeypatch.setattr(
+            "agent.credential_pool.load_pool",
+            lambda provider: codex_pool if provider == "openai-codex" else None,
+        )
+
+        switch_model(
+            agent,
+            "gpt-5.5",
+            "openai-codex",
+            "codex-key",
+            "https://chatgpt.com/backend-api/codex",
+            "codex_responses",
+        )
+
+        assert agent.provider == "openai-codex"
+        assert agent.model == "gpt-5.5"
+        assert agent._credential_pool is codex_pool
+        assert agent._primary_runtime["provider"] == "openai-codex"
+
+    def test_switch_model_same_provider_different_model_keeps_pool_mid_session(self, monkeypatch):
+        agent = self._prepare_switchable_agent(_make_agent(provider="openai-codex", model="gpt-5.5"))
+        codex_pool = _make_pool("openai-codex", n_entries=2)
+        agent._credential_pool = codex_pool
+
+        def _fail_if_reloaded(provider):  # pragma: no cover - assertion path
+            raise AssertionError(f"should not reload matching pool for {provider}")
+
+        monkeypatch.setattr("agent.credential_pool.load_pool", _fail_if_reloaded)
+
+        switch_model(
+            agent,
+            "gpt-5.4",
+            "openai-codex",
+            "codex-key-2",
+            "https://chatgpt.com/backend-api/codex",
+            "codex_responses",
+        )
+
+        assert agent.provider == "openai-codex"
+        assert agent.model == "gpt-5.4"
+        assert agent._credential_pool is codex_pool

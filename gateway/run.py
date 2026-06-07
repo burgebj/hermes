@@ -8275,6 +8275,9 @@ class GatewayRunner:
         if canonical == "model":
             return await self._handle_model_command(event)
 
+        if canonical == "moac":
+            return await self._handle_moac_command(event)
+
         if canonical == "codex-runtime":
             return await self._handle_codex_runtime_command(event)
 
@@ -11526,6 +11529,109 @@ class GatewayRunner:
             lines.append(t("gateway.model.session_only_hint"))
 
         return "\n".join(lines)
+
+    async def _handle_moac_command(self, event: MessageEvent) -> str:
+        """Handle /moac command — view or configure the MoA council lineup.
+
+        Uses provider/model format, same provider infrastructure as /model.
+        """
+        raw_args = event.get_command_args().strip()
+
+        if not raw_args or raw_args == "show":
+            try:
+                from tools import mixture_of_agents_tool as moa
+                import importlib
+                importlib.reload(moa)
+                cfg = moa.get_moa_configuration()
+            except Exception as e:
+                return f"✗ Failed to load MoA config: {e}"
+
+            lines = [
+                "🧠 **MoA Council**",
+                f"**Aggregator:** {cfg['aggregator_model_label']}",
+                f"**Reference models ({cfg['total_reference_models']}):**",
+            ]
+            for i, label in enumerate(cfg['reference_model_labels']):
+                lines.append(f"  {i+1}. {label}")
+            lines.append(f"Temperature: ref={cfg['reference_temperature']}, agg={cfg['aggregator_temperature']}")
+            lines.append(f"Min successful: {cfg['min_successful_references']}")
+            lines.append("")
+
+            # Show available providers
+            try:
+                from hermes_cli.model_switch import list_authenticated_providers
+                providers = list_authenticated_providers(max_models=20)
+                if providers:
+                    lines.append("**Available providers/models:**")
+                    for p in providers:
+                        slug = p.get("slug", "")
+                        models = p.get("models", [])
+                        if slug and models:
+                            preview = ", ".join(models[:6])
+                            lines.append(f"  `{slug}/` → {preview}")
+            except Exception:
+                pass
+
+            lines.append("")
+            lines.append("Set: `/moac set provider/model provider/model ... --agg provider/model`")
+            lines.append("Example: `/moac set opencode-go/kimi-k2.6 opencode-go/deepseek-v4-pro openai-codex/gpt-5.5 openai-codex/gpt-5.4 --agg opencode-go/kimi-k2.6`")
+            return "\n".join(lines)
+
+        if raw_args.startswith("set "):
+            set_args = raw_args[4:].strip()
+            agg_model = None
+            if " --agg " in set_args:
+                parts = set_args.split(" --agg ", 1)
+                set_args = parts[0].strip()
+                agg_model = parts[1].strip()
+            elif set_args.endswith(" --agg"):
+                set_args = set_args[:-6].strip()
+
+            if not set_args:
+                return "✗ Usage: /moac set provider/model ... --agg provider/model"
+
+            ref_parts = set_args.split()
+            if len(ref_parts) < 1:
+                return "✗ Need at least 1 reference model"
+
+            # Resolve using same provider infrastructure as /model
+            try:
+                from hermes_cli.moa_config import resolve_moac_spec as _resolve_moac_spec
+            except ImportError:
+                return "✗ Could not import model resolver"
+
+            resolved_refs = []
+            for pm_str in ref_parts:
+                spec = _resolve_moac_spec(pm_str)
+                if spec is None:
+                    return f"✗ Could not resolve: {pm_str}\nUse format: `provider/model` (e.g. `opencode-go/kimi-k2.6`)\nRun `/moac` without args to see available providers."
+                resolved_refs.append(spec)
+
+            resolved_agg = None
+            if agg_model:
+                resolved_agg = _resolve_moac_spec(agg_model)
+                if resolved_agg is None:
+                    return f"✗ Could not resolve aggregator: {agg_model}"
+
+            # Persist
+            try:
+                from hermes_cli.config import load_config, save_config
+                cfg = load_config()
+                cfg['moa'] = {
+                    'reference_models': resolved_refs,
+                    'aggregator': resolved_agg or resolved_refs[0],
+                }
+                save_config(cfg)
+            except Exception as e:
+                return f"✗ Failed to save config: {e}"
+
+            labels = [f"{s['provider']}/{s['model']}" for s in resolved_refs]
+            agg_label = f"{resolved_agg['provider']}/{resolved_agg['model']}" if resolved_agg else labels[0]
+            result = f"✓ MoA council updated:\nRefs: {', '.join(labels)}\nAgg: {agg_label}"
+            result += "\n\n⚠ Gateway restart required for in-memory tool reload."
+            return result
+
+        return "Usage: /moac [show|set provider/model ... --agg provider/model]"
 
     async def _handle_codex_runtime_command(self, event: MessageEvent) -> str:
         """Handle /codex-runtime command in the gateway.

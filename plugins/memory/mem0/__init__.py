@@ -1,12 +1,14 @@
 """Mem0 memory plugin — MemoryProvider interface.
 
 Server-side LLM fact extraction, semantic search with reranking, and
-automatic deduplication via the Mem0 Platform API.
+automatic deduplication via either the Mem0 Platform API or a local
+Mem0-compatible HTTP server.
 
 Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
 
 Config via environment variables:
-  MEM0_API_KEY       — Mem0 Platform API key (required)
+  MEM0_HOST          — Local Mem0-compatible API base URL (preferred if set)
+  MEM0_API_KEY       — Mem0 Platform API key (required for cloud mode)
   MEM0_USER_ID       — User identifier (default: hermes-user)
   MEM0_AGENT_ID      — Agent identifier (default: hermes)
 
@@ -20,6 +22,8 @@ import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -47,6 +51,7 @@ def _load_config() -> dict:
     from hermes_constants import get_hermes_home
 
     config = {
+        "host": os.environ.get("MEM0_HOST", ""),
         "api_key": os.environ.get("MEM0_API_KEY", ""),
         "user_id": os.environ.get("MEM0_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
@@ -111,6 +116,73 @@ CONCLUDE_SCHEMA = {
     },
 }
 
+TIMELINE_SCHEMA = {
+    "name": "mem0_timeline",
+    "description": (
+        "Return a chronological sequence of memories about a topic. Use this when "
+        "you need to understand how a project, preference, or decision evolved."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "description": "Topic to build a timeline for."},
+            "top_k": {"type": "integer", "description": "Max semantic candidates to inspect (default: 25, max: 50)."},
+        },
+        "required": ["topic"],
+    },
+}
+
+EXTRACTION_PROMPT = (
+    'Extract durable facts from this conversation about the user, their preferences, '
+    'environment, projects, decisions, and stable operating context. '
+    'Return ONLY valid JSON: {"memory": [{"text": "fact as a sentence", "event": "ADD"}]}. '
+    'Extract only explicitly stated facts. Never invent, infer beyond the text, or store transient task progress. '
+    'If nothing durable is extractable, return {"memory": []}.'
+)
+
+
+class _LocalMem0Client:
+    """Tiny client for a local Mem0-compatible HTTP server.
+
+    The self-hosted Mem0 setup exposes a small subset of the Mem0 API at
+    ``MEM0_HOST``. The official ``MemoryClient`` only talks to the hosted
+    Mem0 platform, so using it when ``MEM0_HOST`` is configured silently routes
+    requests to the wrong backend and fails on placeholder/cloud keys.
+    """
+
+    def __init__(self, host: str, timeout: float = 30.0):
+        self.host = host.rstrip("/")
+        self.timeout = timeout
+
+    def _post(self, path: str, payload: Dict[str, Any]) -> dict:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.host}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            raise RuntimeError(f"local Mem0 HTTP {e.code}: {body}") from e
+
+    def search(self, *, query: str, filters: dict | None = None, rerank: bool = False, top_k: int = 10):
+        return self._post(
+            "/v1/memories/search",
+            {"query": query, "filters": filters or {}, "rerank": rerank, "top_k": top_k},
+        )
+
+    def get_all(self, *, filters: dict | None = None):
+        return self._post("/v1/memories", {"filters": filters or {}})
+
+    def add(self, messages, **kwargs):
+        payload = {"messages": messages}
+        payload.update(kwargs)
+        return self._post("/v1/memories/add", payload)
+
 
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
@@ -123,6 +195,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._config = None
         self._client = None
         self._client_lock = threading.Lock()
+        self._host = ""
         self._api_key = ""
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
@@ -141,7 +214,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         cfg = _load_config()
-        return bool(cfg.get("api_key"))
+        return bool(cfg.get("host") or cfg.get("api_key"))
 
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/mem0.json."""
@@ -160,7 +233,8 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def get_config_schema(self):
         return [
-            {"key": "api_key", "description": "Mem0 Platform API key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "host", "description": "Local Mem0-compatible API base URL", "required": False, "env_var": "MEM0_HOST"},
+            {"key": "api_key", "description": "Mem0 Platform API key (cloud mode only)", "secret": True, "required": False, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
             {"key": "agent_id", "description": "Agent identifier", "default": "hermes"},
             {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
@@ -170,6 +244,9 @@ class Mem0MemoryProvider(MemoryProvider):
         """Thread-safe client accessor with lazy initialization."""
         with self._client_lock:
             if self._client is not None:
+                return self._client
+            if self._host:
+                self._client = _LocalMem0Client(self._host)
                 return self._client
             try:
                 from mem0 import MemoryClient
@@ -203,10 +280,17 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
+        self._host = self._config.get("host", "")
         self._api_key = self._config.get("api_key", "")
-        # Prefer gateway-provided user_id for per-user memory scoping;
-        # fall back to config/env default for CLI (single-user) sessions.
-        self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
+        # Explicit MEM0_USER_ID/mem0.json user_id wins. This is critical for
+        # single-user gateways where platform IDs (Matrix/Discord/Telegram)
+        # should all resolve to the same memory namespace. If the user left the
+        # default in place, use the gateway-provided ID for multi-user scoping.
+        configured_user_id = self._config.get("user_id", "hermes-user")
+        if configured_user_id and configured_user_id != "hermes-user":
+            self._user_id = configured_user_id
+        else:
+            self._user_id = kwargs.get("user_id") or configured_user_id or "hermes-user"
         self._agent_id = self._config.get("agent_id", "hermes")
         self._rerank = self._config.get("rerank", True)
 
@@ -227,12 +311,27 @@ class Mem0MemoryProvider(MemoryProvider):
             return response
         return []
 
+    @staticmethod
+    def _memory_text(item: dict) -> str:
+        """Return memory text across cloud/local response shapes."""
+        return item.get("memory") or item.get("data") or item.get("text") or ""
+
+    @staticmethod
+    def _memory_timestamp(item: dict) -> str:
+        """Best-effort chronological key for timeline output."""
+        metadata = item.get("metadata") or {}
+        if isinstance(metadata, dict):
+            for key in ("session_date", "created_at", "timestamp"):
+                if metadata.get(key):
+                    return str(metadata[key])
+        return str(item.get("created_at") or item.get("updated_at") or "")
+
     def system_prompt_block(self) -> str:
         return (
             "# Mem0 Memory\n"
             f"Active. User: {self._user_id}.\n"
-            "Use mem0_search to find memories, mem0_conclude to store facts, "
-            "mem0_profile for a full overview."
+            "Use mem0_search to find memories, mem0_timeline for chronological recall, "
+            "mem0_conclude to store facts, mem0_profile for a full overview."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -259,7 +358,7 @@ class Mem0MemoryProvider(MemoryProvider):
                     top_k=5,
                 ))
                 if results:
-                    lines = [r.get("memory", "") for r in results if r.get("memory")]
+                    lines = [self._memory_text(r) for r in results if self._memory_text(r)]
                     with self._prefetch_lock:
                         self._prefetch_result = "\n".join(f"- {l}" for l in lines)
                 self._record_success()
@@ -282,7 +381,7 @@ class Mem0MemoryProvider(MemoryProvider):
                     {"role": "user", "content": user_content},
                     {"role": "assistant", "content": assistant_content},
                 ]
-                client.add(messages, **self._write_filters())
+                client.add(messages, **self._write_filters(), prompt=EXTRACTION_PROMPT)
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -296,7 +395,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._sync_thread.start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, CONCLUDE_SCHEMA]
+        return [PROFILE_SCHEMA, SEARCH_SCHEMA, CONCLUDE_SCHEMA, TIMELINE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -315,7 +414,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No memories stored yet."})
-                lines = [m.get("memory", "") for m in memories if m.get("memory")]
+                lines = [self._memory_text(m) for m in memories if self._memory_text(m)]
                 return json.dumps({"result": "\n".join(lines), "count": len(lines)})
             except Exception as e:
                 self._record_failure()
@@ -337,11 +436,46 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._record_success()
                 if not results:
                     return json.dumps({"result": "No relevant memories found."})
-                items = [{"memory": r.get("memory", ""), "score": r.get("score", 0)} for r in results]
+                items = [{
+                    "memory": self._memory_text(r),
+                    "score": r.get("score", 0),
+                    "timestamp": self._memory_timestamp(r),
+                } for r in results if self._memory_text(r)]
                 return json.dumps({"results": items, "count": len(items)})
             except Exception as e:
                 self._record_failure()
                 return tool_error(f"Search failed: {e}")
+
+        elif tool_name == "mem0_timeline":
+            topic = args.get("topic", "") or args.get("query", "")
+            if not topic:
+                return tool_error("Missing required parameter: topic")
+            top_k = min(int(args.get("top_k", 25)), 50)
+            try:
+                results = self._unwrap_results(client.search(
+                    query=topic,
+                    filters=self._read_filters(),
+                    rerank=True,
+                    top_k=top_k,
+                ))
+                items = []
+                for r in results:
+                    text = self._memory_text(r)
+                    if not text:
+                        continue
+                    items.append({
+                        "timestamp": self._memory_timestamp(r),
+                        "memory": text,
+                        "score": r.get("score", 0),
+                    })
+                items.sort(key=lambda x: x.get("timestamp") or "")
+                self._record_success()
+                if not items:
+                    return json.dumps({"result": "No timeline memories found."})
+                return json.dumps({"topic": topic, "timeline": items, "count": len(items)})
+            except Exception as e:
+                self._record_failure()
+                return tool_error(f"Timeline failed: {e}")
 
         elif tool_name == "mem0_conclude":
             conclusion = args.get("conclusion", "")
