@@ -127,6 +127,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    MQTT = "mqtt"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -1464,6 +1465,22 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         hass_url = os.getenv("HASS_URL")
         if hass_url:
             config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
+
+    # MQTT (broker subscriber - Phoebe mesh integration)
+    mqtt_user = os.getenv("MQTT_USER")
+    mqtt_password = os.getenv("MQTT_PASSWORD")
+    if mqtt_user and mqtt_password:
+        if Platform.MQTT not in config.platforms:
+            config.platforms[Platform.MQTT] = PlatformConfig()
+        config.platforms[Platform.MQTT].enabled = True
+        config.platforms[Platform.MQTT].token = mqtt_user  # token slot reused for username
+        config.platforms[Platform.MQTT].extra["password"] = mqtt_password
+        mqtt_broker = os.getenv("MQTT_BROKER")
+        if mqtt_broker:
+            config.platforms[Platform.MQTT].extra["broker_host"] = mqtt_broker
+        mqtt_ca_cert = os.getenv("MQTT_CA_CERT")
+        if mqtt_ca_cert:
+            config.platforms[Platform.MQTT].extra["ca_cert"] = mqtt_ca_cert
 
     # Email
     email_addr = os.getenv("EMAIL_ADDRESS")

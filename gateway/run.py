@@ -6914,6 +6914,13 @@ class GatewayRunner:
                 return None
             return SignalAdapter(config)
 
+        elif platform == Platform.MQTT:
+            from gateway.platforms.mqtt import MQTTAdapter, check_mqtt_requirements
+            if not check_mqtt_requirements():
+                logger.warning("MQTT: paho-mqtt not installed or MQTT_USER/MQTT_PASSWORD not set")
+                return None
+            return MQTTAdapter(config)
+
         elif platform == Platform.EMAIL:
             from gateway.platforms.email import EmailAdapter, check_email_requirements
             if not check_email_requirements():
@@ -7146,6 +7153,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+            Platform.MQTT: "MQTT_ALLOWED_USERS",
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
@@ -7172,6 +7180,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+            Platform.MQTT: "MQTT_ALLOW_ALL_USERS",
         }
         # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).
         platform_allow_bots_map = {
