@@ -2846,7 +2846,7 @@ class SlackAdapter(BasePlatformAdapter):
         original_text = ""
         for block in message.get("blocks", []):
             if block.get("type") == "section":
-                original_text = block.get("text", {}).get("text", "")
+                original_text = (block.get("text") or {}).get("text", "")
                 break
 
         updated_blocks = [
@@ -2957,7 +2957,7 @@ class SlackAdapter(BasePlatformAdapter):
         original_text = ""
         for block in message.get("blocks", []):
             if block.get("type") == "section":
-                original_text = block.get("text", {}).get("text", "")
+                original_text = (block.get("text") or {}).get("text", "")
                 break
 
         updated_blocks = [
