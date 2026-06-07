@@ -2025,6 +2025,11 @@ _MODELS_DEV_PREFERRED: frozenset[str] = frozenset({
     "zai",
     "gemini",
     "google",
+    # DigitalOcean Gradient AI does not implement /v1/models, so live
+    # discovery is intentionally skipped (see commit 24a6e1e5). The 76 DO
+    # model IDs + context_length live in the bundled models.dev catalog;
+    # this entry surfaces them in the picker via _merge_with_models_dev().
+    "digitalocean",
 })
 
 
