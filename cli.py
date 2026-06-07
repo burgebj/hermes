@@ -7122,6 +7122,14 @@ class HermesCLI:
         else:
             _cprint(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
 
+        # Retarget the process + tool cwd to where the session was started, so a
+        # mid-chat /resume (and /sessions <id>, which delegates here) lands in the
+        # same directory as a startup `hermes -c`/`--resume`. The startup resume
+        # paths already call this; without it, the terminal/code-exec tools and
+        # relative-path resolution keep operating in the wrong repo. Idempotent
+        # and a no-op when the session recorded no cwd. See #38562.
+        self._restore_session_cwd(session_meta)
+
     def _consume_pending_resume_selection(self, text: str) -> bool:
         """Resolve a bare numeric reply that follows a bare ``/resume`` prompt.
 
