@@ -113,6 +113,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Kept so the metrics-sync path can clear the WebGL glyph atlas after a
+  // font-size change.  The atlas caches rasterized glyphs at the font
+  // metrics that were live when it was built; resizing the font without
+  // clearing it makes WebGL re-blit stale glyph tiles, which renders as
+  // character corruption (see #34617).  null when WebGL is unavailable or
+  // the narrow-host DOM renderer is in use.
+  const webglRef = useRef<WebglAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   // Exposed to the main metrics-sync effect so it can refit the terminal
   // the moment `isActive` flips back to true (display:none → display:flex
@@ -456,8 +463,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     if (useWebgl) {
       try {
         const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
+        webgl.onContextLoss(() => {
+          webgl.dispose();
+          webglRef.current = null;
+        });
         term.loadAddon(webgl);
+        webglRef.current = webgl;
       } catch (err) {
         console.warn(
           "[hermes-chat] WebGL renderer unavailable; falling back to default",
@@ -517,6 +528,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       }
       if (fontChanged && term.rows > 0) {
         try {
+          // The WebGL renderer caches glyphs in a texture atlas keyed on
+          // the font metrics that were live when each glyph was first
+          // drawn.  After we mutate fontSize/lineHeight above, a bare
+          // refresh() re-blits those stale tiles at the new cell size,
+          // which surfaces as garbled characters even though the buffer
+          // is correct (#34617).  Drop the atlas first so glyphs are
+          // re-rasterized at the current metrics.  No-op for the DOM/
+          // canvas renderer, which has no atlas to clear.
+          webglRef.current?.clearTextureAtlas();
           term.refresh(0, term.rows - 1);
         } catch {
           /* ignore */
@@ -709,6 +729,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      webglRef.current = null;
       if (copyResetRef.current) {
         clearTimeout(copyResetRef.current);
         copyResetRef.current = null;
