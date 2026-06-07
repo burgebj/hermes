@@ -161,6 +161,36 @@ hermes skills uninstall <skill-name>
 | [**unsloth**](/docs/user-guide/skills/optional/mlops/mlops-training-unsloth) | Unsloth: 2-5x faster LoRA/QLoRA fine-tuning, less VRAM. |
 | [**whisper**](/docs/user-guide/skills/optional/mlops/mlops-whisper) | OpenAI's general-purpose speech recognition model. Supports 99 languages, transcription, translation to English, and language identification. Six model sizes from tiny (39M params) to large (1550M params). Use for speech-to-text, podcast... |
 
+## moonpay
+
+| Skill | Description |
+|-------|-------------|
+| [**auth**](/docs/user-guide/skills/optional/moonpay/moonpay-auth) | Set up the MoonPay CLI, authenticate, and manage local wallets. Use when commands fail, for login, or to create/import wallets. |
+| [**block-explorer**](/docs/user-guide/skills/optional/moonpay/moonpay-block-explorer) | Open transactions, wallets, and tokens in the correct block explorer. Use after swaps, bridges, or transfers to view results in the browser. |
+| [**budget-agent**](/docs/user-guide/skills/optional/moonpay/moonpay-budget-agent) | Set a daily spending budget for your agent. Check spend, enforce limits before trades, and run an automated watchdog that alerts when the budget is hit. |
+| [**buy-crypto**](/docs/user-guide/skills/optional/moonpay/moonpay-buy-crypto) | Buy crypto with fiat via MoonPay. Returns a checkout URL to complete the purchase in a browser. |
+| [**check-wallet**](/docs/user-guide/skills/optional/moonpay/moonpay-check-wallet) | Check wallet balances and holdings. Use for "what's in my wallet", portfolio breakdown, token balances, allocation percentages, and USD values. |
+| [**commerce**](/docs/user-guide/skills/optional/moonpay/moonpay-commerce) | Browse Shopify stores, search products, manage a cart, and checkout with crypto via Solana Pay. No login required. |
+| [**deposit**](/docs/user-guide/skills/optional/moonpay/moonpay-deposit) | Create deposit links that accept crypto from any chain and auto-convert to stablecoins. No login required. |
+| [**discover-tokens**](/docs/user-guide/skills/optional/moonpay/moonpay-discover-tokens) | Search for tokens, check prices, get trading briefs, and evaluate risk. Use for token research, "is this token safe?", price checks, and market analysis. |
+| [**export-data**](/docs/user-guide/skills/optional/moonpay/moonpay-export-data) | Export portfolio balances and transaction history to CSV or JSON files. Use for spreadsheets, tax reporting, or record-keeping. |
+| [**feedback**](/docs/user-guide/skills/optional/moonpay/moonpay-feedback) | Submit feedback, bug reports, or feature requests for the MoonPay CLI. Use when the user encounters issues, wants to suggest improvements, or has general feedback. |
+| [**fund-polymarket**](/docs/user-guide/skills/optional/moonpay/moonpay-fund-polymarket) | Install the Polymarket CLI and fund its wallet with USDC.e and POL on Polygon via MoonPay. |
+| [**hardware-wallet**](/docs/user-guide/skills/optional/moonpay/moonpay-hardware-wallet) | Connect a hardware wallet (Ledger) to the MoonPay CLI. Sign transactions on the physical device — no private keys stored locally. |
+| [**iron-dca**](/docs/user-guide/skills/optional/moonpay/moonpay-iron-dca) | Wire fiat to your Iron virtual account. Agent detects the deposit, splits it into equal chunks, and automatically DCA's into any token on a daily schedule. Full loop from bank wire to on-chain position — no manual steps. |
+| [**mcp**](/docs/user-guide/skills/optional/moonpay/moonpay-mcp) | Set up MoonPay as an MCP server for Claude Desktop or Claude Code. Provides all MoonPay CLI tools via the Model Context Protocol. |
+| [**missions**](/docs/user-guide/skills/optional/moonpay/moonpay-missions) | A series of missions that walk through every MoonPay CLI capability. Use when the user is new or says "get started", "show me what you can do", or "run the missions". |
+| [**polymarket-ready**](/docs/user-guide/skills/optional/moonpay/moonpay-polymarket-ready) | Fund a Polygon wallet for Polymarket trading. Buy POL for gas and bridge or buy USDC.e so the wallet is ready to trade. |
+| [**prediction-market**](/docs/user-guide/skills/optional/moonpay/moonpay-prediction-market) | Trade on prediction markets (Polymarket, Kalshi). Search markets, buy/sell positions, track PnL, and view trade history. |
+| [**price-alerts**](/docs/user-guide/skills/optional/moonpay/moonpay-price-alerts) | Set up desktop price alerts that notify you when tokens hit target prices. Observe-only — no trading, just notifications. |
+| [**scout**](/docs/user-guide/skills/optional/moonpay/moonpay-scout) | Prediction market arbitrage & alpha scout. Searches Polymarket and Kalshi for the same event, runs cross-platform arb math (including fees), and ranks opportunities by profitability. Use when asked to "find arb", "scout markets", "find e... |
+| [**swap-tokens**](/docs/user-guide/skills/optional/moonpay/moonpay-swap-tokens) | Swap tokens on the same chain or bridge tokens across chains. Use when the user wants to swap, bridge, or move tokens. |
+| [**trading-automation**](/docs/user-guide/skills/optional/moonpay/moonpay-trading-automation) | Set up automated trading strategies — DCA, limit orders, and stop losses — by composing mp CLI commands with OS scheduling (cron/launchd). |
+| [**upgrade**](/docs/user-guide/skills/optional/moonpay/moonpay-upgrade) | Increase your MoonPay API rate limit by paying with crypto via x402. |
+| [**virtual-account**](/docs/user-guide/skills/optional/moonpay/moonpay-virtual-account) | Set up a virtual account for fiat on-ramp and off-ramp. Covers KYC, wallet registration, bank accounts, onramp (fiat to stablecoin), and offramp (stablecoin to fiat). |
+| [**x402**](/docs/user-guide/skills/optional/moonpay/moonpay-x402) | Make paid API requests to x402-protected endpoints. Automatically handles payment with your local wallet. |
+| [**x402-analyst**](/docs/user-guide/skills/optional/moonpay/moonpay-x402-analyst) | Research agent that pays for real-time market intelligence via x402 APIs, synthesizes a trade recommendation, and optionally executes it. Total cost per research run: $0.03. |
+
 ## productivity
 
 | Skill | Description |
