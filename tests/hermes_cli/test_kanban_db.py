@@ -67,6 +67,26 @@ def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     assert row[0] == 123456
 
 
+def test_connect_accepts_string_db_path(tmp_path, kanban_home):
+    """Legacy callers sometimes pass a string path; connect() should still work.
+
+    The kanban crash log showed ``AttributeError: 'str' object has no attribute
+    'parent'`` at the first filesystem access, so this must coerce string input
+    before trying to create parent directories.
+    """
+    db_path = tmp_path / "string-path.db"
+
+    conn = kb.connect(db_path=str(db_path))
+    try:
+        t = kb.create_task(conn, title="string path ok")
+        rows = kb.list_tasks(conn)
+    finally:
+        conn.close()
+
+    assert db_path.exists()
+    assert any(row.id == t for row in rows)
+
+
 def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypatch):
     """Windows must use a real process lock, not a no-op sidecar open."""
     calls: list[tuple[int, int, int]] = []

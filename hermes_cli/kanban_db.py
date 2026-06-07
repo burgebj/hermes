@@ -1413,7 +1413,7 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
 
 
 def connect(
-    db_path: Optional[Path] = None,
+    db_path: Path | str | None = None,
     *,
     board: Optional[str] = None,
 ) -> sqlite3.Connection:
@@ -1436,7 +1436,7 @@ def connect(
       ``<root>/kanban/current`` → ``default``.
     """
     if db_path is not None:
-        path = db_path
+        path = Path(db_path).expanduser()
     else:
         path = kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
