@@ -120,6 +120,23 @@ class ImageGenProvider(abc.ABC):
             "env_vars": [],
         }
 
+    def setup_interactive(self, config: dict) -> bool:
+        """Run an interactive setup wizard for this provider.
+
+        Called by ``hermes tools`` when the user selects this provider.
+        Return ``True`` when setup completed successfully so the caller
+        skips the generic env-var-prompt flow.  Return ``False`` (default)
+        to fall back to that flow.
+
+        ``config`` is the live in-memory config dict; the caller persists
+        it to disk after this method returns.
+
+        Override this when your provider needs more than a list of env-var
+        prompts — for example when it must ask for a URL, choose an auth
+        mode, or run a credential preflight before persisting anything.
+        """
+        return False
+
     def default_model(self) -> Optional[str]:
         """Return the default model id, or None if not applicable."""
         models = self.list_models()

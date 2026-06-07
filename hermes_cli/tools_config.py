@@ -2608,7 +2608,25 @@ def _configure_imagegen_model_for_plugin(plugin_name: str, config: dict) -> None
 
 
 def _select_plugin_image_gen_provider(plugin_name: str, config: dict) -> None:
-    """Persist a plugin-backed image generation provider selection."""
+    """Persist a plugin-backed image generation provider selection.
+
+    If the registered provider implements :meth:`ImageGenProvider.setup_interactive`,
+    that wizard runs and the generic env-var flow is skipped.  Any provider
+    that needs more than a simple list of env-var prompts (e.g. endpoint URL,
+    auth-mode choice, credential preflight) should override that method.
+    """
+    # Ask the provider whether it wants to run its own interactive wizard.
+    _provider = None
+    try:
+        from agent.image_gen_registry import get_provider
+        from hermes_cli.plugins import _ensure_plugins_discovered
+        _ensure_plugins_discovered()
+        _provider = get_provider(plugin_name)
+    except Exception:
+        pass
+    if _provider is not None and _provider.setup_interactive(config):
+        return
+
     img_cfg = config.setdefault("image_gen", {})
     if not isinstance(img_cfg, dict):
         img_cfg = {}
