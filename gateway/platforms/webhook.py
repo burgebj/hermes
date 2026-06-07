@@ -186,16 +186,22 @@ class WebhookAdapter(BasePlatformAdapter):
         app.router.add_get("/health", self._handle_health)
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
 
-        # Port conflict detection — fail fast if port is already in use
+        # Port conflict detection — fail fast if port is already in use.
+        # Uses bind() instead of connect() to distinguish between "port in use
+        # by this process" (own aiohttp server) vs "port in use by another
+        # process" (actual conflict). The old connect()-based check would
+        # false-positive on a running adapter in the same process.
         import socket as _socket
         try:
             with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
-                _s.settimeout(1)
-                _s.connect(('127.0.0.1', self._port))
-            logger.error('[webhook] Port %d already in use. Set a different port in config.yaml: platforms.webhook.port', self._port)
+                _s.bind((self._host, self._port))
+        except OSError as e:
+            if e.errno == _socket.EADDRINUSE:
+                logger.error('[webhook] Port %d already in use. Set a different port in config.yaml: platforms.webhook.port', self._port)
+            else:
+                logger.error('[webhook] Port %d bind error: %s', self._port, e)
             return False
-        except (ConnectionRefusedError, OSError):
-            pass  # port is free
+        # port is free
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
