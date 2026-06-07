@@ -2311,15 +2311,16 @@ class GatewayRunner:
             )
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:
-        """Call adapter.disconnect() defensively, swallowing any error.
+        """Bounded, never-raising adapter.disconnect() — the shared resolver.
 
-        Used when adapter.connect() failed or raised — the adapter may
-        have allocated partial resources (aiohttp.ClientSession, poll
-        tasks, child subprocesses) that would otherwise leak and surface
-        as "Unclosed client session" warnings at process exit.
+        Used after a failed connect (partial resources — aiohttp sessions,
+        poll tasks, subprocesses — would otherwise leak as "Unclosed client
+        session" warnings) and on the fatal-error path, where the same
+        network failure that killed the adapter can wedge its disconnect.
 
-        Must tolerate partial-init state and never raise, since callers
-        use it inside error-handling blocks.
+        Must tolerate partial-init state and never raise, since callers use
+        it inside error-handling blocks and rely on reaching the cleanup
+        that follows.
         """
         timeout = self._adapter_disconnect_timeout_secs()
         try:
@@ -2335,10 +2336,95 @@ class GatewayRunner:
             )
         except Exception as e:
             logger.debug(
-                "Defensive %s disconnect after failed connect raised: %s",
+                "Defensive %s disconnect raised: %s",
                 platform.value if platform is not None else "adapter",
                 e,
             )
+
+    async def _safe_adapter_teardown(self, adapter, platform) -> None:
+        """Bounded, never-raising per-adapter teardown for clean shutdown.
+
+        Each op runs under the shared per-adapter timeout
+        (HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT, default 5s) so a single
+        wedged adapter cannot stall shutdown before it reaches the
+        runtime-lock / PID-file cleanup that follows.
+
+        NOTE: for thread-backed adapters (e.g. Feishu's run_in_executor WS
+        client) the timeout abandons the worker thread rather than closing
+        the socket gracefully; the daemon thread is reclaimed at process
+        exit. This is bounded teardown, not graceful disconnect.
+        """
+        timeout = self._adapter_disconnect_timeout_secs()
+        started_at = time.monotonic()
+
+        async def _bounded(coro):
+            if timeout <= 0:
+                return await coro
+            return await asyncio.wait_for(coro, timeout=timeout)
+
+        try:
+            await _bounded(adapter.cancel_background_tasks())
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs cancelling %s background tasks; continuing shutdown",
+                timeout, platform.value,
+            )
+        except Exception as e:
+            logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
+
+        try:
+            await _bounded(adapter.disconnect())
+            logger.info("✓ %s disconnected (%.2fs)", platform.value, time.monotonic() - started_at)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs disconnecting %s adapter (%.2fs total); continuing shutdown",
+                timeout, platform.value, time.monotonic() - started_at,
+            )
+        except Exception as e:
+            logger.error(
+                "✗ %s disconnect error after %.2fs: %s",
+                platform.value, time.monotonic() - started_at, e,
+            )
+
+    async def _teardown_adapters(self) -> None:
+        """Tear every adapter down concurrently during clean shutdown.
+
+        Each teardown is individually bounded (see _safe_adapter_teardown),
+        so running them under one gather makes the phase ~max(timeout)
+        instead of N×timeout — a wedged adapter no longer extends the window
+        launchd/systemd allow before SIGKILL. Adapters touch only their own
+        state; shared cleanup runs after this returns. return_exceptions is
+        belt-and-suspenders: the helper never raises.
+        """
+        await asyncio.gather(
+            *(
+                self._safe_adapter_teardown(adapter, platform)
+                for platform, adapter in list(self.adapters.items())
+            ),
+            return_exceptions=True,
+        )
+
+    async def _bounded_shutdown_send(self, adapter, *args, **kwargs):
+        """Send a shutdown notification under the shared per-adapter timeout.
+
+        Returns the adapter's result, or None on timeout. A wedged send
+        (half-dead platform, TCP black-hole) must not hang _stop_impl before
+        adapter teardown runs. None matches the adapter contract for a send
+        with no structured result, so callers fall through their existing
+        ``result is not None`` failure check and stop re-targeting the same
+        wedged chat.
+        """
+        timeout = self._adapter_disconnect_timeout_secs()
+        try:
+            if timeout <= 0:
+                return await adapter.send(*args, **kwargs)
+            return await asyncio.wait_for(adapter.send(*args, **kwargs), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs sending shutdown notification to %s; continuing",
+                timeout, getattr(getattr(adapter, "platform", None), "value", None),
+            )
+            return None
 
     def _adapter_disconnect_timeout_secs(self) -> float:
         """Return the per-adapter disconnect timeout used during shutdown."""
@@ -2779,8 +2865,10 @@ class GatewayRunner:
 
         existing = self.adapters.get(adapter.platform)
         if existing is adapter:
+            # finally so a teardown-time cancellation still drops the dead
+            # adapter; _safe_adapter_disconnect itself never raises.
             try:
-                await adapter.disconnect()
+                await self._safe_adapter_disconnect(adapter, adapter.platform)
             finally:
                 self.adapters.pop(adapter.platform, None)
                 self.delivery_router.adapters = self.adapters
@@ -3770,7 +3858,7 @@ class GatewayRunner:
                     adapter=adapter,
                 )
 
-                result = await adapter.send(chat_id, msg, metadata=metadata)
+                result = await self._bounded_shutdown_send(adapter, chat_id, msg, metadata=metadata)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to %s:%s: %s",
@@ -3825,9 +3913,9 @@ class GatewayRunner:
                     adapter=adapter,
                 )
                 if metadata:
-                    result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
+                    result = await self._bounded_shutdown_send(adapter, str(home.chat_id), msg, metadata=metadata)
                 else:
-                    result = await adapter.send(str(home.chat_id), msg)
+                    result = await self._bounded_shutdown_send(adapter, str(home.chat_id), msg)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to home channel %s:%s: %s",
@@ -6649,26 +6737,7 @@ class GatewayRunner:
                     )
                     self._cleanup_agent_resources(_agent)
 
-            for platform, adapter in list(self.adapters.items()):
-                _adapter_started_at = time.monotonic()
-                try:
-                    await adapter.cancel_background_tasks()
-                except Exception as e:
-                    logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
-                try:
-                    await adapter.disconnect()
-                    logger.info(
-                        "✓ %s disconnected (%.2fs)",
-                        platform.value,
-                        time.monotonic() - _adapter_started_at,
-                    )
-                except Exception as e:
-                    logger.error(
-                        "✗ %s disconnect error after %.2fs: %s",
-                        platform.value,
-                        time.monotonic() - _adapter_started_at,
-                        e,
-                    )
+            await self._teardown_adapters()
             logger.info(
                 "Shutdown phase: all adapters disconnected at +%.2fs",
                 _phase_elapsed(),

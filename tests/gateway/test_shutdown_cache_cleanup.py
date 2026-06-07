@@ -60,6 +60,12 @@ class _FakeGateway:
     async def _notify_active_sessions_of_shutdown(self):
         pass
 
+    async def _teardown_adapters(self):
+        # Real GatewayRunner extracts the per-adapter shutdown loop into this
+        # method; the fake has no live adapters, so a no-op mirrors the empty
+        # ``self.adapters`` iteration the inline loop used to perform.
+        pass
+
     async def _drain_active_agents(self, timeout):
         return {}, False
 
