@@ -227,7 +227,7 @@ Health check. Returns `{"status": "ok"}`. Also available at **GET /v1/health** f
 
 ### GET /health/detailed
 
-Extended health check that also reports active sessions, running agents, and resource usage. Useful for monitoring/observability tooling.
+Extended health check that also reports active sessions, running agents, and resource usage. Useful for monitoring/observability tooling. Unlike `GET /health`, this endpoint follows the standard bearer auth requirement and expects `Authorization: Bearer $API_SERVER_KEY`.
 
 ## Runs API (streaming-friendly alternative)
 
