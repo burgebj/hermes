@@ -1922,6 +1922,37 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         if compress_start >= compress_end:
             return messages
 
+        # Safety check for infinite compression loop (issue #40803):
+        # If the compression window is too small (< 5 messages), we risk a no-op
+        # compression that saves 0 tokens and triggers on every turn.
+        # Estimate tokens in the compression window and fallback if needed.
+        compress_window_size = compress_end - compress_start
+        if compress_window_size < 5:
+            # Estimate tokens in this small window using rough heuristic
+            window_tokens = sum(
+                len((msg.get("content") or "") + str(msg.get("tool_calls", [])))
+                for msg in messages[compress_start:compress_end]
+            ) // _CHARS_PER_TOKEN + (compress_window_size * 10)
+            
+            # If compressing this window would save less than ~2000 tokens,
+            # it won't be enough to drop back below the threshold.
+            # Fall back to a more aggressive tail budget to create a larger
+            # compression window that yields meaningful savings.
+            if window_tokens < 2000:
+                if not self.quiet_mode:
+                    logger.debug(
+                        "Compression window too small (messages=%d, tokens≈%d). "
+                        "Falling back to more aggressive tail budget to prevent loop.",
+                        compress_window_size, window_tokens
+                    )
+                # Reduce tail budget by 50% for this attempt to make room for compression
+                fallback_tail_budget = self.tail_token_budget // 2
+                compress_end = self._find_tail_cut_by_tokens(messages, compress_start, token_budget=fallback_tail_budget)
+                
+                if compress_start >= compress_end:
+                    # Even with fallback, nothing compressible. Return unchanged.
+                    return messages
+
         turns_to_summarize = messages[compress_start:compress_end]
         # A persisted handoff summary can sit in the protected head after a
         # resume (commonly immediately after the system prompt). Search from
