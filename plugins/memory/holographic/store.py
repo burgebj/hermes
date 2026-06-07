@@ -89,10 +89,46 @@ _RE_AKA          = re.compile(
     r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)',
     re.IGNORECASE,
 )
+_RE_FTS_SAFE     = re.compile(r'^[\w\s]+$', re.UNICODE)
+_RE_FTS_TOKEN    = re.compile(r'\w+', re.UNICODE)
 
 
 def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
+
+
+def sanitize_fts_query(query: str) -> str:
+    """Normalize natural-language queries into a safe FTS5 MATCH string."""
+    query = (query or "").strip()
+    if not query:
+        return ""
+    if _RE_FTS_SAFE.fullmatch(query):
+        return query
+
+    ordered_tokens: list[str] = []
+    seen: set[str] = set()
+    for token in _RE_FTS_TOKEN.findall(query):
+        folded = token.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        ordered_tokens.append(token)
+    return " ".join(ordered_tokens)
+
+
+def build_fts_queries(query: str) -> list[str]:
+    """Return narrow-then-broad FTS5 queries for natural-language input."""
+    fts_query = sanitize_fts_query(query)
+    if not fts_query:
+        return []
+
+    queries = [fts_query]
+    tokens = fts_query.split()
+    if len(tokens) > 1:
+        or_query = " OR ".join(tokens)
+        if or_query not in queries:
+            queries.append(or_query)
+    return queries
 
 
 class MemoryStore:
@@ -201,16 +237,15 @@ class MemoryStore:
         descending. Also increments retrieval_count for matched facts.
         """
         with self._lock:
-            query = query.strip()
-            if not query:
+            fts_queries = build_fts_queries(query)
+            if not fts_queries:
                 return []
 
-            params: list = [query, min_trust]
             category_clause = ""
+            category_params: list = []
             if category is not None:
                 category_clause = "AND f.category = ?"
-                params.append(category)
-            params.append(limit)
+                category_params.append(category)
 
             sql = f"""
                 SELECT f.fact_id, f.content, f.category, f.tags,
@@ -225,7 +260,12 @@ class MemoryStore:
                 LIMIT ?
             """
 
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = []
+            for fts_query in fts_queries:
+                params: list = [fts_query, min_trust, *category_params, limit]
+                rows = self._conn.execute(sql, params).fetchall()
+                if rows:
+                    break
             results = [self._row_to_dict(r) for r in rows]
 
             if results:

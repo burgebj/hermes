@@ -18,6 +18,11 @@ try:
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
 
+try:
+    from .store import build_fts_queries
+except ImportError:
+    from store import build_fts_queries  # type: ignore[no-redef]
+
 
 class FactRetriever:
     """Multi-strategy fact retrieval with trust-weighted scoring."""
@@ -491,19 +496,20 @@ class FactRetriever:
         with rank scoring. Normalizes FTS5 rank to [0, 1] range.
         """
         conn = self.store._conn
+        fts_queries = build_fts_queries(query)
+        if not fts_queries:
+            return []
 
         # Build query - FTS5 rank is negative (lower = better match)
         # We need to join facts_fts with facts to get all columns
-        params: list = []
         where_clauses = ["facts_fts MATCH ?"]
-        params.append(query)
+        category_params: list = []
 
         if category:
             where_clauses.append("f.category = ?")
-            params.append(category)
+            category_params.append(category)
 
         where_clauses.append("f.trust_score >= ?")
-        params.append(min_trust)
 
         where_sql = " AND ".join(where_clauses)
 
@@ -515,13 +521,16 @@ class FactRetriever:
             ORDER BY facts_fts.rank
             LIMIT ?
         """
-        params.append(limit)
-
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except Exception:
-            # FTS5 MATCH can fail on malformed queries — fall back to empty
-            return []
+        rows = []
+        for fts_query in fts_queries:
+            params: list = [fts_query, *category_params, min_trust, limit]
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except Exception:
+                # FTS5 MATCH can fail on malformed queries — try the broader fallback.
+                rows = []
+            if rows:
+                break
 
         if not rows:
             return []
