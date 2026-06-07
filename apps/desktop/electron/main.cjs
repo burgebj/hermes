@@ -26,7 +26,7 @@ const { fileURLToPath, pathToFileURL } = require('node:url')
 const { execFileSync, spawn } = require('node:child_process')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
-const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
+const { canImportHermesCli, findSupportedPosixPython, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const {
@@ -1027,12 +1027,11 @@ function findPythonForRoot(root) {
 
 function findSystemPython() {
   if (!IS_WINDOWS) {
-    // POSIX systems: PATH lookup is safe.
-    for (const command of ['python3', 'python']) {
-      const candidate = findOnPath(command)
-      if (candidate) return candidate
-    }
-    return null
+    return findSupportedPosixPython({
+      platform: process.platform,
+      resolveCommand: findOnPath,
+      fileExists
+    })
   }
 
   // Windows: PATH-based detection has TWO landmines we have to dodge.

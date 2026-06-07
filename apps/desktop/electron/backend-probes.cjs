@@ -33,8 +33,10 @@
  */
 
 const { execFileSync } = require('node:child_process')
+const path = require('node:path')
 
 const PROBE_TIMEOUT_MS = 5000
+const POSIX_MIN_PYTHON_MINOR = 10
 
 /**
  * Return true iff `python -c "import hermes_cli"` exits 0.
@@ -99,8 +101,101 @@ function verifyHermesCli(hermesCommand, opts = {}) {
   }
 }
 
+/**
+ * Return true iff the given POSIX Python reports version >= 3.10.
+ *
+ * macOS Finder/Dock launches often inherit a minimal PATH where
+ * `/usr/bin/python3` (3.9) wins even when a newer Homebrew or
+ * `/usr/local/bin` install exists. Hermes itself only needs to know
+ * whether the interpreter is modern enough to import hermes_cli; the
+ * desktop bootstrap later verifies the module import separately.
+ *
+ * @param {string} pythonPath
+ * @param {object} [opts]
+ * @param {typeof execFileSync} [opts.execFileSyncImpl]
+ * @returns {boolean}
+ */
+function isSupportedPosixPython(pythonPath, opts = {}) {
+  if (!pythonPath) return false
+  const execFileSyncImpl = opts.execFileSyncImpl || execFileSync
+  try {
+    const raw = execFileSyncImpl(
+      pythonPath,
+      ['-c', 'import sys; print(".".join(map(str, sys.version_info[:2])))'],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: PROBE_TIMEOUT_MS,
+        windowsHide: true
+      }
+    )
+    const [major, minor] = String(raw)
+      .trim()
+      .split('.')
+      .map(value => Number.parseInt(value, 10))
+    return major > 3 || (major === 3 && minor >= POSIX_MIN_PYTHON_MINOR)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Resolve the first supported POSIX Python candidate.
+ *
+ * On macOS we check the common Homebrew/install locations first because
+ * GUI-launched apps frequently do not inherit `/opt/homebrew/bin` or
+ * `/usr/local/bin` in PATH. We still fall back to PATH-based discovery,
+ * but only after filtering out 3.9-era interpreters that would crash on
+ * Hermes' Python 3.10+ syntax.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.platform]
+ * @param {(command: string) => string | null} [opts.resolveCommand]
+ * @param {(candidate: string) => boolean} [opts.fileExists]
+ * @param {typeof execFileSync} [opts.execFileSyncImpl]
+ * @param {typeof path} [opts.pathModule]
+ * @returns {string | null}
+ */
+function findSupportedPosixPython(opts = {}) {
+  const platform = opts.platform || process.platform
+  const resolveCommand = opts.resolveCommand || (() => null)
+  const fileExists = opts.fileExists || (() => false)
+  const execFileSyncImpl = opts.execFileSyncImpl || execFileSync
+  const pathModule = opts.pathModule || path
+  const commands = ['python3', 'python']
+  const candidates = []
+
+  if (platform === 'darwin') {
+    for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) {
+      for (const command of commands) {
+        const candidate = pathModule.join(dir, command)
+        if (fileExists(candidate)) candidates.push(candidate)
+      }
+    }
+  }
+
+  for (const command of commands) {
+    const candidate = resolveCommand(command)
+    if (candidate) candidates.push(candidate)
+  }
+
+  const seen = new Set()
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue
+    seen.add(candidate)
+    if (isSupportedPosixPython(candidate, { execFileSyncImpl })) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
 module.exports = {
   canImportHermesCli,
+  findSupportedPosixPython,
+  isSupportedPosixPython,
+  POSIX_MIN_PYTHON_MINOR,
   verifyHermesCli,
   PROBE_TIMEOUT_MS
 }
