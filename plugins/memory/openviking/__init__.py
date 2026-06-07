@@ -464,6 +464,18 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 "default": "hermes",
                 "env_var": "OPENVIKING_AGENT",
             },
+            {
+                "key": "isolate_user_by_agent",
+                "description": "Expand user-scope shorthands with /agent/{id} (viking://user/memories → viking://user/{user}/agent/{agent}/memories) (default: false)",
+                "default": False,
+                "env_var": "OPENVIKING_ISOLATE_USER_BY_AGENT",
+            },
+            {
+                "key": "isolate_agent_by_user",
+                "description": "Expand agent-scope shorthands with /user/{id} (viking://agent/memories → viking://agent/{agent}/user/{user}/memories) (default: false)",
+                "default": False,
+                "env_var": "OPENVIKING_ISOLATE_AGENT_BY_USER",
+            },
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -472,6 +484,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._account = os.environ.get("OPENVIKING_ACCOUNT", "default")
         self._user = os.environ.get("OPENVIKING_USER", "default")
         self._agent = os.environ.get("OPENVIKING_AGENT", "hermes")
+        self._isolate_user_by_agent = os.environ.get("OPENVIKING_ISOLATE_USER_BY_AGENT", "false").lower() in ("true", "1", "yes")
+        self._isolate_agent_by_user = os.environ.get("OPENVIKING_ISOLATE_AGENT_BY_USER", "false").lower() in ("true", "1", "yes")
         self._session_id = session_id
         self._turn_count = 0
 
@@ -631,6 +645,42 @@ class OpenVikingMemoryProvider(MemoryProvider):
         slug = uuid.uuid4().hex[:12]
         return f"viking://user/{self._user}/agent/{self._agent}/memories/{subdir}/mem_{slug}.md"
 
+    def _expand_scope(self, uri: str) -> str:
+        """Expand OpenViking shorthand URIs to canonical paths based on isolation flags.
+
+        Expands shorthand URIs to canonical paths based on isolation flags:
+          viking://user/memories  →  viking://user/{user}[/agent/{agent}]/memories
+          viking://agent/memories →  viking://agent/{agent}[/user/{user}]/memories
+        Non-shorthand URIs pass through unchanged.
+        """
+        if not uri.startswith("viking://"):
+            return uri
+
+        parts = uri[len("viking://"):].split("/")
+        if len(parts) < 2:
+            return uri
+
+        scope = parts[0]
+        second = parts[1]
+        suffix = parts[2:] if len(parts) > 2 else []
+        suffix_str = f"/{'/'.join(suffix)}" if suffix else ""
+
+        # User scope shorthands: viking://user/{memories|profile.md|...}
+        user_shorthands = {"memories", "profile.md", ".abstract.md", ".overview.md"}
+        if scope == "user" and second in user_shorthands:
+            if self._isolate_user_by_agent:
+                return f"viking://user/{self._user}/agent/{self._agent}/{second}{suffix_str}"
+            return f"viking://user/{self._user}/{second}{suffix_str}"
+
+        # Agent scope shorthands: viking://agent/{memories|skills|...}
+        agent_shorthands = {"memories", "skills", "instructions", "workspaces"}
+        if scope == "agent" and second in agent_shorthands:
+            if self._isolate_agent_by_user:
+                return f"viking://agent/{self._agent}/user/{self._user}/{second}{suffix_str}"
+            return f"viking://agent/{self._agent}/{second}{suffix_str}"
+
+        return uri
+
     def on_memory_write(
         self,
         action: str,
@@ -746,7 +796,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if mode != "auto":
             payload["mode"] = mode
         if args.get("scope"):
-            payload["target_uri"] = args["scope"]
+            payload["target_uri"] = self._expand_scope(args["scope"])
         if args.get("limit"):
             payload["top_k"] = args["limit"]
 
@@ -853,7 +903,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def _tool_browse(self, args: dict) -> str:
         action = args.get("action", "list")
-        path = args.get("path", "viking://")
+        path = self._expand_scope(args.get("path", "viking://"))
 
         # Map action to the correct fs endpoint (all GET with uri= param)
         endpoint_map = {"tree": "/api/v1/fs/tree", "list": "/api/v1/fs/ls", "stat": "/api/v1/fs/stat"}
