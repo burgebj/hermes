@@ -3201,15 +3201,44 @@ class BasePlatformAdapter(ABC):
                 _prev = existing_cb
                 _new = callback
 
-                def _chained() -> None:
+                def _chained() -> Any:
                     try:
-                        _prev()
+                        _prev_result = _prev()
                     except Exception:
                         logger.debug("Post-delivery callback failed", exc_info=True)
+                        _prev_result = None
+
+                    if inspect.isawaitable(_prev_result):
+                        async def _run_async_tail() -> None:
+                            try:
+                                await _prev_result
+                            except Exception:
+                                logger.debug("Post-delivery callback failed", exc_info=True)
+                            try:
+                                _new_result = _new()
+                                if inspect.isawaitable(_new_result):
+                                    await _new_result
+                            except Exception:
+                                logger.debug("Post-delivery callback failed", exc_info=True)
+
+                        return _run_async_tail()
+
                     try:
-                        _new()
+                        _new_result = _new()
                     except Exception:
                         logger.debug("Post-delivery callback failed", exc_info=True)
+                        return None
+
+                    if inspect.isawaitable(_new_result):
+                        async def _await_new() -> None:
+                            try:
+                                await _new_result
+                            except Exception:
+                                logger.debug("Post-delivery callback failed", exc_info=True)
+
+                        return _await_new()
+
+                    return None
 
                 callback = _chained
 

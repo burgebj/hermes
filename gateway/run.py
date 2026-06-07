@@ -2090,8 +2090,9 @@ class GatewayRunner:
         from gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
 
-        # Per-chat voice reply mode: "off" | "voice_only" | "all"
+        # Per-chat/topic voice reply mode: "off" | "voice_only" | "all" | "narration"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        self._tts_narration_store = None
         # Recent voice transcripts per (guild,user) for duplicate suppression.
         # Protects against the same utterance being emitted twice by the voice
         # capture / STT pipeline, which otherwise produces a second delayed reply.
@@ -2194,10 +2195,56 @@ class GatewayRunner:
     # -- Voice mode persistence ------------------------------------------
 
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
+    _TTS_NARRATION_DB_PATH = _hermes_home / "tts_narration.sqlite"
 
     def _voice_key(self, platform: Platform, chat_id: str) -> str:
         """Return a platform-namespaced key for voice mode state."""
         return f"{platform.value}:{chat_id}"
+
+    def _voice_topic_key(self, source: SessionSource) -> Optional[str]:
+        """Return the platform/chat/thread key for topic-scoped voice state."""
+        thread_id = getattr(source, "thread_id", None)
+        if thread_id in {None, ""}:
+            return None
+        return f"{source.platform.value}:{source.chat_id}:{thread_id}"
+
+    def _legacy_voice_topic_key(self, source: SessionSource) -> Optional[str]:
+        """Return the short-lived legacy narration topic key, if applicable."""
+        thread_id = getattr(source, "thread_id", None)
+        if thread_id in {None, ""}:
+            return None
+        return f"{source.platform.value}:{source.chat_id}:thread:{thread_id}"
+
+    @staticmethod
+    def _normalize_voice_mode_key(key: str) -> str:
+        """Normalize persisted voice keys to the established topic key shape."""
+        parts = str(key).split(":")
+        if len(parts) == 4 and parts[0] == "telegram" and parts[2] == "thread":
+            return f"{parts[0]}:{parts[1]}:{parts[3]}"
+        return str(key)
+
+    @staticmethod
+    def _merge_loaded_voice_mode(result: Dict[str, str], raw_key: str, key: str, mode: str) -> None:
+        """Merge a loaded voice-mode entry, resolving canonical/legacy conflicts."""
+        if key not in result:
+            result[key] = mode
+            return
+        if raw_key == key:
+            result[key] = mode
+            return
+        if result[key] in {"all", "voice_only"} and mode in {"off", "narration"}:
+            result[key] = mode
+
+    def _resolve_voice_mode(self, source: SessionSource) -> tuple[str, str]:
+        """Resolve effective voice mode, with topic scope overriding chat scope."""
+        topic_key = self._voice_topic_key(source)
+        if topic_key and topic_key in self._voice_mode:
+            return self._voice_mode.get(topic_key, "off"), topic_key
+        legacy_topic_key = self._legacy_voice_topic_key(source)
+        if legacy_topic_key and legacy_topic_key in self._voice_mode:
+            return self._voice_mode.get(legacy_topic_key, "off"), legacy_topic_key
+        chat_key = self._voice_key(source.platform, source.chat_id)
+        return self._voice_mode.get(chat_key, "off"), chat_key
 
     def _load_voice_modes(self) -> Dict[str, str]:
         try:
@@ -2208,12 +2255,13 @@ class GatewayRunner:
         if not isinstance(data, dict):
             return {}
 
-        valid_modes = {"off", "voice_only", "all"}
+        valid_modes = {"off", "voice_only", "all", "narration"}
         result = {}
         for chat_id, mode in data.items():
             if mode not in valid_modes:
                 continue
-            key = str(chat_id)
+            raw_key = str(chat_id)
+            key = self._normalize_voice_mode_key(raw_key)
             # Skip legacy unprefixed keys (warn and skip)
             if ":" not in key:
                 logger.warning(
@@ -2222,7 +2270,7 @@ class GatewayRunner:
                     key,
                 )
                 continue
-            result[key] = mode
+            self._merge_loaded_voice_mode(result, raw_key, key, mode)
         return result
 
     def _save_voice_modes(self) -> None:
@@ -9851,6 +9899,8 @@ class GatewayRunner:
             _already_sent = bool(agent_result.get("already_sent"))
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
                 await self._send_voice_reply(event, response)
+            if self._should_enqueue_narration(event, response, agent_messages):
+                await self._defer_narration_after_delivery(event, response)
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -11993,7 +12043,7 @@ class GatewayRunner:
         return None
 
     async def _handle_voice_command(self, event: MessageEvent) -> str:
-        """Handle /voice [on|off|tts|channel|leave|status] command."""
+        """Handle /voice [on|off|tts|narrate|channel|leave|status] command."""
         args = event.get_command_args().strip().lower()
         chat_id = event.source.chat_id
         platform = event.source.platform
@@ -12001,13 +12051,34 @@ class GatewayRunner:
 
         adapter = self.adapters.get(platform)
 
-        if args in {"on", "enable"}:
+        if args in {"narrate", "narration"} or args in {"narrate topic", "narration topic"}:
+            narrate_key = self._voice_topic_key(event.source) or voice_key
+            self._voice_mode[narrate_key] = "narration"
+            self._save_voice_modes()
+            if adapter and narrate_key == voice_key:
+                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=False)
+            scope = "topic" if narrate_key != voice_key else "chat"
+            return f"Long-form narration enabled for this {scope}. I’ll send text first, then narrated voice chunks."
+        elif args in {"narrate chat", "narration chat"}:
+            self._voice_mode[voice_key] = "narration"
+            self._save_voice_modes()
+            if adapter:
+                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=False)
+            return "Long-form narration enabled for this chat. I’ll send text first, then narrated voice chunks."
+        elif args in {"on", "enable"}:
             self._voice_mode[voice_key] = "voice_only"
             self._save_voice_modes()
             if adapter:
                 self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
             return t("gateway.voice.enabled_voice_only")
         elif args in {"off", "disable"}:
+            target_key = self._voice_topic_key(event.source) or voice_key
+            self._voice_mode[target_key] = "off"
+            self._save_voice_modes()
+            if adapter and target_key == voice_key:
+                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            return t("gateway.voice.disabled_text")
+        elif args in {"off chat", "disable chat"}:
             self._voice_mode[voice_key] = "off"
             self._save_voice_modes()
             if adapter:
@@ -12024,13 +12095,13 @@ class GatewayRunner:
         elif args == "leave":
             return await self._handle_voice_channel_leave(event)
         elif args == "status":
-            mode = self._voice_mode.get(voice_key, "off")
+            mode, effective_key = self._resolve_voice_mode(event.source)
             labels = {
                 "off": t("gateway.voice.label_off"),
                 "voice_only": t("gateway.voice.label_voice_only"),
                 "all": t("gateway.voice.label_all"),
+                "narration": "long-form narration",
             }
-            # Append voice channel info if connected
             adapter = self.adapters.get(event.source.platform)
             guild_id = self._get_guild_id(event)
             if guild_id and hasattr(adapter, "get_voice_channel_info"):
@@ -12045,9 +12116,9 @@ class GatewayRunner:
                         status = t("gateway.voice.speaking") if m.get("is_speaking") else ""
                         lines.append(t("gateway.voice.status_member", name=m['display_name'], status=status))
                     return "\n".join(lines)
-            return t("gateway.voice.status_mode", label=labels.get(mode, mode))
+            suffix = " (topic override)" if effective_key != voice_key else ""
+            return t("gateway.voice.status_mode", label=labels.get(mode, mode) + suffix)
         else:
-            # Toggle: off → on, on/all → off
             current = self._voice_mode.get(voice_key, "off")
             if current == "off":
                 self._voice_mode[voice_key] = "voice_only"
@@ -12266,6 +12337,23 @@ class GatewayRunner:
 
         await adapter.handle_message(event)
 
+    def _agent_already_called_tts(self, agent_messages: list) -> bool:
+        """Return True when the current turn already invoked TTS."""
+        messages = agent_messages or []
+        last_user_idx = -1
+        for idx, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_idx = idx
+        current_turn = messages[last_user_idx + 1:]
+        return any(
+            msg.get("role") == "assistant"
+            and any(
+                tc.get("function", {}).get("name") == "text_to_speech"
+                for tc in (msg.get("tool_calls") or [])
+            )
+            for msg in current_turn
+        )
+
     def _should_send_voice_reply(
         self,
         event: MessageEvent,
@@ -12273,22 +12361,13 @@ class GatewayRunner:
         agent_messages: list,
         already_sent: bool = False,
     ) -> bool:
-        """Decide whether the runner should send a TTS voice reply.
-
-        Returns False when:
-        - voice_mode is off for this chat
-        - response is empty or an error
-        - agent already called text_to_speech tool (dedup)
-        - voice input and base adapter auto-TTS already handled it (skip_double)
-          UNLESS streaming already consumed the response (already_sent=True),
-          in which case the base adapter won't have text for auto-TTS so the
-          runner must handle it.
-        """
+        """Decide whether the runner should send a TTS voice reply."""
         if not response or response.startswith("Error:"):
             return False
 
-        chat_id = event.source.chat_id
-        voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
+        voice_mode, _scope_key = self._resolve_voice_mode(event.source)
+        if voice_mode == "narration":
+            return False
         is_voice_input = (event.message_type == MessageType.VOICE)
 
         should = (
@@ -12298,27 +12377,183 @@ class GatewayRunner:
         if not should:
             return False
 
-        # Dedup: agent already called TTS tool
-        has_agent_tts = any(
-            msg.get("role") == "assistant"
-            and any(
-                tc.get("function", {}).get("name") == "text_to_speech"
-                for tc in (msg.get("tool_calls") or [])
-            )
-            for msg in agent_messages
-        )
-        if has_agent_tts:
+        if self._agent_already_called_tts(agent_messages):
             return False
 
-        # Dedup: base adapter auto-TTS already handles voice input
-        # (play_tts plays in VC when connected, so runner can skip).
-        # When streaming already delivered the text (already_sent=True),
-        # the base adapter will receive None and can't run auto-TTS,
-        # so the runner must take over.
         if is_voice_input and not already_sent:
             return False
 
         return True
+
+    def _get_tts_narration_store(self):
+        store = getattr(self, "_tts_narration_store", None)
+        if store is None:
+            from gateway.tts_narration import NarrationJobStore
+            store = NarrationJobStore(getattr(self, "_TTS_NARRATION_DB_PATH"))
+            self._tts_narration_store = store
+        return store
+
+    def _should_enqueue_narration(
+        self,
+        event: MessageEvent,
+        response: str,
+        agent_messages: list,
+    ) -> bool:
+        """Return True when long-form narration should run after text delivery."""
+        if not response or response.startswith("Error:"):
+            return False
+        mode, _scope_key = self._resolve_voice_mode(event.source)
+        if mode != "narration":
+            return False
+        if self._agent_already_called_tts(agent_messages):
+            return False
+        return True
+
+    def _narration_idempotency_key(self, event: MessageEvent, response: str, scope_key: str) -> str:
+        from gateway.tts_narration import _sha256
+        message_id = getattr(event, "message_id", None) or self._reply_anchor_for_event(event) or "no-message-id"
+        return f"{event.source.platform.value}:{event.source.chat_id}:{event.source.thread_id or ''}:{message_id}:{scope_key}:{_sha256(response)}"
+
+    async def _defer_narration_after_delivery(self, event: MessageEvent, response: str) -> None:
+        """Enqueue/process long-form TTS only after the visible text is delivered."""
+        adapter = self.adapters.get(event.source.platform)
+        if not adapter:
+            return
+        session_key = self._session_key_for_source(event.source)
+        generation = None
+        try:
+            active = getattr(adapter, "_active_sessions", {}).get(session_key)
+            generation = getattr(active, "_hermes_run_generation", None)
+        except Exception:
+            generation = None
+
+        async def _deliver() -> None:
+            try:
+                job = self._enqueue_narration_job(event, response)
+                await self._process_narration_job(job.job_id)
+            except Exception as exc:
+                logger.warning("Long-form narration delivery failed: %s", exc, exc_info=True)
+
+        register = getattr(adapter, "register_post_delivery_callback", None)
+        if callable(register):
+            register(session_key, _deliver, generation=generation)
+        else:
+            await _deliver()
+
+    def _enqueue_narration_job(self, event: MessageEvent, response: str):
+        from gateway.tts_narration import (
+            DEFAULT_MAX_CHARS,
+            DEFAULT_TARGET_CHARS,
+            chunk_narration_text,
+            provider_metadata_from_config,
+        )
+        mode, scope_key = self._resolve_voice_mode(event.source)
+        if mode != "narration":
+            raise RuntimeError("Narration mode is not enabled for this source")
+        provider_meta = provider_metadata_from_config()
+        chunks = chunk_narration_text(response, target_chars=DEFAULT_TARGET_CHARS, max_chars=DEFAULT_MAX_CHARS)
+        reply_anchor = self._reply_anchor_for_event(event)
+        metadata = self._thread_metadata_for_source(event.source, reply_anchor) or {}
+        return self._get_tts_narration_store().enqueue_job(
+            platform=event.source.platform.value,
+            chat_id=str(event.source.chat_id),
+            thread_id=str(event.source.thread_id) if event.source.thread_id is not None else None,
+            reply_to_message_id=str(reply_anchor) if reply_anchor is not None else None,
+            idempotency_key=self._narration_idempotency_key(event, response, scope_key),
+            text=response,
+            chunks=chunks,
+            provider=provider_meta.get("provider"),
+            model=provider_meta.get("model"),
+            voice=provider_meta.get("voice"),
+            scope_key=scope_key,
+            policy={"target_chars": DEFAULT_TARGET_CHARS, "max_chars": DEFAULT_MAX_CHARS, "text_first": True},
+            metadata=metadata,
+        )
+
+    async def _process_narration_job(self, job_id: str) -> None:
+        """Generate and send queued narration chunks in order, stopping on failure."""
+        from gateway.tts_narration import narration_audio_path, sanitize_error, text_to_speech_tool
+
+        store = self._get_tts_narration_store()
+        job = store.get_job(job_id)
+        if not job:
+            return
+        if job.get("status") == "complete":
+            return
+        if not store.claim_job(job_id):
+            return
+        job = store.get_job(job_id)
+        if not job:
+            return
+        try:
+            platform = Platform(job["platform"])
+        except Exception:
+            store.update_job_status(job_id, "failed", last_error="unknown platform")
+            return
+        adapter = self.adapters.get(platform)
+        if not adapter or not hasattr(adapter, "send_voice"):
+            store.update_job_status(job_id, "failed", last_error="voice delivery unavailable")
+            return
+
+        chunks = store.list_chunks(job_id)
+        for chunk in chunks:
+            if chunk.get("status") == "sent":
+                continue
+            index = int(chunk["chunk_index"])
+            if chunk.get("status") not in {"queued", "failed"} or not store.claim_chunk(job_id, index):
+                continue
+            total = int(chunk["chunk_total"])
+            audio_path = narration_audio_path(job_id, index)
+            tts_text = chunk["text"]
+            caption = f"Narration part {index}/{total}" if total > 1 else None
+            try:
+                from tools.tts_tool import _strip_markdown_for_tts
+                tts_text = re.sub(r"(?m)^.*MEDIA:\S+.*$", "", tts_text).strip()
+                tts_text = _strip_markdown_for_tts(tts_text)
+                if not tts_text:
+                    store.update_chunk(job_id, index, status="skipped", increment_attempts=True)
+                    continue
+                result_json = await asyncio.to_thread(
+                    text_to_speech_tool,
+                    text=tts_text,
+                    output_path=audio_path,
+                    provider=job.get("provider") or None,
+                )
+                result = json.loads(result_json) if isinstance(result_json, str) else (result_json or {})
+                actual_path = result.get("file_path") or audio_path
+                if not result.get("success") or not os.path.isfile(actual_path):
+                    raise RuntimeError(result.get("error") or "TTS generation failed")
+
+                try:
+                    metadata = json.loads(job.get("metadata_json") or "{}")
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                except Exception:
+                    metadata = {}
+                metadata = dict(metadata)
+                metadata["notify"] = True
+                if job.get("thread_id") and "thread_id" not in metadata:
+                    metadata["thread_id"] = job.get("thread_id")
+                send_result = await adapter.send_voice(
+                    chat_id=job["chat_id"],
+                    audio_path=actual_path,
+                    caption=caption,
+                    reply_to=job.get("reply_to_message_id"),
+                    metadata=metadata,
+                )
+                if not getattr(send_result, "success", False):
+                    raise RuntimeError(getattr(send_result, "error", None) or "voice send failed")
+                store.update_chunk(
+                    job_id, index, status="sent", audio_path=actual_path,
+                    sent_message_id=getattr(send_result, "message_id", None), increment_attempts=True,
+                )
+            except Exception as exc:
+                safe_error = sanitize_error(exc)
+                store.update_chunk(job_id, index, status="failed", last_error=safe_error, increment_attempts=True)
+                store.update_job_status(job_id, "failed", last_error=safe_error)
+                return
+
+        store.update_job_status(job_id, "complete")
 
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
