@@ -51,6 +51,9 @@ const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cac
 const PAIR_ONLY = args.includes('--pair-only');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
+const PROCESS_FROM_ME_GROUPS = ['true', '1', 'yes', 'on'].includes(
+  String(process.env.WHATSAPP_PROCESS_FROM_ME_GROUPS || '').trim().toLowerCase(),
+);
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -266,22 +269,30 @@ async function startSocket() {
 
       // Handle fromMe messages based on mode
       if (msg.key.fromMe) {
-        if (isGroup || chatId.includes('status')) continue;
+        if (chatId.includes('status')) continue;
+        if (isGroup && !PROCESS_FROM_ME_GROUPS) continue;
 
-        if (WHATSAPP_MODE === 'bot') {
-          // Bot mode: separate number. ALL fromMe are echo-backs of our own replies — skip.
+        if (WHATSAPP_MODE === 'bot' && !isGroup) {
+          // Bot mode normally uses a separate number. Non-group fromMe events
+          // are echo-backs of our own replies, so skip them.  Some operators
+          // intentionally run Hermes from the same WhatsApp account in a
+          // dedicated allowlisted group (for example alongside OpenClaw); when
+          // WHATSAPP_PROCESS_FROM_ME_GROUPS is enabled, let those group
+          // messages reach the Python-side group allowlist + mention filters.
           continue;
         }
 
-        // Self-chat mode: only allow messages in the user's own self-chat
-        // WhatsApp now uses LID (Linked Identity Device) format: 67427329167522@lid
-        // AND classic format: 34652029134@s.whatsapp.net
-        // sock.user has both: { id: "number:10@s.whatsapp.net", lid: "lid_number:10@lid" }
-        const myNumber = (sock.user?.id || '').replace(/:.*@/, '@').replace(/@.*/, '');
-        const myLid = (sock.user?.lid || '').replace(/:.*@/, '@').replace(/@.*/, '');
-        const chatNumber = chatId.replace(/@.*/, '');
-        const isSelfChat = (myNumber && chatNumber === myNumber) || (myLid && chatNumber === myLid);
-        if (!isSelfChat) continue;
+        if (WHATSAPP_MODE === 'self-chat') {
+          // Self-chat mode: only allow messages in the user's own self-chat.
+          // WhatsApp now uses LID (Linked Identity Device) format: 67427329167522@lid
+          // AND classic format: 34652029134@s.whatsapp.net
+          // sock.user has both: { id: "number:10@s.whatsapp.net", lid: "lid_number:10@lid" }
+          const myNumber = (sock.user?.id || '').replace(/:.*@/, '@').replace(/@.*/, '');
+          const myLid = (sock.user?.lid || '').replace(/:.*@/, '@').replace(/@.*/, '');
+          const chatNumber = chatId.replace(/@.*/, '');
+          const isSelfChat = (myNumber && chatNumber === myNumber) || (myLid && chatNumber === myLid);
+          if (!isSelfChat) continue;
+        }
       }
 
       // Handle !fromMe messages (from other people) based on mode.
