@@ -719,6 +719,10 @@ def _is_container() -> bool:
     return False
 
 
+# Emit the container chmod-skip warning at most once per process.
+_CHMOD_SKIP_WARNED = False
+
+
 def _secure_file(path):
     """Set file to owner-only read/write (0600). No-op on Windows.
 
@@ -727,8 +731,27 @@ def _secure_file(path):
 
     Skipped in containers — Docker/Podman volume mounts often need broader
     permissions.  Set HERMES_SKIP_CHMOD=1 to force-skip on other systems.
+
+    NOTE: when the chmod is skipped in a container, file-level hardening is
+    disabled and at-rest protection of secrets (.env, auth.json) relies solely
+    on the HERMES_HOME directory mode (0700 by default via ``_secure_dir``) and
+    the volume-mount permissions.  We log a one-time warning so operators don't
+    silently widen HERMES_HOME_MODE on a shared host and expose plaintext keys.
     """
-    if is_managed() or _is_container():
+    if is_managed():
+        return
+    if _is_container():
+        global _CHMOD_SKIP_WARNED
+        if not _CHMOD_SKIP_WARNED:
+            _CHMOD_SKIP_WARNED = True
+            logging.getLogger(__name__).warning(
+                "Skipping 0600 chmod on %s inside a container — file-level "
+                "permission hardening is disabled. At-rest secret protection "
+                "now relies on the HERMES_HOME directory mode (0700 default) and "
+                "the volume-mount permissions; do NOT widen HERMES_HOME_MODE on "
+                "a shared host. Set HERMES_SKIP_CHMOD=0 to force the chmod.",
+                path,
+            )
         return
     try:
         if os.path.exists(str(path)):
