@@ -378,6 +378,23 @@ _LOG_ROTATE_BYTES = 256 * 1024
 
 def main() -> int:
     """Entry point invoked from /etc/cont-init.d/02-reconcile-profiles."""
+    # Dashboard containers do not need per-profile gateway services.
+    # When gateway and dashboard containers share a bind-mounted
+    # HERMES_HOME, both would otherwise race to flock() the same
+    # s6-log lock files under logs/gateways/<profile>/lock, producing
+    # "Resource busy" failures and a restart storm.  Operators can set
+    # HERMES_SKIP_PROFILE_RECONCILE=1 to skip reconciliation entirely
+    # (the official docker-compose.yml sets it for the dashboard
+    # service).  See #XXXXX.
+    if os.environ.get("HERMES_SKIP_PROFILE_RECONCILE", "").lower() in (
+        "1", "true", "yes",
+    ):
+        print(
+            "reconcile: skipping (HERMES_SKIP_PROFILE_RECONCILE is set "
+            "— this container does not need per-profile gateways)"
+        )
+        return 0
+
     hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
     scandir = Path(os.environ.get("S6_PROFILE_GATEWAY_SCANDIR", "/run/service"))
     actions = reconcile_profile_gateways(
