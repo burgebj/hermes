@@ -1,5 +1,6 @@
 import type { Msg } from '../types.js'
 
+import type { Locale } from '../i18n/index.js'
 import { userDisplay } from './messages.js'
 
 const upperBound = (offsets: ArrayLike<number>, target: number) => {
@@ -20,7 +21,8 @@ export const stickyPromptFromViewport = (
   offsets: ArrayLike<number>,
   top: number,
   bottom: number,
-  sticky: boolean
+  sticky: boolean,
+  locale: Locale = 'en'
 ) => {
   if (sticky || !messages.length) {
     return ''
@@ -43,7 +45,7 @@ export const stickyPromptFromViewport = (
     }
 
     return (offsets[i + 1] ?? (offsets[i] ?? 0) + 1) <= top
-      ? userDisplay(messages[i]!.text.trim()).replace(/\s+/g, ' ').trim()
+      ? userDisplay(messages[i]!.text.trim(), locale).replace(/\s+/g, ' ').trim()
       : ''
   }
 

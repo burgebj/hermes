@@ -136,7 +136,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
           }
 
           if (r.is_image) {
-            turnController.pushActivity(attachedImageNotice(r))
+            turnController.pushActivity(attachedImageNotice(r, getUiState().locale))
           } else {
             turnController.pushActivity(`detected file: ${r.name}`)
           }

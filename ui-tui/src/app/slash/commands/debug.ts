@@ -1,4 +1,5 @@
 import { formatBytes, performHeapDump } from '../../../lib/memory.js'
+import { translate } from '../../../i18n/index.js'
 import type { SlashCommand } from '../types.js'
 
 export const debugCommands: SlashCommand[] = [
@@ -7,8 +8,9 @@ export const debugCommands: SlashCommand[] = [
     name: 'heapdump',
     run: (_arg, ctx) => {
       const { heapUsed, rss } = process.memoryUsage()
+      const locale = ctx.ui.locale
 
-      ctx.transcript.sys(`writing heap dump (heap ${formatBytes(heapUsed)} · rss ${formatBytes(rss)})…`)
+      ctx.transcript.sys(translate(locale, 'debug.writingHeapDump', { heap: formatBytes(heapUsed), rss: formatBytes(rss) }))
 
       void performHeapDump('manual').then(r => {
         if (ctx.stale()) {
@@ -16,11 +18,11 @@ export const debugCommands: SlashCommand[] = [
         }
 
         if (!r.success) {
-          return ctx.transcript.sys(`heapdump failed: ${r.error ?? 'unknown error'}`)
+          return ctx.transcript.sys(translate(locale, 'debug.heapdumpFailed', { error: r.error ?? 'unknown error' }))
         }
 
-        ctx.transcript.sys(`heapdump: ${r.heapPath}`)
-        ctx.transcript.sys(`diagnostics: ${r.diagPath}`)
+        ctx.transcript.sys(translate(locale, 'debug.heapdumpPath', { path: r.heapPath ?? '' }))
+        ctx.transcript.sys(translate(locale, 'debug.diagPath', { path: r.diagPath ?? '' }))
       })
     }
   },
@@ -30,16 +32,17 @@ export const debugCommands: SlashCommand[] = [
     name: 'mem',
     run: (_arg, ctx) => {
       const { arrayBuffers, external, heapTotal, heapUsed, rss } = process.memoryUsage()
+      const locale = ctx.ui.locale
 
-      ctx.transcript.panel('Memory', [
+      ctx.transcript.panel(translate(locale, 'section.memory'), [
         {
           rows: [
-            ['heap used', formatBytes(heapUsed)],
-            ['heap total', formatBytes(heapTotal)],
-            ['external', formatBytes(external)],
-            ['array buffers', formatBytes(arrayBuffers)],
-            ['rss', formatBytes(rss)],
-            ['uptime', `${process.uptime().toFixed(0)}s`]
+            [translate(locale, 'debug.heapUsed'), formatBytes(heapUsed)],
+            [translate(locale, 'debug.heapTotal'), formatBytes(heapTotal)],
+            [translate(locale, 'debug.external'), formatBytes(external)],
+            [translate(locale, 'debug.arrayBuffers'), formatBytes(arrayBuffers)],
+            [translate(locale, 'debug.rss'), formatBytes(rss)],
+            [translate(locale, 'debug.uptime'), `${process.uptime().toFixed(0)}s`]
           ]
         }
       ])

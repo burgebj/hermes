@@ -6,6 +6,8 @@ import {
   VERBOSE_TRAIL_MAX_LINES
 } from '../config/limits.js'
 import { VERBS } from '../content/verbs.js'
+import type { Locale } from '../i18n/index.js'
+import { TRAIL_PATTERNS } from '../i18n/index.js'
 import type { ThinkingMode } from '../types.js'
 
 const ESC = String.fromCharCode(27)
@@ -275,7 +277,10 @@ export const splitToolDuration = (call: string) => {
   return match ? { label: match[1]!, duration: match[2]! } : { label: call, duration: '' }
 }
 
-export const isTransientTrailLine = (line: string) => line.startsWith('drafting ') || line === 'analyzing tool output…'
+export const isTransientTrailLine = (line: string, locale: Locale = 'en') => {
+  const p = TRAIL_PATTERNS[locale] ?? TRAIL_PATTERNS.en
+  return line.startsWith(p.draftPrefix) || line === p.analyzeLabel
+}
 
 export const sameToolTrailGroup = (label: string, entry: string) =>
   entry === `${label} ✓` ||

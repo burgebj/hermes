@@ -1122,6 +1122,15 @@ def resolve_skin() -> dict:
         return {}
 
 
+def resolve_language() -> str:
+    """Resolve the language code used by TUI-facing gateway metadata."""
+    try:
+        from agent.i18n import get_language
+        return get_language()
+    except Exception:
+        return "en"
+
+
 def _resolve_model() -> str:
     env = (
         os.environ.get("HERMES_MODEL", "")
@@ -6098,8 +6107,20 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
     }
 )
 
+_TUI_EXTRA_META: dict[str, dict[str, str]] = {
+    "/compact": {"en": "Toggle compact display mode", "zh": "切换紧凑显示模式"},
+    "/details": {"en": "Control agent detail visibility", "zh": "控制 Agent 详情可见性"},
+    "/logs": {"en": "Show recent gateway log lines", "zh": "显示最近的网关日志"},
+    "/mouse": {
+        "en": "Set mouse tracking preset [on|off|toggle|wheel|buttons|all]",
+        "zh": "设置鼠标追踪预设 [on|off|toggle|wheel|buttons|all]",
+    },
+    "/sessions": {"en": "Switch between live TUI sessions", "zh": "切换实时 TUI 会话"},
+}
+
 _TUI_EXTRA: list[tuple[str, str, str]] = [
     ("/compact", "Toggle compact display mode", "TUI"),
+    ("/details", "Control agent detail visibility", "TUI"),
     ("/logs", "Show recent gateway log lines", "TUI"),
     (
         "/mouse",
@@ -6108,6 +6129,13 @@ _TUI_EXTRA: list[tuple[str, str, str]] = [
     ),
     ("/sessions", "Switch between live TUI sessions", "TUI"),
 ]
+
+
+def _tui_extra_meta(command: str) -> str:
+    """Return localized metadata for TUI-only slash commands."""
+    lang = resolve_language().lower()
+    meta = _TUI_EXTRA_META[command]
+    return meta.get(lang, meta.get("en", ""))
 
 # Commands that queue messages onto _pending_input in the CLI.
 # In the TUI the slash worker subprocess has no reader for that queue,
@@ -6161,7 +6189,8 @@ def _(rid, params: dict) -> dict:
                 cat_order.append(cat)
             cat_map[cat].append([c, desc])
 
-        for name, desc, cat in _TUI_EXTRA:
+        for name, _desc, cat in _TUI_EXTRA:
+            desc = _tui_extra_meta(name)
             all_pairs.append([name, desc])
             if cat not in cat_map:
                 cat_map[cat] = []
@@ -7084,26 +7113,8 @@ def _(rid, params: dict) -> dict:
         ][:30]
         text_lower = text.lower()
         extras = [
-            {
-                "text": "/compact",
-                "display": "/compact",
-                "meta": "Toggle compact display mode",
-            },
-            {
-                "text": "/details",
-                "display": "/details",
-                "meta": "Control agent detail visibility",
-            },
-            {
-                "text": "/logs",
-                "display": "/logs",
-                "meta": "Show recent gateway log lines",
-            },
-            {
-                "text": "/mouse",
-                "display": "/mouse",
-                "meta": "Set mouse tracking preset [on|off|toggle|wheel|buttons|all]",
-            },
+            {"text": command, "display": command, "meta": _tui_extra_meta(command)}
+            for command in _TUI_EXTRA_META
         ]
         for extra in extras:
             if extra["text"].startswith(text_lower) and not any(

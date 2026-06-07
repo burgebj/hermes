@@ -50,6 +50,7 @@ export const en: Translations = {
       "Could not load this plugin’s script. Check the Network tab (dashboard-plugins/…) and the server’s plugin path.",
     pluginNotRegistered:
       "The plugin’s script did not call register(), or the script errored. Open the browser console for details.",
+    listPlaceholder: "comma-separated values",
   },
 
   app: {
@@ -72,19 +73,31 @@ export const en: Translations = {
     nav: {
       analytics: "Analytics",
       chat: "Chat",
+      channels: "Channels",
       config: "Config",
       cron: "Cron",
       documentation: "Documentation",
+      achievements: "Achievements",
+      example: "Example",
+      kanban: "Kanban",
       keys: "Keys",
       logs: "Logs",
+      mcp: "MCP",
       models: "Models",
+      pairing: "Pairing",
       profiles: "Profiles",
       plugins: "Plugins",
       sessions: "Sessions",
       skills: "Skills",
+      system: "System",
+      webhooks: "Webhooks",
     },
     modelToolsSheetSubtitle: "& tools",
     modelToolsSheetTitle: "Model",
+    copyLastResponse: "Copy last response",
+    copyLastResponseTitle: "Copy last assistant response as raw markdown",
+    copyLastResponseAria: "Copy last assistant response",
+    copied: "Copied",
     navigation: "Navigation",
     openDocumentation: "Open documentation in a new tab",
     openNavigation: "Open navigation",
@@ -93,6 +106,38 @@ export const en: Translations = {
     statusOverview: "Status overview",
     system: "System",
     webUi: "Web UI",
+    loadingChat: "Loading chat…",
+  },
+
+  chatSidebar: {
+    model: "model",
+    switchModel: "switch model",
+    reconnect: "reconnect",
+    tools: "tools",
+    noToolCalls: "no tool calls yet",
+    eventsDisconnected:
+      "events feed disconnected — tool calls may not appear",
+    eventsRejected: "events feed rejected ({code}) — reload the page",
+  },
+
+  modelPicker: {
+    title: "Switch Model",
+    close: "Close",
+    filterPlaceholder: "Filter providers and models…",
+    currentTag: "current",
+    cancel: "Cancel",
+    switch_: "Switch",
+    noMatches: "no matches",
+    noAuthProviders: "no authenticated providers",
+    loading: "loading…",
+    pickProvider: "pick a provider →",
+    noModelsMatch: "no models match your filter",
+    noModelsListed: "no models listed for this provider",
+    persistGlobal: "Persist globally (otherwise this session only)",
+    savesToConfig: "Saves to config.yaml — applies to new sessions.",
+    modelsCount: "{count} models",
+    unknownModel: "(unknown)",
+    currentModelLabel: "current: {model}",
   },
 
   status: {
@@ -207,6 +252,14 @@ export const en: Translations = {
     toolCalls: "tool calls",
     noModelsData: "No model usage data for this period",
     startSession: "Start a session to see model data here",
+    overrideAuto: "(override — auto: {value})",
+    autoDetected: "auto-detected",
+    loading: "Loading model info…",
+    contextWindow: "Context Window",
+    maxOutput: "Max Output",
+    capabilityTools: "Tools",
+    capabilityVision: "Vision",
+    capabilityReasoning: "Reasoning",
   },
 
   logs: {
@@ -217,6 +270,39 @@ export const en: Translations = {
     component: "Component",
     lines: "Lines",
     noLogLines: "No log lines found",
+  },
+
+  channels: {
+    changesSaved: "Changes are saved. Restart the gateway for them to take effect.",
+    configure: "Configure",
+    configureTitle: "Configure {name}",
+    configuredSummary: "{configured} of {total} channels configured. Credentials are written to {path}; the gateway connects each enabled channel on its next restart.",
+    enablePlatform: "Enable {name}",
+    errorToast: "Error: {error}",
+    failedToRestart: "Failed to restart: {error}",
+    failedToSave: "Failed to save: {error}",
+    gatewayNotRunning: "The gateway is not running. Configure channels here, then start the gateway with hermes gateway start (or the Restart button above).",
+    gatewayRestarting: "Gateway restarting...",
+    keepExistingPlaceholder: "****** (set - leave blank to keep)",
+    nothingToSave: "Nothing to save - fill in at least one field.",
+    platformMessage: "{name}: {message}",
+    requiredField: "{field} is required",
+    restartGateway: "Restart gateway",
+    restartingGateway: "Restarting...",
+    restartNow: "Restart now",
+    saveAndEnable: "Save & enable",
+    saved: "{name} saved",
+    setupGuide: "Setup guide",
+    test: "Test",
+    state: {
+      connected: "Connected",
+      pendingRestart: "Restart to apply",
+      gatewayStopped: "Gateway stopped",
+      disconnected: "Disconnected",
+      notConfigured: "Not configured",
+      disabled: "Disabled",
+      fatal: "Error",
+    },
   },
 
   cron: {
@@ -431,6 +517,7 @@ export const en: Translations = {
     failedToLoadRaw: "Failed to load raw config",
     configImported: "Config imported — review and save",
     invalidJson: "Invalid JSON file",
+    yaml: "YAML",
     categories: {
       general: "General",
       agent: "Agent",
@@ -472,6 +559,16 @@ export const en: Translations = {
     hideValue: "Hide value",
   },
 
+  toolCall: {
+    running: "running",
+    error: "error",
+    done: "done",
+    context: "Context",
+    streaming: "Streaming",
+    diff: "Diff",
+    result: "Result",
+  },
+
   oauth: {
     title: "Provider Logins (OAuth)",
     providerLogins: "Provider Logins (OAuth)",
@@ -509,6 +606,9 @@ export const en: Translations = {
       external: "External CLI",
     },
     expiresIn: "expires in {time}",
+    tokenExchangeFailed: "Token exchange failed",
+    openDocs: "Open {provider} docs",
+    disconnectDescription: "This will remove the stored OAuth tokens for {provider}. You will need to re-authenticate to use it again.",
   },
 
   language: {
@@ -518,6 +618,10 @@ export const en: Translations = {
   theme: {
     title: "Theme",
     switchTheme: "Switch theme",
+    presets: {
+      dock: { label: "Dock" },
+      minimal: { label: "Minimal" },
+    },
   },
 
   achievements: {

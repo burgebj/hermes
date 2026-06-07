@@ -15,6 +15,7 @@ import {
   treeTotals,
   widthByDepth
 } from '../lib/subagentTree.js'
+import { useI18n } from '../i18n/index.js'
 import {
   boundedLiveRenderText,
   compactPreview,
@@ -293,6 +294,7 @@ function SubagentAccordion({
   rails?: TreeRails
   t: Theme
 }) {
+  const { t: ti, tStatus } = useI18n()
   const [open, setOpen] = useState(expanded)
   const [deep, setDeep] = useState(expanded)
   const [openThinking, setOpenThinking] = useState(expanded)
@@ -340,7 +342,7 @@ function SubagentAccordion({
 
   // Suffix packs branch rollup: status · elapsed · per-branch tool/agent/token/cost.
   // Emphasises the numbers the user can't easily eyeball from a flat list.
-  const statusLabel = item.status === 'queued' ? 'queued' : item.status === 'running' ? 'running' : String(item.status)
+  const statusLabel = item.status === 'queued' ? tStatus('queued') : item.status === 'running' ? tStatus('running') : String(item.status)
 
   const rollupBits: string[] = [statusLabel]
 
@@ -421,7 +423,7 @@ function SubagentAccordion({
           }}
           open={openThinking}
           t={t}
-          title="Thinking"
+          title={ti('section.thinking')}
         />
       ),
       key: 'thinking',
@@ -454,7 +456,7 @@ function SubagentAccordion({
           }}
           open={openTools}
           t={t}
-          title="Tool calls"
+          title={ti('section.toolCalls')}
         />
       ),
       key: 'tools',
@@ -495,7 +497,7 @@ function SubagentAccordion({
           }}
           open={openNotes}
           t={t}
-          title="Progress"
+          title={ti('section.progress')}
           tone={statusTone}
         />
       ),
@@ -536,7 +538,7 @@ function SubagentAccordion({
           open={openKids}
           suffix={`d${item.depth + 1} · ${aggregate.descendantCount} total`}
           t={t}
-          title="Spawned"
+          title={ti('section.spawned')}
         />
       ),
       key: 'subagents',
@@ -729,6 +731,7 @@ export const ToolTrail = memo(function ToolTrail({
     [commandOverride, detailsMode, sections]
   )
 
+  const { t: ti } = useI18n()
   const [now, setNow] = useState(() => Date.now())
   // Local toggles own the open state once mounted.  Init from the resolved
   // section visibility so default-expanded sections (thinking/tools) render
@@ -1015,11 +1018,11 @@ export const ToolTrail = memo(function ToolTrail({
             <Text color={t.color.accent}>{openThinking ? '▾ ' : '▸ '}</Text>
             {thinkingLive ? (
               <Text bold color={t.color.text}>
-                Thinking
+                {ti('section.thinking')}
               </Text>
             ) : (
               <Text color={t.color.muted} dim>
-                Thinking
+                {ti('section.thinking')}
               </Text>
             )}
             {thinkingTokensLabel ? (
@@ -1062,7 +1065,7 @@ export const ToolTrail = memo(function ToolTrail({
           open={openTools}
           suffix={toolTokensLabel}
           t={t}
-          title="Tool calls"
+          title={ti('section.toolCalls')}
         />
       ),
       key: 'tools',
@@ -1136,7 +1139,7 @@ export const ToolTrail = memo(function ToolTrail({
           open={openSubagents}
           suffix={suffix}
           t={t}
-          title="Spawn tree"
+          title={ti('section.spawnTree')}
         />
       ),
       key: 'subagents',
@@ -1159,7 +1162,7 @@ export const ToolTrail = memo(function ToolTrail({
           }}
           open={openMeta}
           t={t}
-          title="Activity"
+          title={ti('section.activity')}
           tone={metaTone}
         />
       ),

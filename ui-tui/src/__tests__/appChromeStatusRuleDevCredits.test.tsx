@@ -1,7 +1,8 @@
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { StatusRule } from '../components/appChrome.js'
+import { StatusRuleView } from '../components/appChrome.js'
+import { getThinkingVerbs, getToolVerb, translate, translateStatus, type I18nApi } from '../i18n/index.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 // DEV_CREDITS_MODE is a module-load-time constant (config/env.ts reads
@@ -16,6 +17,14 @@ vi.mock('../config/env.js', async (importOriginal) => {
 })
 
 type ReactNodeLike = React.ReactNode
+
+const enI18n: I18nApi = {
+  locale: 'en',
+  t: (key, vars) => translate('en', key, vars),
+  tStatus: status => translateStatus('en', status),
+  toolVerb: name => getToolVerb('en', name),
+  verbs: getThinkingVerbs('en')
+}
 
 const textContent = (node: ReactNodeLike): string => {
   if (node === null || node === undefined || typeof node === 'boolean') {
@@ -56,8 +65,9 @@ const baseProps = {
 
 describe('StatusRule dev-credits banner (HERMES_DEV_CREDITS on)', () => {
   it('keeps the dev-credits banner visible alongside a notice', () => {
-    const element = StatusRule({
+    const element = StatusRuleView({
       ...baseProps,
+      i18n: enI18n,
       notice: { key: 'credits.90', kind: 'sticky', level: 'warn', text: '⚠ 90% used' },
       usage: { ...baseProps.usage, dev_credits_spent_micros: 12_345 }
     })

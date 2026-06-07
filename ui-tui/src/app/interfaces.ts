@@ -4,6 +4,7 @@ import type { MutableRefObject, ReactNode, RefObject, SetStateAction } from 'rea
 import type { PasteEvent } from '../components/textInput.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { ImageAttachResponse, SessionCloseResponse } from '../gatewayTypes.js'
+import type { Locale } from '../i18n/index.js'
 import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
@@ -121,6 +122,7 @@ export interface UiState {
   info: null | SessionInfo
   liveSessionCount: number
   inlineDiffs: boolean
+  locale: Locale
   mouseTracking: MouseTrackingMode
   notice: Notice | null
   pasteCollapseLines: number
@@ -371,7 +373,10 @@ export interface AppLayoutStatusProps {
   statusColor: string
   stickyPrompt: string
   turnStartedAt: null | number
-  voiceLabel: string
+  voiceRecording: boolean
+  voiceProcessing: boolean
+  voiceEnabled: boolean
+  voiceTts: boolean
 }
 
 export interface AppLayoutTranscriptProps {
