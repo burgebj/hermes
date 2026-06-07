@@ -163,7 +163,11 @@ def cleanup_intent(profile: str = "default") -> None:
 # ---------------------------------------------------------------------------
 
 class RestartLock:
-    """Profile-scoped restart lock with TTL and coalesce support.
+    """Profile-scoped restart lock with ownership, TTL, and coalesce support.
+
+    Lock is created exclusively on the final ``.lock`` path (``O_EXCL``),
+    not via a tmp+rename pattern.  The lock file stores an ``owner_token``
+    that must match on release — a non-owner cannot delete or modify the lock.
 
     Usage::
 
@@ -174,66 +178,121 @@ class RestartLock:
             lock.release()
     """
 
+    _LOCK_SCHEMA_VERSION = 1
+
     def __init__(self, profile: str = "default"):
         self._path = lock_path(profile)
-        self._handle = None
+        self._handle: Any = None
+        self._owner_token: str = ""
+        self._owner_request_id: str = ""
 
     def try_acquire(self, request_id: str, ttl_s: int = _LOCK_TTL_S) -> bool:
         """Try to acquire the lock.  Returns True on success.
 
-        If the lock file exists but is expired (TTL), it is force-released first.
-        If the lock file exists and the request_id matches (within coalesce
-        window), returns True (coalesce).
+        Lock is created with ``O_EXCL`` directly on the final path.
+        If the lock file exists but is expired (TTL) **and** the owner PID
+        is no longer alive, it is force-released first.
+        If the lock file exists and the request_id matches (coalesce),
+        returns True.
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
         # Check existing lock
         existing = self._read_lock()
         if existing:
-            age = time.time() - existing.get("acquired_at", 0)
-            if age > ttl_s:
-                # Expired — force release
-                self._force_release()
-            elif existing.get("request_id") == request_id:
+            age = time.time() - existing.get("created_at", 0)
+            if existing.get("request_id") == request_id:
                 # Coalesce — same request
+                self._owner_token = existing.get("owner_token", "")
+                self._owner_request_id = request_id
                 return True
+            if age > ttl_s:
+                # Expired — verify owner is dead before force-release
+                owner_pid = existing.get("owner_pid", 0)
+                if owner_pid > 0 and _pid_exists(owner_pid):
+                    # Owner still alive — do NOT take over
+                    return False
+                self._force_release()
             else:
                 # Active lock by another request
                 return False
 
-        # Atomic create
+        # Generate owner token for this acquisition
+        self._owner_token = secrets.token_urlsafe(32)
+        self._owner_request_id = request_id
+
+        # Atomic create on FINAL path (O_EXCL prevents overwrite)
         lock_data = {
+            "schema_version": self._LOCK_SCHEMA_VERSION,
             "request_id": request_id,
-            "pid": os.getpid(),
-            "acquired_at": time.time(),
+            "owner_token": self._owner_token,
+            "owner_pid": os.getpid(),
+            "profile": self._path.stem.replace("gateway-restart-", "").replace(".lock", ""),
+            "created_at": time.time(),
+            "expires_at": time.time() + ttl_s,
         }
-        tmp = self._path.with_suffix(".tmp")
         try:
-            fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(lock_data, f)
                 f.flush()
                 os.fsync(f.fileno())
-            tmp.replace(self._path)
         except FileExistsError:
-            # Race lost
+            # Race lost — another process created the lock between our
+            # _read_lock check and this O_EXCL call.
             return False
         except OSError:
             return False
 
-        # Verify we still hold it (no race between create and replace)
-        verify = self._read_lock()
-        if verify and verify.get("request_id") == request_id:
-            return self._acquire_os_lock()
-        return False
+        return True
 
     def release(self) -> None:
-        """Release the lock."""
+        """Release the lock ONLY if we are the owner.
+
+        Reads the lock file and verifies ``owner_token`` and ``request_id``
+        match before deleting.  Non-owner callers are silently rejected.
+        """
         self._release_os_lock()
+        existing = self._read_lock()
+        if not existing:
+            return
+        if (existing.get("owner_token") != self._owner_token
+                or existing.get("request_id") != self._owner_request_id):
+            # Not our lock — do NOT delete
+            return
         try:
             self._path.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def claim_lease(self, request_id: str) -> bool:
+        """Atomically claim the lock from a different process (worker).
+
+        The worker calls this after reading the intent.  It verifies the
+        ``request_id`` matches, then rewrites the lock with the worker's
+        ``owner_token`` so the original coordinator can no longer release it.
+
+        Returns True on success.
+        """
+        existing = self._read_lock()
+        if not existing or existing.get("request_id") != request_id:
+            return False
+        self._owner_token = secrets.token_urlsafe(32)
+        self._owner_request_id = request_id
+        claimed_data = {
+            **existing,
+            "owner_token": self._owner_token,
+            "owner_pid": os.getpid(),
+            "claimed_at": time.time(),
+        }
+        try:
+            self._path.write_text(
+                json.dumps(claimed_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except OSError:
+            return False
 
     def _read_lock(self) -> Optional[dict[str, Any]]:
         if not self._path.exists():
@@ -245,6 +304,7 @@ class RestartLock:
             return None
 
     def _force_release(self) -> None:
+        """Force-release an expired lock whose owner is confirmed dead."""
         self._release_os_lock()
         try:
             self._path.unlink(missing_ok=True)
@@ -397,3 +457,38 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         except OSError:
             pass
         raise
+
+
+def _pid_exists(pid: int) -> bool:
+    """Cross-platform PID existence check (best-effort)."""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return bool(psutil.pid_exists(int(pid)))
+    except ImportError:
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.OpenProcess.restype = ctypes.c_void_p
+            k32.WaitForSingleObject.restype = ctypes.c_uint
+            k32.GetLastError.restype = ctypes.c_uint
+            h = k32.OpenProcess(0x1000 | 0x100000, False, int(pid))
+            if not h:
+                return k32.GetLastError() != 87
+            try:
+                return k32.WaitForSingleObject(h, 0) == 0x102
+            finally:
+                k32.CloseHandle(h)
+        except (OSError, AttributeError):
+            return False
+    else:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+        except PermissionError:
+            return True

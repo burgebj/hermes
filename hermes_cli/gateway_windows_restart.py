@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -126,6 +128,9 @@ def schedule_restart_handoff(
 ) -> dict[str, Any]:
     """Schedule a transactional restart.
 
+    Correct ordering: acquire lock → write intent → spawn worker →
+    worker claims lease → coordinator releases its hold.
+
     Returns a result dict with keys:
     - request_id: str
     - scheduled: bool
@@ -142,7 +147,6 @@ def schedule_restart_handoff(
         cleanup_intent,
         cleanup_status,
         create_intent,
-        read_intent,
         write_status,
     )
     from gateway.status import get_running_pid
@@ -170,49 +174,31 @@ def schedule_restart_handoff(
             "detail": f"Preflight failed: {detail}",
         }
 
-    # Create intent
+    # P0-1: Acquire lock FIRST, before writing intent
+    request_id = str(uuid.uuid4())
+    lock = RestartLock(profile)
+    if not lock.try_acquire(request_id):
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            origin=origin, state="failed", error="lock contention",
+        )
+        return {
+            "request_id": request_id,
+            "scheduled": False,
+            "detail": "Another restart is already in progress",
+        }
+
+    # Lock acquired — now safe to write intent
     intent = create_intent(
         profile=profile,
         target_pid=old_pid,
         task_name=task_name,
         origin=origin,
     )
+    # Use the request_id from intent (it generates its own UUID)
     request_id = intent["request_id"]
-
-    # Acquire lock (coalesce if same request within window)
-    lock = RestartLock(profile)
-    if not lock.try_acquire(request_id):
-        # Check if existing intent is from the same origin within coalesce window
-        existing = read_intent(profile)
-        if existing:
-            cleanup_intent(profile)
-            lock.release()
-            # Retry once
-            intent = create_intent(
-                profile=profile,
-                target_pid=old_pid,
-                task_name=task_name,
-                origin=origin,
-            )
-            request_id = intent["request_id"]
-            if not lock.try_acquire(request_id):
-                append_restart_log(
-                    request_id=request_id, profile=profile, old_pid=old_pid,
-                    origin=origin, state="failed", error="lock contention",
-                )
-                cleanup_intent(profile)
-                return {
-                    "request_id": request_id,
-                    "scheduled": False,
-                    "detail": "Another restart is already in progress",
-                }
-        else:
-            cleanup_intent(profile)
-            return {
-                "request_id": request_id,
-                "scheduled": False,
-                "detail": "Another restart is already in progress",
-            }
+    # Update lock to match intent's request_id
+    lock._owner_request_id = request_id
 
     write_status(profile, "scheduled", request_id=request_id, old_pid=old_pid)
     append_restart_log(
@@ -237,6 +223,11 @@ def schedule_restart_handoff(
             "detail": f"Failed to spawn worker: {e}",
         }
 
+    # P0-4: Wait for worker to claim lease before releasing coordinator hold
+    _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
+    # Coordinator releases its reference — worker now owns the lock
+    lock.release()
+
     result: dict[str, Any] = {
         "request_id": request_id,
         "scheduled": True,
@@ -246,7 +237,7 @@ def schedule_restart_handoff(
 
     # If external CLI with wait, poll for completion
     if wait:
-        completed = _wait_for_completion(profile, timeout_s, lock)
+        completed = _wait_for_completion(profile, timeout_s)
         result["completed"] = completed
         final_status = _read_final_status(profile)
         if final_status:
@@ -258,17 +249,33 @@ def schedule_restart_handoff(
                 result["detail"] = "Restart completed successfully"
         else:
             result["detail"] = "Restart timed out waiting for completion"
-    else:
-        # Don't wait — release lock so worker can acquire it
-        lock.release()
 
     return result
+
+
+def _wait_for_worker_claim(
+    profile: str,
+    request_id: str,
+    timeout_s: float = 10.0,
+) -> bool:
+    """Poll the lock file until the worker claims the lease."""
+    from hermes_cli.gateway_restart_state import lock_path
+    lp = lock_path(profile)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            data = json.loads(lp.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("claimed_at"):
+                return True
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.5)
+    return False
 
 
 def _wait_for_completion(
     profile: str,
     timeout_s: float,
-    lock: RestartLock,
 ) -> bool:
     """Poll status file until completion or timeout."""
     from hermes_cli.gateway_restart_state import read_status
@@ -277,10 +284,8 @@ def _wait_for_completion(
     while time.monotonic() < deadline:
         status = read_status(profile)
         if status and status.get("state") in ("completed", "failed"):
-            lock.release()
             return status["state"] == "completed"
         time.sleep(1.0)
-    lock.release()
     return False
 
 

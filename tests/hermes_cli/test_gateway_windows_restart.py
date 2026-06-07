@@ -94,10 +94,15 @@ class TestScheduleRestartHandoff:
                 "hermes_cli.gateway_windows_restart._spawn_worker",
                 lambda intent, profile: 5678,
             )
+            # Mock _wait_for_worker_claim to return immediately
+            monkeypatch.setattr(
+                "hermes_cli.gateway_windows_restart._wait_for_worker_claim",
+                lambda profile, request_id, timeout_s=10.0: True,
+            )
             # Mock _wait_for_completion to return immediately
             monkeypatch.setattr(
                 "hermes_cli.gateway_windows_restart._wait_for_completion",
-                lambda profile, timeout, lock: True,
+                lambda profile, timeout: True,
             )
             monkeypatch.setattr(
                 "hermes_cli.gateway_windows_restart._read_final_status",

@@ -49,6 +49,7 @@ def main() -> None:
 def _run_restart_transaction(intent: dict[str, Any]) -> None:
     """Execute the full restart transaction."""
     from hermes_cli.gateway_restart_state import (
+        RestartLock,
         append_restart_log,
         cleanup_intent,
         cleanup_status,
@@ -83,6 +84,18 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
         # Nonce from the intent we were spawned with
         pass  # Nonce already validated by the coordinator who wrote it
 
+    # P0-4: Claim lease from coordinator
+    lock = RestartLock(profile)
+    if not lock.claim_lease(request_id):
+        _log_error("lease_claim_failed", "Worker could not claim lease", profile=profile, request_id=request_id)
+        write_status(profile, "failed", request_id=request_id, error="Worker could not claim lease")
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            origin=origin, state="failed", error="lease claim failed",
+        )
+        cleanup_intent(profile)
+        sys.exit(1)
+
     # Restore HERMES_HOME if needed
     if hermes_home and not os.environ.get("HERMES_HOME"):
         os.environ["HERMES_HOME"] = hermes_home
@@ -93,23 +106,25 @@ def _run_restart_transaction(intent: dict[str, Any]) -> None:
         origin=origin, state="preflight_ok",
     )
 
-    # --- Phase 1: Drain and stop old gateway ---
-    _drain_and_stop(profile, request_id, old_pid, origin)
+    try:
+        # --- Phase 1: Drain and stop old gateway ---
+        _drain_and_stop(profile, request_id, old_pid, origin)
 
-    # --- Phase 2: Wait for port release ---
-    port = _detect_gateway_port()
-    if port > 0:
-        write_status(profile, "waiting_port_release", request_id=request_id, port=port)
-        _wait_for_port_release(profile, request_id, old_pid, origin, port)
+        # --- Phase 2: Wait for port release ---
+        port = _detect_gateway_port()
+        if port > 0:
+            write_status(profile, "waiting_port_release", request_id=request_id, port=port)
+            _wait_for_port_release(profile, request_id, old_pid, origin, port)
 
-    # --- Phase 3: Start new gateway ---
-    new_pid, launcher = _start_new_gateway(profile, request_id, old_pid, origin, task_name)
+        # --- Phase 3: Start new gateway ---
+        new_pid, launcher = _start_new_gateway(profile, request_id, old_pid, origin, task_name)
 
-    # --- Phase 4: Verify ---
-    _verify_new_gateway(profile, request_id, old_pid, new_pid, origin, launcher)
-
-    # Cleanup
-    cleanup_intent(profile)
+        # --- Phase 4: Verify ---
+        _verify_new_gateway(profile, request_id, old_pid, new_pid, origin, launcher)
+    finally:
+        # Cleanup: release lease and intent
+        lock.release()
+        cleanup_intent(profile)
 
 
 # ---------------------------------------------------------------------------

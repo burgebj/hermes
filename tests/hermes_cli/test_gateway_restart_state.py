@@ -166,14 +166,35 @@ class TestRestartLock:
         lock = RestartLock("default")
         assert lock.try_acquire("req-1", ttl_s=1) is True
 
-        # Expire it
+        # Expire it and set owner_pid to a dead process
         lp = lock_path("default")
         data = json.loads(lp.read_text())
-        data["acquired_at"] = time.time() - 10
+        data["created_at"] = time.time() - 10
+        data["owner_pid"] = 99999  # Dead PID
         lp.write_text(json.dumps(data))
 
-        # New request should succeed (expired lock is force-released)
+        # New request should succeed (expired lock with dead owner is force-released)
         assert lock.try_acquire("req-2", ttl_s=1) is True
+        lock.release()
+
+    def test_lock_ttl_expiry_owner_alive(self, restart_state_dir):
+        """TTL expired but owner PID still alive — must NOT take over."""
+        import os
+        from hermes_cli.gateway_restart_state import RestartLock, lock_path
+
+        lock = RestartLock("default")
+        assert lock.try_acquire("req-1", ttl_s=1) is True
+
+        # Expire it but keep owner_pid as current process (alive)
+        lp = lock_path("default")
+        data = json.loads(lp.read_text())
+        data["created_at"] = time.time() - 10
+        data["owner_pid"] = os.getpid()  # Alive!
+        lp.write_text(json.dumps(data))
+
+        # New request should FAIL (owner still alive)
+        lock2 = RestartLock("default")
+        assert lock2.try_acquire("req-2", ttl_s=1) is False
         lock.release()
 
     def test_lock_profile_isolation(self, restart_state_dir):
@@ -186,6 +207,88 @@ class TestRestartLock:
         assert lock2.try_acquire("req-2") is True  # Different profile
 
         lock1.release()
+        lock2.release()
+
+    def test_non_owner_release_rejected(self, restart_state_dir):
+        """Non-owner calling release() must NOT delete the lock."""
+        from hermes_cli.gateway_restart_state import RestartLock, lock_path
+
+        lock1 = RestartLock("default")
+        assert lock1.try_acquire("req-1") is True
+
+        # Simulate a non-owner trying to release
+        lock2 = RestartLock("default")
+        lock2.release()  # Should be a no-op
+
+        # Verify lock1 still exists
+        assert lock_path("default").exists()
+        lock1.release()
+
+    def test_owner_token_mismatch_rejected(self, restart_state_dir):
+        """release() with wrong owner_token must NOT delete the lock."""
+        from hermes_cli.gateway_restart_state import RestartLock, lock_path
+
+        lock = RestartLock("default")
+        assert lock.try_acquire("req-1") is True
+
+        # Corrupt the owner_token
+        lp = lock_path("default")
+        data = json.loads(lp.read_text())
+        data["owner_token"] = "wrong-token"
+        lp.write_text(json.dumps(data))
+
+        # release() should detect mismatch and NOT delete
+        lock.release()
+        assert lock_path("default").exists()
+
+        # Clean up with correct token
+        lock._force_release()
+
+    def test_claim_lease(self, restart_state_dir):
+        """Worker can claim lease from coordinator."""
+        from hermes_cli.gateway_restart_state import RestartLock, lock_path
+
+        lock = RestartLock("default")
+        assert lock.try_acquire("req-1") is True
+
+        # Simulate worker claiming lease
+        worker_lock = RestartLock("default")
+        assert worker_lock.claim_lease("req-1") is True
+
+        # Lock should still exist with new owner
+        assert lock_path("default").exists()
+        data = json.loads(lock_path("default").read_text())
+        assert "claimed_at" in data
+
+        # Worker can release
+        worker_lock.release()
+
+    def test_claim_lease_wrong_request_id(self, restart_state_dir):
+        """Worker can't claim lease with wrong request_id."""
+        from hermes_cli.gateway_restart_state import RestartLock
+
+        lock = RestartLock("default")
+        assert lock.try_acquire("req-1") is True
+
+        worker_lock = RestartLock("default")
+        assert worker_lock.claim_lease("req-WRONG") is False
+
+        lock.release()
+
+    def test_concurrent_acquire_contention(self, restart_state_dir):
+        """Two locks competing — only one wins."""
+        from hermes_cli.gateway_restart_state import RestartLock
+
+        lock1 = RestartLock("default")
+        lock2 = RestartLock("default")
+
+        assert lock1.try_acquire("req-1") is True
+        assert lock2.try_acquire("req-2") is False  # Contention
+
+        lock1.release()
+
+        # Now lock2 can acquire
+        assert lock2.try_acquire("req-2") is True
         lock2.release()
 
 
