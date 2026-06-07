@@ -810,7 +810,7 @@ def run_conversation(
     # Use original_user_message (clean input) — user_message may contain
     # injected skill content that bloats / breaks provider queries.
     _ext_prefetch_cache = ""
-    if agent._memory_manager:
+    if agent._memory_manager and getattr(agent, "_memory_auto_inject_recall", True):
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
@@ -987,7 +987,7 @@ def run_conversation(
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
-                if _ext_prefetch_cache:
+                if getattr(agent, "_memory_auto_inject_recall", True) and _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
                         _injections.append(_fenced)
