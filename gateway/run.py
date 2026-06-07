@@ -3699,6 +3699,10 @@ class GatewayRunner:
         messages can be delivered. Best-effort: individual send failures are
         logged and swallowed so they never block the shutdown sequence.
         """
+        # Check if shutdown notifications are disabled
+        if not cfg_get(self.config, "agent", "gateway_shutdown_notifications", default=True):
+            return
+
         active = self._snapshot_running_agents()
         restart_source = self._restart_command_source if self._restart_requested else None
 
