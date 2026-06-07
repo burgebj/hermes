@@ -213,6 +213,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     ),
 }
 
+MODELS_DEV_PROVIDER_IDS: Dict[str, str] = {
+    "kilocode": "kilo",
+    "opencode-zen": "opencode",
+}
+
 
 # -- Resolved provider -------------------------------------------------------
 # The merged result of models.dev + overlay + user config.
@@ -286,17 +291,16 @@ ALIASES: Dict[str, str] = {
     "github-copilot-acp": "copilot-acp",
 
     # opencode (models.dev ID for OpenCode Zen)
-    "opencode-zen": "opencode",
-    "zen": "opencode",
+    "zen": "opencode-zen",
 
     # opencode-go
     "go": "opencode-go",
     "opencode-go-sub": "opencode-go",
 
     # kilo (models.dev ID for KiloCode)
-    "kilocode": "kilo",
-    "kilo-code": "kilo",
-    "kilo-gateway": "kilo",
+    "kilo": "kilocode",
+    "kilo-code": "kilocode",
+    "kilo-gateway": "kilocode",
 
     # deepseek
     "deep-seek": "deepseek",
@@ -417,15 +421,16 @@ def get_provider(name: str) -> Optional[ProviderDef]:
     Returns a fully-resolved ProviderDef or None.
     """
     canonical = normalize_provider(name)
+    models_dev_id = MODELS_DEV_PROVIDER_IDS.get(canonical, canonical)
 
     # Try to get models.dev data
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
-        mdev_info = _mdev_provider(canonical)
+        mdev_info = _mdev_provider(models_dev_id)
     except Exception:
         mdev_info = None
 
-    overlay = HERMES_OVERLAYS.get(canonical)
+    overlay = HERMES_OVERLAYS.get(canonical) or HERMES_OVERLAYS.get(models_dev_id)
 
     if mdev_info is not None:
         # Merge models.dev + overlay
