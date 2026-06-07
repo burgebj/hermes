@@ -137,6 +137,7 @@ def adapter():
     # document-routing tests need to bypass the new gate so messages from fake
     # senders reach handle_message.
     a._is_callback_user_authorized = lambda user_id, **_kw: True
+    a._document_batch_delay_seconds = 0.01
     return a
 
 
@@ -151,6 +152,13 @@ def _redirect_cache(tmp_path, monkeypatch):
     )
 
 
+async def _drain_document_batches(adapter):
+    """Wait for pending Telegram document-burst flush tasks in tests."""
+    tasks = list(getattr(adapter, "_pending_document_batch_tasks", {}).values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # TestDocumentTypeDetection
 # ---------------------------------------------------------------------------
@@ -162,6 +170,7 @@ class TestDocumentTypeDetection:
         msg = _make_message(document=doc)
         update = _make_update(msg)
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert event.message_type == MessageType.DOCUMENT
 
@@ -172,6 +181,7 @@ class TestDocumentTypeDetection:
         msg.document = None  # no media at all
         update = _make_update(msg)
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert event.message_type == MessageType.DOCUMENT
 
@@ -196,6 +206,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert len(event.media_urls) == 1
         assert os.path.exists(event.media_urls[0])
@@ -213,6 +224,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert "Hello from a text file" in event.text
         assert "[Content of notes.txt]" in event.text
@@ -229,6 +241,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert "# Title" in event.text
 
@@ -244,6 +257,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert "file text" in event.text
         assert "Please summarize" in event.text
@@ -256,6 +270,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert event.media_urls and event.media_urls[0].endswith("archive.zip")
         assert event.media_types == ["application/zip"]
@@ -304,6 +319,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert "too large" in event.text
 
@@ -315,6 +331,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert "too large" in event.text or "could not be verified" in event.text
 
@@ -331,6 +348,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert len(event.media_urls) == 1
         assert event.media_types == ["application/pdf"]
@@ -342,6 +360,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert "Unsupported" in event.text
 
@@ -358,6 +377,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         # File should still be cached
         assert len(event.media_urls) == 1
@@ -378,6 +398,7 @@ class TestDocumentDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         # File should be cached
         assert len(event.media_urls) == 1
@@ -408,6 +429,7 @@ class TestVideoDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert event.message_type == MessageType.VIDEO
         assert len(event.media_urls) == 1
@@ -422,6 +444,7 @@ class TestVideoDownloadBlock:
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
+        await _drain_document_batches(adapter)
         event = adapter.handle_message.call_args[0][0]
         assert event.message_type == MessageType.VIDEO
         assert len(event.media_urls) == 1
@@ -473,6 +496,51 @@ class TestMediaGroups:
         assert event.text == "two images"
         assert event.media_urls == ["/tmp/one.jpg", "/tmp/two.jpg"]
         assert len(event.media_types) == 2
+
+    @pytest.mark.asyncio
+    async def test_document_burst_without_media_group_is_buffered_and_combined(self, adapter):
+        """Telegram may deliver multi-document uploads without media_group_id."""
+        adapter._document_batch_delay_seconds = 0.01
+        doc1 = _make_document(file_name="a.docx", file_obj=_make_file_obj(b"doc-one"))
+        doc2 = _make_document(file_name="b.docx", file_obj=_make_file_obj(b"doc-two"))
+        msg1 = _make_message(document=doc1)
+        msg2 = _make_message(document=doc2, caption="Please use these as references")
+
+        with patch(
+            "gateway.platforms.telegram.cache_document_from_bytes",
+            side_effect=["/tmp/a.docx", "/tmp/b.docx"],
+        ):
+            await adapter._handle_media_message(_make_update(msg1), MagicMock())
+            await adapter._handle_media_message(_make_update(msg2), MagicMock())
+            assert adapter.handle_message.await_count == 0
+            await asyncio.sleep(adapter._document_batch_delay_seconds + 0.05)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "Please use these as references"
+        assert event.media_urls == ["/tmp/a.docx", "/tmp/b.docx"]
+        assert event.media_types == [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_pending_document_batch_flush(self, adapter):
+        doc = _make_document(file_name="a.docx", file_obj=_make_file_obj(b"doc-one"))
+        msg = _make_message(document=doc)
+
+        with patch("gateway.platforms.telegram.cache_document_from_bytes", return_value="/tmp/a.docx"):
+            await adapter._handle_media_message(_make_update(msg), MagicMock())
+
+        assert adapter._pending_document_batches
+        assert adapter._pending_document_batch_tasks
+
+        await adapter.disconnect()
+        await asyncio.sleep(adapter._document_batch_delay_seconds + 0.05)
+
+        assert adapter._pending_document_batches == {}
+        assert adapter._pending_document_batch_tasks == {}
+        adapter.handle_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_disconnect_cancels_pending_media_group_flush(self, adapter):
