@@ -17,6 +17,7 @@ const ANSI_OSC_RE = new RegExp(`${ESC}\\][\\s\\S]*?(?:${BEL}|${ESC}\\\\)`, 'g')
 const ANSI_STRING_RE = new RegExp(`${ESC}[PX^_][\\s\\S]*?(?:${BEL}|${ESC}\\\\)`, 'g')
 const ANSI_NON_CSI_ESC_SEQ_RE = new RegExp(`${ESC}(?!\\[|\\]|P|X|\\^|_)[ -/]*[0-~]`, 'g')
 const ANSI_STRAY_ESC_RE = new RegExp(`${ESC}(?!\\[)[\\s\\S]?`, 'g')
+// eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\x00-\x08\x0B\x0C\x0D\x0E-\x1A\x1C-\x1F\x7F]/g
 const WS_RE = /\s+/g
 
@@ -194,6 +195,53 @@ export const toolTrailLabel = (name: string) =>
     .map(p => p[0]!.toUpperCase() + p.slice(1))
     .join(' ') || name
 
+export type ToolEmojiMap = Record<string, string>
+
+const toolEmojiKey = (nameOrLabel: string) => nameOrLabel.trim()
+const toolEmojiSnakeKey = (nameOrLabel: string) => toolEmojiKey(nameOrLabel).toLowerCase().replace(/\s+/g, '_')
+
+export const withToolEmoji = (emojis: ToolEmojiMap = {}, name: string, emoji?: string): ToolEmojiMap => {
+  const cleanName = toolEmojiKey(name)
+  const cleanEmoji = String(emoji ?? '').trim()
+
+  if (!cleanName || !cleanEmoji) {
+    return emojis
+  }
+
+  return {
+    ...emojis,
+    [cleanName]: cleanEmoji,
+    [toolTrailLabel(cleanName)]: cleanEmoji,
+    [toolEmojiSnakeKey(cleanName)]: cleanEmoji
+  }
+}
+
+export const normalizeToolEmojis = (emojis?: ToolEmojiMap): ToolEmojiMap => {
+  let normalized: ToolEmojiMap = {}
+
+  for (const [name, emoji] of Object.entries(emojis ?? {})) {
+    normalized = withToolEmoji(normalized, name, emoji)
+  }
+
+  return normalized
+}
+
+export const toolEmoji = (nameOrLabel: string, fallback = '⚡', emojis?: ToolEmojiMap) => {
+  const key = toolEmojiKey(nameOrLabel)
+
+  return emojis?.[key] ?? emojis?.[toolEmojiSnakeKey(key)] ?? fallback
+}
+
+const toolCallBaseLabel = (call: string) => {
+  const noDuration = call.replace(/ \(\d+(?:\.\d)?s\)$/, '').trim()
+  const paren = noDuration.indexOf('(')
+
+  return (paren >= 0 ? noDuration.slice(0, paren) : noDuration).trim()
+}
+
+export const toolCallEmoji = (call: string, fallback = '⚡', emojis?: ToolEmojiMap) =>
+  toolEmoji(toolCallBaseLabel(call), fallback, emojis)
+
 export const formatToolCall = (name: string, context = '') => {
   const label = toolTrailLabel(name)
   const preview = compactPreview(context, 64)
@@ -240,6 +288,7 @@ export const buildVerboseToolTrailLine = (
   const detail = [verboseToolBlock('Args', argsText), verboseToolBlock(error ? 'Error' : 'Result', resultText)]
     .filter(Boolean)
     .join('\n')
+
   const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : ''
 
   return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`
