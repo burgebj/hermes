@@ -1241,12 +1241,26 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return list(global_entries) if isinstance(global_entries, list) else []
 
 
+def _is_placeholder_only_entry(entry: Any) -> bool:
+    """Return True when a pool entry's only secret is a placeholder value."""
+    if not isinstance(entry, dict):
+        return False
+    token = str(entry.get("access_token") or entry.get("api_key") or "").strip()
+    if not token:
+        return False
+    return token.lower() in _PLACEHOLDER_SECRET_VALUES
+
+
 def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Path:
     """Persist one provider's credential pool under auth.json.
 
     This is the final disk-boundary guard for borrowed/reference-only
     credentials. Callers may pass raw dictionaries, so sanitize here even when
     ``PooledCredential.to_dict()`` already did the same work upstream.
+
+    Entries whose only secret field is a placeholder value (e.g. "none",
+    "changeme") are evicted before writing so stale UI-injected credentials
+    do not block real credentials from being seeded. See issue #38799.
     """
     with _auth_store_lock():
         auth_store = _load_auth_store()
@@ -1254,10 +1268,13 @@ def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Pa
         if not isinstance(pool, dict):
             pool = {}
             auth_store["credential_pool"] = pool
-        pool[provider_id] = [
+        sanitized = [
             sanitize_borrowed_credential_payload(entry, provider_id)
             if isinstance(entry, dict) else entry
             for entry in entries
+        ]
+        pool[provider_id] = [
+            entry for entry in sanitized if not _is_placeholder_only_entry(entry)
         ]
         return _save_auth_store(auth_store)
 
