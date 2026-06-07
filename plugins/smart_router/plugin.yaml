@@ -1,0 +1,12 @@
+name: smart-router
+version: "0.1.0"
+description: >
+  SmartRouter — token-efficient AI task routing with zero ML
+  dependencies.  Classifies incoming messages by task complexity
+  (greeting, analysis, code, architecture) and injects routing
+  recommendations as context.  Includes /route and /route-stats
+  slash commands.  Rule-based — no ONNX, no training data, no
+  external model downloads.
+author: "Qijing Digital Technology / 淇经数字科技"
+hooks:
+  - pre_llm_call
