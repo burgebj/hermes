@@ -399,6 +399,9 @@ def _run_review_in_thread(
             # Match parent's toolset config so ``tools[]`` is byte-identical
             # in the request body — Anthropic's cache key includes it.
             # (The runtime whitelist below still restricts dispatch.)
+            # Match parent's reasoning config so the fork's ``thinking`` /
+            # ``output_config`` are byte-identical in the request body —
+            # Anthropic's cache key is namespaced by ``thinking`` presence.
             review_agent = AIAgent(
                 model=agent.model,
                 max_iterations=16,
@@ -413,6 +416,7 @@ def _run_review_in_thread(
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 skip_memory=True,
+                reasoning_config=getattr(agent, "reasoning_config", None),
             )
             review_agent._memory_write_origin = "background_review"
             review_agent._memory_write_context = "background_review"
