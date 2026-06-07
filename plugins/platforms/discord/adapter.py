@@ -5050,7 +5050,8 @@ class DiscordAdapter(BasePlatformAdapter):
         # (can happen when user sends @mention-only with no other text).
         # When channel_context is present, a bare mention means "catch me up"
         # — the context IS the message, so skip the placeholder.
-        if (not event_text or not event_text.strip()) and not _channel_context:
+        # When media is present, skip too — vision enrichment handles it.
+        if (not event_text or not event_text.strip()) and not _channel_context and not media_urls:
             event_text = "(The user sent a message with no text content)"
 
         _chan = message.channel
