@@ -82,6 +82,12 @@ export interface ClientSessionState {
   messages: ChatMessage[]
   branch: string
   cwd: string
+  model: string
+  provider: string
+  reasoningEffort: string
+  serviceTier: string
+  fast: boolean
+  yolo: boolean
   busy: boolean
   awaitingResponse: boolean
   streamId: string | null
