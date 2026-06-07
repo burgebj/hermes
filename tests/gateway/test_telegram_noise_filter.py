@@ -12,7 +12,6 @@ def test_telegram_status_suppresses_auxiliary_and_retry_noise():
     noisy_messages = [
         "⚠ Auxiliary title generation failed: HTTP 400: Operation contains cybersecurity risk",
         "⚠ Compression summary failed: upstream error. Inserted a fallback context marker.",
-        "🗜️ Compacting context — summarizing earlier conversation so I can continue...",
         "ℹ Configured compression model 'small-model' failed (timeout). Recovered using main model — check auxiliary.compression.model in config.yaml.",
         "⏳ Retrying in 4.2s (attempt 1/3)...",
         "⏱️ Rate limited. Waiting 30.0s (attempt 2/3)...",
@@ -21,6 +20,13 @@ def test_telegram_status_suppresses_auxiliary_and_retry_noise():
 
     for message in noisy_messages:
         assert _prepare_gateway_status_message(Platform.TELEGRAM, "warn", message) is None
+
+
+def test_telegram_status_keeps_context_compaction_notice():
+    """Telegram users should see when a long turn pauses for context compaction."""
+    message = "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
+
+    assert _prepare_gateway_status_message(Platform.TELEGRAM, "lifecycle", message) == message
 
 
 def test_non_telegram_status_is_unchanged():
