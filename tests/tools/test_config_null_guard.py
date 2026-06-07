@@ -33,6 +33,19 @@ class TestTTSProviderNullGuard:
         result = _get_provider({"provider": "OPENAI"})
         assert result == "openai"
 
+    @patch("gateway.session_context.get_session_env")
+    def test_session_voice_provider_override_wins(self, get_session_env_mock):
+        from tools.tts_tool import _get_provider
+
+        get_session_env_mock.side_effect = (
+            lambda name, default="": "xai"
+            if name == "HERMES_VOICE_TTS_PROVIDER_OVERRIDE"
+            else default
+        )
+
+        result = _get_provider({"provider": "edge"})
+        assert result == "xai"
+
 
 # ── Web tools ─────────────────────────────────────────────────────────────
 

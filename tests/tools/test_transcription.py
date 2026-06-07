@@ -78,6 +78,18 @@ class TestGetProvider:
         from tools.transcription_tools import _get_provider
         assert _get_provider({"enabled": False, "provider": "openai"}) == "none"
 
+    def test_session_voice_provider_override_wins(self, monkeypatch):
+        monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+        with patch("gateway.session_context.get_session_env") as get_session_env_mock:
+            get_session_env_mock.side_effect = (
+                lambda name, default="": "xai"
+                if name == "HERMES_VOICE_STT_PROVIDER_OVERRIDE"
+                else default
+            )
+            from tools.transcription_tools import _get_provider
+
+            assert _get_provider({"provider": "local"}) == "xai"
+
 
 # ---------------------------------------------------------------------------
 # File validation

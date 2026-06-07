@@ -60,6 +60,9 @@ _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
 # so background-process notifications stay inside the originating Telegram
 # private-chat topic (those lanes route only with thread id + reply anchor).
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", default=_UNSET)
+_VOICE_STT_PROVIDER_OVERRIDE: ContextVar = ContextVar("HERMES_VOICE_STT_PROVIDER_OVERRIDE", default=_UNSET)
+_VOICE_TTS_PROVIDER_OVERRIDE: ContextVar = ContextVar("HERMES_VOICE_TTS_PROVIDER_OVERRIDE", default=_UNSET)
+_VOICE_TTS_VOICE_OVERRIDE: ContextVar = ContextVar("HERMES_VOICE_TTS_VOICE_OVERRIDE", default=_UNSET)
 
 # Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
 # don't clobber each other's delivery targets.
@@ -77,6 +80,9 @@ _VAR_MAP = {
     "HERMES_SESSION_KEY": _SESSION_KEY,
     "HERMES_SESSION_ID": _SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
+    "HERMES_VOICE_STT_PROVIDER_OVERRIDE": _VOICE_STT_PROVIDER_OVERRIDE,
+    "HERMES_VOICE_TTS_PROVIDER_OVERRIDE": _VOICE_TTS_PROVIDER_OVERRIDE,
+    "HERMES_VOICE_TTS_VOICE_OVERRIDE": _VOICE_TTS_VOICE_OVERRIDE,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -108,6 +114,9 @@ def set_session_vars(
     session_key: str = "",
     message_id: str = "",
     cwd: str = "",
+    voice_stt_provider_override: str = "",
+    voice_tts_provider_override: str = "",
+    voice_tts_voice_override: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -128,6 +137,9 @@ def set_session_vars(
         _SESSION_USER_NAME.set(user_name),
         _SESSION_KEY.set(session_key),
         _SESSION_MESSAGE_ID.set(message_id),
+        _VOICE_STT_PROVIDER_OVERRIDE.set(voice_stt_provider_override),
+        _VOICE_TTS_PROVIDER_OVERRIDE.set(voice_tts_provider_override),
+        _VOICE_TTS_VOICE_OVERRIDE.set(voice_tts_voice_override),
     ]
     try:
         from agent.runtime_cwd import set_session_cwd
@@ -158,6 +170,9 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_USER_NAME,
         _SESSION_KEY,
         _SESSION_MESSAGE_ID,
+        _VOICE_STT_PROVIDER_OVERRIDE,
+        _VOICE_TTS_PROVIDER_OVERRIDE,
+        _VOICE_TTS_VOICE_OVERRIDE,
     ):
         var.set("")
     try:
@@ -192,3 +207,19 @@ def get_session_env(name: str, default: str = "") -> str:
             return value
     # Fall back to os.environ for CLI, cron, and test compatibility
     return os.getenv(name, default)
+
+
+def set_session_env(name: str, value: str):
+    """Set a single session context variable and return its reset token."""
+    var = _VAR_MAP.get(name)
+    if var is None:
+        raise KeyError(name)
+    return var.set(value)
+
+
+def reset_session_env(name: str, token) -> None:
+    """Reset a single session context variable from a token."""
+    var = _VAR_MAP.get(name)
+    if var is None:
+        raise KeyError(name)
+    var.reset(token)

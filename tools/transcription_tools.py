@@ -751,8 +751,19 @@ def _get_provider(stt_config: dict) -> str:
     if not is_stt_enabled(stt_config):
         return "none"
 
-    explicit = "provider" in stt_config
-    provider = stt_config.get("provider", DEFAULT_PROVIDER)
+    try:
+        from gateway.session_context import get_session_env
+
+        override = get_session_env("HERMES_VOICE_STT_PROVIDER_OVERRIDE", "").strip().lower()
+        if override in BUILTIN_STT_PROVIDERS:
+            provider = override
+            explicit = True
+        else:
+            explicit = "provider" in stt_config
+            provider = stt_config.get("provider", DEFAULT_PROVIDER)
+    except Exception:
+        explicit = "provider" in stt_config
+        provider = stt_config.get("provider", DEFAULT_PROVIDER)
 
     # --- Explicit provider: respect the user's choice ----------------------
 
