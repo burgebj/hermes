@@ -3452,6 +3452,29 @@ def run_conversation(
                     ):
                         primary_recovery_attempted = True
                         retry_count = 0
+                        # Transport recovery restored us to the primary
+                        # runtime — give the next iteration's recovery
+                        # path a clean slate so a 429 that follows the
+                        # rebuilt-client attempt isn't blocked by
+                        # stale per-turn state from before the timeout
+                        # cycle.  See #32646: an eager-fallback attempt
+                        # that lost its race with a concurrent session
+                        # mutating the on-disk credential pool can
+                        # leave ``_fallback_index`` bumped past the
+                        # chain length even though ``_fallback_activated``
+                        # stays False.  The eager-fallback gate then
+                        # short-circuits on
+                        # ``_fallback_index >= len(_fallback_chain)``
+                        # without ever calling ``_try_activate_fallback``,
+                        # so the 429s burn the retry budget on the
+                        # primary model with no fallback ever attempted.
+                        # Reset the chain index and the credential-pool
+                        # retry flag so the configured
+                        # ``fallback_providers`` chain always gets a
+                        # fresh attempt after primary recovery.
+                        has_retried_429 = False
+                        agent._fallback_index = 0
+                        agent._fallback_activated = False
                         continue
                     # Try fallback before giving up entirely
                     if agent._has_pending_fallback():
