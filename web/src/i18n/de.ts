@@ -627,6 +627,9 @@ export const de: Translations = {
     createTask: "Aufgabe in dieser Spalte erstellen",
     noTasks: "— keine Aufgaben —",
     unassigned: "nicht zugewiesen",
+    needsAssignee: "Zuständige Person fehlt",
+    needsAssigneeHint:
+      "Abhängigkeiten sind erfüllt, aber der Dispatcher überspringt diese Aufgabe, bis du ein Profil zuweist.",
     untitled: "(ohne Titel)",
     loadingDetail: "Wird geladen…",
     addComment: "Kommentar hinzufügen… (Enter zum Senden)",
@@ -731,6 +734,8 @@ export const de: Translations = {
       "Diese Aufgabe archivieren? Sie verschwindet aus der Standard-Board-Ansicht.",
     confirmBlocked:
       "Diese Aufgabe als blockiert markieren? Der Anspruch des Workers wird freigegeben.",
+    confirmScheduled:
+      "Diese Aufgabe auf Geplant setzen? Verwende dies für bekannte Zeitverzögerungen, nicht für menschliche Blocker.",
     completionSummary:
       "Abschluss-Zusammenfassung für {label}. Diese wird als Ergebnis der Aufgabe gespeichert.",
     completionSummaryRequired:

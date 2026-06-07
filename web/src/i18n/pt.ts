@@ -628,6 +628,9 @@ export const pt: Translations = {
     createTask: "Criar tarefa nesta coluna",
     noTasks: "— sem tarefas —",
     unassigned: "sem atribuição",
+    needsAssignee: "Falta atribuir responsável",
+    needsAssigneeHint:
+      "As dependências estão satisfeitas, mas o dispatcher ignora esta tarefa até atribuíres um perfil.",
     untitled: "(sem título)",
     loadingDetail: "A carregar…",
     addComment: "Adicionar um comentário… (Enter para submeter)",
@@ -732,6 +735,8 @@ export const pt: Translations = {
       "Arquivar esta tarefa? Desaparece da vista padrão do quadro.",
     confirmBlocked:
       "Marcar esta tarefa como bloqueada? A reivindicação do worker é libertada.",
+    confirmScheduled:
+      "Mover esta tarefa para Agendado? Usa isto para atrasos de tempo conhecidos, não para bloqueios humanos.",
     completionSummary:
       "Resumo de conclusão para {label}. Será guardado como o resultado da tarefa.",
     completionSummaryRequired:

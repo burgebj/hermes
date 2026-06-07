@@ -628,6 +628,9 @@ export const hu: Translations = {
     createTask: "Feladat létrehozása ebben az oszlopban",
     noTasks: "— nincsenek feladatok —",
     unassigned: "nincs felelős",
+    needsAssignee: "Felelős szükséges",
+    needsAssigneeHint:
+      "A függőségek teljesültek, de a dispatcher átugorja ezt a feladatot, amíg nem rendel hozzá profilt.",
     untitled: "(névtelen)",
     loadingDetail: "Betöltés…",
     addComment: "Hozzászólás hozzáadása… (Enter a beküldéshez)",
@@ -732,6 +735,8 @@ export const hu: Translations = {
       "Archiválod ezt a feladatot? Eltűnik az alapértelmezett tábla nézetből.",
     confirmBlocked:
       "Megjelölöd ezt a feladatot blokkoltként? A worker foglalása felszabadul.",
+    confirmScheduled:
+      "Áthelyezed ezt a feladatot Ütemezett állapotba? Ezt használd ismert időbeli késések esetén, ne emberi blokkolóknál.",
     completionSummary:
       "Befejezési összefoglaló a következőhöz: {label}. Ez a feladat eredményeként kerül tárolásra.",
     completionSummaryRequired:

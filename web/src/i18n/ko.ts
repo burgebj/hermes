@@ -627,6 +627,9 @@ export const ko: Translations = {
     createTask: "이 열에 작업 만들기",
     noTasks: "— 작업 없음 —",
     unassigned: "미지정",
+    needsAssignee: "담당자 필요",
+    needsAssigneeHint:
+      "종속성은 충족되었지만, 프로필을 지정할 때까지 디스패처가 이 작업을 건너뜁니다.",
     untitled: "(제목 없음)",
     loadingDetail: "불러오는 중…",
     addComment: "댓글 추가… (Enter로 전송)",
@@ -731,6 +734,8 @@ export const ko: Translations = {
       "이 작업을 보관하시겠습니까? 기본 보드 보기에서 사라집니다.",
     confirmBlocked:
       "이 작업을 차단됨으로 표시하시겠습니까? 워커의 점유가 해제됩니다.",
+    confirmScheduled:
+      "이 작업을 예약됨으로 이동하시겠습니까? 사람으로 인한 차단이 아닌, 알려진 시간 지연에 사용하세요.",
     completionSummary:
       "{label}의 완료 요약입니다. 이는 작업 결과로 저장됩니다.",
     completionSummaryRequired:

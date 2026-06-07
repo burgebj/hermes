@@ -627,6 +627,9 @@ export const fr: Translations = {
     createTask: "Créer une tâche dans cette colonne",
     noTasks: "— aucune tâche —",
     unassigned: "non assigné",
+    needsAssignee: "Assignation requise",
+    needsAssigneeHint:
+      "Les dépendances sont satisfaites, mais le dispatcher ignore cette tâche tant que vous n'assignez pas de profil.",
     untitled: "(sans titre)",
     loadingDetail: "Chargement…",
     addComment: "Ajouter un commentaire… (Enter pour envoyer)",
@@ -731,6 +734,8 @@ export const fr: Translations = {
       "Archiver cette tâche ? Elle disparaîtra de la vue par défaut du tableau.",
     confirmBlocked:
       "Marquer cette tâche comme bloquée ? La revendication du worker est libérée.",
+    confirmScheduled:
+      "Déplacer cette tâche vers Planifié ? Utilisez ceci pour des délais connus plutôt que pour des bloqueurs humains.",
     completionSummary:
       "Résumé d'achèvement pour {label}. Stocké comme result de la tâche.",
     completionSummaryRequired:

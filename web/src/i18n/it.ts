@@ -627,6 +627,9 @@ export const it: Translations = {
     createTask: "Crea attività in questa colonna",
     noTasks: "— nessuna attività —",
     unassigned: "non assegnato",
+    needsAssignee: "Assegnatario mancante",
+    needsAssigneeHint:
+      "Le dipendenze sono soddisfatte, ma il dispatcher salta questa attività finché non assegni un profilo.",
     untitled: "(senza titolo)",
     loadingDetail: "Caricamento…",
     addComment: "Aggiungi un commento… (Enter per inviare)",
@@ -731,6 +734,8 @@ export const it: Translations = {
       "Archiviare questa attività? Sparirà dalla vista predefinita della bacheca.",
     confirmBlocked:
       "Contrassegnare questa attività come bloccata? La presa in carico del worker viene rilasciata.",
+    confirmScheduled:
+      "Spostare questa attività in Pianificato? Usalo per ritardi temporali noti, non per blocchi umani.",
     completionSummary:
       "Riepilogo di completamento per {label}. Memorizzato come result dell'attività.",
     completionSummaryRequired:

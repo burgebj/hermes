@@ -627,6 +627,9 @@ export const ja: Translations = {
     createTask: "この列にタスクを作成",
     noTasks: "— タスクはありません —",
     unassigned: "未割り当て",
+    needsAssignee: "担当者が必要",
+    needsAssigneeHint:
+      "依存関係は満たされていますが、プロファイルを割り当てるまで、ディスパッチャーはこのタスクをスキップします。",
     untitled: "（タイトルなし）",
     loadingDetail: "読み込み中…",
     addComment: "コメントを追加…（Enter で送信）",
@@ -731,6 +734,8 @@ export const ja: Translations = {
       "このタスクをアーカイブしますか？既定のボードビューから消えます。",
     confirmBlocked:
       "このタスクをブロック中にしますか？ワーカーの取得は解放されます。",
+    confirmScheduled:
+      "このタスクをスケジュール済みに移動しますか？人間によるブロックではなく、既知の時間遅延に使用してください。",
     completionSummary:
       "{label} の完了サマリ。これはタスクの結果として保存されます。",
     completionSummaryRequired:

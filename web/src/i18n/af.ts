@@ -628,6 +628,9 @@ export const af: Translations = {
     createTask: "Skep taak in hierdie kolom",
     noTasks: "— geen take —",
     unassigned: "nie toegewys nie",
+    needsAssignee: "Toegewysde nodig",
+    needsAssigneeHint:
+      "Afhanklikhede is bevredig, maar die dispatcher slaan hierdie taak oor totdat jy 'n profiel toewys.",
     untitled: "(sonder titel)",
     loadingDetail: "Word gelaai…",
     addComment: "Voeg 'n opmerking by… (Enter om in te dien)",
@@ -732,6 +735,8 @@ export const af: Translations = {
       "Argiveer hierdie taak? Dit verdwyn uit die verstek-bordaansig.",
     confirmBlocked:
       "Merk hierdie taak as geblokkeer? Die werker se eis word vrygestel.",
+    confirmScheduled:
+      "Skuif hierdie taak na Geskeduleerd? Gebruik dit vir bekende tydvertragings eerder as menslike blokkers.",
     completionSummary:
       "Voltooiingsopsomming vir {label}. Dit word as die taak se result gestoor.",
     completionSummaryRequired:

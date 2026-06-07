@@ -628,6 +628,9 @@ export const tr: Translations = {
     createTask: "Bu sütunda görev oluştur",
     noTasks: "— görev yok —",
     unassigned: "atanmamış",
+    needsAssignee: "Atanan kişi gerekli",
+    needsAssigneeHint:
+      "Bağımlılıklar karşılandı, ancak siz bir profil atayana kadar dispatcher bu görevi atlar.",
     untitled: "(başlıksız)",
     loadingDetail: "Yükleniyor…",
     addComment: "Yorum ekle… (göndermek için Enter)",
@@ -732,6 +735,8 @@ export const tr: Translations = {
       "Bu görev arşivlensin mi? Varsayılan pano görünümünden kaybolur.",
     confirmBlocked:
       "Bu görev engellendi olarak işaretlensin mi? Worker'ın sahiplenmesi serbest bırakılır.",
+    confirmScheduled:
+      "Bu görev Zamanlandı'ya taşınsın mı? Bunu insan kaynaklı engeller için değil, bilinen zaman gecikmeleri için kullanın.",
     completionSummary:
       "{label} için tamamlanma özeti. Görev result'ı olarak saklanır.",
     completionSummaryRequired:

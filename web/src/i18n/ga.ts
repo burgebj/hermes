@@ -636,6 +636,9 @@ export const ga: Translations = {
     createTask: "Cruthaigh tasc sa cholún seo",
     noTasks: "— gan tascanna —",
     unassigned: "gan sannadh",
+    needsAssignee: "Sannaí ag teastáil",
+    needsAssigneeHint:
+      "Tá na spleáchais sásaithe, ach scipeálann an dispatcher an tasc seo go dtí go sannann tú próifíl.",
     untitled: "(gan teideal)",
     loadingDetail: "Á luchtú…",
     addComment: "Cuir nóta tráchta… (Enter chun seoladh)",
@@ -740,6 +743,8 @@ export const ga: Translations = {
       "Cartlannaigh an tasc seo? Imíonn sé as an réamhradharc cláir.",
     confirmBlocked:
       "Marcáil an tasc seo mar bactha? Scaoiltear éileamh an worker.",
+    confirmScheduled:
+      "Bog an tasc seo go Sceidealta? Úsáid é seo le haghaidh moilleanna ama atá ar eolas seachas bacainní daonna.",
     completionSummary:
       "Achoimre chríochnaithe ar {label}. Stóráiltear é seo mar result an taisc.",
     completionSummaryRequired:

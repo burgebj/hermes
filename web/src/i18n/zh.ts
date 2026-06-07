@@ -623,6 +623,9 @@ export const zh: Translations = {
     createTask: "在此列创建任务",
     noTasks: "— 无任务 —",
     unassigned: "未分配",
+    needsAssignee: "需要负责人",
+    needsAssigneeHint:
+      "依赖项已满足，但在您分配配置文件之前，调度器会跳过此任务。",
     untitled: "（无标题）",
     loadingDetail: "加载中…",
     addComment: "添加评论…（按回车提交）",
@@ -727,6 +730,8 @@ export const zh: Translations = {
       "归档此任务？它将从默认看板视图中消失。",
     confirmBlocked:
       "将此任务标记为阻塞？工作者将被释放。",
+    confirmScheduled:
+      "将此任务移至已调度？将此用于已知的时间延迟，而非人为阻塞。",
     completionSummary:
       "{label} 的完成摘要。这将作为任务结果存储。",
     completionSummaryRequired:

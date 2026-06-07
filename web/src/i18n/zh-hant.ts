@@ -627,6 +627,9 @@ export const zhHant: Translations = {
     createTask: "在此欄建立任務",
     noTasks: "— 沒有任務 —",
     unassigned: "未指派",
+    needsAssignee: "需要負責人",
+    needsAssigneeHint:
+      "相依項目已滿足，但在您指派設定檔之前，排程器會略過此任務。",
     untitled: "（無標題）",
     loadingDetail: "載入中…",
     addComment: "新增留言…（按 Enter 送出）",
@@ -731,6 +734,8 @@ export const zhHant: Translations = {
       "封存此任務？它將從預設看板檢視中消失。",
     confirmBlocked:
       "將此任務標記為已封鎖？工作者的領取將被釋放。",
+    confirmScheduled:
+      "將此任務移至已排程？將此用於已知的時間延遲，而非人為阻塞。",
     completionSummary:
       "{label} 的完成摘要。這將作為任務結果儲存。",
     completionSummaryRequired:
