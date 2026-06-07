@@ -1,0 +1,7 @@
+name: openrouter
+version: 1.0.0
+description: "OpenRouter audio generation backend. Composes music and audio from a text prompt using OpenRouter's audio-output chat models (Google Lyria 3, GPT-Audio) via the chat/completions modalities:[audio] path. Uses the same OPENROUTER_API_KEY as the agent's main model."
+author: NousResearch
+kind: backend
+requires_env:
+  - OPENROUTER_API_KEY

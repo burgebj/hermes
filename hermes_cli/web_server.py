@@ -370,14 +370,14 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "tts.provider": {
         "type": "select",
         "description": "Text-to-speech provider",
-        "options": ["edge", "elevenlabs", "openai", "neutts"],
+        "options": ["edge", "elevenlabs", "openai", "openrouter", "neutts"],
     },
     "stt.provider": {
         "type": "select",
         "description": "Speech-to-text provider",
         # "mistral" temporarily removed — mistralai PyPI package quarantined
         # (malicious 2.4.6 release on 2026-05-12). Restore once available.
-        "options": ["local", "groq", "openai", "xai", "elevenlabs"],
+        "options": ["local", "groq", "openai", "openrouter", "xai", "elevenlabs"],
     },
     "stt.elevenlabs.model_id": {
         "type": "select",

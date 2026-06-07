@@ -139,6 +139,17 @@ TOOLSETS = {
         "includes": []
     },
 
+    "audio_gen": {
+        "description": (
+            "Audio generation tools. Single ``audio_generate`` tool composes "
+            "music, soundscapes, or sound effects from a text prompt (NOT "
+            "text-to-speech) — the active backend handles the request. "
+            "Configure via ``hermes tools`` → Audio Generation."
+        ),
+        "tools": ["audio_generate"],
+        "includes": []
+    },
+
     "computer_use": {
         "description": (
             "Background macOS desktop control via cua-driver — screenshots, "

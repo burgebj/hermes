@@ -62,6 +62,7 @@ CONFIGURABLE_TOOLSETS = [
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),
     ("image_gen",       "🎨 Image Generation",          "image_generate"),
     ("video_gen",       "🎬 Video Generation",          "video_generate (text-to-video + image-to-video)"),
+    ("audio_gen",       "🎵 Audio Generation",          "audio_generate (music, soundscapes, SFX from a prompt)"),
     ("x_search",        "🐦 X (Twitter) Search",        "x_search (requires xAI OAuth or XAI_API_KEY)"),
     ("moa",             "🧠 Mixture of Agents",         "mixture_of_agents"),
     ("tts",             "🔊 Text-to-Speech",            "text_to_speech"),
@@ -112,7 +113,7 @@ def gui_toolset_label(label: str) -> str:
 # `hermes tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
+_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "audio_gen", "x_search"}
 
 
 def _xai_credentials_present() -> bool:
@@ -269,6 +270,14 @@ TOOL_CATEGORIES = {
                 "tts_provider": "openai",
             },
             {
+                "name": "OpenRouter TTS",
+                "tag": "One OpenRouter key, many TTS voices — uses OPENROUTER_API_KEY",
+                "env_vars": [
+                    {"key": "OPENROUTER_API_KEY", "prompt": "OpenRouter API key", "url": "https://openrouter.ai/keys"},
+                ],
+                "tts_provider": "openrouter",
+            },
+            {
                 "name": "xAI TTS",
                 "tag": "Grok voices — uses xAI Grok OAuth or XAI_API_KEY",
                 "env_vars": [],
@@ -406,6 +415,17 @@ TOOL_CATEGORIES = {
                 "video_gen_plugin_name": "fal",
             },
         ],
+    },
+    "audio_gen": {
+        "name": "Audio Generation",
+        "icon": "🎵",
+        # Audio generation has NO Nous-managed subscription provider today —
+        # every backend is BYOK plugin (OpenRouter for Lyria music, etc.).
+        # Provider rows are injected at runtime by
+        # ``_plugin_audio_gen_providers()`` in ``_visible_providers``, so the
+        # hardcoded list stays empty (mirrors how video_gen's plugin rows
+        # are injected).
+        "providers": [],
     },
     "x_search": {
         "name": "X (Twitter) Search",
@@ -1851,6 +1871,44 @@ def _plugin_video_gen_providers() -> list[dict]:
     return rows
 
 
+def _plugin_audio_gen_providers() -> list[dict]:
+    """Build picker-row dicts from plugin-registered audio gen providers.
+
+    Mirrors ``_plugin_video_gen_providers`` exactly — every audio backend
+    is a plugin, so this function is the *only* source of provider rows
+    for the Audio Generation category. The hardcoded ``TOOL_CATEGORIES``
+    entry for ``audio_gen`` keeps an empty providers list.
+    """
+    try:
+        from agent.audio_gen_registry import list_providers
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        providers = list_providers()
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    for provider in providers:
+        try:
+            schema = provider.get_setup_schema()
+        except Exception:
+            continue
+        if not isinstance(schema, dict):
+            continue
+        row = {
+            "name": schema.get("name", provider.display_name),
+            "badge": schema.get("badge", ""),
+            "tag": schema.get("tag", ""),
+            "env_vars": schema.get("env_vars", []),
+            "audio_gen_plugin_name": provider.name,
+        }
+        if schema.get("post_setup"):
+            row["post_setup"] = schema["post_setup"]
+        rows.append(row)
+    return rows
+
+
 # Mirror of _plugin_image_gen_providers for web search backends. Surfaces
 # every plugin-registered web provider so it appears in the
 # "Web Search & Extract" picker. All seven providers (brave-free, ddgs,
@@ -2078,6 +2136,11 @@ def _visible_providers(
     # video_gen has NO hardcoded providers — every backend is a plugin.
     if cat.get("name") == "Video Generation":
         visible.extend(_plugin_video_gen_providers())
+
+    # Inject plugin-registered audio_gen backends. Like video_gen, audio_gen
+    # has NO hardcoded providers — every backend is a plugin.
+    if cat.get("name") == "Audio Generation":
+        visible.extend(_plugin_audio_gen_providers())
 
     # Inject plugin-registered web search backends. After PR #25182, this
     # is the SOLE source of provider rows for the Web Search & Extract
@@ -2353,6 +2416,11 @@ def _is_provider_active(
     if video_plugin_name and not provider.get("managed_nous_feature"):
         video_cfg = config.get("video_gen", {})
         return isinstance(video_cfg, dict) and video_cfg.get("provider") == video_plugin_name
+
+    audio_plugin_name = provider.get("audio_gen_plugin_name")
+    if audio_plugin_name:
+        audio_cfg = config.get("audio_gen", {})
+        return isinstance(audio_cfg, dict) and audio_cfg.get("provider") == audio_plugin_name
 
     managed_feature = provider.get("managed_nous_feature")
     if managed_feature:
@@ -2723,6 +2791,101 @@ def _select_plugin_video_gen_provider(plugin_name: str, config: dict, *, use_gat
     _configure_videogen_model_for_plugin(plugin_name, config)
 
 
+# ─── Audio Generation Model Pickers ───────────────────────────────────────────
+
+
+def _plugin_audio_gen_catalog(plugin_name: str):
+    """Return ``(catalog_dict, default_model_id)`` for an audio gen plugin.
+
+    Mirrors :func:`_plugin_video_gen_catalog`. Returns ``({}, None)`` when
+    the plugin isn't registered or has no models.
+    """
+    try:
+        from agent.audio_gen_registry import get_provider
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        provider = get_provider(plugin_name)
+    except Exception:
+        return {}, None
+    if provider is None:
+        return {}, None
+    try:
+        models = provider.list_models() or []
+        default = provider.default_model()
+    except Exception:
+        return {}, None
+    catalog = {m["id"]: m for m in models if isinstance(m, dict) and "id" in m}
+    return catalog, default
+
+
+def _configure_audiogen_model_for_plugin(plugin_name: str, config: dict) -> None:
+    """Prompt for an audio gen model from a plugin's catalog.
+
+    Mirrors :func:`_configure_videogen_model_for_plugin`. Writes the
+    selection to ``audio_gen.model``.
+    """
+    catalog, default_model = _plugin_audio_gen_catalog(plugin_name)
+    if not catalog:
+        return
+
+    cur_cfg = config.setdefault("audio_gen", {})
+    if not isinstance(cur_cfg, dict):
+        cur_cfg = {}
+        config["audio_gen"] = cur_cfg
+    current_model = cur_cfg.get("model") or default_model
+    if current_model not in catalog:
+        current_model = default_model
+
+    model_ids = list(catalog.keys())
+    ordered = [current_model] + [m for m in model_ids if m != current_model]
+
+    widths = {
+        "model": max(len(m) for m in model_ids),
+        "strengths": max((len(catalog[m].get("strengths", "")) for m in model_ids), default=0),
+    }
+
+    print()
+    header = (
+        f"  {'Model':<{widths['model']}}  "
+        f"{'Strengths':<{widths['strengths']}}"
+    )
+    print(color(header, Colors.CYAN))
+
+    rows = []
+    for mid in ordered:
+        meta = catalog[mid]
+        row = (
+            f"  {mid:<{widths['model']}}  "
+            f"{meta.get('strengths', ''):<{widths['strengths']}}"
+        )
+        if mid == current_model:
+            row += "  ← currently in use"
+        rows.append(row)
+
+    idx = _prompt_choice(
+        f"  Choose {plugin_name} model:",
+        rows,
+        default=0,
+    )
+
+    chosen = ordered[idx]
+    cur_cfg["model"] = chosen
+    _print_success(f"  Model set to: {chosen}")
+
+
+def _select_plugin_audio_gen_provider(plugin_name: str, config: dict, *, use_gateway: bool = False) -> None:
+    """Persist a plugin-backed audio generation provider selection."""
+    aud_cfg = config.setdefault("audio_gen", {})
+    if not isinstance(aud_cfg, dict):
+        aud_cfg = {}
+        config["audio_gen"] = aud_cfg
+    aud_cfg["provider"] = plugin_name
+    aud_cfg["use_gateway"] = use_gateway
+    _print_success(f"  audio_gen.provider set to: {plugin_name}")
+    _configure_audiogen_model_for_plugin(plugin_name, config)
+
+
 def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> None:
     """Persist the provider/backend config keys for a selected provider.
 
@@ -2815,6 +2978,15 @@ def apply_provider_selection(ts_key: str, provider_name: str, config: dict) -> N
             config["video_gen"] = vid_cfg
         vid_cfg["provider"] = video_plugin
         vid_cfg["use_gateway"] = bool(managed_feature)
+
+    audio_plugin = provider.get("audio_gen_plugin_name")
+    if audio_plugin:
+        aud_cfg = config.setdefault("audio_gen", {})
+        if not isinstance(aud_cfg, dict):
+            aud_cfg = {}
+            config["audio_gen"] = aud_cfg
+        aud_cfg["provider"] = audio_plugin
+        aud_cfg["use_gateway"] = bool(managed_feature)
 
     # In-tree FAL imagegen backend: keep image_gen.provider on the legacy
     # path (mirrors _configure_provider).
@@ -2913,6 +3085,10 @@ def _configure_provider(
         if video_plugin:
             _select_plugin_video_gen_provider(video_plugin, config, use_gateway=bool(managed_feature))
             return
+        audio_plugin = provider.get("audio_gen_plugin_name")
+        if audio_plugin:
+            _select_plugin_audio_gen_provider(audio_plugin, config, use_gateway=bool(managed_feature))
+            return
         # Imagegen backends prompt for model selection after backend pick.
         backend = provider.get("imagegen_backend")
         if backend:
@@ -2991,6 +3167,10 @@ def _configure_provider(
         video_plugin = provider.get("video_gen_plugin_name")
         if video_plugin:
             _select_plugin_video_gen_provider(video_plugin, config, use_gateway=bool(managed_feature))
+            return
+        audio_plugin = provider.get("audio_gen_plugin_name")
+        if audio_plugin:
+            _select_plugin_audio_gen_provider(audio_plugin, config, use_gateway=bool(managed_feature))
             return
         # Imagegen backends prompt for model selection after env vars are in.
         backend = provider.get("imagegen_backend")
@@ -3292,6 +3472,10 @@ def _reconfigure_provider(
         if video_plugin:
             _select_plugin_video_gen_provider(video_plugin, config, use_gateway=bool(managed_feature))
             return
+        audio_plugin = provider.get("audio_gen_plugin_name")
+        if audio_plugin:
+            _select_plugin_audio_gen_provider(audio_plugin, config, use_gateway=bool(managed_feature))
+            return
         # Imagegen backends prompt for model selection on reconfig too.
         backend = provider.get("imagegen_backend")
         if backend:
@@ -3331,6 +3515,12 @@ def _reconfigure_provider(
     video_plugin = provider.get("video_gen_plugin_name")
     if video_plugin:
         _select_plugin_video_gen_provider(video_plugin, config, use_gateway=bool(managed_feature))
+        return
+
+    # Plugin-registered audio_gen provider — same flow, different registry.
+    audio_plugin = provider.get("audio_gen_plugin_name")
+    if audio_plugin:
+        _select_plugin_audio_gen_provider(audio_plugin, config, use_gateway=bool(managed_feature))
         return
 
     backend = provider.get("imagegen_backend")

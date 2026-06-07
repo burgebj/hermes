@@ -6,6 +6,7 @@ Built-in TTS providers:
 - Edge TTS (default, free, no API key): Microsoft Edge neural voices
 - ElevenLabs (premium): High-quality voices, needs ELEVENLABS_API_KEY
 - OpenAI TTS: Good quality, needs OPENAI_API_KEY
+- OpenRouter TTS: One key for many TTS vendors, needs OPENROUTER_API_KEY
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
@@ -190,6 +191,11 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+# OpenRouter TTS (POST {base}/audio/speech). Defaults to an OpenAI voice/model
+# pairing since OpenRouter proxies OpenAI TTS; users override via
+# tts.openrouter.{model,voice} in config.yaml.
+DEFAULT_OPENROUTER_TTS_MODEL = "openai/gpt-4o-mini-tts"
+DEFAULT_OPENROUTER_TTS_VOICE = "alloy"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -215,6 +221,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
     "mistral": 4000,      # conservative; no published per-request cap
     "gemini": 5000,       # Gemini TTS caps at ~8k input tokens / ~655s audio
+    "openrouter": 5000,   # varies by underlying model; conservative default
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
@@ -358,6 +365,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "edge",
     "elevenlabs",
     "openai",
+    "openrouter",
     "minimax",
     "xai",
     "mistral",
@@ -1023,6 +1031,82 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         close = getattr(client, "close", None)
         if callable(close):
             close()
+
+
+# ===========================================================================
+# Provider: OpenRouter TTS  (POST {base}/audio/speech)
+# ===========================================================================
+def _generate_openrouter_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using OpenRouter's ``/audio/speech`` endpoint.
+
+    OpenRouter normalizes a single key across many TTS vendors (ElevenLabs,
+    OpenAI, etc.). The request body is ``{model, input, voice, response_format,
+    speed}`` and the response is a raw audio bytestream. Unlike OpenAI's TTS,
+    OpenRouter only supports ``mp3`` and ``pcm`` output formats — there is no
+    native Opus, so Telegram voice-bubble conversion falls back to the
+    ffmpeg path the same way Edge TTS does.
+
+    Auth reuses the agent's main OpenRouter credentials (``OPENROUTER_API_KEY``)
+    so enabling this provider requires no extra setup when the user already
+    runs Hermes on OpenRouter.
+    """
+    import requests
+
+    from tools.tool_backend_helpers import resolve_openrouter_credentials
+
+    creds = resolve_openrouter_credentials()
+    api_key = creds["api_key"]
+    base_url = creds["base_url"]
+    if not api_key:
+        raise RuntimeError(
+            "OpenRouter TTS selected but OPENROUTER_API_KEY is not set. "
+            "Set it in ~/.hermes/.env or run `hermes setup`."
+        )
+
+    or_config = tts_config.get("openrouter", {}) if isinstance(tts_config, dict) else {}
+    base_url = str(or_config.get("base_url", base_url)).rstrip("/")
+    model = or_config.get("model", DEFAULT_OPENROUTER_TTS_MODEL)
+    voice = or_config.get("voice", DEFAULT_OPENROUTER_TTS_VOICE)
+    speed = or_config.get("speed", tts_config.get("speed") if isinstance(tts_config, dict) else None)
+
+    # OpenRouter speech supports only mp3 / pcm. We always request mp3 here;
+    # Opus conversion for Telegram is handled downstream via ffmpeg.
+    payload: Dict[str, Any] = {
+        "model": model,
+        "input": text,
+        "voice": voice,
+        "response_format": "mp3",
+    }
+    if isinstance(speed, (int, float)) and float(speed) != 1.0:
+        payload["speed"] = max(0.25, min(4.0, float(speed)))
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        # Optional OpenRouter attribution headers — harmless if ignored.
+        "HTTP-Referer": "https://github.com/NousResearch/hermes-agent",
+        "X-Title": "Hermes Agent",
+    }
+
+    resp = requests.post(
+        f"{base_url}/audio/speech",
+        headers=headers,
+        json=payload,
+        timeout=120,
+    )
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            detail = resp.text[:500]
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"OpenRouter TTS request failed ({resp.status_code}): {detail or resp.reason}"
+        )
+
+    with open(output_path, "wb") as fh:
+        fh.write(resp.content)
+    return output_path
 
 
 # ===========================================================================
@@ -1978,6 +2062,10 @@ def text_to_speech_tool(
                 }, ensure_ascii=False)
             logger.info("Generating speech with OpenAI TTS...")
             _generate_openai_tts(text, file_str, tts_config)
+
+        elif provider == "openrouter":
+            logger.info("Generating speech with OpenRouter TTS...")
+            _generate_openrouter_tts(text, file_str, tts_config)
 
         elif provider == "minimax":
             logger.info("Generating speech with MiniMax TTS...")

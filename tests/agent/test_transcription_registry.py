@@ -67,10 +67,10 @@ def _reset_registry():
 
 class TestRegistration:
     def test_happy_path(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         transcription_registry.register_provider(p)
-        assert transcription_registry.get_provider("openrouter") is p
-        assert [r.name for r in transcription_registry.list_providers()] == ["openrouter"]
+        assert transcription_registry.get_provider("sensaudio") is p
+        assert [r.name for r in transcription_registry.list_providers()] == ["sensaudio"]
 
     def test_rejects_non_provider_type(self):
         with pytest.raises(TypeError, match="expects a TranscriptionProvider instance"):
@@ -91,7 +91,7 @@ class TestRegistration:
 
     @pytest.mark.parametrize(
         "builtin",
-        ["local", "local_command", "groq", "openai", "mistral", "xai"],
+        ["local", "local_command", "groq", "openai", "openrouter", "mistral", "xai"],
     )
     def test_rejects_builtin_shadow_with_warning(self, builtin, caplog):
         p = _FakeProvider(name=builtin)
@@ -112,12 +112,12 @@ class TestRegistration:
             )
 
     def test_reregistration_overwrites(self, caplog):
-        p1 = _FakeProvider(name="openrouter")
-        p2 = _FakeProvider(name="openrouter")
+        p1 = _FakeProvider(name="sensaudio")
+        p2 = _FakeProvider(name="sensaudio")
         transcription_registry.register_provider(p1)
         with caplog.at_level(logging.DEBUG, logger="agent.transcription_registry"):
             transcription_registry.register_provider(p2)
-        assert transcription_registry.get_provider("openrouter") is p2
+        assert transcription_registry.get_provider("sensaudio") is p2
         assert "re-registered" in caplog.text
 
 
@@ -135,15 +135,15 @@ class TestLookup:
         assert transcription_registry.get_provider(123) is None  # type: ignore[arg-type]
 
     def test_get_provider_case_insensitive(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         transcription_registry.register_provider(p)
-        assert transcription_registry.get_provider("OPENROUTER") is p
-        assert transcription_registry.get_provider("OpenRouter") is p
+        assert transcription_registry.get_provider("SENSAUDIO") is p
+        assert transcription_registry.get_provider("SensAudio") is p
 
     def test_get_provider_whitespace_tolerant(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         transcription_registry.register_provider(p)
-        assert transcription_registry.get_provider("  openrouter  ") is p
+        assert transcription_registry.get_provider("  sensaudio  ") is p
 
     def test_list_providers_sorted(self):
         transcription_registry.register_provider(_FakeProvider(name="zylo"))
@@ -179,23 +179,23 @@ class TestABCContract:
             Incomplete()  # type: ignore[abstract]
 
     def test_display_name_defaults_to_title(self):
-        p = _FakeProvider(name="openrouter")
-        assert p.display_name == "Openrouter"
+        p = _FakeProvider(name="sensaudio")
+        assert p.display_name == "Sensaudio"
 
     def test_display_name_override_respected(self):
-        p = _FakeProvider(name="openrouter", display="OpenRouter STT")
-        assert p.display_name == "OpenRouter STT"
+        p = _FakeProvider(name="sensaudio", display="SensAudio STT")
+        assert p.display_name == "SensAudio STT"
 
     def test_is_available_default_true(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         assert p.is_available() is True
 
     def test_list_models_default_empty(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         assert p.list_models() == []
 
     def test_default_model_none_when_no_models(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         assert p.default_model() is None
 
     def test_default_model_first_listed(self):
@@ -203,13 +203,13 @@ class TestABCContract:
             def list_models(self):
                 return [{"id": "whisper-large-v3-turbo"}, {"id": "whisper-large-v3"}]
 
-        p = WithModels(name="openrouter")
+        p = WithModels(name="sensaudio")
         assert p.default_model() == "whisper-large-v3-turbo"
 
     def test_get_setup_schema_default_minimal(self):
-        p = _FakeProvider(name="openrouter")
+        p = _FakeProvider(name="sensaudio")
         schema = p.get_setup_schema()
-        assert schema["name"] == "Openrouter"
+        assert schema["name"] == "Sensaudio"
         assert schema["env_vars"] == []
 
 

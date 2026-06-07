@@ -736,6 +736,7 @@ const sidebars: SidebarsConfig = {
             'developer-guide/model-provider-plugin',
             'developer-guide/image-gen-provider-plugin',
             'developer-guide/video-gen-provider-plugin',
+            'developer-guide/audio-gen-provider-plugin',
             'developer-guide/web-search-provider-plugin',
             'developer-guide/plugin-llm-access',
             'developer-guide/creating-skills',

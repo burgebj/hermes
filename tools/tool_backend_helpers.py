@@ -146,6 +146,63 @@ def resolve_openai_audio_api_key() -> str:
     ).strip()
 
 
+# Default OpenRouter API base. OpenRouter's media endpoints (/audio/speech,
+# /audio/transcriptions, /videos) hang off this same base, so a single key +
+# base_url covers TTS, STT, video gen, and chat-based audio generation.
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _env_value(name: str) -> str:
+    """Read an env var, falling back to ~/.hermes/.env via the config helper.
+
+    Mirrors ``fal_key_configured`` — tool-side checks and CLI setup-time
+    checks must agree even when dotenv has not yet been loaded into
+    ``os.environ`` (e.g. a fresh ``hermes tools`` invocation).
+    """
+    value = os.getenv(name)
+    if value is None:
+        try:
+            from hermes_cli.config import get_env_value
+
+            value = get_env_value(name)
+        except Exception:
+            value = None
+    return (value or "").strip()
+
+
+def resolve_openrouter_credentials() -> Dict[str, str]:
+    """Return ``{"api_key": ..., "base_url": ...}`` for OpenRouter media calls.
+
+    Resolution order for the key:
+      1. ``OPENROUTER_API_KEY`` (env, then ~/.hermes/.env)
+
+    The base URL honours ``OPENROUTER_BASE_URL`` when set, otherwise defaults
+    to :data:`DEFAULT_OPENROUTER_BASE_URL`. A trailing slash is stripped so
+    callers can safely build ``f"{base_url}/audio/speech"`` etc.
+
+    ``api_key`` is an empty string when no credential is available; callers
+    MUST check before issuing a request. This is the single source of truth
+    for OpenRouter-backed TTS / STT / video / audio-gen so the four surfaces
+    stay in lockstep with the agent's main model credentials.
+    """
+    api_key = _env_value("OPENROUTER_API_KEY")
+    base_url = (
+        _env_value("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL
+    ).rstrip("/")
+    return {"api_key": api_key, "base_url": base_url}
+
+
+def openrouter_credentials_present() -> bool:
+    """Return True when an OpenRouter API key is configured.
+
+    Used by the built-in TTS/STT ``check_fn`` gates and by the video /
+    audio-gen plugins' ``is_available`` so the OpenRouter media options only
+    surface (and auto-enable) when the user is actually authed with
+    OpenRouter — matching how the agent's main model provider is wired.
+    """
+    return bool(resolve_openrouter_credentials()["api_key"])
+
+
 def prefers_gateway(config_section: str) -> bool:
     """Return True when the user opted into the Tool Gateway for this tool.
 

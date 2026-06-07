@@ -206,6 +206,20 @@ The single `video_generate` tool covers both modalities — pass `image_url` to 
 |------|-------------|----------------------|
 | `video_generate` | Generate a video from a text prompt (text-to-video) or animate a still image (image-to-video) using the user's configured video generation backend. Pass `image_url` to animate that image; omit it to generate from text alone. The backend auto-routes to the right endpoint. Returns either an HTTP URL or an absolute file path in the `video` field. | Active `video_gen` plugin + its credential (e.g. `XAI_API_KEY`, `FAL_KEY`) |
 
+## `audio_gen` toolset
+
+Opt-in toolset (not loaded in the default `hermes-cli` set). Add via `--toolsets audio_gen` or enable it in `hermes tools` → Audio Generation, which also walks you through picking a backend.
+
+Backends ship as plugins under `plugins/audio_gen/<name>/`:
+
+- **OpenRouter** — music via Google Lyria 3, through the chat-completions audio-output path (streamed, reuses `OPENROUTER_API_KEY`).
+
+`audio_generate` composes new audio (music, soundscapes, sound effects) from a creative prompt. It is **not** text-to-speech — use `text_to_speech` to read a fixed string aloud. The tool's description is rebuilt at session start to reflect the active backend's capabilities (kinds, formats, duration range, lyric/negative-prompt support). See [Audio Generation Provider Plugins](/developer-guide/audio-gen-provider-plugin) for backend authoring.
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `audio_generate` | Compose music, a soundscape, or a sound effect from a text prompt using the user's configured audio generation backend. Optional `lyrics` for vocal/song models, `duration`, and `audio_format`. Returns either an HTTP URL or an absolute file path in the `audio` field. Distinct from `text_to_speech`. | Active `audio_gen` plugin + its credential (e.g. `OPENROUTER_API_KEY`) |
+
 ## `web` toolset
 
 | Tool | Description | Requires environment |

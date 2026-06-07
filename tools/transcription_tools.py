@@ -11,6 +11,8 @@ Provides speech-to-text transcription with six providers:
   - **mistral** — Mistral Voxtral Transcribe API, requires ``MISTRAL_API_KEY``.
   - **xai** — xAI Grok STT API, requires ``XAI_API_KEY``. High accuracy,
     Inverse Text Normalization, diarization, 21 languages.
+  - **openrouter** — OpenRouter ``/audio/transcriptions``, requires
+    ``OPENROUTER_API_KEY``. One key routes to many Whisper-class models.
   - **elevenlabs** — ElevenLabs Scribe API, requires ``ELEVENLABS_API_KEY``.
 
 Used by the messaging gateway to automatically transcribe voice messages
@@ -90,6 +92,7 @@ DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
 DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
 DEFAULT_ELEVENLABS_STT_MODEL = os.getenv("STT_ELEVENLABS_MODEL", "scribe_v2")
+DEFAULT_OPENROUTER_STT_MODEL = os.getenv("STT_OPENROUTER_MODEL", "openai/whisper-large-v3")
 LOCAL_STT_COMMAND_ENV = "HERMES_LOCAL_STT_COMMAND"
 LOCAL_STT_LANGUAGE_ENV = "HERMES_LOCAL_STT_LANGUAGE"
 COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
@@ -239,6 +242,7 @@ BUILTIN_STT_PROVIDERS = frozenset({
     "local_command",
     "groq",
     "openai",
+    "openrouter",
     "mistral",
     "xai",
 })
@@ -1526,6 +1530,121 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: OpenRouter (POST {base}/audio/transcriptions)
+# ---------------------------------------------------------------------------
+
+
+def _transcribe_openrouter(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using OpenRouter's ``/audio/transcriptions`` endpoint.
+
+    Unlike the OpenAI Whisper API (multipart upload), OpenRouter takes a
+    JSON body with the audio base64-encoded inline::
+
+        {"model": "openai/whisper-large-v3",
+         "input_audio": {"data": "<base64>", "format": "ogg"},
+         "language": "en"}
+
+    and returns ``{"text": ..., "usage": {...}}``. Auth reuses the agent's
+    main OpenRouter credentials (``OPENROUTER_API_KEY``) so no extra setup is
+    needed when Hermes already runs on OpenRouter.
+    """
+    import base64
+
+    from tools.tool_backend_helpers import resolve_openrouter_credentials
+
+    creds = resolve_openrouter_credentials()
+    api_key = creds["api_key"]
+    base_url = creds["base_url"]
+    if not api_key:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": (
+                "OpenRouter STT selected but OPENROUTER_API_KEY is not set. "
+                "Set it in ~/.hermes/.env or run `hermes setup`."
+            ),
+        }
+
+    stt_config = _load_stt_config()
+    or_config = stt_config.get("openrouter", {}) if isinstance(stt_config, dict) else {}
+    base_url = str(or_config.get("base_url", base_url)).rstrip("/")
+    language = str(
+        or_config.get("language")
+        or os.getenv(LOCAL_STT_LANGUAGE_ENV)
+        or ""
+    ).strip()
+
+    audio_format = Path(file_path).suffix.lstrip(".").lower() or "wav"
+
+    try:
+        import requests
+
+        with open(file_path, "rb") as audio_file:
+            audio_b64 = base64.b64encode(audio_file.read()).decode("ascii")
+
+        payload: Dict[str, Any] = {
+            "model": model_name,
+            "input_audio": {"data": audio_b64, "format": audio_format},
+        }
+        if language:
+            payload["language"] = language
+
+        response = requests.post(
+            f"{base_url}/audio/transcriptions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/NousResearch/hermes-agent",
+                "X-Title": "Hermes Agent",
+            },
+            json=payload,
+            timeout=120,
+        )
+
+        if response.status_code != 200:
+            detail = ""
+            try:
+                err_body = response.json()
+                detail = (
+                    err_body.get("error", {}).get("message", "")
+                    if isinstance(err_body.get("error"), dict)
+                    else ""
+                ) or response.text[:300]
+            except Exception:
+                detail = response.text[:300]
+            return {
+                "success": False,
+                "transcript": "",
+                "error": f"OpenRouter STT API error (HTTP {response.status_code}): {detail}",
+            }
+
+        result = response.json()
+        transcript_text = str(result.get("text", "")).strip()
+
+        if not transcript_text:
+            return {
+                "success": False,
+                "transcript": "",
+                "error": "OpenRouter STT returned empty transcript",
+            }
+
+        logger.info(
+            "Transcribed %s via OpenRouter STT (model=%s, %d chars)",
+            Path(file_path).name,
+            model_name,
+            len(transcript_text),
+        )
+
+        return {"success": True, "transcript": transcript_text, "provider": "openrouter"}
+
+    except PermissionError:
+        return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        logger.error("OpenRouter STT transcription failed: %s", e, exc_info=True)
+        return {"success": False, "transcript": "", "error": f"OpenRouter STT transcription failed: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Provider: ElevenLabs (Scribe STT API)
 # ---------------------------------------------------------------------------
 
@@ -1683,6 +1802,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         # xAI Grok STT doesn't use a model parameter — pass through for logging
         model_name = model or "grok-stt"
         return _transcribe_xai(file_path, model_name)
+
+    if provider == "openrouter":
+        or_cfg = stt_config.get("openrouter", {}) if isinstance(stt_config.get("openrouter"), dict) else {}
+        model_name = model or or_cfg.get("model", DEFAULT_OPENROUTER_STT_MODEL)
+        return _transcribe_openrouter(file_path, model_name)
 
     if provider == "elevenlabs":
         elevenlabs_cfg = stt_config.get("elevenlabs", {})

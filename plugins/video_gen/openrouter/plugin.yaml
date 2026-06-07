@@ -1,0 +1,7 @@
+name: openrouter
+version: 1.0.0
+description: "OpenRouter video generation backend. One OpenRouter key routes to Veo, Sora, Kling, and other video models via OpenRouter's async /videos API (text-to-video and image-to-video)."
+author: NousResearch
+kind: backend
+requires_env:
+  - OPENROUTER_API_KEY

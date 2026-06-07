@@ -8,7 +8,7 @@ register instances via
 (selected via ``stt.provider`` in ``config.yaml``) services every
 :func:`tools.transcription_tools.transcribe_audio` call **when the
 configured name is neither a built-in (``local``, ``local_command``,
-``groq``, ``openai``, ``mistral``, ``xai``) nor disabled**.
+``groq``, ``openai``, ``openrouter``, ``mistral``, ``xai``) nor disabled**.
 
 Two coexisting STT extension surfaces — in resolution order:
 
@@ -71,9 +71,9 @@ class TranscriptionProvider(abc.ABC):
     def name(self) -> str:
         """Stable short identifier used in ``stt.provider`` config.
 
-        Lowercase, no spaces. Examples: ``openrouter``, ``sensaudio``,
-        ``gemini``, ``deepgram``. Names that collide with a built-in STT
-        provider (``local``, ``local_command``, ``groq``, ``openai``,
+        Lowercase, no spaces. Examples: ``sensaudio``, ``gemini``,
+        ``deepgram``. Names that collide with a built-in STT provider
+        (``local``, ``local_command``, ``groq``, ``openai``, ``openrouter``,
         ``mistral``, ``xai``) are rejected at registration time.
         """
 
