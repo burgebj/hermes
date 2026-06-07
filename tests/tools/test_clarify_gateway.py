@@ -224,3 +224,57 @@ class TestGatewayTextIntercept:
         
         # Clean up
         cm.clear_session("sk-tf")
+
+
+class TestGetAnyPendingForSession:
+    """Tests for get_any_pending_for_session (GitHub issue #38475).
+
+    Unlike get_pending_for_session, this returns entries regardless of
+    whether they are in awaiting_text mode — so freeform typed replies to
+    multi-choice clarify prompts are captured instead of dropped.
+    """
+
+    def setup_method(self):
+        from tools import clarify_gateway as cm
+        with cm._lock:
+            cm._entries.clear()
+            cm._session_index.clear()
+
+    def test_returns_awaiting_text_entry(self):
+        from tools import clarify_gateway as cm
+
+        cm.register("c1", "sk", "Free form?", None)
+        assert cm.get_any_pending_for_session("sk") is not None
+
+    def test_returns_multi_choice_entry(self):
+        """Multi-choice clarify (awaiting_text=False) should be found."""
+        from tools import clarify_gateway as cm
+
+        cm.register("c2", "sk", "Pick", ["A", "B"])
+        entry = cm.get_any_pending_for_session("sk")
+        assert entry is not None
+        assert entry.clarify_id == "c2"
+        assert entry.awaiting_text is False
+
+    def test_returns_none_when_no_pending(self):
+        from tools import clarify_gateway as cm
+
+        assert cm.get_any_pending_for_session("empty") is None
+
+    def test_returns_oldest_multi_choice(self):
+        """FIFO ordering — oldest pending entry returned first."""
+        from tools import clarify_gateway as cm
+
+        cm.register("older", "sk", "Q1?", ["A"])
+        cm.register("newer", "sk", "Q2?", ["B"])
+        entry = cm.get_any_pending_for_session("sk")
+        assert entry is not None
+        assert entry.clarify_id == "older"
+
+    def test_get_pending_vs_any_pending_divergence(self):
+        """get_pending_for_session skips multi-choice; get_any finds it."""
+        from tools import clarify_gateway as cm
+
+        cm.register("c-div", "sk-div", "Pick", ["X", "Y"])
+        assert cm.get_pending_for_session("sk-div") is None
+        assert cm.get_any_pending_for_session("sk-div") is not None

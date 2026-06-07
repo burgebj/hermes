@@ -180,6 +180,26 @@ def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
         return None
 
 
+def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
+    """Return the OLDEST pending clarify entry for a session, or None.
+
+    Unlike :func:`get_pending_for_session`, this returns entries regardless
+    of whether they are in ``awaiting_text`` mode.  Used by the gateway
+    text-fallback intercept so that freeform typed replies to multi-choice
+    clarify prompts are captured as the user's custom "Other" answer
+    rather than being silently dropped.
+
+    See GitHub issue #38475.
+    """
+    with _lock:
+        ids = _session_index.get(session_key) or []
+        for cid in ids:
+            entry = _entries.get(cid)
+            if entry is not None:
+                return entry
+        return None
+
+
 def mark_awaiting_text(clarify_id: str) -> bool:
     """Flip an entry into text-capture mode (user picked the 'Other' button).
 

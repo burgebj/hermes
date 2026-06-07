@@ -7601,14 +7601,24 @@ class GatewayRunner:
                 _update_prompts.pop(_quick_key, None)
 
         # Intercept messages that are responses to a pending clarify
-        # request that is awaiting free-form text (either an open-ended
-        # clarify with no choices, or one where the user picked the
-        # "Other" button).  The first non-empty user message in the
-        # session resolves the clarify and unblocks the agent thread —
-        # we do NOT route it to the agent as a new turn.
+        # request.  Covers two cases (see GitHub issue #38475):
+        #
+        #  1. Open-ended clarify (no choices) or "Other" button clicked:
+        #     ``awaiting_text`` is True — next message is captured as the
+        #     free-form response.
+        #
+        #  2. Multi-choice clarify with choices: ``awaiting_text`` is
+        #     False, but any typed non-command text should be treated as
+        #     the user's custom "Other" answer.  Numeric replies map to
+        #     the corresponding choice; exact choice text maps to that
+        #     choice; everything else resolves as free-form text.
+        #
+        # In both cases the first non-empty user message in the session
+        # resolves the clarify and unblocks the agent thread — we do NOT
+        # route it to the agent as a new turn.
         try:
             from tools import clarify_gateway as _clarify_mod
-            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            _pending_clarify = _clarify_mod.get_any_pending_for_session(_quick_key)
         except Exception:
             _pending_clarify = None
         if _pending_clarify is not None:
@@ -7618,8 +7628,28 @@ class GatewayRunner:
             # so the user can retry; if it times out, the agent unblocks
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                # For multi-choice clarifies, try to map the typed text
+                # to a choice before falling through to free-form.
+                _clarify_response = _raw_clarify_reply
+                if (
+                    _pending_clarify.choices
+                    and not _pending_clarify.awaiting_text
+                ):
+                    # Numeric reply → map to choice text (1-indexed)
+                    try:
+                        _choice_idx = int(_raw_clarify_reply) - 1
+                        if 0 <= _choice_idx < len(_pending_clarify.choices):
+                            _clarify_response = _pending_clarify.choices[_choice_idx]
+                    except (ValueError, TypeError):
+                        # Not a number — check for exact choice match
+                        _lower_reply = _raw_clarify_reply.lower()
+                        for _choice in _pending_clarify.choices:
+                            if _lower_reply == _choice.lower():
+                                _clarify_response = _choice
+                                break
+                        # else: free-form text, use as-is
                 _resolved = _clarify_mod.resolve_gateway_clarify(
-                    _pending_clarify.clarify_id, _raw_clarify_reply,
+                    _pending_clarify.clarify_id, _clarify_response,
                 )
                 if _resolved:
                     logger.info(
