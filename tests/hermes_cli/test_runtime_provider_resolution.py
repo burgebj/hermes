@@ -2705,3 +2705,114 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# ------------------------------------------------------------------
+# fix #31216 — ANTHROPIC_BASE_URL env var in native anthropic path
+# ------------------------------------------------------------------
+
+
+def _stub_anthropic_token(monkeypatch):
+    """Stub out resolve_anthropic_token so the anthropic branch doesn't
+    try to resolve real OAuth credentials."""
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.resolve_anthropic_token",
+        lambda: "test-anthropic-token",
+    )
+
+
+def test_anthropic_base_url_env_used_when_no_config(monkeypatch):
+    """ANTHROPIC_BASE_URL env var should be used when model.base_url is not set."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(
+        rp, "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8317")
+    _stub_anthropic_token(monkeypatch)
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["base_url"] == "http://127.0.0.1:8317"
+
+
+def test_anthropic_config_base_url_wins_over_env(monkeypatch):
+    """model.base_url in config.yaml should take precedence over env var."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp, "_get_model_config",
+        lambda: {"provider": "anthropic", "base_url": "http://config-proxy:9090"},
+    )
+    monkeypatch.setattr(
+        rp, "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://env-proxy:8080")
+    _stub_anthropic_token(monkeypatch)
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["base_url"] == "http://config-proxy:9090"
+
+
+def test_anthropic_default_when_neither_config_nor_env(monkeypatch):
+    """Without config or env, should fall back to api.anthropic.com."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(
+        rp, "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    _stub_anthropic_token(monkeypatch)
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["base_url"] == "https://api.anthropic.com"
+
+
+def test_anthropic_base_url_env_stripped_and_slash_removed(monkeypatch):
+    """Env var value should be stripped and trailing slash removed."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(
+        rp, "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "  http://127.0.0.1:8317/  ")
+    _stub_anthropic_token(monkeypatch)
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["base_url"] == "http://127.0.0.1:8317"
+
+
+def test_anthropic_env_used_when_cfg_provider_not_anthropic(monkeypatch):
+    """When config says provider: openai-codex with a base_url, cfg_base_url
+    is suppressed (guarded by cfg_provider == 'anthropic'), so the env var
+    should fill in. The outer block is gated on resolved provider == anthropic,
+    so this is the correct precedence."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp, "_get_model_config",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        },
+    )
+    monkeypatch.setattr(
+        rp, "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8317")
+    _stub_anthropic_token(monkeypatch)
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["base_url"] == "http://127.0.0.1:8317"
