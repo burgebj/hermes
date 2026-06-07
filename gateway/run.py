@@ -16815,7 +16815,9 @@ class GatewayRunner:
         user_config = _load_gateway_config()
         from gateway.display_config import resolve_display_setting
         _plat_streaming = resolve_display_setting(
-            user_config, platform_key, "streaming"
+            user_config, platform_key, "streaming",
+            chat_id=getattr(source, "chat_id", None),
+            thread_id=getattr(source, "thread_id", None),
         )
         _streaming_enabled = (
             _scfg.enabled and _scfg.transport != "off"
@@ -17070,18 +17072,45 @@ class GatewayRunner:
         # Apply tool preview length config (0 = no limit)
         try:
             from agent.display import set_tool_preview_max_len
-            _tpl = resolve_display_setting(user_config, platform_key, "tool_preview_length", 0)
+            _tpl = resolve_display_setting(
+                user_config, platform_key, "tool_preview_length", 0,
+                chat_id=getattr(source, "chat_id", None),
+                thread_id=getattr(source, "thread_id", None),
+            )
             set_tool_preview_max_len(int(_tpl) if _tpl else 0)
         except Exception:
             pass
 
         # Tool progress mode — resolved per-platform with env var fallback
-        _resolved_tp = resolve_display_setting(user_config, platform_key, "tool_progress")
+        _resolved_tp = resolve_display_setting(
+            user_config, platform_key, "tool_progress",
+            chat_id=getattr(source, "chat_id", None),
+            thread_id=getattr(source, "thread_id", None),
+        )
         _env_tp = os.getenv("HERMES_TOOL_PROGRESS_MODE")
         _display_cfg = display_config if isinstance(display_config, dict) else {}
         _platforms_cfg = _display_cfg.get("platforms") or {}
         _platform_cfg = _platforms_cfg.get(platform_key) or {}
         _legacy_tp_overrides = _display_cfg.get("tool_progress_overrides") or {}
+
+        def _per_chat_tp_configured() -> bool:
+            if not isinstance(_platform_cfg, dict):
+                return False
+            chats_cfg = _platform_cfg.get("chats")
+            if not isinstance(chats_cfg, dict):
+                return False
+            cid = getattr(source, "chat_id", None)
+            if cid is None:
+                return False
+            tid = getattr(source, "thread_id", None)
+            cid_s = str(cid)
+            keys = [f"{cid_s}:{tid}", cid_s] if tid not in (None, "") else [cid_s]
+            for k in keys:
+                entry = chats_cfg.get(k)
+                if isinstance(entry, dict) and "tool_progress" in entry:
+                    return True
+            return False
+
         _tool_progress_configured = (
             "tool_progress" in _display_cfg
             or (
@@ -17092,6 +17121,7 @@ class GatewayRunner:
                 isinstance(_legacy_tp_overrides, dict)
                 and platform_key in _legacy_tp_overrides
             )
+            or _per_chat_tp_configured()
         )
         progress_mode = (
             _env_tp
@@ -17171,7 +17201,11 @@ class GatewayRunner:
         # are collected here and deleted after the final response lands.
         # Failed runs skip cleanup so the bubbles remain as breadcrumbs.
         _cleanup_progress = bool(
-            resolve_display_setting(user_config, platform_key, "cleanup_progress")
+            resolve_display_setting(
+                user_config, platform_key, "cleanup_progress",
+                chat_id=getattr(source, "chat_id", None),
+                thread_id=getattr(source, "thread_id", None),
+            )
         )
         _cleanup_adapter = self.adapters.get(source.platform) if _cleanup_progress else None
         if _cleanup_adapter is not None and (
@@ -17807,7 +17841,9 @@ class GatewayRunner:
             # can disable streaming for specific platforms even when the global
             # streaming config is enabled.
             _plat_streaming = resolve_display_setting(
-                user_config, platform_key, "streaming"
+                user_config, platform_key, "streaming",
+                chat_id=getattr(source, "chat_id", None),
+                thread_id=getattr(source, "thread_id", None),
             )
             # None = no per-platform override → follow global config
             _streaming_enabled = (
