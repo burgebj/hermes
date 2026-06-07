@@ -483,12 +483,6 @@ class ProcessRegistry:
         import psutil
         try:
             parent = psutil.Process(pid)
-            for child in parent.children(recursive=True):
-                try:
-                    child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
-            parent.terminate()
         except psutil.NoSuchProcess:
             return
         except (OSError, PermissionError):
@@ -496,6 +490,42 @@ class ProcessRegistry:
                 os.kill(pid, signal.SIGTERM)
             except (OSError, ProcessLookupError, PermissionError):
                 pass
+            return
+
+        # Snapshot the whole tree (descendants + parent) up front, before any
+        # of them exit and reparent grandchildren to init — once a process is
+        # reparented it falls off ``children(recursive=True)`` and survives.
+        try:
+            procs = parent.children(recursive=True)
+        except (psutil.NoSuchProcess, OSError):
+            procs = []
+        procs.append(parent)
+
+        # Graceful first: SIGTERM the full tree so a live browser can flush
+        # (cookies are already persisted by the agent-browser ``close``
+        # command before this runs on the cleanup path).
+        for proc in procs:
+            try:
+                proc.terminate()
+            except (psutil.NoSuchProcess, OSError, PermissionError):
+                pass
+
+        # Then SIGKILL anything still alive.  ``chrome_crashpad_handler`` (and
+        # renderers under load) routinely ignore SIGTERM; without escalation
+        # they orphan to init and accumulate — the root of the leak.
+        try:
+            _gone, alive = psutil.wait_procs(procs, timeout=5)
+        except (psutil.NoSuchProcess, OSError):
+            alive = procs
+        for proc in alive:
+            try:
+                proc.kill()
+            except (psutil.NoSuchProcess, OSError, PermissionError):
+                pass
+        try:
+            psutil.wait_procs(alive, timeout=3)
+        except (psutil.NoSuchProcess, OSError):
+            pass
 
     # ----- Spawn -----
 

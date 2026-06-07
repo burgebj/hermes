@@ -370,6 +370,57 @@ def run_conversation(
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Public entry point — see :func:`_run_conversation_impl` for the body.
+
+    Thin wrapper that guarantees per-task resource cleanup (browser/VM) runs
+    even when the turn aborts with an exception or is interrupted
+    (``CancelledError``).  The impl already cleans up on every *normal*
+    return path; this finally only covers the error/interrupt paths, where
+    the ``agent-browser`` daemon and its Chromium/Xvfb tree would otherwise
+    orphan and accumulate — the cause of the gateway's slow memory growth.
+
+    The success path is unchanged: cleanup runs here only when the impl
+    raised (``completed_normally`` stays False), so there is no extra work
+    and no timing change on a normal turn.  ``_cleanup_task_resources`` is
+    idempotent and persistence-aware (it skips persistent sandboxes and does
+    a cookie-flushing graceful close), so the reap is safe to run on abort.
+    """
+    # Bind task_id here so the finally reaps exactly the task the impl ran
+    # under — the impl derives the same value from this argument.
+    effective_task_id = task_id or str(uuid.uuid4())
+    completed_normally = False
+    try:
+        result = _run_conversation_impl(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=effective_task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+        )
+        completed_normally = True
+        return result
+    finally:
+        if not completed_normally:
+            try:
+                agent._cleanup_task_resources(effective_task_id)
+            except Exception:
+                logger.warning(
+                    "post-abort cleanup_task_resources failed for task %s",
+                    effective_task_id,
+                )
+
+
+def _run_conversation_impl(
+    agent,
+    user_message: str,
+    system_message: str = None,
+    conversation_history: List[Dict[str, Any]] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+    persist_user_message: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
 
