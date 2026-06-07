@@ -587,6 +587,13 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
     try:
         tid = kb.create_task(conn1, title="x", assignee="w")
         kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
+        # add_notify_sub snaps the cursor to MAX(id) over task_events so the
+        # sub starts caught up (#29905). Capture that snapped value as the
+        # baseline; the watcher's claim then only sees events generated
+        # AFTER subscription.
+        snapped_cursor = int(
+            kb.list_notify_subs(conn1, tid)[0]["last_event_id"]
+        )
         kb.complete_task(conn1, tid, result="ok")
 
         old_cursor, claimed_cursor, events = kb.claim_unseen_events_for_sub(
@@ -596,7 +603,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
             chat_id="123",
             kinds=["completed", "blocked"],
         )
-        assert old_cursor == 0
+        assert old_cursor == snapped_cursor
         assert claimed_cursor > old_cursor
         assert [ev.kind for ev in events] == ["completed"]
 

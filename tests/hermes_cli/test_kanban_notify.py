@@ -343,6 +343,7 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
             chat_id="chat1",
             notifier_profile="default",
         )
+        snapped_cursor = int(kb.list_notify_subs(conn, tid)[0]["last_event_id"])
         kb.complete_task(conn, tid, result="done")
     finally:
         conn.close()
@@ -379,7 +380,13 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
     finally:
         conn.close()
     assert len(subs) == 1
-    assert int(subs[0]["last_event_id"]) == 0, "wrong profile must not claim the event"
+    # The wrong profile must not have advanced the cursor: it should still
+    # point at the snapshot taken when the sub was created (the `created`
+    # event id), so the owning profile's watcher will deliver the unseen
+    # ``completed`` event on its next tick.
+    assert int(subs[0]["last_event_id"]) == snapped_cursor, (
+        "wrong profile must not claim the event"
+    )
 
 
 @pytest.mark.asyncio
@@ -653,3 +660,91 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     # Only the real file was uploaded.
     assert len(documents_uploaded) == 1
     assert "real.pdf" in documents_uploaded[0]
+
+
+def test_add_notify_sub_snaps_cursor_past_existing_events(kanban_home):
+    """Regression for #29905: a subscription created on an already-active task
+    must start caught-up, not replay every backlogged terminal event on the
+    next watcher tick.
+    """
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="pre-existing events", assignee="worker1")
+        # Pre-populate task_events so a fresh sub created now would otherwise
+        # see them all on the next tick.
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, kind="completed")
+            kb._append_event(conn, tid, kind="blocked")
+        max_id_before = conn.execute(
+            "SELECT MAX(id) FROM task_events WHERE task_id = ?", (tid,),
+        ).fetchone()[0]
+        assert max_id_before is not None and max_id_before > 0
+
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-late")
+
+        sub = kb.list_notify_subs(conn, tid)[0]
+        assert int(sub["last_event_id"]) == max_id_before, (
+            "Expected new sub to start at the current MAX(id); got "
+            f"{sub['last_event_id']} vs {max_id_before}"
+        )
+
+        # The watcher's claim path should now see nothing for this sub —
+        # the storm in #29905 was 100+ messages from exactly this state.
+        _, _, replayed = kb.claim_unseen_events_for_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-late",
+            kinds=("completed", "blocked", "gave_up", "crashed", "timed_out"),
+        )
+        assert replayed == []
+
+        # And a NEW event after subscription must still be delivered.
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, kind="gave_up")
+        _, _, fresh = kb.claim_unseen_events_for_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-late",
+            kinds=("completed", "blocked", "gave_up", "crashed", "timed_out"),
+        )
+        assert len(fresh) == 1 and fresh[0].kind == "gave_up"
+    finally:
+        conn.close()
+
+
+def test_add_notify_sub_idempotent_does_not_rewind_cursor(kanban_home):
+    """Re-subscribing the same (task, platform, chat, thread) tuple must NOT
+    rewind the cursor: existing rows are IGNORED by the INSERT, and the snap
+    only fires for newly-inserted rows.
+    """
+    import hermes_cli.kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="resub", assignee="worker1")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-x")
+
+        # Simulate the watcher having advanced the cursor.
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, kind="completed")
+        kb.claim_unseen_events_for_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-x",
+            kinds=("completed", "blocked", "gave_up", "crashed", "timed_out"),
+        )
+        sub_before = kb.list_notify_subs(conn, tid)[0]
+        cursor_before = int(sub_before["last_event_id"])
+        assert cursor_before > 0
+
+        # Re-subscribe (no-op insert). Cursor must not move.
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-x")
+        sub_after = kb.list_notify_subs(conn, tid)[0]
+        assert int(sub_after["last_event_id"]) == cursor_before
+    finally:
+        conn.close()

@@ -7172,7 +7172,7 @@ def add_notify_sub(
     for ``task_id``. Idempotent on (task, platform, chat, thread)."""
     now = int(time.time())
     with write_txn(conn):
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
                 (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
@@ -7180,6 +7180,27 @@ def add_notify_sub(
             """,
             (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, now),
         )
+        if cur.rowcount > 0:
+            # Snap the cursor to the current MAX(id) of task_events for this
+            # task so the new subscription starts caught up: only events
+            # generated AFTER subscription should fire notifications. Without
+            # this, a sub created on an already-active task would replay
+            # every backlogged terminal event on the next watcher tick — see
+            # issue #29905, where 27 stale subs at last_event_id=0 produced
+            # a 100+ notification burst at gateway boot. Idempotency: only
+            # runs when INSERT OR IGNORE actually inserted; existing rows
+            # keep their advancing cursor.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET last_event_id = COALESCE(
+                       (SELECT MAX(id) FROM task_events WHERE task_id = ?),
+                       0
+                   )
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (task_id, task_id, platform, chat_id, thread_id or ""),
+            )
         if notifier_profile:
             # Self-heal legacy rows that predate notifier ownership by
             # backfilling only when the existing value is unset.
