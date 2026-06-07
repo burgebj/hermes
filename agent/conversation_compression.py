@@ -589,6 +589,7 @@ def compress_context(
     agent.context_compressor.last_compression_rough_tokens = _compressed_est
     agent.context_compressor.last_prompt_tokens = -1
     agent.context_compressor.last_completion_tokens = 0
+    agent.context_compressor.last_real_prompt_tokens = 0  # reset so defer check doesn't see stale pre-compression value (#36718)
     agent.context_compressor.awaiting_real_usage_after_compression = True
 
     # Clear the file-read dedup cache.  After compression the original

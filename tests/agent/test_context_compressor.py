@@ -82,6 +82,27 @@ class TestPreflightDeferral:
 
         assert compressor.should_defer_preflight_to_real_usage(93_000) is False
 
+    def test_defers_after_compression_awaiting_real_usage(self, compressor):
+        """Regression: after compression, stale last_real_prompt_tokens
+        (above threshold) should not defeat preflight deferral.  (#36718)"""
+        compressor.threshold_tokens = 85_000
+        # Simulate post-compression state: real prompt was high (why
+        # compression fired), but we haven't received a real API response yet.
+        compressor.last_real_prompt_tokens = 90_000  # stale, above threshold
+        compressor.awaiting_real_usage_after_compression = True
+
+        # Rough estimate is above threshold, but we should defer because
+        # we don't trust the stale last_real_prompt_tokens after compression.
+        assert compressor.should_defer_preflight_to_real_usage(90_000) is True
+
+    def test_does_not_defer_after_compression_when_below_threshold(self, compressor):
+        """Even when awaiting_real_usage, rough estimate below threshold
+        means no compression needed — don't defer (no-op)."""
+        compressor.threshold_tokens = 85_000
+        compressor.awaiting_real_usage_after_compression = True
+
+        assert compressor.should_defer_preflight_to_real_usage(40_000) is False
+
 
 
 class TestCompress:

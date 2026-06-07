@@ -708,6 +708,13 @@ class ContextCompressor(ContextEngine):
         """
         if rough_tokens < self.threshold_tokens:
             return False
+        # After compression, ``last_real_prompt_tokens`` still holds the
+        # pre-compression value (which was above threshold — that's why
+        # compression fired).  Without this check the stale value defeats
+        # deferral and preflight compression fires a second time before
+        # a real API response has returned fresh token counts.  (#36718)
+        if self.awaiting_real_usage_after_compression:
+            return True
         if self.last_real_prompt_tokens <= 0:
             return False
         if self.last_real_prompt_tokens >= self.threshold_tokens:
