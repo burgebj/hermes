@@ -492,14 +492,27 @@ class WebhookAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
 
-        # Build a unique delivery ID
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get(
-                "svix-id",
-                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
-            ),
+        # Build a unique delivery ID. Header-based IDs win; Alertmanager has
+        # no such header so derive a stable hash from payload.groupKey to
+        # make retries hit the idempotency cache below. Route name is part
+        # of the hash input so two routes happening to receive the same
+        # groupKey value never collide in _seen_deliveries.
+        delivery_id = (
+            request.headers.get("X-GitHub-Delivery")
+            or request.headers.get("svix-id")
+            or request.headers.get("X-Request-ID")
         )
+        if not delivery_id and isinstance(payload, dict):
+            group_key = payload.get("groupKey")
+            if isinstance(group_key, str) and group_key.strip():
+                # 16 hex chars = 64 bits: collision-safe for any realistic
+                # alert-group cardinality at the 1h _idempotency_ttl horizon.
+                _hash_input = f"{route_name}:{group_key.strip()}".encode("utf-8")
+                delivery_id = "alertmanager:" + hashlib.sha256(
+                    _hash_input
+                ).hexdigest()[:16]
+        if not delivery_id:
+            delivery_id = str(int(time.time() * 1000))
 
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).

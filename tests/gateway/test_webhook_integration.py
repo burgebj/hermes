@@ -336,3 +336,226 @@ class TestGitHubCommentDelivery:
         # Delivery info is retained after send() so interim status messages
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info
+
+
+# ===================================================================
+# Test 5: Alertmanager groupKey-based delivery_id dedup
+# ===================================================================
+
+ALERTMANAGER_PAYLOAD = {
+    "receiver": "hermes",
+    "status": "firing",
+    "alerts": [
+        {
+            "status": "firing",
+            "labels": {
+                "alertname": "HighRequestLatency",
+                "service": "api",
+                "severity": "warning",
+            },
+            "annotations": {"summary": "API latency spiked"},
+            "startsAt": "2026-01-01T00:00:00Z",
+            "endsAt": "0001-01-01T00:00:00Z",
+            "generatorURL": "",
+            "fingerprint": "abc123",
+        }
+    ],
+    "groupLabels": {"alertname": "HighRequestLatency"},
+    "commonLabels": {
+        "alertname": "HighRequestLatency",
+        "service": "api",
+        "severity": "warning",
+    },
+    "commonAnnotations": {"summary": "API latency spiked"},
+    "externalURL": "",
+    "version": "4",
+    # The key field this test exercises: stable per-group identifier.
+    "groupKey": '{}/{}:{alertname="HighRequestLatency"}',
+    "truncatedAlerts": 0,
+}
+
+
+import re
+
+
+class TestAlertmanagerGroupKeyDedup:
+
+    @pytest.mark.asyncio
+    async def test_groupkey_derived_delivery_id_dedups_retries(self):
+        """When the payload has a `groupKey` field, repeated POSTs of the
+        same alert group must collapse to a single delivery_id via
+        sha256(route + groupKey) so the idempotency loop catches the
+        second call as a duplicate. Without this Alertmanager retries
+        (which omit X-GitHub-Delivery / svix-id / X-Request-ID) re-trigger
+        the agent every time."""
+        routes = {
+            "alertmanager": {
+                "prompt": "Alert: {commonLabels.alertname}",
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "log",
+            }
+        }
+        adapter = _make_adapter(routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        body = json.dumps(ALERTMANAGER_PAYLOAD).encode()
+
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/alertmanager",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            assert first.status == 202
+            data1 = await first.json()
+            assert data1["status"] == "accepted"
+            assert re.fullmatch(
+                r"alertmanager:[0-9a-f]{16}", data1["delivery_id"]
+            ), f"unexpected delivery_id: {data1['delivery_id']}"
+
+            # Same payload, same groupKey -> must dedup.
+            second = await cli.post(
+                "/webhooks/alertmanager",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            assert second.status == 200
+            data2 = await second.json()
+            assert data2["status"] == "duplicate"
+            assert data2["delivery_id"] == data1["delivery_id"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_delivery_header_wins_over_groupkey(self):
+        """Senders that DO supply X-GitHub-Delivery / svix-id /
+        X-Request-ID continue to win - the payload-based derivation is a
+        fallback, not an override. Two POSTs with the same groupKey but
+        different X-Request-IDs are NOT deduped."""
+        routes = {
+            "alertmanager": {
+                "prompt": "Alert: {commonLabels.alertname}",
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "log",
+            }
+        }
+        adapter = _make_adapter(routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        body = json.dumps(ALERTMANAGER_PAYLOAD).encode()
+
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/alertmanager",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Request-ID": "explicit-id-001",
+                },
+            )
+            assert first.status == 202
+            data1 = await first.json()
+            assert data1["delivery_id"] == "explicit-id-001"
+
+            second = await cli.post(
+                "/webhooks/alertmanager",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Request-ID": "explicit-id-002",
+                },
+            )
+            assert second.status == 202
+            data2 = await second.json()
+            assert data2["delivery_id"] == "explicit-id-002"
+
+    @pytest.mark.asyncio
+    async def test_different_routes_get_distinct_delivery_ids(self):
+        """Same groupKey on two different routes must produce different
+        delivery_ids so a duplicate on route A never silently masks a
+        legitimate delivery on route B."""
+        routes = {
+            "alertmanager-a": {
+                "prompt": "A: {commonLabels.alertname}",
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "log",
+            },
+            "alertmanager-b": {
+                "prompt": "B: {commonLabels.alertname}",
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "log",
+            },
+        }
+        adapter = _make_adapter(routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        body = json.dumps(ALERTMANAGER_PAYLOAD).encode()
+
+        async with TestClient(TestServer(app)) as cli:
+            a = await cli.post(
+                "/webhooks/alertmanager-a",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            b = await cli.post(
+                "/webhooks/alertmanager-b",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            assert a.status == 202
+            assert b.status == 202
+            id_a = (await a.json())["delivery_id"]
+            id_b = (await b.json())["delivery_id"]
+            assert id_a != id_b
+            assert id_a.startswith("alertmanager:")
+            assert id_b.startswith("alertmanager:")
+
+    @pytest.mark.parametrize(
+        "group_key",
+        [
+            pytest.param(None, id="missing"),
+            pytest.param("", id="empty-string"),
+            pytest.param("   ", id="whitespace-only"),
+            pytest.param("\t\n", id="tab-newline"),
+            pytest.param(123, id="integer"),
+            pytest.param(["foo"], id="list"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_groupkey_falls_through_to_timestamp(self, group_key):
+        """Non-string or effectively-empty groupKey must fall through to
+        the timestamp fallback (a fresh unique ID per request), never to
+        a stable hash. Otherwise an absent groupKey would silently dedup
+        every retry of every alert across the deployment."""
+        routes = {
+            "alertmanager": {
+                "prompt": "Alert: x",
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "log",
+            }
+        }
+        adapter = _make_adapter(routes)
+        adapter.handle_message = AsyncMock()
+
+        payload = dict(ALERTMANAGER_PAYLOAD)
+        if group_key is None:
+            payload.pop("groupKey", None)
+        else:
+            payload["groupKey"] = group_key
+
+        app = _create_app(adapter)
+        body = json.dumps(payload).encode()
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/alertmanager",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            assert resp.status == 202
+            delivery_id = (await resp.json())["delivery_id"]
+            # Timestamp fallback is digits-only; the hash path starts with
+            # "alertmanager:". Either way it must NOT be the hash path.
+            assert not delivery_id.startswith("alertmanager:")
+            assert delivery_id.isdigit()
