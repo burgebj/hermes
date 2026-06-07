@@ -1,0 +1,8 @@
+name: parse-screening
+version: 0.1.0
+description: "Config-gated ParseThis-style prompt, tool-result, and final-output screening."
+author: "Hermes Agent"
+hooks:
+  - pre_tool_call
+  - transform_tool_result
+  - transform_llm_output
