@@ -313,3 +313,46 @@ def test_background_review_fork_skips_external_memory_plugins(monkeypatch):
         "the fork leaks harness prompts into the user's real memory "
         "namespace via on_turn_start / prefetch_all / sync_all."
     )
+
+def test_background_review_disables_compression(monkeypatch):
+    """Review agent must not compress — its result is discarded.
+
+    Phantom compressions waste auxiliary-model tokens and can corrupt
+    process-global context engine state (session bindings, DAG nodes).
+    """
+    import agent.background_review as bg_review
+
+    captured_attrs: dict = {}
+
+    class FakeReviewAgent:
+        def __init__(self, **kwargs):
+            self._session_messages = []
+
+        def __setattr__(self, name, value):
+            if name == "compression_enabled":
+                captured_attrs["compression_enabled"] = value
+            super().__setattr__(name, value)
+
+        def run_conversation(self, **kwargs):
+            pass
+
+        def shutdown_memory_provider(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
+    monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+
+    agent = _bare_agent()
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+    )
+
+    assert captured_attrs.get("compression_enabled") is False, (
+        "Review agent must have compression_enabled=False to prevent "
+        "phantom compressions against shared context engines"
+    )

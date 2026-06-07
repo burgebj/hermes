@@ -449,6 +449,12 @@ def _run_review_in_thread(
             # if a future code path bypasses the cache.
             review_agent.session_start = agent.session_start
             review_agent.session_id = agent.session_id
+                 
+            # Disable compression — the review fork inherits the full
+            # messages_snapshot but its compressed output is discarded
+            # when the fork exits.  Compressing wastes auxiliary-model
+            # tokens and can race with the foreground compression.
+            review_agent.compression_enabled = False
 
             from model_tools import get_tool_definitions
             from hermes_cli.plugins import (
