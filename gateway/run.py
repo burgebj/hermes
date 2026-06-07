@@ -20023,6 +20023,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Start background cron ticker so scheduled jobs fire automatically.
     # Pass the event loop so cron delivery can use live adapters (E2EE support).
     cron_stop = threading.Event()
+    # Resolve the heartbeat file path on THIS (main) thread, BEFORE the
+    # cron ticker starts and could transiently mutate the process-global Hermes
+    # home in its own thread. Passed explicitly to the heartbeat loop below.
+    from cron.scheduler import _get_heartbeat_path as _get_hb_path
+    _hb_path = _get_hb_path()
     cron_thread = threading.Thread(
         target=_start_cron_ticker,
         args=(cron_stop,),
@@ -20031,6 +20036,35 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="cron-ticker",
     )
     cron_thread.start()
+
+    # Gateway heartbeat — decouples the liveness signal from cron tick.
+    # Gated on _gateway_alive(): if the event loop is hung the probe never
+    # returns and the heartbeat stops, so a real outage still trips the monitor.
+    _hb_loop = asyncio.get_running_loop()
+    _HEARTBEAT_PROBE_TIMEOUT = 10.0  # seconds to wait for the loop to run a probe
+
+    def _gateway_alive() -> bool:
+        if cron_stop.is_set():
+            return False
+        if _hb_loop is None or not _hb_loop.is_running():
+            return False
+        probe = threading.Event()
+        try:
+            _hb_loop.call_soon_threadsafe(probe.set)
+        except RuntimeError:
+            return False
+        return probe.wait(_HEARTBEAT_PROBE_TIMEOUT)
+
+    from cron.scheduler import heartbeat_loop as _cron_heartbeat_loop
+    hb_stop = threading.Event()
+    hb_thread = threading.Thread(
+        target=_cron_heartbeat_loop,
+        args=(hb_stop, _gateway_alive),
+        kwargs={"interval": 30.0, "heartbeat_path": _hb_path},
+        daemon=True,
+        name="cron-heartbeat",
+    )
+    hb_thread.start()
     
     # Wait for shutdown
     await runner.wait_for_shutdown()
@@ -20043,6 +20077,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop gateway heartbeat thread
+    hb_stop.set()
+    hb_thread.join(timeout=5)
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()

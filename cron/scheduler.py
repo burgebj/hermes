@@ -235,6 +235,68 @@ def _get_lock_paths() -> tuple[Path, Path]:
     return lock_dir, lock_dir / ".tick.lock"
 
 
+def _get_heartbeat_path() -> Path:
+    """Resolve the gateway heartbeat file path.
+
+    Distinct from ``.tick.lock``: ``.tick.lock`` mtime means "a tick actually
+    ran"; ``.gateway.heartbeat`` mtime means "the gateway event loop is alive".
+    Keeping them separate lets the health monitor tell a long-running cron job
+    (tick lock held, but gateway healthy) apart from a real gateway hang.
+    """
+    return _get_hermes_home() / "cron" / ".gateway.heartbeat"
+
+
+def heartbeat_loop(stop_event, alive_check, interval: float = 30.0, heartbeat_path=None) -> None:
+    """Bump the gateway heartbeat file mtime every ``interval`` seconds.
+
+    Runs in a dedicated daemon thread started by the gateway. Decouples the
+    gateway-liveness signal from ``tick()`` execution: even while a long
+    sequential cron job monopolises the cron-ticker thread (holding the
+    ``.tick.lock`` ``flock`` for ~26 min), this loop keeps ``.gateway.heartbeat``
+    fresh so the health monitor does not false-alarm "cron tick stopped".
+
+    Safety requirement: each bump is gated on ``alive_check()`` — a
+    callable returning True only when the gateway event loop is provably
+    responsive. If the loop is hung, ``alive_check()`` returns False and we STOP
+    bumping, so the monitor still detects the real outage. An unconditional,
+    always-on bump would permanently disable the health monitor and is forbidden.
+
+    Args:
+        stop_event: ``threading.Event`` set on gateway shutdown to exit promptly.
+        alive_check: zero-arg callable -> bool gating each bump on real
+            event-loop liveness (see gateway ``_gateway_alive``).
+        interval: seconds between bump attempts (default 30s; 1/10 of the
+            health monitor's 300s staleness threshold).
+    """
+    # Resolve the heartbeat path ONCE. Prefer the caller-supplied path: the
+    # gateway resolves it on the MAIN thread (clean Hermes home) before any tick
+    # job can transiently mutate the process-global ``_hermes_home`` in the
+    # ticker thread. Falling back to _get_heartbeat_path() here is only for
+    # direct/test callers that have no concurrent ticker.
+    hb_path = Path(heartbeat_path) if heartbeat_path is not None else _get_heartbeat_path()
+    try:
+        hb_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.debug("Heartbeat dir create failed (non-fatal): %s", e)
+    logger.info("Gateway heartbeat loop started (interval=%.0fs, file=%s)", interval, hb_path)
+    while not stop_event.is_set():
+        try:
+            # Re-check stop_event AFTER the (possibly blocking) liveness probe so
+            # a shutdown landing mid-probe does not produce a post-shutdown bump.
+            if alive_check() and not stop_event.is_set():
+                # Path-based mtime bump — independent of the fcntl LOCK_EX that
+                # tick() holds on .tick.lock (different file/inode), so it works
+                # mid-tick.
+                hb_path.touch(exist_ok=True)
+                os.utime(hb_path, None)
+        except OSError as e:
+            logger.debug("Heartbeat bump failed (non-fatal): %s", e)
+        except Exception as e:  # never let the heartbeat thread die silently
+            logger.debug("Heartbeat loop unexpected error (non-fatal): %s", e)
+        stop_event.wait(interval)
+    logger.info("Gateway heartbeat loop stopped")
+
+
 @contextmanager
 def _job_profile_context(job_id: str, profile: Optional[str]):
     """Temporarily run a job under a specific Hermes profile.
