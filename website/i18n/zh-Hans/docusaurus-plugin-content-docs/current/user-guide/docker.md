@@ -41,6 +41,23 @@ docker run -d \
 
 端口 8642 暴露 gateway 的 [OpenAI 兼容 API 服务器](./features/api-server.md)和健康检查端点。如果你只使用聊天平台（Telegram、Discord 等），该端口是可选的；但如果你希望 dashboard 或外部工具访问 gateway，则必须开放。
 
+:::tip Gateway 以 supervised 模式运行
+在官方 Docker 镜像中，`gateway run` 由 **s6-overlay 自动托管**：gateway 进程崩溃时会在几秒内自动重启而不影响容器；若设置了 `HERMES_DASHBOARD=1`，dashboard 也由 s6 一并托管。`gateway run` 这个 CMD 进程本身只是一个 `sleep infinity` 心跳，用于在 s6 管理真正的 gateway 进程时保持容器存活——因此 `docker stop` 仍能干净地关闭整个容器，而 `docker logs` 显示的就是受托管的 gateway 输出。
+
+你会在 `docker logs` 里看到一行 breadcrumb 确认该升级行为。如需关闭（恢复"gateway 即容器主进程、gateway 退出即容器退出"的旧语义），传入 `--no-supervise` 或设置 `HERMES_GATEWAY_NO_SUPERVISE=1`。关闭后通常用于 CI 冒烟测试——希望容器以 gateway 的退出码退出；生产部署仍建议使用 supervised 默认行为。
+
+该行为仅适用于 s6 镜像。更早的（基于 tini 的）镜像仍以前台主进程方式运行 `gateway run`。
+:::
+
+:::note Gateway 日志在哪里
+在 s6 镜像中，受托管的 gateway 输出会被 tee 到两个目标：
+
+- **`docker logs <container>`**——所有行都是实时（原始，无额外前缀），与前台 gateway 输出相同，现有 `docker logs --follow` / `--timestamps` / 日志采集器集成无需修改。
+- **`${HERMES_HOME}/logs/gateways/<profile>/current`**（通过 volume 挂载映射到宿主机 `~/.hermes/logs/gateways/<profile>/current`）——带轮转，每行前缀 ISO 8601 时间戳。轮转策略为 10 份归档 × 每份 1 MB，不会撑爆磁盘。这是 `hermes logs` 读取的来源，也是容器重启后仍保留的日志。
+
+per-profile reconciler 还会在 `${HERMES_HOME}/logs/container-boot.log` 维护一份独立审计日志——每次容器启动、每个 profile 一行，记录各 gateway 是否被恢复到先前状态。
+:::
+
 注意：API 服务器需设置 `API_SERVER_ENABLED=true` 才会启用。若要在容器内将其暴露至 `127.0.0.1` 以外，还需设置 `API_SERVER_HOST=0.0.0.0` 和 `API_SERVER_KEY`（最少 8 个字符——可用 `openssl rand -hex 32` 生成）。示例：
 
 ```sh
