@@ -582,6 +582,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_ALLOW_PRIVATE_URLS` | `true`/`false` — allow tools to fetch localhost/private-network URLs. Off by default in gateway mode. |
 | `HERMES_REDACT_SECRETS` | `true`/`false` — control secret redaction in tool output, logs, and chat responses (default: `true`). |
 | `HERMES_WRITE_SAFE_ROOT` | Optional directory prefix that restricts `write_file`/`patch` writes; paths outside require approval. |
+| `HERMES_TERMINAL_WRITE_GUARD` | `off`/`warn`/`block` — extend `HERMES_WRITE_SAFE_ROOT` to `terminal`/`execute_code` (best-effort static scan). `warn` (default) flags out-of-root writes to the model; `block` refuses them. No-op when `HERMES_WRITE_SAFE_ROOT` is unset. Defense-in-depth, not a security boundary. |
 | `HERMES_DISABLE_FILE_STATE_GUARD` | Set to `1` to turn off the "file changed since you read it" guard on `patch`/`write_file`. |
 | `HERMES_CORE_TOOLS` | Comma-separated override for the canonical core tool list (advanced; rarely needed). |
 | `HERMES_BUNDLED_SKILLS` | Comma-separated override for the list of bundled skills loaded at startup. |

@@ -1111,8 +1111,40 @@ def execute_code(
             "duration_seconds": 0,
         }, ensure_ascii=False)
 
+    # Safe-root write guard (#36645): execute_code runs arbitrary Python that
+    # bypasses HERMES_WRITE_SAFE_ROOT. Best-effort static scan for write
+    # targets (open(p,'w'), .write_text/.write_bytes) resolving outside the
+    # safe root, surfaced to the model (warn, default) or refused (block).
+    # No-op when the safe root is unset. NOT a security boundary.
+    safe_root_warning = None
+    try:
+        from agent.file_safety import (
+            build_unsafe_write_warning,
+            find_unsafe_code_writes,
+            get_terminal_write_guard_mode,
+        )
+
+        _guard_mode = get_terminal_write_guard_mode()
+        if _guard_mode != "off":
+            _base = os.environ.get("TERMINAL_CWD", "").strip()
+            _base = os.path.expanduser(_base) if _base and os.path.isdir(os.path.expanduser(_base)) else os.getcwd()
+            _unsafe = find_unsafe_code_writes(code, _base)
+            if _unsafe:
+                if _guard_mode == "block":
+                    return json.dumps({
+                        "status": "blocked",
+                        "error": build_unsafe_write_warning(_unsafe, blocked=True),
+                        "tool_calls_made": 0,
+                        "duration_seconds": 0,
+                    }, ensure_ascii=False)
+                safe_root_warning = build_unsafe_write_warning(_unsafe, blocked=False)
+    except Exception:
+        safe_root_warning = None
+
     if env_type != "local":
-        return _execute_remote(code, task_id, enabled_tools)
+        return _attach_safe_root_warning(
+            _execute_remote(code, task_id, enabled_tools), safe_root_warning,
+        )
 
     # --- Local execution path (UDS) --- below this line is unchanged ---
 
@@ -1461,6 +1493,9 @@ def execute_code(
             if stderr_text:
                 result["output"] = stdout_text + "\n--- stderr ---\n" + stderr_text
 
+        if safe_root_warning:
+            result["safe_root_warning"] = safe_root_warning
+
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as exc:
@@ -1665,6 +1700,24 @@ def _resolve_child_python(mode: str) -> str:
                 return sys.executable
 
     return sys.executable
+
+
+def _attach_safe_root_warning(result_json: str, warning: Optional[str]) -> str:
+    """Merge a safe-root guard warning (#36645) into a result JSON string.
+
+    Best-effort: if the payload isn't a JSON object we return it unchanged so
+    the guard never corrupts a tool result.
+    """
+    if not warning:
+        return result_json
+    try:
+        data = json.loads(result_json)
+        if isinstance(data, dict):
+            data["safe_root_warning"] = warning
+            return json.dumps(data, ensure_ascii=False)
+    except Exception:
+        pass
+    return result_json
 
 
 def _resolve_child_cwd(mode: str, staging_dir: str) -> str:

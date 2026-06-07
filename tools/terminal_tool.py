@@ -2024,6 +2024,47 @@ def terminal_tool(
                     "status": "blocked"
                 }, ensure_ascii=False)
 
+        # Safe-root write guard (#36645): the shell bypasses
+        # HERMES_WRITE_SAFE_ROOT that the Write/Edit tools honor. Best-effort
+        # static scan of the command for writes that resolve outside the safe
+        # root (tracking `cd` and `python3 -c` payloads), surfaced to the model
+        # (warn, default) or refused (block). No-op when the safe root is unset
+        # or for isolated/remote backends. NOT a security boundary.
+        safe_root_warning = None
+        if env_type == "local":
+            try:
+                from agent.file_safety import (
+                    build_unsafe_write_warning,
+                    find_unsafe_shell_writes,
+                    get_terminal_write_guard_mode,
+                )
+
+                guard_mode = get_terminal_write_guard_mode()
+                if guard_mode != "off":
+                    guard_cwd = _resolve_command_cwd(
+                        workdir=workdir, env=env, default_cwd=cwd,
+                    )
+                    unsafe_targets = find_unsafe_shell_writes(command, guard_cwd)
+                    if unsafe_targets:
+                        if guard_mode == "block":
+                            logger.warning(
+                                "Blocked out-of-safe-root write(s) in command: %s",
+                                _safe_command_preview(command),
+                            )
+                            return json.dumps({
+                                "output": "",
+                                "exit_code": -1,
+                                "error": build_unsafe_write_warning(
+                                    unsafe_targets, blocked=True,
+                                ),
+                                "status": "blocked",
+                            }, ensure_ascii=False)
+                        safe_root_warning = build_unsafe_write_warning(
+                            unsafe_targets, blocked=False,
+                        )
+            except Exception:
+                safe_root_warning = None
+
         # Prepare command for execution
         pty_disabled_reason = None
         effective_pty = pty
@@ -2077,6 +2118,8 @@ def terminal_tool(
                 }
                 if approval_note:
                     result_data["approval"] = approval_note
+                if safe_root_warning:
+                    result_data["safe_root_warning"] = safe_root_warning
                 if pty_disabled_reason:
                     result_data["pty_note"] = pty_disabled_reason
 
@@ -2362,6 +2405,8 @@ def terminal_tool(
             }
             if approval_note:
                 result_dict["approval"] = approval_note
+            if safe_root_warning:
+                result_dict["safe_root_warning"] = safe_root_warning
             if exit_note:
                 result_dict["exit_code_meaning"] = exit_note
 
