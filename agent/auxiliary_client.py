@@ -1510,7 +1510,7 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
         logger.debug("Auxiliary client: OpenRouter via pool")
         return OpenAI(api_key=or_key, base_url=base_url,
-                       default_headers=build_or_headers()), model or _OPENROUTER_MODEL
+                       default_headers=build_or_headers()), _resolve_openrouter_aux_model()
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
@@ -1518,7 +1518,42 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
-                   default_headers=build_or_headers()), model or _OPENROUTER_MODEL
+                   default_headers=build_or_headers()), _resolve_openrouter_aux_model()
+
+
+def _resolve_openrouter_aux_model() -> str:
+    """Return the user's preferred OpenRouter aux model from fallback_providers, or the hardcoded default.
+
+    When the user has configured fallback_providers with an OpenRouter entry
+    that specifies a model (especially :free variants), use that model for
+    auxiliary tasks instead of the hardcoded paid default.  This prevents
+    unexpected billing for free-tier users.
+
+    Skip meta-router models (openrouter/auto, openrouter/free) as they are not
+    concrete models and would route through the router non-deterministically.
+    """
+    META_ROUTER_MODELS = {"openrouter/auto", "openrouter/free"}
+    selected_model = None
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        fallbacks = cfg.get("fallback_providers", [])
+        if isinstance(fallbacks, list):
+            for entry in fallbacks:
+                if isinstance(entry, dict):
+                    prov = (entry.get("provider") or "").strip().lower()
+                    model = (entry.get("model") or "").strip()
+                    if prov == "openrouter" and model and model not in META_ROUTER_MODELS:
+                        selected_model = model
+                        break
+    except Exception:
+        pass
+    if selected_model is None:
+        selected_model = _OPENROUTER_MODEL
+    logger.info(f"Using OpenRouter auxiliary model: {selected_model}")
+    return selected_model
+
+
 
 
 def _describe_openrouter_unavailable() -> str:
