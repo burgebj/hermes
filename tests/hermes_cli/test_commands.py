@@ -507,9 +507,13 @@ class TestSlashCommandCompleter:
         completions = _completions(SlashCommandCompleter(), "/re")
         texts = {item.text for item in completions}
 
-        assert "reset" in texts
+        # Primary commands starting with "re" should appear.
         assert "retry" in texts
         assert "reload-mcp" in texts
+        assert "reload-skills" in texts
+        # Semantic aliases like /reset (alias of /new) are KEPT in
+        # autocomplete — users discover them via the menu.
+        assert "reset" in texts
 
     def test_builtin_completion_display_meta_shows_description(self):
         completions = _completions(SlashCommandCompleter(), "/help")
@@ -570,6 +574,43 @@ class TestSlashCommandCompleter:
         completions = _completions(completer, "/gif")
         # /gif doesn't match any builtin command
         assert completions == []
+
+    def test_underscore_alias_duplicates_not_in_autocomplete(self):
+        """Only underscore↔hyphon duplicate aliases are filtered from the
+        autocomplete dropdown (issue #33211).  Semantic aliases like
+        /provider, /bg, /reset etc. are kept.  All aliases still resolve
+        via resolve_command()."""
+        completer = SlashCommandCompleter()
+        completions = _completions(completer, "/reload")
+        texts = {item.text for item in completions}
+
+        # Primary commands should appear
+        assert "reload-mcp" in texts
+        assert "reload-skills" in texts
+        # Underscore variants should NOT appear as separate entries
+        assert "reload_mcp" not in texts
+        assert "reload_skills" not in texts
+
+    def test_semantic_aliases_are_kept_in_autocomplete(self):
+        """Semantic aliases (non-underscore-variants) must appear in
+        autocomplete — users discover /bg, /reset, /q etc. via the menu."""
+        completer = SlashCommandCompleter()
+
+        # /bg (alias of /background) must appear for "/b"
+        completions = _completions(completer, "/b")
+        texts = {item.text for item in completions}
+        assert "bg" in texts
+
+    def test_alias_commands_still_resolve(self):
+        """Aliases must still resolve to their primary command via
+        resolve_command() even though they don't appear in autocomplete."""
+        cmd = resolve_command("reload_mcp")
+        assert cmd is not None
+        assert cmd.name == "reload-mcp"
+
+        cmd = resolve_command("bg")
+        assert cmd is not None
+        assert cmd.name == "background"
 
     def test_skill_provider_exception_is_swallowed(self):
         """A broken provider should not crash autocomplete."""
