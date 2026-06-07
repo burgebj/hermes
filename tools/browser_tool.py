@@ -865,6 +865,10 @@ def _run_chrome_fallback_command(
 
     def _run_tmp(cmd: str, cmd_args: List[str]) -> Dict[str, Any]:
         full = base_args + [cmd] + cmd_args
+        # Same Windows .cmd/.bat shim escaping as _run_browser_command — see #35654.
+        popen_target: Union[List[str], str] = (
+            _build_bat_cmdline(full) if _is_windows_bat_target(full[0]) else full
+        )
         # Use temp-file stdout/stderr pattern (same as _run_browser_command)
         # to avoid pipe hang from agent-browser daemon inheriting fds.
         stdout_path = os.path.join(task_socket_dir, f"_stdout_{cmd}")
@@ -908,7 +912,7 @@ def _run_chrome_fallback_command(
                 _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
                 _popen_extra["startupinfo"] = _si
             proc = subprocess.Popen(
-                full, stdout=stdout_fd, stderr=stderr_fd,
+                popen_target, stdout=stdout_fd, stderr=stderr_fd,
                 stdin=subprocess.DEVNULL, env=browser_env,
                 **_popen_extra,
             )
@@ -1748,6 +1752,53 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
 
 
 
+# Cmd.exe metacharacters that, if unquoted, get interpreted by the .cmd/.bat
+# wrapper's `%*` re-evaluation pass. `&` splits a URL, `|` pipes the rest, etc.
+# CPython 3.11.9+ / 3.12.3+ / 3.13+ auto-escape these for .bat/.cmd targets
+# (CVE-2024-1874); the helper below backports the same protection so older
+# patch levels of supported Pythons (3.11.0–3.11.8) don't drop URL query
+# strings on the floor.  See issue #35654.
+_CMD_METACHARS = frozenset('&|<>^"%!()')
+
+
+def _quote_arg_for_cmd(arg: str) -> str:
+    """Wrap *arg* in cmd.exe-safe double quotes if it contains any cmd
+    metacharacter or whitespace; otherwise return it unchanged.
+
+    Internal `"` are doubled (`""`) per cmd.exe convention so the .cmd shim's
+    `%*` expansion preserves them.
+    """
+    if not arg:
+        return '""'
+    if any(c in _CMD_METACHARS or c.isspace() for c in arg):
+        return '"' + arg.replace('"', '""') + '"'
+    return arg
+
+
+def _build_bat_cmdline(parts: List[str]) -> str:
+    """Render argv as a single command-line string with cmd.exe-safe quoting.
+
+    Used when the executable is a `.cmd` / `.bat` shim on Windows: passing a
+    list to `subprocess.Popen` would route through `subprocess.list2cmdline`,
+    whose backslash-quote escaping is incompatible with the cmd.exe parser
+    that runs inside the shim's `%*` expansion.
+    """
+    if not parts:
+        return ""
+    # Quote the executable path itself if it contains spaces (typical for
+    # `C:\Program Files\…\agent-browser.cmd`).  Internal quotes shouldn't
+    # appear in a real path; if they do, this fails closed by quoting them.
+    head = parts[0]
+    if any(c.isspace() or c == '"' for c in head):
+        head = '"' + head.replace('"', '""') + '"'
+    return " ".join([head, *(_quote_arg_for_cmd(a) for a in parts[1:])])
+
+
+def _is_windows_bat_target(executable: str) -> bool:
+    """True iff *executable* will be dispatched through the cmd.exe shim layer."""
+    return os.name == "nt" and executable.lower().endswith((".cmd", ".bat"))
+
+
 def _find_agent_browser() -> str:
     """
     Find the agent-browser CLI executable.
@@ -1976,6 +2027,15 @@ def _run_browser_command(
         command
     ] + args
 
+    # Windows .cmd/.bat shim: render argv as a cmd.exe-safe string so URLs
+    # containing `&` / `|` / `<` / `>` aren't split by the wrapper's `%*`
+    # re-evaluation pass.  See _build_bat_cmdline for the rationale; #35654.
+    popen_target: Union[List[str], str] = (
+        _build_bat_cmdline(cmd_parts)
+        if _is_windows_bat_target(cmd_parts[0])
+        else cmd_parts
+    )
+
     try:
         # Give each task its own socket directory to prevent concurrency conflicts.
         # Without this, parallel workers fight over the same default socket path,
@@ -2069,7 +2129,7 @@ def _run_browser_command(
                 _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
                 _popen_extra["startupinfo"] = _si
             proc = subprocess.Popen(
-                cmd_parts,
+                popen_target,
                 stdout=stdout_fd,
                 stderr=stderr_fd,
                 stdin=subprocess.DEVNULL,
