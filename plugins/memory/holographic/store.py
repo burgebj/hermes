@@ -3,6 +3,7 @@ SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Hermes memory store plugin.
 """
 
+import logging
 import re
 import sqlite3
 import threading
@@ -75,6 +76,15 @@ CREATE TABLE IF NOT EXISTS memory_banks (
 );
 """
 
+logger = logging.getLogger(__name__)
+
+_CORRUPT_DB_MARKERS = (
+    "file is not a database",
+    "database disk image is malformed",
+    "file is encrypted or is not a database",
+    "unsupported file format",
+)
+
 # Trust adjustment constants
 _HELPFUL_DELTA   =  0.05
 _UNHELPFUL_DELTA = -0.10
@@ -112,14 +122,49 @@ class MemoryStore:
         self.default_trust = _clamp_trust(default_trust)
         self.hrr_dim = hrr_dim
         self._hrr_available = hrr._HAS_NUMPY
-        self._conn: sqlite3.Connection = sqlite3.connect(
+        self._lock = threading.RLock()
+        self._conn = self._connect()
+        try:
+            self._init_db()
+        except sqlite3.DatabaseError as exc:
+            self._conn.close()
+            self._recover_corrupt_database(exc)
+            self._conn = self._connect()
+            self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
             timeout=10.0,
         )
-        self._lock = threading.RLock()
-        self._conn.row_factory = sqlite3.Row
-        self._init_db()
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _recover_corrupt_database(self, exc: sqlite3.DatabaseError) -> None:
+        """Quarantine a corrupt SQLite store so Hermes can start with a fresh DB."""
+        error = str(exc).lower()
+        if not any(marker in error for marker in _CORRUPT_DB_MARKERS):
+            raise exc
+
+        backup_path = self.db_path.with_name(f"{self.db_path.name}.corrupt")
+        counter = 1
+        while backup_path.exists():
+            backup_path = self.db_path.with_name(f"{self.db_path.name}.corrupt.{counter}")
+            counter += 1
+
+        logger.warning(
+            "Holographic memory database at %s is unreadable (%s); moving it to %s and creating a fresh store",
+            self.db_path,
+            exc,
+            backup_path,
+        )
+        if self.db_path.exists():
+            self.db_path.replace(backup_path)
+        for sidecar_suffix in ("-wal", "-shm"):
+            sidecar = self.db_path.with_name(f"{self.db_path.name}{sidecar_suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
 
     # ------------------------------------------------------------------
     # Initialisation
