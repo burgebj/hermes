@@ -803,7 +803,29 @@ class ShellFileOperations(FileOperations):
         """
         if not path:
             return path
-        
+
+        # ── MSYS / git-bash / WSL drive-path normalization (Windows only) ──
+        # On Windows the "local" terminal backend is a busybox-style shell
+        # whose filesystem root ``/`` maps to the CURRENT DRIVE root (C:\),
+        # NOT through a git-bash mount table. So a git-bash-style path like
+        # ``/c/dev/x`` does NOT resolve to ``C:\dev\x`` — the shell reads it
+        # literally as ``C:\c\dev\x``, silently writing files into a phantom
+        # ``C:\c\`` tree the user never sees (write succeeds, file "vanishes").
+        #
+        # The agent and the user naturally refer to paths in git-bash form
+        # (``/c/dev/...``). Translate a leading ``/<drive>/`` segment — plus
+        # the WSL ``/mnt/<drive>/`` and Cygwin ``/cygdrive/<drive>/`` variants
+        # — into drive-letter form with FORWARD slashes (``c:/dev/...``).
+        # Forward slashes are load-bearing: both busybox-w32 and git-bash
+        # resolve ``c:/dev`` correctly, and they survive single-quote shell
+        # escaping where backslashes would not.
+        if os.name == 'nt':
+            drive_match = re.match(r'^/(?:mnt/|cygdrive/)?([A-Za-z])(?:/|$)', path)
+            if drive_match:
+                drive = drive_match.group(1)
+                rest = path[drive_match.end():]
+                path = f"{drive}:/{rest}"
+
         # Handle ~ and ~user
         if path.startswith('~'):
             # Get home directory via the terminal environment
