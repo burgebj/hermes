@@ -1515,29 +1515,22 @@ async def _send_dingtalk(extra, chat_id, message):
         return _error(f"DingTalk send failed: {e}")
 
 
-async def _send_wecom(extra, chat_id, message):
-    """Send via WeCom using the adapter's WebSocket send pipeline."""
+async def _send_wecom(extra, chat_id, message, media_files=None):
+    """Send via WeCom using the Gateway's live adapter (no second WebSocket)."""
     try:
-        from gateway.platforms.wecom import WeComAdapter, check_wecom_requirements
+        from gateway.platforms.wecom import send_wecom_direct, check_wecom_requirements
         if not check_wecom_requirements():
             return {"error": "WeCom requirements not met. Need aiohttp + WECOM_BOT_ID/SECRET."}
     except ImportError:
         return {"error": "WeCom adapter not available."}
 
     try:
-        from gateway.config import PlatformConfig
-        pconfig = PlatformConfig(extra=extra)
-        adapter = WeComAdapter(pconfig)
-        connected = await adapter.connect()
-        if not connected:
-            return _error(f"WeCom: failed to connect - {adapter.fatal_error_message or 'unknown error'}")
-        try:
-            result = await adapter.send(chat_id, message)
-            if not result.success:
-                return _error(f"WeCom send failed: {result.error}")
-            return {"success": True, "platform": "wecom", "chat_id": chat_id, "message_id": result.message_id}
-        finally:
-            await adapter.disconnect()
+        return await send_wecom_direct(
+            extra=extra,
+            chat_id=chat_id,
+            message=message,
+            media_files=media_files,
+        )
     except Exception as e:
         return _error(f"WeCom send failed: {e}")
 
