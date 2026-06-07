@@ -488,6 +488,11 @@ class MCPOAuthManager:
             if mtime_ns != entry.last_mtime_ns:
                 old = entry.last_mtime_ns
                 entry.last_mtime_ns = mtime_ns
+                if old == 0:
+                    # First observation only seeds the baseline. Forcing a
+                    # reload here can reset the provider in the middle of its
+                    # first auth handshake and tear down HTTP MCP discovery.
+                    return False
                 # Force the SDK's OAuthClientProvider to reload from storage
                 # on its next auth flow. `_initialized` is private API but
                 # stable across the MCP SDK versions we pin (>=1.26.0).
