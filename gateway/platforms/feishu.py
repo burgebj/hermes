@@ -942,6 +942,34 @@ def _normalize_interactive_message(message_type: str, payload: Dict[str, Any]) -
     body_lines = _collect_card_lines(card_payload)
     actions = _collect_action_labels(card_payload)
 
+    # Template cards use {type: "template", data: {template_id, template_variable}}.
+    # The template_variable dict holds the actual text content that should be
+    # presented to the agent.  When a card is sent via template, the raw content
+    # lacks the resolved "elements" array, so _collect_card_lines returns empty.
+    # (ref: https://github.com/NousResearch/hermes-agent/issues/33090)
+    if not body_lines:
+        template_data = card_payload.get("data") if isinstance(card_payload, dict) else None
+        if isinstance(template_data, dict):
+            template_vars = template_data.get("template_variable")
+            if isinstance(template_vars, dict):
+                for _key, val in template_vars.items():
+                    if isinstance(val, str):
+                        normalized = _normalize_feishu_text(val)
+                        if normalized:
+                            body_lines.append(normalized)
+
+    # Fallback: some card payloads carry a top-level summary/description that
+    # is not nested inside elements (e.g. notification previews).
+    if not body_lines and not title:
+        body_lines = [
+            _normalize_feishu_text(v)
+            for v in (
+                card_payload.get("summary", ""),
+                card_payload.get("description", ""),
+            )
+            if isinstance(v, str) and _normalize_feishu_text(v)
+        ]
+
     lines: List[str] = []
     if title:
         lines.append(title)
@@ -951,7 +979,7 @@ def _normalize_interactive_message(message_type: str, payload: Dict[str, Any]) -
     if actions:
         lines.append(f"Actions: {', '.join(actions)}")
 
-    text_content = "\n".join(lines[:12]).strip() or FALLBACK_INTERACTIVE_TEXT
+    text_content = "\n".join(lines[:20]).strip() or FALLBACK_INTERACTIVE_TEXT
     return FeishuNormalizedMessage(
         raw_type=message_type,
         text_content=text_content,

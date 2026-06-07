@@ -159,6 +159,58 @@ class TestFeishuMessageNormalization(unittest.TestCase):
             "Build Failed\nService: payments-api\nBranch: main\nView Logs\nRetry\nActions: View Logs, Retry",
         )
 
+    def test_normalize_template_card_extracts_template_variables(self):
+        """Template cards should extract template_variable content (#33090)."""
+        from gateway.platforms.feishu import normalize_feishu_message
+
+        normalized = normalize_feishu_message(
+            message_type="interactive",
+            raw_content=json.dumps(
+                {
+                    "type": "template",
+                    "data": {
+                        "template_id": "ctp_Aa9a8a34be56e",
+                        "template_variable": {
+                            "title_text": "Daily Report",
+                            "content_text": "Top pick: 600519 +3.2%",
+                            "detail_text": "Runner up: 000858 +2.1%",
+                        },
+                    },
+                }
+            ),
+        )
+
+        self.assertEqual(normalized.relation_kind, "interactive")
+        self.assertIn("Daily Report", normalized.text_content)
+        self.assertIn("600519", normalized.text_content)
+        self.assertIn("000858", normalized.text_content)
+        self.assertNotEqual(normalized.text_content, "[Interactive message]")
+
+    def test_normalize_template_card_wrapped_in_card_key(self):
+        """Template card wrapped in a 'card' key should also extract content."""
+        from gateway.platforms.feishu import normalize_feishu_message
+
+        normalized = normalize_feishu_message(
+            message_type="interactive",
+            raw_content=json.dumps(
+                {
+                    "card": {
+                        "type": "template",
+                        "data": {
+                            "template_id": "ctp_xxx",
+                            "template_variable": {
+                                "title": "Alert",
+                                "body": "Server CPU at 95%",
+                            },
+                        },
+                    }
+                }
+            ),
+        )
+
+        self.assertIn("Alert", normalized.text_content)
+        self.assertIn("95%", normalized.text_content)
+
 
 class TestFeishuAdapterMessaging(unittest.TestCase):
     @patch.dict(os.environ, {
