@@ -189,6 +189,17 @@ ALL_TOOL_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REASONING_SCHEMA, CONTEXT_SCH
 # ---------------------------------------------------------------------------
 
 class HonchoMemoryProvider(MemoryProvider):
+    _VACUOUS_DIALECTIC_PREFIXES = (
+        "i don't have any gathered information about this person",
+        "i do not have any gathered information about this person",
+        "i don't have enough information about this person",
+        "i do not have enough information about this person",
+        "i can't reliably identify who they are",
+        "i cannot reliably identify who they are",
+        "no gathered information about this person",
+        "no profile facts available yet.",
+    )
+
     """Honcho AI-native memory with dialectic Q&A and persistent user modeling."""
 
     def __init__(self):
@@ -546,6 +557,17 @@ class HonchoMemoryProvider(MemoryProvider):
             return True
         return not (self._init_thread and self._init_thread.is_alive())
 
+    @classmethod
+    def _is_vacuous_dialectic_result(cls, text: str) -> bool:
+        """Detect generic empty-memory summaries that contradict base context."""
+        if not text or not text.strip():
+            return False
+        normalized = re.sub(r"\s+", " ", text.strip().lower())
+        return any(
+            normalized.startswith(prefix)
+            for prefix in cls._VACUOUS_DIALECTIC_PREFIXES
+        )
+
     def _format_first_turn_context(self, ctx: dict) -> str:
         """Format the prefetch context dict into a readable system prompt block."""
         parts = []
@@ -748,6 +770,17 @@ class HonchoMemoryProvider(MemoryProvider):
             logger.debug(
                 "Honcho pending dialectic discarded as stale: fired_at=%d, "
                 "turn=%d, limit=%d", fired_at, self._turn_count, stale_limit,
+            )
+            dialectic_result = ""
+
+        if (
+            base_context
+            and dialectic_result
+            and self._is_vacuous_dialectic_result(dialectic_result)
+        ):
+            logger.debug(
+                "Honcho dialectic summary discarded because base context already "
+                "contains concrete profile facts"
             )
             dialectic_result = ""
 
