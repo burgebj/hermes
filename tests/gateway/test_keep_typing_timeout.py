@@ -198,3 +198,130 @@ class TestKeepTypingTimeoutPerTick:
         assert calls == [], (
             f"send_typing was called on a paused chat: {calls}"
         )
+
+
+class TestKeepTypingMaxDuration:
+    """Tests for _keep_typing max_duration safety net (#41168).
+
+    When the parent message-processing task stalls (e.g. Telegram flood
+    control retries, HTTP hangs, or cancellation races in the finally block),
+    the typing indicator can persist for hours because _keep_typing keeps
+    refreshing it every 2s. The max_duration parameter caps total runtime
+    so typing always stops after a bounded period.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stops_after_max_duration_without_cancel(self, monkeypatch):
+        """_keep_typing must stop on its own after max_duration expires,
+        even if never cancelled and stop_event is never set."""
+        adapter = _StubAdapter()
+        ticks = []
+
+        async def counting_send_typing(chat_id, metadata=None):
+            ticks.append(1)
+
+        monkeypatch.setattr(adapter, "send_typing", counting_send_typing)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+
+        task = asyncio.create_task(
+            adapter._keep_typing(
+                chat_id="test",
+                interval=0.1,
+                max_duration=0.5,
+            )
+        )
+        # Wait longer than max_duration — the task should have exited on its own.
+        done = await asyncio.wait_for(task, timeout=2.0)
+        assert done is None  # task returned normally
+
+        # Should have ticked a few times (0.5s / 0.1s interval ≈ 5 ticks).
+        assert len(ticks) >= 2, (
+            f"expected multiple typing ticks, got {len(ticks)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_runs_stops_typing_on_max_duration(self, monkeypatch):
+        """When max_duration expires, stop_typing must be called to clean
+        up the platform-level typing indicator."""
+        adapter = _StubAdapter()
+        stop_calls = []
+
+        async def noop_send_typing(chat_id, metadata=None):
+            pass
+
+        async def recording_stop_typing(chat_id):
+            stop_calls.append(chat_id)
+
+        monkeypatch.setattr(adapter, "send_typing", noop_send_typing)
+        monkeypatch.setattr(adapter, "stop_typing", recording_stop_typing)
+
+        task = asyncio.create_task(
+            adapter._keep_typing(
+                chat_id="cleanup-test",
+                interval=0.1,
+                max_duration=0.3,
+            )
+        )
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert "cleanup-test" in stop_calls, (
+            f"stop_typing was not called when max_duration expired; calls: {stop_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_normal_duration_does_not_trigger_max(self, monkeypatch):
+        """A short-lived typing task (cancelled before max_duration) must
+        work exactly as before — max_duration is a safety net, not a cap on
+        normal operation."""
+        adapter = _StubAdapter()
+        ticks = []
+
+        async def counting_send_typing(chat_id, metadata=None):
+            ticks.append(1)
+
+        monkeypatch.setattr(adapter, "send_typing", counting_send_typing)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            adapter._keep_typing(
+                chat_id="normal",
+                interval=0.1,
+                max_duration=10.0,  # generous — should NOT trigger
+                stop_event=stop_event,
+            )
+        )
+        await asyncio.sleep(0.5)
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        # Should have ticked ~5 times normally.
+        assert len(ticks) >= 2, f"expected ticks during normal operation, got {len(ticks)}"
+
+    @pytest.mark.asyncio
+    async def test_max_duration_logs_warning(self, monkeypatch, caplog):
+        """When max_duration is hit, a warning must be logged so operators
+        can diagnose the underlying stall."""
+        import logging
+
+        adapter = _StubAdapter()
+
+        async def noop_send_typing(chat_id, metadata=None):
+            pass
+
+        monkeypatch.setattr(adapter, "send_typing", noop_send_typing)
+        adapter.stop_typing = MagicMock(return_value=asyncio.sleep(0))
+
+        with caplog.at_level(logging.WARNING, logger="gateway.platforms.base"):
+            task = asyncio.create_task(
+                adapter._keep_typing(
+                    chat_id="warn-test",
+                    interval=0.1,
+                    max_duration=0.3,
+                )
+            )
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert any("max_duration" in r.message.lower() for r in caplog.records), (
+            f"expected a warning about max_duration expiry, got: {[r.message for r in caplog.records]}"
+        )

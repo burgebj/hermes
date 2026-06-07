@@ -3057,6 +3057,7 @@ class BasePlatformAdapter(ABC):
         interval: float = 2.0,
         metadata=None,
         stop_event: asyncio.Event | None = None,
+        max_duration: float = 300.0,
     ) -> None:
         """
         Continuously send typing indicator until cancelled.
@@ -3077,13 +3078,28 @@ class BasePlatformAdapter(ABC):
         the next tick fire a fresh send_typing on schedule — as long as
         one of them succeeds within the 5s platform-side window, the bubble
         stays visible across provider stalls / upstream API timeouts.
+
+        **max_duration** (default 300s = 5 minutes) is a safety net: if the
+        parent message-processing task stalls (e.g. Telegram flood-control
+        retries, an HTTP hang, or a cancellation race in the finally block),
+        the typing loop stops automatically instead of persisting for hours
+        (#41168). Normal agent turns finish well within this bound; the
+        limit only fires when something is already going wrong.
         """
         # Bound each send_typing round-trip so the refresh cadence isn't
         # gated on network health.  Must stay below ``interval`` so a slow
         # call gets abandoned before the next scheduled tick.
         _send_typing_timeout = max(0.25, min(1.5, interval - 0.25))
+        _loop = asyncio.get_running_loop()
+        _deadline = _loop.time() + max_duration
         try:
             while True:
+                if _loop.time() >= _deadline:
+                    logger.warning(
+                        "[%s] _keep_typing exceeded max_duration (%.0fs) for chat %s — stopping",
+                        self.name, max_duration, chat_id,
+                    )
+                    return
                 if stop_event is not None and stop_event.is_set():
                     return
                 if chat_id not in self._typing_paused:
