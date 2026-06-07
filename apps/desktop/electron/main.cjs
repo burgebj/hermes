@@ -119,6 +119,20 @@ if (REMOTE_DISPLAY_REASON) {
     `[hermes] remote display detected (${REMOTE_DISPLAY_REASON}); disabling GPU hardware acceleration to prevent flicker`
   )
 }
+// Must run before app `ready` — Chromium switches only apply pre-launch.
+// Set HERMES_DESKTOP_PASSWORD_STORE to select the keychain backend on Linux.
+// Valid values: gnome-libsecret, kwallet, kwallet5, kwallet6, basic.
+const _VALID_PASSWORD_STORES = new Set(['gnome-libsecret', 'kwallet', 'kwallet5', 'kwallet6', 'basic'])
+const PASSWORD_STORE_OVERRIDE = process.env.HERMES_DESKTOP_PASSWORD_STORE
+if (PASSWORD_STORE_OVERRIDE) {
+  if (_VALID_PASSWORD_STORES.has(PASSWORD_STORE_OVERRIDE)) {
+    app.commandLine.appendSwitch('password-store', PASSWORD_STORE_OVERRIDE)
+    console.log(`[hermes] using password store backend: ${PASSWORD_STORE_OVERRIDE}`)
+  } else {
+    console.warn(`[hermes] ignoring unknown HERMES_DESKTOP_PASSWORD_STORE value: ${PASSWORD_STORE_OVERRIDE}`)
+  }
+}
+
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
 // Build-time install stamp -- the git ref this .exe was built against.
