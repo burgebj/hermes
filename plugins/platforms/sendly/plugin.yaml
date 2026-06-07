@@ -1,0 +1,57 @@
+name: sendly-platform
+label: SMS (Sendly)
+kind: platform
+version: 1.0.0
+description: >
+  Sendly SMS gateway adapter for Hermes Agent. Runs an aiohttp webhook
+  server that receives Sendly `message.received` webhooks (with
+  HMAC-SHA256 signature verification over `{timestamp}.{body}`) and relays
+  them to the agent; outbound replies go through the Sendly send API.
+  Sendly runs carrier verification for you (toll-free for US/Canada,
+  instant international), so there is no approval gauntlet before you can
+  send. People text a Sendly number and chat with the agent over SMS, the
+  same conversational experience as Telegram or Discord.
+author: Sendly
+# ``requires_env`` / ``optional_env`` entries are surfaced in the
+# ``hermes config`` UI via the platform-plugin env var injector in
+# ``hermes_cli/config.py``.
+requires_env:
+  - name: SENDLY_API_KEY
+    description: "Sendly API key (test key = sandbox, live key = real SMS)"
+    prompt: "Sendly API key"
+    url: "https://sendly.live/api-keys"
+    password: true
+  - name: SENDLY_PHONE_NUMBER
+    description: "Your Sendly sending number / sender ID (E.164 for numbers). For two-way, use a receive-capable number — a US/Canada toll-free."
+    prompt: "Sendly number or sender ID"
+    password: false
+  - name: SENDLY_WEBHOOK_SECRET
+    description: "Signing secret of the Sendly webhook pointed at this adapter (verifies X-Sendly-Signature)"
+    prompt: "Sendly webhook signing secret"
+    url: "https://sendly.live"
+    password: true
+optional_env:
+  - name: SENDLY_WEBHOOK_PORT
+    description: "Port the adapter's webhook server listens on (default: 8080)"
+    prompt: "Webhook port (or empty)"
+    password: false
+  - name: SENDLY_WEBHOOK_HOST
+    description: "Bind address for the webhook server (default: 0.0.0.0)"
+    prompt: "Webhook host (or empty)"
+    password: false
+  - name: SENDLY_ALLOWED_USERS
+    description: "Comma-separated E.164 numbers allowed to chat (recommended; deny-all by default)"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: SENDLY_HOME_CHANNEL
+    description: "Phone number for cron-job / proactive delivery"
+    prompt: "Home channel number (or empty)"
+    password: false
+  - name: SENDLY_BASE_URL
+    description: "Override the Sendly API base URL (default: https://sendly.live)"
+    prompt: "Base URL (or empty)"
+    password: false
+  - name: SENDLY_INSECURE_NO_SIGNATURE
+    description: "Set to true to skip webhook signature checks (LOCAL DEV ONLY)"
+    prompt: "Disable signature check? (true/empty)"
+    password: false
