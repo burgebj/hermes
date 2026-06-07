@@ -17337,12 +17337,22 @@ class GatewayRunner:
             last_tool[0] = tool_name
             
             # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            from agent.display import format_skill_progress, get_tool_emoji
             emoji = get_tool_emoji(tool_name, default="⚙️")
-            
+
+            # Plugin-skill override: when the agent invokes a TAP-installed
+            # skill via skill_view, surface it with the 🔌 plug glyph and
+            # qualified name so plugin skills are visually distinct from
+            # native (📚) ones in Slack tool-progress.
+            _plugin_skill_msg = (
+                format_skill_progress(args) if tool_name == "skill_view" else None
+            )
+
             # Verbose mode: show detailed arguments, respects tool_preview_length
             if progress_mode == "verbose":
-                if args:
+                if _plugin_skill_msg is not None:
+                    msg = _plugin_skill_msg
+                elif args:
                     from agent.display import get_tool_preview_max_len
                     _pl = get_tool_preview_max_len()
                     args_str = json.dumps(args, ensure_ascii=False, default=str)
@@ -17358,11 +17368,13 @@ class GatewayRunner:
                     msg = f"{emoji} {tool_name}..."
                 progress_queue.put(msg)
                 return
-            
+
             # "all" / "new" modes: short preview, respects tool_preview_length
             # config (defaults to 40 chars when unset to keep gateway messages
             # compact — unlike CLI spinners, these persist as permanent messages).
-            if preview:
+            if _plugin_skill_msg is not None:
+                msg = _plugin_skill_msg
+            elif preview:
                 from agent.display import get_tool_preview_max_len
                 _pl = get_tool_preview_max_len()
                 _cap = _pl if _pl > 0 else 40

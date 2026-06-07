@@ -159,6 +159,30 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     return default
 
 
+def format_skill_progress(args: dict | None) -> str | None:
+    """Render a tool-progress line for plugin (TAP-installed) skills.
+
+    Native ``skill_view`` calls render as ``📚 skill_view: "axolotl"`` via
+    the standard emoji + preview pipeline.  Skills installed via TAP
+    plugins arrive with qualified names like ``bp-shopify:seo-reports``,
+    and surfacing them with a 🔌 plug glyph lets users distinguish plugin
+    skills from native ones at a glance in tool-progress messages.
+
+    Returns the formatted message string for plugin skills, or ``None``
+    for native skills / malformed input (caller falls through to the
+    default render).  Pure function — no registry lookups or I/O.
+    """
+    if not args:
+        return None
+    name = args.get("name")
+    if not isinstance(name, str) or ":" not in name:
+        return None
+    namespace, _, bare = name.partition(":")
+    if not namespace or not bare:
+        return None
+    return f"🔌 {namespace} · {bare}"
+
+
 # =========================================================================
 # Tool preview (one-line summary of a tool call's primary argument)
 # =========================================================================

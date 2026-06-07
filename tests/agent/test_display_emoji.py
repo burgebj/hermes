@@ -2,7 +2,7 @@
 
 from unittest.mock import patch as mock_patch, MagicMock
 
-from agent.display import get_tool_emoji
+from agent.display import format_skill_progress, get_tool_emoji
 
 
 class TestGetToolEmoji:
@@ -121,3 +121,47 @@ class TestSkinConfigToolEmojis:
         data = {"name": "minimal"}
         skin = _build_skin_config(data)
         assert skin.tool_emojis == {}
+
+
+class TestFormatSkillProgress:
+    """Verify the 🔌 plugin-skill override for tool-progress messages."""
+
+    def test_plugin_skill_qualified_name(self):
+        """Qualified ``namespace:bare`` renders as ``🔌 namespace · bare``."""
+        result = format_skill_progress({"name": "bp-shopify:seo-reports"})
+        assert result == "🔌 bp-shopify · seo-reports"
+
+    def test_native_skill_no_namespace(self):
+        """Bare names (native skills) fall through to default render."""
+        assert format_skill_progress({"name": "axolotl"}) is None
+
+    def test_native_skill_categorized_path(self):
+        """Native skills with category-path slashes still fall through."""
+        assert format_skill_progress({"name": "fine-tuning/axolotl"}) is None
+
+    def test_empty_args(self):
+        assert format_skill_progress({}) is None
+
+    def test_none_args(self):
+        assert format_skill_progress(None) is None
+
+    def test_missing_name(self):
+        assert format_skill_progress({"file_path": "foo.md"}) is None
+
+    def test_non_string_name(self):
+        assert format_skill_progress({"name": 42}) is None
+        assert format_skill_progress({"name": None}) is None
+        assert format_skill_progress({"name": ["a", "b"]}) is None
+
+    def test_empty_namespace(self):
+        """Defensive: leading colon means no namespace — fall through."""
+        assert format_skill_progress({"name": ":seo-reports"}) is None
+
+    def test_empty_bare(self):
+        """Defensive: trailing colon means no bare name — fall through."""
+        assert format_skill_progress({"name": "bp-shopify:"}) is None
+
+    def test_multi_colon_partitions_on_first(self):
+        """If a skill name contains multiple colons, split on the first."""
+        result = format_skill_progress({"name": "foo:bar:baz"})
+        assert result == "🔌 foo · bar:baz"
