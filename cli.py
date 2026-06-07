@@ -6618,23 +6618,38 @@ class HermesCLI:
 
         from hermes_cli.main import _relative_time
 
-        print()
+        def _emit_session_line(text: str = "") -> None:
+            # In the active prompt_toolkit TUI, route output through _cprint so
+            # it renders above/redraws around the fixed input area. Outside the
+            # TUI (unit tests, scripts, plain stdout), keep normal print()
+            # semantics so output remains capturable and pipe-friendly.
+            try:
+                from prompt_toolkit.application import get_app_or_none
+                app = get_app_or_none()
+            except Exception:
+                app = None
+            if app is not None and getattr(app, "_is_running", False):
+                _cprint(text)
+            else:
+                print(text)
+
+        _emit_session_line()
         if reason == "history":
-            print("(._.) No messages in the current chat yet — here are recent sessions you can resume:")
+            _emit_session_line("(._.) No messages in the current chat yet — here are recent sessions you can resume:")
         else:
-            print("  Recent sessions:")
-        print()
-        print(f"  {'#':<3} {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-        print(f"  {'─' * 3} {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
+            _emit_session_line("  Recent sessions:")
+        _emit_session_line()
+        _emit_session_line(f"  {'#':<3} {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
+        _emit_session_line(f"  {'─' * 3} {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
         for idx, session in enumerate(sessions, start=1):
             title = session.get("title") or "—"
             preview = (session.get("preview") or "")[:38]
             last_active = _relative_time(session.get("last_active"))
-            print(f"  {idx:<3} {title:<32} {preview:<40} {last_active:<13} {session['id']}")
-        print()
-        print("  Use /resume <number>, /resume <session id>, or /resume <session title> to continue.")
-        print("  Example: /resume 2")
-        print()
+            _emit_session_line(f"  {idx:<3} {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+        _emit_session_line()
+        _emit_session_line("  Use /resume <number>, /resume <session id>, or /resume <session title> to continue.")
+        _emit_session_line("  Example: /resume 2")
+        _emit_session_line()
         return True
 
     def show_history(self):
