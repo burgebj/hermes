@@ -1032,6 +1032,12 @@ DEFAULT_CONFIG = {
             "rewrite_loopback_urls": False,
             "loopback_host_alias": "host.docker.internal",
         },
+        "cloakbrowser": {
+            # Native stealth Chromium backend via the Python cloakbrowser package.
+            # When enabled, browser tools route through tools/browser_cloak.py
+            # instead of agent-browser/Camofox. BROWSER_CDP_URL still wins.
+            "enabled": False,
+        },
     },
 
     # Filesystem checkpoints — automatic snapshots before destructive file ops.
