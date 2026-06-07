@@ -67,6 +67,22 @@ _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
+
+def _pairing_approve_command_hint(platform_name: str, code: str) -> str:
+    """Return profile-aware CLI instructions for approving a DM pairing code."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        profile_name = get_active_profile_name()
+    except Exception:
+        profile_name = "default"
+
+    if profile_name in ("default", "custom"):
+        return f"`hermes pairing approve {platform_name} {code}`"
+
+    return f"`{profile_name} pairing approve {platform_name} {code}`"
+
+
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not Telegram chat
     r"auxiliary\s+.+\s+failed"
@@ -7510,7 +7526,7 @@ class GatewayRunner:
                             f"Hi~ I don't recognize you yet!\n\n"
                             f"Here's your pairing code: `{code}`\n\n"
                             f"Ask the bot owner to run:\n"
-                            f"`hermes pairing approve {platform_name} {code}`"
+                            f"{_pairing_approve_command_hint(platform_name, code)}"
                         )
                 else:
                     adapter = self.adapters.get(source.platform)
