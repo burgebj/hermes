@@ -97,6 +97,10 @@ class HookRegistry:
                 if not events:
                     print(f"[hooks] Skipping {hook_name}: no events declared", flush=True)
                     continue
+                # Check if hook is disabled
+                if not manifest.get("enabled", True):
+                    print(f"[hooks] Skipping {hook_name}: disabled in HOOK.yaml", flush=True)
+                    continue
 
                 # Dynamically load the handler module.
                 # Register in sys.modules BEFORE exec_module so Pydantic /
