@@ -3370,6 +3370,11 @@ class AIAgent:
 
     @staticmethod
     def _build_keepalive_http_client(base_url: str = "") -> Any:
+        # On Windows, httpx's custom HTTPTransport + socket_options path can
+        # starve the ChatGPT Codex SSE stream until the SDK read timeout fires.
+        # Let the OpenAI SDK use its default transport for this endpoint.
+        if os.name == "nt" and base_url_host_matches(str(base_url or ""), "chatgpt.com"):
+            return None
         try:
             import httpx as _httpx
             import socket as _socket
