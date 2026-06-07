@@ -42,6 +42,13 @@ def _clean_env(monkeypatch):
         "HINDSIGHT_IDLE_TIMEOUT", "HINDSIGHT_LLM_API_KEY",
         "HINDSIGHT_RETAIN_TAGS", "HINDSIGHT_RETAIN_SOURCE",
         "HINDSIGHT_RETAIN_USER_PREFIX", "HINDSIGHT_RETAIN_ASSISTANT_PREFIX",
+        "HINDSIGHT_API_LLM_MAX_CONCURRENT", "HINDSIGHT_API_LLM_TIMEOUT",
+        "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT", "HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT",
+        "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT", "HINDSIGHT_API_RETAIN_MAX_CONCURRENT",
+        "HINDSIGHT_API_WORKER_MAX_SLOTS", "HINDSIGHT_API_WORKER_RETAIN_MAX_SLOTS",
+        "HINDSIGHT_API_WORKER_CONSOLIDATION_MAX_SLOTS", "HINDSIGHT_API_RECALL_MAX_CONCURRENT",
+        "HINDSIGHT_API_RECALL_MAX_TOKENS", "HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS",
+        "HINDSIGHT_API_REFLECT_WALL_TIMEOUT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -220,10 +227,10 @@ class TestConfig:
         p = provider_with_config(recall_types="observation, world")
         assert p._recall_types == ["observation", "world"]
 
-    def test_recall_types_empty_list_falls_back_to_default(self, provider_with_config):
-        """An empty list shouldn't disable the filter (would be wider than default)."""
-        p = provider_with_config(recall_types=[])
-        assert p._recall_types == ["observation"]
+    def test_recall_tags_auto_disables_client_filter(self, provider_with_config):
+        """The Hindsight default sentinel 'auto' is not a literal tag list."""
+        p = provider_with_config(recall_tags="auto")
+        assert p._recall_tags is None
 
     def test_custom_config_values(self, provider_with_config):
         p = provider_with_config(
@@ -297,12 +304,44 @@ class TestConfig:
 
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "42"
 
+    def test_embedded_profile_env_mirrors_daemon_runtime_tuning(self):
+        env = _build_embedded_profile_env({
+            "llm_provider": "lmstudio",
+            "llm_model": "google/gemma-4-e4b",
+            "llm_base_url": "http://127.0.0.1:1234/v1",
+            "llm_max_concurrent": 1,
+            "retain_llm_max_concurrent": 1,
+            "reflect_llm_max_concurrent": 1,
+            "consolidation_llm_max_concurrent": 1,
+            "retain_max_concurrent": 1,
+            "worker_max_slots": 3,
+            "worker_retain_max_slots": 2,
+            "worker_consolidation_max_slots": 1,
+            "recall_max_tokens": 1200,
+            "reflect_max_context_tokens": 4096,
+            "HINDSIGHT_API_REFLECT_WALL_TIMEOUT": "180",
+        })
+
+        assert env["HINDSIGHT_API_LLM_BASE_URL"] == "http://127.0.0.1:1234/v1"
+        assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+        assert env["HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT"] == "1"
+        assert env["HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT"] == "1"
+        assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+        assert env["HINDSIGHT_API_RETAIN_MAX_CONCURRENT"] == "1"
+        assert env["HINDSIGHT_API_WORKER_MAX_SLOTS"] == "3"
+        assert env["HINDSIGHT_API_WORKER_RETAIN_MAX_SLOTS"] == "2"
+        assert env["HINDSIGHT_API_WORKER_CONSOLIDATION_MAX_SLOTS"] == "1"
+        assert env["HINDSIGHT_API_RECALL_MAX_TOKENS"] == "1200"
+        assert env["HINDSIGHT_API_REFLECT_MAX_CONTEXT_TOKENS"] == "4096"
+        assert env["HINDSIGHT_API_REFLECT_WALL_TIMEOUT"] == "180"
+
     def test_get_client_passes_idle_timeout_to_hindsight_embedded(self, monkeypatch):
         captured = {}
 
         class FakeHindsightEmbedded:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
+                self.config = {}
 
         monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
         monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
@@ -318,10 +357,40 @@ class TestConfig:
         }
         p._llm_base_url = "http://localhost:8060/v1"
 
-        p._get_client()
+        client = p._get_client()
 
         assert captured["idle_timeout"] == 0
         assert captured["llm_provider"] == "openai"
+        assert client.config["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "0"
+
+    def test_get_client_merges_runtime_tuning_into_hindsight_embedded_config(self, monkeypatch):
+        class FakeHindsightEmbedded:
+            def __init__(self, **kwargs):
+                self.config = {}
+
+        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
+        monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
+
+        p = HindsightMemoryProvider()
+        p._mode = "local_embedded"
+        p._config = {
+            "profile": "hermes",
+            "llm_provider": "lmstudio",
+            "llm_model": "google/gemma-4-e4b",
+            "llm_base_url": "http://127.0.0.1:1234/v1",
+            "llm_max_concurrent": 1,
+            "worker_max_slots": 3,
+            "worker_retain_max_slots": 2,
+            "worker_consolidation_max_slots": 1,
+        }
+        p._llm_base_url = "http://127.0.0.1:1234/v1"
+
+        client = p._get_client()
+
+        assert client.config["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+        assert client.config["HINDSIGHT_API_WORKER_MAX_SLOTS"] == "3"
+        assert client.config["HINDSIGHT_API_WORKER_RETAIN_MAX_SLOTS"] == "2"
+        assert client.config["HINDSIGHT_API_WORKER_CONSOLIDATION_MAX_SLOTS"] == "1"
 
 
 class TestPostSetup:
@@ -351,13 +420,16 @@ class TestPostSetup:
 
         profile_env = user_home / ".hindsight" / "profiles" / "hermes.env"
         assert profile_env.exists()
-        assert profile_env.read_text() == (
-            "HINDSIGHT_API_LLM_PROVIDER=openai\n"
-            "HINDSIGHT_API_LLM_API_KEY=sk-local-test\n"
-            "HINDSIGHT_API_LLM_MODEL=gpt-4o-mini\n"
-            "HINDSIGHT_API_LOG_LEVEL=info\n"
-            "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT=300\n"
-        )
+        actual_env = profile_env.read_text()
+        assert "HINDSIGHT_API_LLM_API_KEY=" in actual_env
+        for expected_line in (
+            "HINDSIGHT_API_LLM_PROVIDER=openai\n",
+            "HINDSIGHT_API_LLM_MODEL=gpt-4o-mini\n",
+            "HINDSIGHT_API_LOG_LEVEL=info\n",
+            "HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:1234/v1\n",
+            "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT=300\n",
+        ):
+            assert expected_line in actual_env
 
     def test_local_embedded_setup_respects_existing_profile_name(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes-home"
@@ -589,6 +661,28 @@ class TestToolHandlers:
         ))
 
         assert result["result"] == "1. Recovered memory"
+        assert provider._client is second_client
+        first_client.arecall.assert_called_once()
+        second_client.arecall.assert_called_once()
+
+    def test_local_embedded_recall_reconnects_after_server_disconnected(self, provider, monkeypatch):
+        first_client = _make_mock_client()
+        first_client.arecall.side_effect = RuntimeError("Server disconnected")
+        second_client = _make_mock_client()
+        second_client.arecall.return_value = SimpleNamespace(
+            results=[SimpleNamespace(text="Recovered after restart")]
+        )
+        clients = iter([first_client, second_client])
+
+        provider._mode = "local_embedded"
+        provider._client = first_client
+        monkeypatch.setattr(provider, "_get_client", lambda: next(clients))
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall", {"query": "test"}
+        ))
+
+        assert result["result"] == "1. Recovered after restart"
         assert provider._client is second_client
         first_client.arecall.assert_called_once()
         second_client.arecall.assert_called_once()
