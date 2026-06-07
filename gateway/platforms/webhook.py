@@ -38,6 +38,8 @@ import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
+from gateway.subprocess_env import scrubbed_env
+
 try:
     from aiohttp import web
 
@@ -865,6 +867,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=scrubbed_env(),
             )
             if result.returncode == 0:
                 logger.info(

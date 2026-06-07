@@ -323,16 +323,20 @@ class TestGitHubCommentDelivery:
             )
 
         assert result.success is True
-        mock_run.assert_called_once_with(
-            [
-                "gh", "pr", "comment", "42",
-                "--repo", "org/repo",
-                "--body", "LGTM! The code looks great.",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        mock_run.assert_called_once()
+        call_args, call_kwargs = mock_run.call_args
+        assert call_args[0] == [
+            "gh", "pr", "comment", "42",
+            "--repo", "org/repo",
+            "--body", "LGTM! The code looks great.",
+        ]
+        assert call_kwargs["capture_output"] is True
+        assert call_kwargs["text"] is True
+        assert call_kwargs["timeout"] == 30
+        # env= must be present and must not include any credentials
+        assert "env" in call_kwargs
+        from gateway.subprocess_env import CREDENTIAL_ENV_VARS
+        assert not (set(call_kwargs["env"].keys()) & CREDENTIAL_ENV_VARS)
         # Delivery info is retained after send() so interim status messages
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info

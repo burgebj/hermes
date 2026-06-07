@@ -25,6 +25,8 @@ import shutil
 import signal
 import subprocess
 
+from gateway.subprocess_env import scrubbed_env
+
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, Optional, Any
@@ -42,6 +44,7 @@ def _kill_port_process(port: int) -> None:
             result = subprocess.run(
                 ["netstat", "-ano", "-p", "TCP"],
                 capture_output=True, text=True, timeout=5,
+                env=scrubbed_env(),
             )
             for line in result.stdout.splitlines():
                 parts = line.split()
@@ -52,6 +55,7 @@ def _kill_port_process(port: int) -> None:
                             subprocess.run(
                                 ["taskkill", "/PID", parts[4], "/F"],
                                 capture_output=True, timeout=5,
+                                env=scrubbed_env(),
                             )
                         except subprocess.SubprocessError:
                             pass
@@ -62,11 +66,13 @@ def _kill_port_process(port: int) -> None:
                 result = subprocess.run(
                     ["fuser", f"{port}/tcp"],
                     capture_output=True, timeout=5,
+                    env=scrubbed_env(),
                 )
                 if result.returncode == 0:
                     subprocess.run(
                         ["fuser", "-k", f"{port}/tcp"],
                         capture_output=True, timeout=5,
+                        env=scrubbed_env(),
                     )
                     killed = True
             except FileNotFoundError:
@@ -77,6 +83,7 @@ def _kill_port_process(port: int) -> None:
                     result = subprocess.run(
                         ["lsof", "-ti", f":{port}"],
                         capture_output=True, text=True, timeout=5,
+                        env=scrubbed_env(),
                     )
                     for pid_str in result.stdout.strip().splitlines():
                         try:
@@ -142,6 +149,7 @@ def _terminate_bridge_process(proc, *, force: bool = False) -> None:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=scrubbed_env(),
             )
         except FileNotFoundError:
             if force:
@@ -208,7 +216,8 @@ def check_whatsapp_requirements() -> bool:
             [_node, "--version"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=scrubbed_env(),
         )
         return result.returncode == 0
     except Exception:
@@ -604,6 +613,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         capture_output=True,
                         text=True,
                         timeout=npm_install_timeout,
+                        env=scrubbed_env(),
                     )
                     if install_result.returncode != 0:
                         print(f"[{self.name}] npm install failed: {install_result.stderr}")
@@ -655,7 +665,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Build bridge subprocess environment.
             # Pass WHATSAPP_REPLY_PREFIX from config.yaml so the Node bridge
             # can use it without the user needing to set a separate env var.
-            bridge_env = os.environ.copy()
+            # Scrub credential env vars so the Node process cannot read them.
+            bridge_env = scrubbed_env()
             if self._reply_prefix is not None:
                 bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
 

@@ -531,12 +531,16 @@ class TestHttpSessionLifecycle:
              patch("gateway.platforms.whatsapp.asyncio.sleep", new_callable=AsyncMock):
             await adapter.disconnect()
 
-        mock_run.assert_called_once_with(
-            ["taskkill", "/PID", "12345", "/T"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        mock_run.assert_called_once()
+        call_args, call_kwargs = mock_run.call_args
+        assert call_args[0] == ["taskkill", "/PID", "12345", "/T"]
+        assert call_kwargs["capture_output"] is True
+        assert call_kwargs["text"] is True
+        assert call_kwargs["timeout"] == 10
+        # env= must be set and must not include any credentials
+        assert "env" in call_kwargs
+        from gateway.subprocess_env import CREDENTIAL_ENV_VARS
+        assert not (set(call_kwargs["env"].keys()) & CREDENTIAL_ENV_VARS)
         mock_proc.terminate.assert_not_called()
         mock_proc.kill.assert_not_called()
 
@@ -701,3 +705,49 @@ class TestNoCredsPreflight:
         # but the fatal-error code is NOT the "not paired" one.
         assert result is False
         assert adapter._fatal_error_code != "whatsapp_not_paired"
+
+
+# ---------------------------------------------------------------------------
+# Subprocess credential scrubbing
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeEnvDoesNotContainCredentials:
+    """Verify the bridge Popen never receives credential env vars."""
+
+    @pytest.mark.asyncio
+    async def test_bridge_env_does_not_contain_credentials(self, monkeypatch):
+        """Popen's env= kwarg must not include any CREDENTIAL_ENV_VARS entries."""
+        from gateway.subprocess_env import CREDENTIAL_ENV_VARS
+
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-bot-token")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+
+        adapter = _make_adapter()
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # bridge alive
+        mock_proc.pid = 42
+
+        captured_env = {}
+
+        def capture_popen(cmd, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return mock_proc
+
+        mock_client_cls = _mock_aiohttp(
+            status=200, json_data={"status": "connected"},
+        )
+        mock_fh = MagicMock()
+        patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
+
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("subprocess.Popen", side_effect=capture_popen), \
+             patches[5], patches[6], patches[7], patches[8], \
+             patch.object(type(adapter), "_poll_messages", return_value=MagicMock()):
+            await adapter.connect()
+
+        credential_leaks = {k for k in captured_env if k in CREDENTIAL_ENV_VARS}
+        assert not credential_leaks, (
+            f"Bridge subprocess received credential env vars: {credential_leaks}"
+        )

@@ -61,6 +61,7 @@ except ImportError:
     httpx = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.subprocess_env import scrubbed_env
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -2116,6 +2117,7 @@ class QQAdapter(BasePlatformAdapter):
                 wav_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                env=scrubbed_env(),
             )
             await asyncio.wait_for(proc.wait(), timeout=30)
             if proc.returncode != 0:

@@ -65,6 +65,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.subprocess_env import scrubbed_env
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -3644,6 +3645,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=scrubbed_env(),
             )
             _stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=60,
