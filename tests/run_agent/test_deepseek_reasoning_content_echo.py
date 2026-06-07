@@ -160,10 +160,12 @@ class TestCopyReasoningContentForApi:
         agent._copy_reasoning_content_for_api(source, api_msg)
         assert api_msg["reasoning_content"] == " "
 
-    def test_non_thinking_provider_preserves_empty_reasoning_content_verbatim(self) -> None:
-        """The stale-placeholder upgrade ONLY fires when the active provider
-        enforces thinking-mode echo. On non-thinking providers, an empty
-        reasoning_content must still round-trip verbatim.
+    def test_non_thinking_provider_strips_empty_reasoning_content(self) -> None:
+        """Strict OpenAI-compatible providers reject reasoning_content.
+
+        The stale-placeholder upgrade ONLY fires when the active provider
+        enforces thinking-mode echo. On non-thinking providers, provider-facing
+        reasoning_content must not be replayed at all.
         """
         agent = _make_agent(
             provider="openrouter",
@@ -177,7 +179,46 @@ class TestCopyReasoningContentForApi:
         }
         api_msg: dict = {}
         agent._copy_reasoning_content_for_api(source, api_msg)
-        assert api_msg["reasoning_content"] == ""
+        assert "reasoning_content" not in api_msg
+
+    def test_custom_mistral_endpoint_strips_explicit_reasoning_content(self) -> None:
+        """Regression: local LiteLLM/Mistral rejects assistant.reasoning_content.
+
+        A previous turn from ``magistral-violette`` stored reasoning_content in
+        state.db; replaying it to the custom localhost Mistral endpoint caused
+        HTTP 422 ``extra_forbidden``. Custom non-require-side endpoints must
+        strip the field before API replay.
+        """
+        agent = _make_agent(
+            provider="custom",
+            model="magistral-violette",
+            base_url="http://localhost:4000/v1",
+        )
+        source = {
+            "role": "assistant",
+            "content": "Good morning",
+            "reasoning": "internal reasoning copy",
+            "reasoning_content": "provider rejected this",
+        }
+        api_msg = source.copy()
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert "reasoning_content" not in api_msg
+
+    def test_custom_mistral_endpoint_does_not_promote_reasoning_field(self) -> None:
+        """Internal reasoning must not be promoted for strict non-thinking APIs."""
+        agent = _make_agent(
+            provider="custom",
+            model="magistral-violette",
+            base_url="http://localhost:4000/v1",
+        )
+        source = {
+            "role": "assistant",
+            "content": "Good morning",
+            "reasoning": "internal reasoning copy",
+        }
+        api_msg = source.copy()
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert "reasoning_content" not in api_msg
 
     def test_deepseek_reasoning_field_promoted(self) -> None:
         """When only 'reasoning' is set, it gets promoted to reasoning_content."""

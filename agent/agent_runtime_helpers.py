@@ -2044,6 +2044,18 @@ def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> No
     if source_msg.get("role") != "assistant":
         return
 
+    needs_thinking_pad = agent._needs_thinking_reasoning_pad()
+
+    # Most OpenAI-compatible providers (including Mistral via LiteLLM) reject
+    # ``reasoning_content`` as an extra assistant-message field.  Hermes keeps
+    # reasoning/reasoning_content internally for trajectories and provider
+    # continuity, but only require-side thinking providers should see it on
+    # replay.  Strip any copy inherited from ``api_msg = msg.copy()`` and do
+    # not promote the internal ``reasoning`` field for strict providers.
+    if not needs_thinking_pad:
+        api_msg.pop("reasoning_content", None)
+        return
+
     # 1. Explicit reasoning_content already set — preserve it verbatim
     # (includes DeepSeek/Kimi's own space-placeholder written at creation
     # time, and any valid reasoning content from the same provider).
@@ -2060,8 +2072,6 @@ def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> No
         else:
             api_msg["reasoning_content"] = existing
         return
-
-    needs_thinking_pad = agent._needs_thinking_reasoning_pad()
 
     # 2. Cross-provider poisoned history (#15748): on DeepSeek/Kimi,
     # if the source turn has tool_calls AND a 'reasoning' field but no
