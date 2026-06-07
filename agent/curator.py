@@ -186,13 +186,16 @@ def get_archive_after_days() -> int:
 def get_prune_builtins() -> bool:
     """Whether the curator may prune (archive) bundled built-in skills too.
 
-    ON by default. When on, built-ins become curation candidates and are
-    archived after the same inactivity period as agent-created skills, with a
-    suppression list keeping them archived across `hermes update` re-seeds.
-    Hub-installed skills are never pruned regardless of this flag.
+    OFF by default because bundled skills are upstream-owned slash-command and
+    discovery surfaces. When explicitly enabled, built-ins may be archived by
+    the deterministic lifecycle pass after the same inactivity period as
+    agent-created skills, with a suppression list keeping them archived across
+    `hermes update` re-seeds. Hub-installed skills are never pruned regardless
+    of this flag, and bundled skills are never sent to the LLM consolidation
+    pass.
     """
     cfg = _load_config()
-    return bool(cfg.get("prune_builtins", True))
+    return bool(cfg.get("prune_builtins", False))
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +289,7 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
 
     counts = {"marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0, "seeded": 0}
 
-    for row in _u.agent_created_report():
+    for row in _u.agent_created_report(include_bundled=get_prune_builtins()):
         counts["checked"] += 1
         name = row["name"]
         if row.get("pinned"):
@@ -451,13 +454,11 @@ CURATOR_REVIEW_PROMPT = (
     "  - skill_manage action=write_file — add a references/, templates/, "
     "or scripts/ file under an existing skill (the skill must already "
     "exist)\n"
-    "  - skill_manage action=delete     — archive a skill. MUST pass "
-    "`absorbed_into=<umbrella>` when you've merged its content into another "
-    "skill, or `absorbed_into=\"\"` when you're truly pruning with no "
-    "forwarding target. This drives cron-job skill-reference migration — "
-    "guessing from your YAML summary after the fact is fragile.\n"
-    "  - terminal                       — mv a sibling into the archive "
-    "OR move its content into a support subfile\n\n"
+    "  - terminal                       — archive a skill by moving the "
+    "COMPLETE skill directory into ~/.hermes/skills/.archive/, OR move its "
+    "content into a support subfile. Do NOT use skill_manage action=delete "
+    "for curator archiving; that is destructive and not the recoverable "
+    "archive path.\n\n"
     "'keep' is a legitimate decision ONLY when the skill is already a "
     "class-level umbrella and none of the proposed merges would improve "
     "discoverability. 'This is narrow but distinct from its siblings' "
@@ -1511,30 +1512,14 @@ def run_curator_review(
                     "error": None,
                 }
             else:
-                # When pruning built-ins is enabled, the candidate list now
-                # includes bundled skills. Override the default "don't touch
-                # bundled" rule for them — but only archiving is permitted, and
-                # hub-installed skills remain strictly off-limits.
-                builtins_note = ""
-                if get_prune_builtins():
-                    builtins_note = (
-                        "\n\nPRUNE-BUILTINS MODE IS ON: bundled built-in skills "
-                        "ARE included in the candidate list below and MAY be "
-                        "archived for staleness/irrelevance, overriding hard "
-                        "rule #1 for bundled skills ONLY. Hub-installed skills "
-                        "remain strictly off-limits. Treat a stale built-in the "
-                        "same as a stale agent-created skill: archive it (never "
-                        "delete). It will be restored on `hermes update` only if "
-                        "the user explicitly restores it."
-                    )
                 if dry_run:
                     prompt = (
                         f"{CURATOR_DRY_RUN_BANNER}\n\n"
-                        f"{CURATOR_REVIEW_PROMPT}{builtins_note}\n\n"
+                        f"{CURATOR_REVIEW_PROMPT}\n\n"
                         f"{candidate_list}"
                     )
                 else:
-                    prompt = f"{CURATOR_REVIEW_PROMPT}{builtins_note}\n\n{candidate_list}"
+                    prompt = f"{CURATOR_REVIEW_PROMPT}\n\n{candidate_list}"
                 llm_meta = _run_llm_review(prompt)
                 final_summary = (
                     f"{prefix}{auto_summary}; llm: {llm_meta.get('summary', 'no change')}"

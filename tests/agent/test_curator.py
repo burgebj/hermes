@@ -310,11 +310,12 @@ def _disable_prune_builtins(curator_env, monkeypatch):
     monkeypatch.setattr(u, "_prune_builtins_enabled", lambda: False)
 
 
-def test_prune_builtins_default_on(curator_env):
-    # Shipped default is ON: with no explicit config, built-ins are eligible.
+def test_prune_builtins_default_off(curator_env):
+    # Shipped default is OFF: bundled skills are upstream-owned command and
+    # discovery surfaces, so pruning requires an explicit opt-in.
     c = curator_env["curator"]
-    # _load_config returns {} (fixture) → default True surfaces.
-    assert c.get_prune_builtins() is True
+    # _load_config returns {} (fixture) → safe default False surfaces.
+    assert c.get_prune_builtins() is False
 
 
 def test_prune_builtins_off_excludes_bundled(curator_env, monkeypatch):
@@ -533,6 +534,44 @@ def test_run_review_synchronous_invokes_llm_stub(curator_env, monkeypatch):
     assert "skill CURATOR" in calls[0] or "CURATOR" in calls[0]
     assert captured  # on_summary was called
     assert any("stubbed-summary" in s for s in captured)
+
+
+def test_llm_review_excludes_bundled_even_when_prune_builtins_enabled(curator_env, monkeypatch):
+    """prune_builtins is only for deterministic lifecycle archiving.
+
+    Bundled skills must never enter the LLM umbrella/consolidation prompt: the
+    model can call skill_manage(delete), so exposing bundled rows there can
+    remove first-party slash-command skills such as /plan.
+    """
+    c = curator_env["curator"]
+    u = curator_env["usage"]
+    skills_dir = curator_env["home"] / "skills"
+    _write_skill(skills_dir, "agent-only")
+    _write_skill(skills_dir, "bundled-plan")
+    u.mark_agent_created("agent-only")
+    (skills_dir / ".bundled_manifest").write_text("bundled-plan:abc\n", encoding="utf-8")
+    _enable_prune_builtins(curator_env, monkeypatch)
+
+    captured = {}
+
+    def _stub(prompt):
+        captured["prompt"] = prompt
+        return {
+            "final": "no change",
+            "summary": "no change",
+            "model": "stub-model",
+            "provider": "stub-provider",
+            "tool_calls": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(c, "_run_llm_review", _stub)
+
+    c.run_curator_review(synchronous=True, dry_run=True)
+
+    assert "agent-only" in captured["prompt"]
+    assert "bundled-plan" not in captured["prompt"]
+    assert "PRUNE-BUILTINS MODE IS ON" not in captured["prompt"]
 
 
 def test_run_review_skips_llm_when_no_candidates(curator_env, monkeypatch):

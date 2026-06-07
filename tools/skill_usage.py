@@ -220,11 +220,11 @@ def _read_hub_installed_names() -> Set[str]:
 def _prune_builtins_enabled() -> bool:
     """Whether bundled built-in skills are eligible for curator pruning.
 
-    Reads ``curator.prune_builtins`` from config (default True). Lazy import
+    Reads ``curator.prune_builtins`` from config (default False). Lazy import
     keeps this module importable without the CLI config layer (e.g. in the
-    update/sync context); on any failure we fall back to the default. The real
-    safety against a mass-prune is the curator's seed-on-first-sight, not this
-    flag — built-ins only archive after a fresh inactivity window.
+    update/sync context); on any failure we fall back to the safe default.
+    Built-ins are upstream-owned command/discovery surfaces, so they are only
+    curation-eligible when the user explicitly opts in.
     """
     try:
         from hermes_cli.config import load_config
@@ -232,10 +232,10 @@ def _prune_builtins_enabled() -> bool:
         cfg = load_config()
         cur = cfg.get("curator") if isinstance(cfg, dict) else None
         if isinstance(cur, dict):
-            return bool(cur.get("prune_builtins", True))
+            return bool(cur.get("prune_builtins", False))
     except Exception as e:  # pragma: no cover — best-effort config read
         logger.debug("Failed to read curator.prune_builtins: %s", e)
-    return True
+    return False
 
 
 def _suppressed_file() -> Path:
@@ -305,16 +305,16 @@ def remove_suppressed_name(skill_name: str) -> None:
         _write_suppressed_names(names)
 
 
-def list_agent_created_skill_names() -> List[str]:
+def list_agent_created_skill_names(*, include_bundled: bool = False) -> List[str]:
     """Enumerate skills the curator may manage.
 
-    Always includes agent-authored skills (those marked in ``.usage.json`` via
-    ``skill_manage(action="create")``). When ``curator.prune_builtins`` is
-    enabled, bundled built-in skills are ALSO included even though they have no
-    agent-created usage record — their inactivity clock is anchored on first
-    sight (see ``apply_automatic_transitions``). Hub-installed skills are never
-    included; manually authored skills are not inferred from filesystem
-    location.
+    By default this returns only agent-authored skills (those marked in
+    ``.usage.json`` via ``skill_manage(action="create")``). The automatic
+    lifecycle pass can opt into bundled built-ins by passing
+    ``include_bundled=True``; the LLM consolidation pass intentionally does not,
+    because bundled skills are upstream-owned slash-command/discovery surfaces.
+    Hub-installed skills are never included; manually authored skills are not
+    inferred from filesystem location.
     """
     base = _skills_dir()
     if not base.exists():
@@ -339,9 +339,11 @@ def list_agent_created_skill_names() -> List[str]:
         if name in hub:
             continue
         if name in bundled:
-            # Built-ins are only candidates when pruning is enabled. They never
-            # carry a curator-managed record, so the record gate is skipped.
-            if not prune_builtins:
+            # Built-ins are only automatic lifecycle candidates when pruning is
+            # explicitly enabled AND the caller opted into bundled rows. They
+            # never carry a curator-managed record, so the record gate is
+            # skipped only for that deterministic lifecycle path.
+            if not include_bundled or not prune_builtins:
                 continue
             names.append(name)
             continue
@@ -772,9 +774,11 @@ def _find_skill_dir(skill_name: str) -> Optional[Path]:
 # Reporting — for the curator CLI / slash command
 # ---------------------------------------------------------------------------
 
-def agent_created_report() -> List[Dict[str, Any]]:
+def agent_created_report(*, include_bundled: bool = False) -> List[Dict[str, Any]]:
     """Return a list of {name, state, pinned, last_activity_at, ...}
-    records for every curator-managed skill. Missing usage records are
+    records for every agent-created skill. When ``include_bundled=True`` and
+    ``curator.prune_builtins`` is enabled, also include bundled skills for the
+    deterministic lifecycle pass. Missing usage records are
     backfilled with defaults so callers can always index fields.
 
     Each row carries ``_persisted``: True when a real record exists in
@@ -784,7 +788,7 @@ def agent_created_report() -> List[Dict[str, Any]]:
     """
     data = load_usage()
     rows: List[Dict[str, Any]] = []
-    for name in list_agent_created_skill_names():
+    for name in list_agent_created_skill_names(include_bundled=include_bundled):
         raw = data.get(name)
         persisted = isinstance(raw, dict)
         rec: Dict[str, Any] = raw if isinstance(raw, dict) else _empty_record()

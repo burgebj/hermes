@@ -379,6 +379,25 @@ class TestDeleteSkill:
             result = _delete_skill("nonexistent")
         assert result["success"] is False
 
+    def test_delete_refuses_bundled_skill(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("tools.skill_usage.is_bundled", return_value=True), \
+             patch("tools.skill_usage.is_hub_installed", return_value=False):
+            _create_skill("bundled-plan", VALID_SKILL_CONTENT)
+            result = _delete_skill("bundled-plan", absorbed_into="umbrella")
+        assert result["success"] is False
+        assert "bundled" in result["error"].lower()
+        assert (tmp_path / "bundled-plan").exists()
+
+    def test_delete_refuses_hub_installed_skill(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("tools.skill_usage.is_hub_installed", return_value=True):
+            _create_skill("hub-skill", VALID_SKILL_CONTENT)
+            result = _delete_skill("hub-skill")
+        assert result["success"] is False
+        assert "hub-installed" in result["error"].lower()
+        assert (tmp_path / "hub-skill").exists()
+
     def test_delete_cleans_empty_category_dir(self, tmp_path):
         with _skill_dir(tmp_path):
             _create_skill("my-skill", VALID_SKILL_CONTENT, category="devops")

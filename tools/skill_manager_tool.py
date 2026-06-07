@@ -4,8 +4,9 @@ Skill Manager Tool -- Agent-Managed Skill Creation & Editing
 
 Allows the agent to create, update, and delete skills, turning successful
 approaches into reusable procedural knowledge. New skills are created in
-~/.hermes/skills/. Existing skills (bundled, hub-installed, or user-created)
-can be modified or deleted wherever they live.
+~/.hermes/skills/. Existing skills can be modified wherever they live, but
+upstream-owned bundled and hub-installed skills are protected from autonomous
+delete operations.
 
 Skills are the agent's procedural memory: they capture *how to do a specific
 type of task* based on proven experience. General memory (MEMORY.md, USER.md) is
@@ -681,6 +682,38 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+
+    # skill_manage is an autonomous-agent write surface. Do not let a curator
+    # or ordinary agent delete upstream-owned skills: bundled skills define
+    # first-party slash-command/discovery surfaces, and hub skills have their
+    # own external owner. Users can still manage bundled/hub installs through
+    # dedicated CLI flows (`hermes skills reset --restore`, hub uninstall, or
+    # explicit curator archive/restore paths where supported).
+    try:
+        from tools import skill_usage
+
+        if skill_usage.is_hub_installed(name):
+            return {
+                "success": False,
+                "error": (
+                    f"Skill '{name}' is hub-installed; skill_manage delete "
+                    "will not remove upstream-owned skills. Use `hermes skills "
+                    "uninstall` for hub skills."
+                ),
+            }
+        if skill_usage.is_bundled(name):
+            return {
+                "success": False,
+                "error": (
+                    f"Skill '{name}' is bundled; skill_manage delete will not "
+                    "remove upstream-owned bundled skills. Use `hermes skills "
+                    "reset <name> --restore` to restore a bundled copy. For "
+                    "intentional built-in pruning, enable curator.prune_builtins "
+                    "and use the curator archive/restore workflow."
+                ),
+            }
+    except Exception as e:
+        logger.debug("Failed to check skill provenance before delete: %s", e, exc_info=True)
 
     pinned_err = _pinned_guard(name)
     if pinned_err:
