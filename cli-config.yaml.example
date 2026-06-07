@@ -715,6 +715,37 @@ platform_toolsets:
 #   history_backfill_limit: 50       # Max messages to scan backwards (default: 50)
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background Services
+# ─────────────────────────────────────────────────────────────────────────────
+# services:
+#   nextcloud_notifications:
+#     enabled: true
+#     extra:
+#       poll_interval: 30
+#       deliver: nextcloud_talk:your_conv_token
+#       rules:
+#         - app: deck
+#           object_type: deck_card
+#           type: deck_card_description
+#           action: silent
+#         - app: deck
+#           object_type: deck_card
+#           action: react
+#         - app: files_sharing
+#           object_type: files
+#           type: shared
+#           action: react
+#         - app: files
+#           object_type: files
+#           type: file_created
+#           action: react
+#         - app: dav
+#           object_type: calendar_event
+#           action: react
+#         - app: "*"
+#           action: silent
 # Available toolsets (use these names in platform_toolsets or the toolsets list)
 #
 # Run `hermes chat --list-toolsets` to see all toolsets and their tools.

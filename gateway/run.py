@@ -1891,6 +1891,7 @@ class GatewayRunner:
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
+        self.services: dict = {}  # Background services (non-chat event listeners)
 
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
@@ -4848,6 +4849,22 @@ class GatewayRunner:
         # turn so the agent kicks off the new chat.
         asyncio.create_task(self._handoff_watcher())
 
+        # Start background services
+        for svc_name, svc_config in self.config.services.items():
+            if not isinstance(svc_config, dict) or not svc_config.get("enabled", False):
+                continue
+            svc = self._create_service(svc_name, svc_config)
+            if svc:
+                svc.gateway_runner = self
+                try:
+                    if await svc.start():
+                        self.services[svc_name] = svc
+                        logger.info("Service %s started", svc_name)
+                    else:
+                        logger.warning("Service %s failed to start", svc_name)
+                except Exception as e:
+                    logger.error("Service %s startup error: %s", svc_name, e)
+
         logger.info("Press Ctrl+C to stop")
         
         return True
@@ -6747,6 +6764,18 @@ class GatewayRunner:
                 _phase_elapsed(),
             )
 
+            # Stop services before tearing down the rest (services may be mid-delivery).
+            # getattr guard: tests mock GatewayRunner without running __init__.
+            _services = getattr(self, "services", None)
+            if _services:
+                for _svc_name, _svc in list(_services.items()):
+                    try:
+                        await _svc.stop()
+                        logger.info("Service %s stopped", _svc_name)
+                    except Exception as _e:
+                        logger.error("Service %s stop error: %s", _svc_name, _e)
+                _services.clear()
+
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
             release_gateway_runtime_lock()
@@ -7077,6 +7106,22 @@ class GatewayRunner:
             if isinstance(extra, dict):
                 policy = extra.get("dm_policy")
         return str(policy or "").strip().lower()
+
+    def _create_service(self, name: str, config: dict):
+        """Factory for background services."""
+        if name == "nextcloud_notifications":
+            from gateway.services.nextcloud_notifications import NextcloudNotificationService
+            svc_config = dict(config.get("extra", config))
+            # Inherit NC credentials from Talk platform if not set
+            if not svc_config.get("nextcloud_url"):
+                talk_cfg = self.config.platforms.get(Platform.NEXTCLOUD_TALK) if hasattr(Platform, "NEXTCLOUD_TALK") else None
+                if talk_cfg and talk_cfg.extra:
+                    svc_config.setdefault("nextcloud_url", talk_cfg.extra.get("nextcloud_url", ""))
+                    svc_config.setdefault("username", talk_cfg.extra.get("username", "hermes"))
+                    svc_config.setdefault("app_password_env", talk_cfg.extra.get("app_password_env", "NEXTCLOUD_TALK_APP_PASSWORD"))
+            return NextcloudNotificationService(svc_config)
+        logger.warning("Unknown service: %s", name)
+        return None
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
