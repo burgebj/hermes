@@ -399,6 +399,16 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "big-pickle",
     ],
     "opencode-go": [
+        # First-class opencode-go models as of June 2026: the live
+        # https://opencode.ai/zen/go/v1/models endpoint lists these and
+        # they are the recommended DeepSeek-tier models on the platform.
+        # Refs #36915: /model switches for deepseek-v4-pro/flash used to
+        # rely solely on the live /v1/models probe; if the probe failed
+        # (offline, 401, transient) the static-catalog fallback rejected
+        # the switch.  See the curated-catalog fallback branch near the
+        # end of validate_requested_model().
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
         "kimi-k2.6",
         "kimi-k2.5",
         "glm-5.1",

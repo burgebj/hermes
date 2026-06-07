@@ -102,6 +102,87 @@ class TestDoctorEnvFileEncoding:
             doctor_mod.run_doctor(Namespace(fix=False))
 
 
+class TestShellEnvDotenvMismatches:
+    """Verifies the opencode-go / .env 401 surface in #36915 is caught by doctor."""
+
+    def test_no_mismatch_when_nothing_set(self, monkeypatch, tmp_path):
+        # No shell keys, no .env file → empty list.
+        from hermes_cli import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "get_env_path", lambda: tmp_path / ".env")
+        for name in doctor._DOTENV_REQUIRED_PROVIDER_KEYS:
+            monkeypatch.delenv(name, raising=False)
+        assert doctor._shell_env_dotenv_mismatches() == []
+
+    def test_no_mismatch_when_keys_match(self, monkeypatch, tmp_path):
+        from hermes_cli import config as cfg_mod
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENCODE_GO_API_KEY=sk-abc\nOPENAI_API_KEY=sk-openai\n")
+        monkeypatch.setattr(cfg_mod, "get_env_path", lambda: env_path)
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-abc")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+        assert doctor._shell_env_dotenv_mismatches() == []
+
+    def test_mismatch_when_key_in_shell_only(self, monkeypatch, tmp_path):
+        from hermes_cli import config as cfg_mod
+        env_path = tmp_path / ".env"
+        env_path.write_text("# empty .env\n")
+        monkeypatch.setattr(cfg_mod, "get_env_path", lambda: env_path)
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-shell-only")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        result = doctor._shell_env_dotenv_mismatches()
+        assert "OPENCODE_GO_API_KEY" in result
+        assert "OPENAI_API_KEY" not in result
+
+    def test_mismatch_when_dotenv_missing_but_keys_in_shell(self, monkeypatch, tmp_path):
+        # The user case in #36915: shell has the key, ~/.hermes/.env doesn't exist.
+        from hermes_cli import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "get_env_path", lambda: tmp_path / "nonexistent.env")
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-shell-only")
+        result = doctor._shell_env_dotenv_mismatches()
+        assert "OPENCODE_GO_API_KEY" in result
+
+    def test_ignores_empty_values(self, monkeypatch, tmp_path):
+        from hermes_cli import config as cfg_mod
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENCODE_GO_API_KEY=sk-abc\n")
+        monkeypatch.setattr(cfg_mod, "get_env_path", lambda: env_path)
+        # Empty string in shell is not a real key, should not be flagged.
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert doctor._shell_env_dotenv_mismatches() == []
+
+    def test_returns_empty_list_on_load_error(self, monkeypatch):
+        from hermes_cli import config as cfg_mod
+        def _boom():
+            raise RuntimeError("corrupt .env")
+        monkeypatch.setattr(cfg_mod, "load_env", _boom)
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-abc")
+        assert doctor._shell_env_dotenv_mismatches() == []
+
+
+class TestOpencodeGoCatalogIncludesDeepseek:
+    """Validates the static-catalog fix for #36915: offline and probe-failure
+    paths can now recognize deepseek-v4-pro / deepseek-v4-flash on opencode-go."""
+
+    def test_deepseek_v4_pro_in_opencode_go_catalog(self):
+        from hermes_cli import models
+        assert "deepseek-v4-pro" in models._PROVIDER_MODELS["opencode-go"]
+
+    def test_deepseek_v4_flash_in_opencode_go_catalog(self):
+        from hermes_cli import models
+        assert "deepseek-v4-flash" in models._PROVIDER_MODELS["opencode-go"]
+
+    def test_opencode_go_models_merged_with_models_dev(self, monkeypatch):
+        # When models.dev returns nothing (offline), the curated list still
+        # includes the new models.  This is the regression case in #36915.
+        from hermes_cli import models
+        from agent import models_dev
+        monkeypatch.setattr(models_dev, "list_agentic_models", lambda _slug: [])
+        ids = models.provider_model_ids("opencode-go")
+        assert "deepseek-v4-pro" in ids
+        assert "deepseek-v4-flash" in ids
+
+
 class TestDoctorToolAvailabilityOverrides:
     def test_marks_honcho_available_when_configured(self, monkeypatch):
         monkeypatch.setattr(doctor, "_honcho_is_configured_for_doctor", lambda: True)
