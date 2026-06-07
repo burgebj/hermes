@@ -68,12 +68,38 @@ _yaml_load_fn = None
 
 
 def yaml_load(content: str):
-    """Parse YAML with lazy import and CSafeLoader preference."""
+    """Parse YAML with lazy import and CSafeLoader preference.
+
+    Prefers CSafeLoader (C-based, fast) when available. Falls back to the
+    pure-Python SafeLoader if CSafeLoader is absent — SafeLoader is always
+    safe for untrusted input.  If somehow neither is available (never the
+    case in standard PyYAML), a RuntimeError is raised rather than silently
+    falling back to the unsafe base Loader.
+    """
     global _yaml_load_fn
     if _yaml_load_fn is None:
         import yaml
+        import warnings
 
-        loader = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+        # CSafeLoader is C-accelerated; SafeLoader is pure-Python but equally safe.
+        # We raise rather than fall back to the base Loader (unsafe with
+        # untrusted input) if neither is present.
+        if hasattr(yaml, "CSafeLoader"):
+            loader = yaml.CSafeLoader
+        elif hasattr(yaml, "SafeLoader"):
+            warnings.warn(
+                "yaml.CSafeLoader (libyaml) is not available; "
+                "parsing skill YAML with the pure-Python SafeLoader. "
+                "Install libyaml (pip install pyyaml[libyaml]) for faster parsing.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            loader = yaml.SafeLoader
+        else:
+            raise RuntimeError(
+                "Neither yaml.CSafeLoader nor yaml.SafeLoader is available. "
+                "Your PyYAML installation is incomplete."
+            )
 
         def _load(value: str):
             return yaml.load(value, Loader=loader)
