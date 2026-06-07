@@ -142,8 +142,88 @@ def test_save_env_value_invalidates_cache(tmp_path, monkeypatch):
         assert result.get("NEW_KEY") == "shiny"
         assert result.get("EXISTING_KEY") == "old"
     finally:
-        monkeypatch.delenv("NEW_KEY", raising=False)
+        os.environ.pop("NEW_KEY", None)
         invalidate_env_cache()
+
+
+def test_save_env_value_invalidates_config_cache(tmp_path, monkeypatch):
+    """Env writers must also refresh cached config env interpolation."""
+    from hermes_cli import config as config_mod
+    from hermes_cli.config import (
+        invalidate_config_cache,
+        invalidate_env_cache,
+        load_config,
+        save_env_value,
+    )
+
+    invalidate_env_cache()
+    invalidate_config_cache()
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("model: ${TEST_MODEL}\n", encoding="utf-8")
+    monkeypatch.setenv("TEST_MODEL", "old")
+
+    first = load_config()
+    assert first["model"] == "old"
+
+    monkeypatch.setattr(config_mod, "_secure_file", lambda _p: None)
+    monkeypatch.setattr(config_mod, "is_managed", lambda: False)
+
+    save_env_value("TEST_MODEL", "new")
+
+    second = load_config()
+    assert second["model"] == "new"
+
+
+def test_save_config_preserves_env_template_after_env_rotation(tmp_path, monkeypatch):
+    """Env refreshes must not erase provenance needed to keep ${VAR} templates.
+
+    This regresses the bug where invalidate_config_cache() also cleared the
+    last-expanded snapshot used by save_config(), causing a stale config object
+    to get written back as plaintext after the env value changed.
+    """
+    from hermes_cli import config as config_mod
+    from hermes_cli.config import (
+        invalidate_config_cache,
+        invalidate_env_cache,
+        load_config,
+        save_config,
+        save_env_value,
+    )
+
+    invalidate_env_cache()
+    invalidate_config_cache()
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "model:\n"
+        "  default: ${TEST_MODEL}\n"
+        "agent:\n"
+        "  max_turns: 90\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_MODEL", "model-old-123")
+
+    config = load_config()
+    assert config["model"]["default"] == "model-old-123"
+
+    # Change an unrelated field on the already-loaded config object.
+    config["agent"]["max_turns"] = 123
+
+    monkeypatch.setattr(config_mod, "_secure_file", lambda _p: None)
+    monkeypatch.setattr(config_mod, "is_managed", lambda: False)
+
+    save_env_value("TEST_MODEL", "model-new-456")
+
+    reloaded = load_config()
+    assert reloaded["model"]["default"] == "model-new-456"
+
+    save_config(config)
+
+    raw = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "${TEST_MODEL}" in raw
+    assert "model-old-123" not in raw
+    assert "model-new-456" not in raw
 
 
 def test_remove_env_value_invalidates_cache(tmp_path, monkeypatch):

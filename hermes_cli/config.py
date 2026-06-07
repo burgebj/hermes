@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, cast
 
 from hermes_cli.secret_prompt import masked_secret_prompt
 
@@ -215,6 +215,11 @@ def _reject_denylisted_env_var(key: str) -> None:
         )
 
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
+# Legacy fallback provenance snapshot keyed by config path. The preferred
+# source is the per-config object attribute attached by load_config(); this
+# map only exists so plain dict callers that predate that provenance can still
+# fall back to the last loaded expansion for the path.
+_LOADED_EXPANDED_ATTR = "_hermes_loaded_expanded"
 # (path, mtime_ns, size) -> cached expanded config dict.
 # load_config() returns a deepcopy of the cached value when the file
 # hasn't changed since the last load, skipping yaml.safe_load +
@@ -227,6 +232,10 @@ _LOAD_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
 # _LOAD_CONFIG_CACHE but for read_raw_config() — used when callers want
 # the user's on-disk values without defaults merged in.
 _RAW_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+
+
+class _ConfigDict(dict):
+    """dict subclass that carries load-time provenance for save_config()."""
 # Serializes all config read/write paths. libyaml's C extension is not
 # thread-safe for concurrent safe_load() on the same file, and multiple
 # tool threads (approval.py, browser_tool.py, setup flows) hit
@@ -5168,14 +5177,17 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 _warn_config_parse_failure(config_path, e)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-        expanded = _expand_env_vars(normalized)
+        expanded: Dict[str, Any] = cast(Dict[str, Any], _expand_env_vars(normalized))
+        expanded_cfg = _ConfigDict()
+        expanded_cfg.update(expanded)
+        setattr(expanded_cfg, _LOADED_EXPANDED_ATTR, copy.deepcopy(expanded))
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_key is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
             # (deepcopy=True) callers can mutate freely without affecting the
             # cached value, and ``load_config_readonly()`` (deepcopy=False)
             # callers all see the same stable cached object.
-            cached_copy = copy.deepcopy(expanded)
+            cached_copy = copy.deepcopy(expanded_cfg)
             _LOAD_CONFIG_CACHE[path_key] = (cache_key[0], cache_key[1], cached_copy)
             # On the readonly path return the same cached object subsequent
             # calls will see — keeps "two readonly calls return the same
@@ -5189,7 +5201,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         # canonical "freshly-built mutable result" the function has always
         # returned. For the deepcopy=False path with no cache (e.g. config
         # file missing), it's also fine — callers get an isolated object.
-        return expanded
+        return expanded_cfg
 
 
 _SECURITY_COMMENT = """
@@ -5277,6 +5289,9 @@ def save_config(config: Dict[str, Any]):
 
         ensure_hermes_home()
         config_path = get_config_path()
+        loaded_expanded = getattr(config, _LOADED_EXPANDED_ATTR, None)
+        if loaded_expanded is None:
+            loaded_expanded = _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path))
         current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
         normalized = current_normalized
         raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
@@ -5284,7 +5299,7 @@ def save_config(config: Dict[str, Any]):
             normalized = _preserve_env_ref_templates(
                 normalized,
                 raw_existing,
-                _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)),
+                loaded_expanded,
             )
 
         # Build optional commented-out sections for features that are off by
@@ -5386,6 +5401,21 @@ def invalidate_env_cache() -> None:
     """
     global _env_cache
     _env_cache = None
+
+
+def invalidate_config_cache() -> None:
+    """Clear cached ``load_config()`` results that depend on environment values.
+
+    ``load_config()`` expands ``${VAR}`` references using ``os.environ`` and
+    memoizes the expanded config by config-file mtime/size. When ``.env`` is
+    reloaded or any env writer mutates a credential, that memo can become stale
+    even if ``config.yaml`` itself did not change. Clearing the runtime cache
+    forces the next ``load_config()`` call to rebuild with the current
+    environment while preserving the last expanded snapshot that ``save_config``
+    uses to keep on-disk ``${VAR}`` templates intact.
+    """
+    with _CONFIG_LOCK:
+        _LOAD_CONFIG_CACHE.clear()
 
 
 def _sanitize_env_lines(lines: list) -> list:
@@ -5491,6 +5521,7 @@ def sanitize_env_file() -> int:
         raise
     _secure_file(env_path)
     invalidate_env_cache()
+    invalidate_config_cache()
     return fixes
 
 
@@ -5604,6 +5635,7 @@ def save_env_value(key: str, value: str):
 
     os.environ[key] = value
     invalidate_env_cache()
+    invalidate_config_cache()
 
 
 def remove_env_value(key: str) -> bool:
@@ -5660,6 +5692,7 @@ def remove_env_value(key: str) -> bool:
 
     os.environ.pop(key, None)
     invalidate_env_cache()
+    invalidate_config_cache()
     return found
 
 
@@ -5713,6 +5746,7 @@ def reload_env() -> int:
         if key not in env_vars and key in os.environ:
             del os.environ[key]
             count += 1
+    invalidate_config_cache()
     return count
 
 

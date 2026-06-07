@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from utils import atomic_replace
+from hermes_cli.config import invalidate_config_cache
 
 
 # Env var name suffixes that indicate credential values.  These are the
@@ -243,6 +244,7 @@ def load_hermes_dotenv(
         loaded.append(project_env_path)
 
     _apply_external_secret_sources(home_path)
+    invalidate_config_cache()
 
     return loaded
 

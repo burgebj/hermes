@@ -81,6 +81,39 @@ class TestLoadMCPConfig:
             result = _load_mcp_config()
             assert result == {}
 
+    def test_dotenv_overrides_stale_shell_env_for_mcp_config(self, tmp_path, monkeypatch):
+        """load_hermes_dotenv() must refresh env before config expansion.
+
+        This guards the startup path where a stale shell export would otherwise
+        get cached into ``load_config()`` before Hermes re-loads ``.env``.
+        """
+        home = tmp_path / "hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            "model: test\n"
+            "mcp_servers:\n"
+            "  demo:\n"
+            "    command: ${DEMO_CMD}\n",
+            encoding="utf-8",
+        )
+        (home / ".env").write_text("DEMO_CMD=new\n", encoding="utf-8")
+
+        from hermes_cli.config import invalidate_config_cache, invalidate_env_cache, load_config
+
+        invalidate_config_cache()
+        invalidate_env_cache()
+
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("DEMO_CMD", "old")
+
+        primed = load_config()
+        assert primed["mcp_servers"]["demo"]["command"] == "old"
+
+        from tools.mcp_tool import _load_mcp_config
+
+        result = _load_mcp_config()
+        assert result["demo"]["command"] == "new"
+
 
 # ---------------------------------------------------------------------------
 # Schema conversion
