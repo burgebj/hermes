@@ -1520,7 +1520,7 @@ def run_conversation(
                     # Eager fallback: empty/malformed responses are a common
                     # rate-limit symptom.  Switch to fallback immediately
                     # rather than retrying with extended backoff.
-                    if agent._fallback_index < len(agent._fallback_chain):
+                    if agent._has_pending_fallback():
                         agent._buffer_status("⚠️ Empty/malformed response — switching to fallback...")
                     if agent._try_activate_fallback():
                         retry_count = 0
@@ -2895,7 +2895,7 @@ def run_conversation(
                     FailoverReason.rate_limit,
                     FailoverReason.billing,
                 }
-                if is_rate_limited and agent._fallback_index < len(agent._fallback_chain):
+                if is_rate_limited and agent._has_pending_fallback():
                     # Don't eagerly fallback if credential pool rotation may
                     # still recover.  See _pool_may_recover_from_rate_limit
                     # for the single-credential-pool and CloudCode-quota
@@ -4369,7 +4369,7 @@ def run_conversation(
                     # chain.  This covers the case where a model
                     # (e.g. GLM-4.5-Air) consistently returns empty
                     # due to context degradation or provider issues.
-                    if _truly_empty and agent._fallback_chain:
+                    if _truly_empty and agent._has_pending_fallback():
                         logger.warning(
                             "Empty response after %d retries — "
                             "attempting fallback (model=%s, provider=%s)",
@@ -4433,7 +4433,7 @@ def run_conversation(
                         )
                         agent._emit_status(
                             "❌ Model returned no content after all retries"
-                            + (" and fallback attempts." if agent._fallback_chain else
+                            + (" and fallback attempts." if getattr(agent, "_fallback_chain", None) else
                                ". No fallback providers configured.")
                         )
 
