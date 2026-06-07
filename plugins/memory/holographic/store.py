@@ -73,6 +73,15 @@ CREATE TABLE IF NOT EXISTS memory_banks (
     fact_count INTEGER DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS fact_supersedes (
+    new_id     INTEGER NOT NULL REFERENCES facts(fact_id),
+    old_id     INTEGER NOT NULL REFERENCES facts(fact_id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (new_id, old_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_supersedes_old ON fact_supersedes(old_id);
 """
 
 # Trust adjustment constants
@@ -137,6 +146,10 @@ class MemoryStore:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
+        # Migrate: add superseded_at column if missing. NULL = live; a non-NULL
+        # timestamp marks a fact replaced by a newer version (see fact_supersedes).
+        if "superseded_at" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN superseded_at TIMESTAMP")
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -220,6 +233,7 @@ class MemoryStore:
                 JOIN facts_fts fts ON fts.rowid = f.fact_id
                 WHERE facts_fts MATCH ?
                   AND f.trust_score >= ?
+                  AND f.superseded_at IS NULL
                   {category_clause}
                 ORDER BY fts.rank, f.trust_score DESC
                 LIMIT ?
@@ -303,6 +317,54 @@ class MemoryStore:
 
             return True
 
+    def supersede(
+        self,
+        old_id: int,
+        content: str,
+        category: str | None = None,
+        tags: str = "",
+    ) -> int:
+        """Replace a fact with a corrected version, preserving history.
+
+        Inserts `content` as a new live fact, marks `old_id` superseded
+        (superseded_at = now) so its wording stops surfacing in recall, and
+        records a fact_supersedes(new_id, old_id) edge for tracing the chain.
+        The new fact inherits the old fact's category unless `category` is given.
+
+        Returns the new fact_id. Raises KeyError if `old_id` does not exist,
+        and ValueError if the new content is empty or identical to the old.
+        """
+        with self._lock:
+            content = content.strip()
+            if not content:
+                raise ValueError("content must not be empty")
+
+            old = self._conn.execute(
+                "SELECT content, category FROM facts WHERE fact_id = ?", (old_id,)
+            ).fetchone()
+            if old is None:
+                raise KeyError(f"fact_id {old_id} not found")
+            if old["content"] == content:
+                raise ValueError("new content is identical to the existing fact")
+
+            new_id = self.add_fact(
+                content,
+                category=category or old["category"],
+                tags=tags,
+            )
+            self._conn.execute(
+                "UPDATE facts SET superseded_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                (old_id,),
+            )
+            self._conn.execute(
+                "INSERT INTO fact_supersedes (new_id, old_id) VALUES (?, ?)",
+                (new_id, old_id),
+            )
+            self._conn.commit()
+            # Old fact is now retired; rebuild its bank so it drops out of HRR recall.
+            self._rebuild_bank(old["category"])
+            return new_id
+
     def remove_fact(self, fact_id: int) -> bool:
         """Delete a fact and its entity links. Returns True if the row existed."""
         with self._lock:
@@ -314,6 +376,12 @@ class MemoryStore:
 
             self._conn.execute(
                 "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
+            )
+            # Drop lineage rows referencing this fact (either end) so removal
+            # never leaves dangling supersede references.
+            self._conn.execute(
+                "DELETE FROM fact_supersedes WHERE new_id = ? OR old_id = ?",
+                (fact_id, fact_id),
             )
             self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._conn.commit()
@@ -343,6 +411,7 @@ class MemoryStore:
                        retrieval_count, helpful_count, created_at, updated_at
                 FROM facts
                 WHERE trust_score >= ?
+                  AND superseded_at IS NULL
                   {category_clause}
                 ORDER BY trust_score DESC
                 LIMIT ?
@@ -503,7 +572,8 @@ class MemoryStore:
 
             bank_name = f"cat:{category}"
             rows = self._conn.execute(
-                "SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL",
+                "SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL"
+                " AND superseded_at IS NULL",
                 (category,),
             ).fetchall()
 
