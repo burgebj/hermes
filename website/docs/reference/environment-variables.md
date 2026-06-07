@@ -18,7 +18,7 @@ All variables go in `~/.hermes/.env`. You can also set them with `hermes config 
 | `HERMES_OPENROUTER_CACHE_TTL` | Cache TTL in seconds (1-86400). Overrides `openrouter.response_cache_ttl` in config.yaml. |
 | `NOUS_BASE_URL` | Override Nous Portal base URL (rarely needed; development/testing only) |
 | `NOUS_INFERENCE_BASE_URL` | Override Nous inference endpoint directly |
-| `OPENAI_API_KEY` | API key for custom OpenAI-compatible endpoints (used with `OPENAI_BASE_URL`) |
+| `OPENAI_API_KEY` | API key for custom OpenAI-compatible endpoints (used with `OPENAI_BASE_URL`). Not required for the `openai-codex` provider, which uses OAuth-backed auth state instead. |
 | `OPENAI_BASE_URL` | Base URL for custom endpoint (VLLM, SGLang, etc.) |
 | `COPILOT_GITHUB_TOKEN` | GitHub token for Copilot API — first priority (OAuth `gho_*` or fine-grained PAT `github_pat_*`; classic PATs `ghp_*` are **not supported**) |
 | `GH_TOKEN` | GitHub token — second priority for Copilot (also used by `gh` CLI) |
@@ -108,6 +108,12 @@ All variables go in `~/.hermes/.env`. You can also set them with `hermes config 
 ## Provider Auth (OAuth)
 
 For native Anthropic auth, Hermes prefers Claude Code's own credential files when they exist because those credentials can refresh automatically. **OAuth against Anthropic requires a Claude Max plan with purchased extra usage credits** — Hermes routes as Claude Code, which only draws from the Max plan's extra/overage credits, not the base Max allowance, and does not work on Claude Pro. Without Max + extra credits, use an API key instead. Environment variables such as `ANTHROPIC_TOKEN` remain useful as manual overrides, but they are no longer the preferred path for Claude Max login.
+
+For OpenAI Codex, Hermes stores OAuth tokens under `~/.hermes/auth.json` when
+you run `hermes auth add openai-codex` or select OpenAI Codex in
+`hermes model`. If the Codex CLI is already logged in, Hermes can import tokens
+from `${CODEX_HOME:-~/.codex}/auth.json`; a missing `OPENAI_API_KEY` by itself
+does not mean Codex OAuth credentials are missing.
 
 | Variable | Description |
 |----------|-------------|
