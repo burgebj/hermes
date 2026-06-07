@@ -1,9 +1,12 @@
+import base64
+import json
 from datetime import datetime, timezone
 
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
     fetch_account_usage,
+    fetch_codex_account_usage_for_token,
     render_account_usage_lines,
 )
 
@@ -93,6 +96,97 @@ def test_fetch_account_usage_codex(monkeypatch):
     assert snapshot.windows[0].used_percent == 15.0
     assert snapshot.windows[0].reset_at == datetime.fromtimestamp(1_900_000_000, tz=timezone.utc)
     assert "Credits balance: $12.50" in snapshot.details
+
+
+def test_fetch_codex_account_usage_for_token_uses_explicit_account_id(monkeypatch):
+    calls = {}
+
+    class _RecordingClient:
+        def __init__(self, *, timeout):
+            calls["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            calls["url"] = url
+            calls["headers"] = dict(headers or {})
+            return _Response(
+                {
+                    "plan_type": "plus",
+                    "rate_limit": {
+                        "primary_window": {"used_percent": 20},
+                    },
+                }
+            )
+
+    monkeypatch.setattr("agent.account_usage.httpx.Client", _RecordingClient)
+
+    snapshot = fetch_codex_account_usage_for_token(
+        " access-token ",
+        base_url="https://chatgpt.com/backend-api/codex",
+        account_id="acct_456",
+        timeout_seconds=2.5,
+    )
+
+    assert snapshot.plan == "Plus"
+    assert calls["timeout"] == 2.5
+    assert calls["url"] == "https://chatgpt.com/backend-api/wham/usage"
+    assert calls["headers"]["Authorization"] == "Bearer access-token"
+    assert calls["headers"]["ChatGPT-Account-ID"] == "acct_456"
+
+
+def test_fetch_codex_account_usage_for_token_extracts_account_id_from_jwt(monkeypatch):
+    calls = {}
+    payload = {
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct_from_jwt"},
+    }
+    token_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    token = f"header.{token_payload}.signature"
+
+    class _RecordingClient:
+        def __init__(self, *, timeout):
+            del timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            del url
+            calls["headers"] = dict(headers or {})
+            return _Response({"rate_limit": {"primary_window": {"used_percent": 5}}})
+
+    monkeypatch.setattr("agent.account_usage.httpx.Client", _RecordingClient)
+
+    snapshot = fetch_codex_account_usage_for_token(token)
+
+    assert snapshot.windows[0].used_percent == 5.0
+    assert calls["headers"]["ChatGPT-Account-ID"] == "acct_from_jwt"
+
+
+def test_fetch_codex_account_usage_for_token_refuses_untrusted_usage_host(monkeypatch):
+    def _client_should_not_be_called(*args, **kwargs):
+        raise AssertionError("untrusted Codex usage host should not receive the OAuth token")
+
+    monkeypatch.setattr("agent.account_usage.httpx.Client", _client_should_not_be_called)
+
+    for base_url in (
+        "https://example.test/backend-api/codex",
+        "http://chatgpt.com/backend-api/codex",
+    ):
+        snapshot = fetch_codex_account_usage_for_token(
+            "access-token",
+            base_url=base_url,
+        )
+
+        assert snapshot.unavailable_reason is not None
+        assert "non-ChatGPT usage endpoint" in snapshot.unavailable_reason
 
 
 def test_render_account_usage_lines_includes_reset_and_provider():

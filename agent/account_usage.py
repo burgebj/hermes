@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import logging
 import math
+import base64
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -348,22 +351,42 @@ def _resolve_codex_usage_url(base_url: str) -> str:
     return normalized + "/api/codex/usage"
 
 
-def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
-    creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
-    token_data = _read_codex_tokens()
-    tokens = token_data.get("tokens") or {}
-    account_id = str(tokens.get("account_id", "") or "").strip() or None
-    headers = {
-        "Authorization": f"Bearer {creds['api_key']}",
-        "Accept": "application/json",
-        "User-Agent": "codex-cli",
-    }
-    if account_id:
-        headers["ChatGPT-Account-Id"] = account_id
-    with httpx.Client(timeout=15.0) as client:
-        response = client.get(_resolve_codex_usage_url(creds.get("base_url", "")), headers=headers)
-        response.raise_for_status()
-    payload = response.json() or {}
+def _trusted_codex_usage_host(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return None
+    host = (parsed.hostname or "").lower()
+    if host == "chatgpt.com" or host.endswith(".chatgpt.com"):
+        return host
+    return None
+
+
+def extract_codex_account_id(access_token: str) -> Optional[str]:
+    """Best-effort extraction of ChatGPT account id from a Codex OAuth JWT."""
+    token = str(access_token or "").strip()
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    auth_claims = claims.get("https://api.openai.com/auth")
+    if isinstance(auth_claims, dict):
+        value = auth_claims.get("chatgpt_account_id") or auth_claims.get("account_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("chatgpt_account_id", "account_id"):
+        value = claims.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _codex_usage_snapshot_from_payload(payload: dict[str, Any]) -> AccountUsageSnapshot:
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
     for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
@@ -393,6 +416,64 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
         plan=_title_case_slug(payload.get("plan_type")),
         windows=tuple(windows),
         details=tuple(details),
+    )
+
+
+def fetch_codex_account_usage_for_token(
+    access_token: str,
+    *,
+    base_url: Optional[str] = None,
+    account_id: Optional[str] = None,
+    timeout_seconds: float = 15.0,
+) -> AccountUsageSnapshot:
+    """Fetch Codex usage for one OAuth access token without selecting a pool entry."""
+    token = str(access_token or "").strip()
+    if not token:
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="missing access token",
+        )
+    try:
+        timeout = max(1.0, float(timeout_seconds))
+    except (TypeError, ValueError):
+        timeout = 15.0
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "codex-cli",
+    }
+    normalized_account_id = str(account_id or "").strip() or extract_codex_account_id(token)
+    if normalized_account_id:
+        headers["ChatGPT-Account-ID"] = normalized_account_id
+    usage_url = _resolve_codex_usage_url(base_url or "")
+    trusted_host = _trusted_codex_usage_host(usage_url)
+    if not trusted_host:
+        host = (urlparse(usage_url).hostname or "unknown host").lower()
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"refusing to send Codex OAuth token to non-ChatGPT usage endpoint ({host})",
+        )
+    with httpx.Client(timeout=timeout) as client:
+        response = client.get(usage_url, headers=headers)
+        response.raise_for_status()
+    payload = response.json() or {}
+    return _codex_usage_snapshot_from_payload(payload)
+
+
+def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
+    creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
+    token_data = _read_codex_tokens()
+    tokens = token_data.get("tokens") or {}
+    account_id = str(tokens.get("account_id", "") or "").strip() or None
+    return fetch_codex_account_usage_for_token(
+        creds["api_key"],
+        base_url=creds.get("base_url", ""),
+        account_id=account_id,
+        timeout_seconds=15.0,
     )
 
 

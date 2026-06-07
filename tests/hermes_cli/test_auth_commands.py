@@ -958,6 +958,129 @@ def test_auth_list_prefers_explicit_reset_time(monkeypatch, capsys):
     assert "7d 0h left" in out
 
 
+def test_auth_usage_checks_each_codex_pool_entry_without_select(monkeypatch, capsys):
+    from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+    from hermes_cli.auth_commands import auth_usage_command
+
+    class _Entry:
+        def __init__(self, id, label, token, account_id):
+            self.id = id
+            self.label = label
+            self.auth_type = "oauth"
+            self.source = "device_code"
+            self.access_token = token
+            self.refresh_token = None
+            self.base_url = "https://chatgpt.com/backend-api/codex"
+            self.extra = {"account_id": account_id}
+
+    entries = [
+        _Entry("cred-1", "primary", "token-1", "acct_1"),
+        _Entry("cred-2", "backup", "token-2", "acct_2"),
+    ]
+
+    class _Pool:
+        def entries(self):
+            return entries
+
+        def current(self):
+            return entries[0]
+
+        def peek(self):
+            raise AssertionError("auth_usage_command should not call peek()")
+
+        def select(self):
+            raise AssertionError("auth_usage_command should not select a credential")
+
+        def _entry_needs_refresh(self, entry):
+            return False
+
+    calls = []
+
+    def _fake_fetch(access_token, *, base_url=None, account_id=None, timeout_seconds=15.0):
+        calls.append((access_token, base_url, account_id, timeout_seconds))
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now(timezone.utc),
+            plan="Pro",
+            windows=(AccountUsageWindow(label="Weekly", used_percent=25),),
+        )
+
+    monkeypatch.setattr("hermes_cli.auth_commands.load_pool", lambda provider: _Pool())
+    monkeypatch.setattr("hermes_cli.auth_commands.fetch_codex_account_usage_for_token", _fake_fetch)
+
+    class _Args:
+        provider = "openai-codex"
+        timeout = 2.5
+        no_refresh = False
+
+    auth_usage_command(_Args())
+
+    assert calls == [
+        ("token-1", "https://chatgpt.com/backend-api/codex", "acct_1", 2.5),
+        ("token-2", "https://chatgpt.com/backend-api/codex", "acct_2", 2.5),
+    ]
+    out = capsys.readouterr().out
+    assert "openai-codex account usage (2 credentials):" in out
+    assert "#1 primary [cred-1] oauth device_code ← current" in out
+    assert "#2 backup [cred-2] oauth device_code" in out
+    assert out.count("Weekly: 75% remaining (25% used)") == 2
+
+
+def test_auth_usage_continues_after_per_credential_failure(monkeypatch, capsys):
+    from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+    from hermes_cli.auth_commands import auth_usage_command
+
+    class _Entry:
+        def __init__(self, id, label, token):
+            self.id = id
+            self.label = label
+            self.auth_type = "oauth"
+            self.source = "device_code"
+            self.access_token = token
+            self.refresh_token = None
+            self.base_url = "https://chatgpt.com/backend-api/codex"
+            self.extra = {}
+
+    entries = [_Entry("bad", "bad", "bad-token"), _Entry("ok", "ok", "ok-token")]
+
+    class _Pool:
+        def entries(self):
+            return entries
+
+        def peek(self):
+            return None
+
+        def _entry_needs_refresh(self, entry):
+            return False
+
+    def _fake_fetch(access_token, **kwargs):
+        if access_token == "bad-token":
+            raise RuntimeError("simulated usage failure")
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now(timezone.utc),
+            windows=(AccountUsageWindow(label="Session", used_percent=10),),
+        )
+
+    monkeypatch.setattr("hermes_cli.auth_commands.load_pool", lambda provider: _Pool())
+    monkeypatch.setattr("hermes_cli.auth_commands.fetch_codex_account_usage_for_token", _fake_fetch)
+
+    class _Args:
+        provider = "openai-codex"
+        timeout = 15.0
+        no_refresh = False
+
+    auth_usage_command(_Args())
+
+    out = capsys.readouterr().out
+    assert "#1 bad [bad]" in out
+    assert "Unavailable: simulated usage failure" in out
+    assert "#2 ok [ok]" in out
+    assert "Session: 90% remaining (10% used)" in out
+
+
 def test_auth_remove_env_seeded_clears_env_var(tmp_path, monkeypatch):
     """Removing an env-seeded credential should also clear the env var from .env
     so the entry doesn't get re-seeded on the next load_pool() call."""
