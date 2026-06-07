@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -59,6 +60,60 @@ def test_session_presence_filters_expired_records(tmp_path):
     assert list_session_presence(hermes_home=tmp_path, now=20.0, include_expired=True)[0][
         "session_id"
     ] == "old"
+
+
+def test_session_presence_dedupes_duplicate_runtime_records(tmp_path):
+    older = write_session_presence(
+        session_id="sid-1",
+        session_key="old-key",
+        client="hphone",
+        profile="taro",
+        hermes_home=tmp_path,
+        instance_id="instance",
+        now=10.0,
+    )
+    root = tmp_path / "session-presence" / "active"
+    conflict = dict(older)
+    conflict["session_key"] = "new-key"
+    conflict["updated_at"] = 12.0
+    conflict["expires_at"] = 102.0
+    (root / "instance.sid-1.sync-conflict.json").write_text(
+        json.dumps(conflict),
+        encoding="utf-8",
+    )
+
+    rows = list_session_presence(hermes_home=tmp_path, now=13.0)
+
+    assert [row["session_id"] for row in rows] == ["sid-1"]
+    assert rows[0]["session_key"] == "new-key"
+
+
+def test_session_presence_dedupes_endpoint_successors(tmp_path):
+    write_session_presence(
+        session_id="old-runtime",
+        session_key="old-key",
+        client="hphone",
+        profile="taro",
+        endpoint="tmux://taro/hermes-phone",
+        hermes_home=tmp_path,
+        instance_id="old-instance",
+        now=10.0,
+    )
+    write_session_presence(
+        session_id="new-runtime",
+        session_key="new-key",
+        client="hphone",
+        profile="taro",
+        endpoint="tmux://taro/hermes-phone",
+        hermes_home=tmp_path,
+        instance_id="new-instance",
+        now=12.0,
+    )
+
+    rows = list_session_presence(hermes_home=tmp_path, now=13.0)
+
+    assert [row["session_id"] for row in rows] == ["new-runtime"]
+    assert rows[0]["session_key"] == "new-key"
 
 
 def test_session_presence_dir_env_overrides_hermes_home(tmp_path, monkeypatch):

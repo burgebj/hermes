@@ -3055,6 +3055,9 @@ def _(rid, params: dict) -> dict:
     # and each turn re-bind HERMES_HOME. None/own profile → launch (unchanged).
     profile = (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
+    presence_client = str(params.get("presence_client") or "").strip()
+    presence_endpoint = str(params.get("presence_endpoint") or "").strip()
+    presence_profile = str(params.get("presence_profile") or "").strip()
 
     ready = threading.Event()
     now = time.time()
@@ -3077,6 +3080,9 @@ def _(rid, params: dict) -> dict:
             "inflight_turn": None,
             "last_active": now,
             "pending_title": title or None,
+            "presence_client": presence_client,
+            "presence_endpoint": presence_endpoint,
+            "presence_profile": presence_profile,
             "profile_home": str(profile_home) if profile_home is not None else None,
             "running": False,
             "session_key": key,
@@ -3429,6 +3435,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         "message_count": len(history),
         "model": str(getattr(agent, "model", "") or _resolve_model()),
         "preview": preview,
+        "session_id": sid,
         "session_key": key,
         "started_at": float(session.get("created_at") or now),
         "status": status,
@@ -3446,6 +3453,19 @@ def _publish_session_presence(sid: str, session: dict) -> None:
         return
     try:
         item = _session_live_item(sid, session)
+        route_profile = (
+            str(session.get("presence_profile") or "").strip()
+            or os.environ.get("HERMES_SESSION_PRESENCE_PROFILE", "").strip()
+            or _current_profile_name()
+        )
+        presence_client = (
+            str(session.get("presence_client") or "").strip()
+            or os.environ.get("HERMES_CLIENT_NAME", "tui")
+        )
+        presence_endpoint = (
+            str(session.get("presence_endpoint") or "").strip()
+            or os.environ.get("HERMES_SESSION_PRESENCE_ENDPOINT", "").strip()
+        )
         write_session_presence(
             session_id=sid,
             session_key=str(session.get("session_key") or sid),
@@ -3454,11 +3474,12 @@ def _publish_session_presence(sid: str, session: dict) -> None:
             model=str(item.get("model") or ""),
             cwd=str(session.get("cwd") or ""),
             source="tui_gateway",
-            client=os.environ.get("HERMES_CLIENT_NAME", "tui"),
-            profile=_current_profile_name(),
-            endpoint=os.environ.get("HERMES_SESSION_PRESENCE_ENDPOINT", ""),
+            client=presence_client,
+            profile=route_profile,
+            endpoint=presence_endpoint,
             metadata={
                 "message_count": item.get("message_count", 0),
+                "route_profile": route_profile,
                 "session_key": item.get("session_key") or sid,
             },
             hermes_home=_session_presence_home(session),

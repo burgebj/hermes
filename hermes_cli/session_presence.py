@@ -114,7 +114,7 @@ def list_session_presence(
     if not root.exists():
         return []
 
-    records: list[dict[str, Any]] = []
+    records_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     for path in root.glob("*.json"):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -122,7 +122,22 @@ def list_session_presence(
             continue
         if not include_expired and float(record.get("expires_at") or 0) < ts:
             continue
-        records.append(record)
+        session_id = str(record.get("session_id") or "")
+        endpoint = str(record.get("endpoint") or "").strip()
+        stable_target = endpoint or session_id
+        key = (
+            str(record.get("profile") or ""),
+            str(record.get("client") or record.get("source") or ""),
+            stable_target,
+        )
+        if not stable_target:
+            continue
+        previous = records_by_key.get(key)
+        if previous is None or float(record.get("updated_at") or 0) > float(
+            previous.get("updated_at") or 0
+        ):
+            records_by_key[key] = record
+    records = list(records_by_key.values())
     records.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
     return records
 
