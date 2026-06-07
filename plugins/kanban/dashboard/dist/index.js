@@ -2522,8 +2522,47 @@
                 "aria-label": `Select task ${t.id}`,
               }),
             ),
-            h("span", { className: "hermes-kanban-card-id",
-                        title: `Task id: ${t.id}. Use this id with kanban_show, /kanban show, or hermes kanban show.` }, t.id),
+            h("span", {
+              className: cn(
+                "hermes-kanban-card-id-clickable",
+                idCopied ? "hermes-kanban-card-id-clickable--copied" : "",
+              ),
+              onClick: function (e) {
+                e.stopPropagation();
+                var fallback = function () { window.prompt("Copy:", t.id); };
+                try {
+                  var p = navigator.clipboard && navigator.clipboard.writeText(t.id);
+                  if (p && p.then) {
+                    p.then(function () {
+                      setIdCopied(true);
+                      setTimeout(function () { setIdCopied(false); }, 2000);
+                    }).catch(fallback);
+                  } else {
+                    fallback();
+                  }
+                } catch (_e) { fallback(); }
+              },
+              title: "Click to copy task ID",
+              role: "button",
+              tabIndex: 0,
+              onMouseDown: function (e) { e.stopPropagation(); },
+              onKeyDown: function (e) {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.stopPropagation();
+                  var fallback = function () { window.prompt("Copy:", t.id); };
+                  try {
+                    var p = navigator.clipboard && navigator.clipboard.writeText(t.id);
+                    if (p && p.then) {
+                      p.then(function () { setIdCopied(true); setTimeout(function () { setIdCopied(false); }, 2000); }).catch(fallback);
+                    } else { fallback(); }
+                  } catch (_e) { fallback(); }
+                }
+              },
+            },
+              h("span", { className: "hermes-kanban-card-id" }, t.id),
+              " ",
+              idCopied ? "Copied" : "Copy ID",
+            ),
             t.warnings && t.warnings.count > 0
               ? h("span", {
                   className: cn(
