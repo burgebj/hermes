@@ -133,11 +133,27 @@ def check_compression_model_feasibility(agent: Any) -> None:
         _raw_aux_key = getattr(client, "api_key", "")
         aux_api_key = "" if (callable(_raw_aux_key) and not isinstance(_raw_aux_key, str)) else str(_raw_aux_key or "")
 
+        # Resolve config override for the auxiliary model.
+        # 1. Explicit auxiliary.compression.context_length from config
+        # 2. When the aux model matches the main model (same name & base_url),
+        #    fall back to the main model's resolved context_length (which
+        #    includes custom_providers overrides). Without this fallback the
+        #    aux probe re-detects context for the same endpoint and ignores
+        #    custom_providers.models.context_length (#12977).
+        _aux_ctx_cfg = getattr(agent, "_aux_compression_context_length_config", None)
+        if _aux_ctx_cfg is None:
+            _main_base = str(getattr(agent, "base_url", "")).rstrip("/")
+            if (
+                aux_base_url.rstrip("/") == _main_base
+                and aux_model == agent.model
+            ):
+                _aux_ctx_cfg = getattr(agent, "_config_context_length", None)
+
         aux_context = get_model_context_length(
             aux_model,
             base_url=aux_base_url,
             api_key=aux_api_key,
-            config_context_length=getattr(agent, "_aux_compression_context_length_config", None),
+            config_context_length=_aux_ctx_cfg,
             # Each model must be resolved with its own provider so that
             # provider-specific paths (e.g. Bedrock static table, OpenRouter API)
             # are invoked for the correct client, not inherited from the main model.
@@ -163,7 +179,27 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 f"detected value if it is wrong."
             )
 
-        threshold = agent.context_compressor.threshold_tokens
+        # Re-derive the main model's compression threshold using the same
+        # logic as ContextCompressor.__init__ / update_model:
+        #   threshold = max(int(context_length * threshold_percent), MIN)
+        # Reading context_compressor.threshold_tokens directly would surface
+        # a stale value when custom_providers context_length is propagated
+        # after the compressor was originally constructed (#12977).
+        try:
+            main_ctx_resolved = get_model_context_length(
+                agent.model,
+                base_url=agent.base_url,
+                api_key=getattr(agent, "api_key", ""),
+                config_context_length=getattr(agent, "_config_context_length", None),
+                provider=getattr(agent, "provider", ""),
+                custom_providers=getattr(agent, "_custom_providers", None),
+            )
+        except Exception:
+            main_ctx_resolved = agent.context_compressor.context_length
+        threshold = max(
+            int((main_ctx_resolved or 0) * agent.context_compressor.threshold_percent),
+            MINIMUM_CONTEXT_LENGTH,
+        )
         if aux_context < threshold:
             # Auto-correct: lower the live session threshold so
             # compression actually works this session.  The hard floor
