@@ -2660,19 +2660,36 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
             thread_ts = self._resolve_thread_ts(None, metadata)
+
+            # Slack section text is capped at 3000 characters.  Reserve space
+            # for the wrapper and description before truncating the command;
+            # using a fixed 2900-character command preview can still exceed
+            # the Block Kit limit once the header, code fences, and reason are
+            # added.
+            desc_preview = (
+                description[:500] + "..." if len(description) > 500 else description
+            )
+            prefix = ":warning: *Command Approval Required*\n```"
+            suffix = f"```\nReason: {desc_preview}"
+            max_section_text = 3000
+            max_cmd_len = max_section_text - len(prefix) - len(suffix)
+            if max_cmd_len < 0:
+                desc_preview = desc_preview[:200] + "..." if len(desc_preview) > 200 else desc_preview
+                suffix = f"```\nReason: {desc_preview}"
+                max_cmd_len = max_section_text - len(prefix) - len(suffix)
+            if len(command) > max_cmd_len:
+                cmd_preview = command[: max(0, max_cmd_len - 3)] + "..."
+            else:
+                cmd_preview = command
+            section_text = f"{prefix}{cmd_preview}{suffix}"
 
             blocks = [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": (
-                            f":warning: *Command Approval Required*\n"
-                            f"```{cmd_preview}```\n"
-                            f"Reason: {description}"
-                        ),
+                        "text": section_text,
                     },
                 },
                 {

@@ -140,7 +140,27 @@ class TestSlackExecApproval:
         kwargs = mock_client.chat_postMessage.call_args[1]
         section_text = kwargs["blocks"][0]["text"]["text"]
         assert "..." in section_text
-        assert len(section_text) < 5000
+        assert len(section_text) <= 3000
+
+    @pytest.mark.asyncio
+    async def test_truncates_long_command_with_reason_under_slack_section_limit(self):
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "1.2"})
+
+        long_cmd = "x" * 5000
+        await adapter.send_exec_approval(
+            chat_id="C1",
+            command=long_cmd,
+            session_key="s",
+            description="dangerous command",
+        )
+
+        kwargs = mock_client.chat_postMessage.call_args[1]
+        section_text = kwargs["blocks"][0]["text"]["text"]
+        assert "..." in section_text
+        assert len(section_text) <= 3000
+        assert "Reason: dangerous command" in section_text
 
 
 # ===========================================================================
