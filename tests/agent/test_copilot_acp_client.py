@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.copilot_acp_client import CopilotACPClient
+from agent.copilot_acp_client import CopilotACPClient, _extract_tool_calls_from_text
 
 
 class _FakeProcess:
@@ -36,16 +36,38 @@ class CopilotACPClientSafetyTests(unittest.TestCase):
         self.assertTrue(payload)
         return json.loads(payload)
 
-    def test_request_permission_is_not_auto_allowed(self) -> None:
-        response = self._dispatch(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "session/request_permission",
-                "params": {},
-            },
-            cwd="/tmp",
-        )
+    def test_request_permission_auto_allowed_by_default(self) -> None:
+        with patch.dict(os.environ, {"HERMES_COPILOT_ACP_AUTO_APPROVE": "1"}, clear=False):
+            response = self._dispatch(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "session/request_permission",
+                    "params": {
+                        "options": [
+                            {"optionId": "allow_once", "kind": "allow_once", "name": "Allow once"},
+                            {"optionId": "deny", "kind": "reject_once", "name": "Deny"},
+                        ],
+                    },
+                },
+                cwd="/tmp",
+            )
+
+        outcome = (response.get("result") or {}).get("outcome") or {}
+        self.assertEqual(outcome.get("outcome"), "selected")
+        self.assertEqual(outcome.get("optionId"), "allow_once")
+
+    def test_request_permission_can_be_disabled(self) -> None:
+        with patch.dict(os.environ, {"HERMES_COPILOT_ACP_AUTO_APPROVE": "0"}, clear=False):
+            response = self._dispatch(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "session/request_permission",
+                    "params": {},
+                },
+                cwd="/tmp",
+            )
 
         outcome = (((response.get("result") or {}).get("outcome") or {}).get("outcome"))
         self.assertEqual(outcome, "cancelled")
@@ -144,6 +166,37 @@ class CopilotACPClientSafetyTests(unittest.TestCase):
 
         self.assertIn("error", response)
         self.assertFalse(outside.exists())
+
+
+class CopilotACPToolCallExtractionTests(unittest.TestCase):
+    def test_extracts_tool_call_from_xml_block(self) -> None:
+        text = (
+            'Here is the command.\n'
+            '<tool_call>{"id":"call_1","type":"function","function":{"name":"terminal",'
+            '"arguments":"{\\"command\\":\\"echo ok\\"}"}}</tool_call>'
+        )
+        calls, cleaned = _extract_tool_calls_from_text(text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].function.name, "terminal")
+        self.assertIn("echo ok", calls[0].function.arguments)
+        self.assertNotIn("<tool_call>", cleaned)
+
+    def test_extracts_bare_json_when_no_xml_blocks(self) -> None:
+        text = (
+            '{"id":"call_2","type":"function","function":{"name":"read_file",'
+            '"arguments":"{\\"path\\":\\"/tmp/x\\"}"}}'
+        )
+        calls, cleaned = _extract_tool_calls_from_text(text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].function.name, "read_file")
+
+    def test_auto_approve_default_without_env(self) -> None:
+        from agent.copilot_acp_client import _acp_auto_approve_permissions
+
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("HERMES_COPILOT_ACP_AUTO_APPROVE", None)
+            os.environ.pop("HERMES_YOLO_MODE", None)
+            self.assertTrue(_acp_auto_approve_permissions())
 
 
 if __name__ == "__main__":

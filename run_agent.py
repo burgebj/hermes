@@ -3498,11 +3498,19 @@ class AIAgent:
 
         return copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
 
+    def _is_copilot_acp_provider(self) -> bool:
+        base_url = str(getattr(self, "_client_kwargs", {}).get("base_url", "") or "")
+        return self.provider == "copilot-acp" or base_url.startswith("acp://copilot")
+
     def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
 
         primary_client = self._ensure_primary_openai_client(reason=reason)
         if isinstance(primary_client, Mock):
+            return primary_client
+        # Copilot ACP cold-starts a subprocess per client; reuse the shared
+        # primary client for chat turns instead of spawn/kill every message.
+        if self._is_copilot_acp_provider():
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
@@ -3525,6 +3533,8 @@ class AIAgent:
         return self._create_openai_client(request_kwargs, reason=reason, shared=False)
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
+        if self._is_copilot_acp_provider():
+            return
         self._close_openai_client(client, reason=reason, shared=False)
 
     def _abort_request_openai_client(self, client: Any, *, reason: str) -> None:

@@ -120,6 +120,48 @@ def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:
     }
 
 
+def _acp_auto_approve_permissions() -> bool:
+    """Whether Hermes should auto-approve cursor-agent ACP permission prompts."""
+    for key in ("HERMES_COPILOT_ACP_AUTO_APPROVE", "HERMES_YOLO_MODE"):
+        raw = os.getenv(key, "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+    # Default: allow shell/terminal when Hermes drives cursor-agent over ACP.
+    return True
+
+
+_ALLOW_OPTION_IDS = (
+    "allow_once",
+    "approve",
+    "allow_session",
+    "approve_for_session",
+    "allow_always",
+)
+
+
+def _pick_allow_option_id(params: dict[str, Any]) -> str:
+    options = params.get("options")
+    if isinstance(options, list):
+        for preferred in _ALLOW_OPTION_IDS:
+            for opt in options:
+                if not isinstance(opt, dict):
+                    continue
+                opt_id = str(opt.get("optionId") or opt.get("option_id") or "").strip()
+                kind = str(opt.get("kind") or "").strip()
+                if opt_id == preferred or kind in {"allow_once", "allow_always"}:
+                    return opt_id or preferred
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            kind = str(opt.get("kind") or "")
+            if kind.startswith("allow"):
+                opt_id = str(opt.get("optionId") or opt.get("option_id") or "allow_once").strip()
+                return opt_id or "allow_once"
+    return "allow_once"
+
+
 def _permission_denied(message_id: Any) -> dict[str, Any]:
     return {
         "jsonrpc": "2.0",
@@ -127,6 +169,20 @@ def _permission_denied(message_id: Any) -> dict[str, Any]:
         "result": {
             "outcome": {
                 "outcome": "cancelled",
+            }
+        },
+    }
+
+
+def _permission_granted(message_id: Any, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    option_id = _pick_allow_option_id(params or {})
+    return {
+        "jsonrpc": "2.0",
+        "id": message_id,
+        "result": {
+            "outcome": {
+                "outcome": "selected",
+                "optionId": option_id,
             }
         },
     }
@@ -142,6 +198,9 @@ def _format_messages_as_prompt(
         "You are being used as the active ACP agent backend for Hermes.",
         "Use ACP capabilities to complete tasks.",
         "IMPORTANT: If you take an action with a tool, you MUST output tool calls using <tool_call>{...}</tool_call> blocks with JSON exactly in OpenAI function-call shape.",
+        "Your built-in shell (run_terminal_cmd, bash blocks, trailing '&') is disabled in this ACP subprocess. "
+        "To run commands, emit a <tool_call> for Hermes's `terminal` tool — Hermes executes it locally on the host. "
+        "Use background=true for long jobs; never append '&' in foreground commands.",
         "If no tool is needed, answer normally.",
     ]
     if model:
@@ -357,13 +416,19 @@ class CopilotACPClient:
         self.is_closed = False
         self._active_process: subprocess.Popen[str] | None = None
         self._active_process_lock = threading.Lock()
+        self._protocol_initialized = False
+        self._inbox: queue.Queue[dict[str, Any]] | None = None
+        self._stderr_tail: deque[str] | None = None
 
     def close(self) -> None:
         proc: subprocess.Popen[str] | None
         with self._active_process_lock:
             proc = self._active_process
             self._active_process = None
+            self._inbox = None
+            self._stderr_tail = None
         self.is_closed = True
+        self._protocol_initialized = False
         if proc is None:
             return
         try:
@@ -374,6 +439,60 @@ class CopilotACPClient:
                 proc.kill()
             except Exception:
                 pass
+
+    def _ensure_acp_process(self) -> tuple[subprocess.Popen[str], queue.Queue[dict[str, Any]], deque[str]]:
+        """Return a live ACP subprocess, creating one if needed."""
+        with self._active_process_lock:
+            proc = self._active_process
+            if (
+                proc is not None
+                and proc.poll() is None
+                and not self.is_closed
+                and self._inbox is not None
+                and self._stderr_tail is not None
+            ):
+                return proc, self._inbox, self._stderr_tail
+
+        proc = subprocess.Popen(
+            [self._acp_command] + self._acp_args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=self._acp_cwd,
+            env=_build_subprocess_env(),
+        )
+        if proc.stdin is None or proc.stdout is None:
+            proc.kill()
+            raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
+
+        self.is_closed = False
+        inbox: queue.Queue[dict[str, Any]] = queue.Queue()
+        stderr_tail: deque[str] = deque(maxlen=40)
+        with self._active_process_lock:
+            self._active_process = proc
+            self._inbox = inbox
+            self._stderr_tail = stderr_tail
+
+        def _stdout_reader() -> None:
+            if proc.stdout is None:
+                return
+            for line in proc.stdout:
+                try:
+                    inbox.put(json.loads(line))
+                except Exception:
+                    inbox.put({"raw": line.rstrip("\n")})
+
+        def _stderr_reader() -> None:
+            if proc.stderr is None:
+                return
+            for line in proc.stderr:
+                stderr_tail.append(line.rstrip("\n"))
+
+        threading.Thread(target=_stdout_reader, daemon=True).start()
+        threading.Thread(target=_stderr_reader, daemon=True).start()
+        return proc, inbox, stderr_tail
 
     def _create_chat_completion(
         self,
@@ -437,52 +556,12 @@ class CopilotACPClient:
 
     def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
         try:
-            proc = subprocess.Popen(
-                [self._acp_command] + self._acp_args,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                cwd=self._acp_cwd,
-                env=_build_subprocess_env(),
-            )
+            proc, inbox, stderr_tail = self._ensure_acp_process()
         except FileNotFoundError as exc:
             raise RuntimeError(
                 f"Could not start Copilot ACP command '{self._acp_command}'. "
                 "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
             ) from exc
-
-        if proc.stdin is None or proc.stdout is None:
-            proc.kill()
-            raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
-
-        self.is_closed = False
-        with self._active_process_lock:
-            self._active_process = proc
-
-        inbox: queue.Queue[dict[str, Any]] = queue.Queue()
-        stderr_tail: deque[str] = deque(maxlen=40)
-
-        def _stdout_reader() -> None:
-            if proc.stdout is None:
-                return
-            for line in proc.stdout:
-                try:
-                    inbox.put(json.loads(line))
-                except Exception:
-                    inbox.put({"raw": line.rstrip("\n")})
-
-        def _stderr_reader() -> None:
-            if proc.stderr is None:
-                return
-            for line in proc.stderr:
-                stderr_tail.append(line.rstrip("\n"))
-
-        out_thread = threading.Thread(target=_stdout_reader, daemon=True)
-        err_thread = threading.Thread(target=_stderr_reader, daemon=True)
-        out_thread.start()
-        err_thread.start()
 
         next_id = 0
 
@@ -546,7 +625,7 @@ class CopilotACPClient:
                 raise RuntimeError(f"Copilot ACP process exited early: {stderr_text}")
             raise TimeoutError(f"Timed out waiting for Copilot ACP response to {method}.")
 
-        try:
+        if not self._protocol_initialized:
             _request(
                 "initialize",
                 {
@@ -564,36 +643,36 @@ class CopilotACPClient:
                     },
                 },
             )
-            session = _request(
-                "session/new",
-                {
-                    "cwd": self._acp_cwd,
-                    "mcpServers": [],
-                },
-            ) or {}
-            session_id = str(session.get("sessionId") or "").strip()
-            if not session_id:
-                raise RuntimeError("Copilot ACP did not return a sessionId.")
+            self._protocol_initialized = True
 
-            text_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            _request(
-                "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [
-                        {
-                            "type": "text",
-                            "text": prompt_text,
-                        }
-                    ],
-                },
-                text_parts=text_parts,
-                reasoning_parts=reasoning_parts,
-            )
-            return "".join(text_parts), "".join(reasoning_parts)
-        finally:
-            self.close()
+        session = _request(
+            "session/new",
+            {
+                "cwd": self._acp_cwd,
+                "mcpServers": [],
+            },
+        ) or {}
+        session_id = str(session.get("sessionId") or "").strip()
+        if not session_id:
+            raise RuntimeError("Copilot ACP did not return a sessionId.")
+
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        _request(
+            "session/prompt",
+            {
+                "sessionId": session_id,
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt_text,
+                    }
+                ],
+            },
+            text_parts=text_parts,
+            reasoning_parts=reasoning_parts,
+        )
+        return "".join(text_parts), "".join(reasoning_parts)
 
     def _handle_server_message(
         self,
@@ -629,7 +708,13 @@ class CopilotACPClient:
         params = msg.get("params") or {}
 
         if method == "session/request_permission":
-            response = _permission_denied(message_id)
+            if _acp_auto_approve_permissions():
+                response = _permission_granted(
+                    message_id,
+                    params if isinstance(params, dict) else {},
+                )
+            else:
+                response = _permission_denied(message_id)
         elif method == "fs/read_text_file":
             try:
                 path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
