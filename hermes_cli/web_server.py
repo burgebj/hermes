@@ -9902,6 +9902,12 @@ def start_server(
 
     if open_browser:
         import webbrowser
+        from hermes_constants import is_wsl
+        _is_wsl = False
+        try:
+            _is_wsl = is_wsl()
+        except Exception:
+            pass
 
         # On headless Linux (no DISPLAY or WAYLAND_DISPLAY) some registered
         # browsers are TUI programs (links, lynx, www-browser) that try to
@@ -9909,18 +9915,32 @@ def start_server(
         # and cause an immediate exit even though uvicorn bound successfully.
         # Skip the auto-open attempt on headless systems and let the user
         # open the URL manually.  macOS and Windows are always considered
-        # display-capable.
+        # display-capable. WSL is also display-capable via Windows host.
         _has_display = (
             sys.platform != "linux"
+            or _is_wsl
             or bool(os.environ.get("DISPLAY"))
             or bool(os.environ.get("WAYLAND_DISPLAY"))
         )
 
         if _has_display:
             def _open():
+                time.sleep(1.0)
+                url = f"http://{host}:{port}"
                 try:
-                    time.sleep(1.0)
-                    webbrowser.open(f"http://{host}:{port}")
+                    if _is_wsl:
+                        import subprocess
+                        subprocess.Popen(
+                            ["powershell.exe", "-NoProfile", "-Command",
+                             f"Start-Process '{url}'"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        return
+                except Exception:
+                    pass  # Fall through to standard webbrowser
+                try:
+                    webbrowser.open(url)
                 except Exception:
                     pass
 
