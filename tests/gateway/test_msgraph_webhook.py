@@ -128,6 +128,48 @@ class TestMSGraphValidationHandshake:
         assert resp.status == 200
         assert resp.text == "abc123"
 
+    @pytest.mark.anyio
+    async def test_connect_disables_aiohttp_access_log(self, monkeypatch):
+        """validationToken rides the GET query string, so connect() must build
+        the AppRunner with access_log=None to keep it out of agent.log (mirrors
+        the BlueBubbles/WeCom webhook servers)."""
+        if not AIOHTTP_AVAILABLE:
+            pytest.skip("aiohttp not installed")
+        import gateway.platforms.msgraph_webhook as mod
+
+        captured = {}
+
+        class _FakeSite:
+            def __init__(self, *a, **k):
+                pass
+
+            async def start(self):
+                pass
+
+        class _FakeRunner:
+            def __init__(self, app, *a, **k):
+                captured["kwargs"] = k
+
+            async def setup(self):
+                pass
+
+            async def cleanup(self):
+                pass
+
+        monkeypatch.setattr(mod.web, "AppRunner", _FakeRunner)
+        monkeypatch.setattr(mod.web, "TCPSite", _FakeSite)
+        # Loopback bind: connect() succeeds without an explicit source allowlist.
+        adapter = _make_adapter(host="127.0.0.1", port=0, allowed_source_cidrs=[])
+        result = await adapter.connect()
+        assert result is True
+        assert "access_log" in captured["kwargs"], (
+            "AppRunner must be constructed with an explicit access_log kwarg"
+        )
+        assert captured["kwargs"]["access_log"] is None, (
+            "msgraph webhook AppRunner must set access_log=None so the "
+            "validationToken query param is never written to the access log"
+        )
+
 
 class TestMSGraphNotifications:
     @pytest.mark.anyio

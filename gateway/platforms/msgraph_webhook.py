@@ -157,7 +157,11 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         app.router.add_get(self._webhook_path, self._handle_validation)
         app.router.add_post(self._webhook_path, self._handle_notification)
 
-        self._runner = web.AppRunner(app)
+        # The Graph subscription-validation handshake carries the secret
+        # ``validationToken`` in the GET query string, so the request target is
+        # sensitive. Disable aiohttp's default access log so that token is never
+        # written to agent.log (mirrors the BlueBubbles/WeCom webhook servers).
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
