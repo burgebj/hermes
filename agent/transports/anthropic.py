@@ -94,15 +94,35 @@ class AnthropicTransport(ProviderTransport):
         reasoning_parts = []
         reasoning_details = []
         tool_calls = []
+        # Full block list in ORIGINAL response order. When extended/interleaved
+        # thinking is active the turn comes back as e.g.
+        # [thinking, tool_use, thinking, tool_use, ...]; the flat
+        # reasoning_details + tool_calls lists below discard that interleave.
+        # Replaying them reordered as [all-thinking]+text+[all-tool_use]
+        # mutates the signed thinking blocks → HTTP 400 "thinking blocks in the
+        # latest assistant message cannot be modified". Capturing the ordered
+        # list lets the adapter replay the turn verbatim. See _convert_assistant_message.
+        ordered_blocks = []
 
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text)
+                ordered_blocks.append({"type": "text", "text": block.text})
             elif block.type == "thinking":
                 reasoning_parts.append(block.thinking)
                 block_dict = _to_plain_data(block)
                 if isinstance(block_dict, dict):
                     reasoning_details.append(block_dict)
+                    ordered_blocks.append(block_dict)
+            elif block.type == "redacted_thinking":
+                # Redacted thinking carries an opaque 'data' payload (no
+                # plaintext). It must also round-trip verbatim on the latest
+                # turn, so capture it in both the details list and the ordered
+                # list (the legacy path silently dropped it).
+                block_dict = _to_plain_data(block)
+                if isinstance(block_dict, dict):
+                    reasoning_details.append(block_dict)
+                    ordered_blocks.append(block_dict)
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
@@ -124,12 +144,30 @@ class AnthropicTransport(ProviderTransport):
                         arguments=json.dumps(block.input),
                     )
                 )
+                ordered_blocks.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": name,
+                    "input": _to_plain_data(block.input),
+                })
 
         finish_reason = self._STOP_REASON_MAP.get(response.stop_reason, "stop")
 
         provider_data = {}
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
+            # Only preserve the ordered block list for native Anthropic turns
+            # carrying SIGNED thinking (signature, or redacted 'data'). Those
+            # are the turns where reorder triggers the 400. Kimi/DeepSeek
+            # /anthropic blocks are unsigned and keep their existing
+            # reasoning_content round-trip path untouched.
+            if any(
+                isinstance(b, dict)
+                and b.get("type") in ("thinking", "redacted_thinking")
+                and (b.get("signature") or b.get("data"))
+                for b in ordered_blocks
+            ):
+                provider_data["anthropic_ordered_content"] = ordered_blocks
 
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None,

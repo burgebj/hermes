@@ -122,6 +122,15 @@ class NormalizedResponse:
         return pd.get("reasoning_details")
 
     @property
+    def anthropic_ordered_content(self):
+        # Full ordered Anthropic content-block list (thinking/text/tool_use
+        # in original response order). Only set for native Anthropic turns
+        # that carry signed thinking blocks, where the interleave order must
+        # round-trip verbatim. None for every other provider/turn.
+        pd = self.provider_data or {}
+        return pd.get("anthropic_ordered_content")
+
+    @property
     def codex_reasoning_items(self):
         pd = self.provider_data or {}
         return pd.get("codex_reasoning_items")

@@ -924,6 +924,19 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if preserved:
             msg["reasoning_details"] = preserved
 
+    # Anthropic interleaved-thinking order preservation. The transport sets
+    # this (native Anthropic, signed-thinking turns only) to the exact ordered
+    # block list so the adapter can replay the turn verbatim instead of
+    # reordering thinking ahead of tool_use — a reorder Anthropic rejects with
+    # HTTP 400 ("thinking blocks in the latest assistant message cannot be
+    # modified"). Absent for every other provider/turn. Plain JSON-serializable
+    # dicts, so it survives session persistence.
+    ordered_blocks = getattr(assistant_message, "anthropic_ordered_content", None)
+    if ordered_blocks:
+        preserved_ordered = [b for b in ordered_blocks if isinstance(b, dict)]
+        if preserved_ordered:
+            msg["anthropic_ordered_content"] = preserved_ordered
+
     # Codex Responses API: preserve encrypted reasoning items for
     # multi-turn continuity. These get replayed as input on the next turn.
     codex_items = getattr(assistant_message, "codex_reasoning_items", None)

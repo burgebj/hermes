@@ -1631,6 +1631,63 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     Handles thinking blocks, regular content, tool calls, and
     reasoning_content injection for Kimi/DeepSeek endpoints.
     """
+    # Fast path — native Anthropic turn captured with its full ordered block
+    # list (set by transports/anthropic.py only when SIGNED thinking blocks are
+    # present). Replay the blocks in their ORIGINAL order so interleaved
+    # thinking/tool_use sequences round-trip verbatim. Rebuilding from the flat
+    # reasoning_details + tool_calls lists below reorders the turn to
+    # [all-thinking]+text+[all-tool_use], which modifies the signed thinking
+    # blocks and triggers HTTP 400 "thinking blocks in the latest assistant
+    # message cannot be modified".
+    ordered = m.get("anthropic_ordered_content")
+    _ordered_has_signed_thinking = isinstance(ordered, list) and any(
+        isinstance(b, dict)
+        and b.get("type") in {"thinking", "redacted_thinking"}
+        and (b.get("signature") or b.get("data"))
+        for b in ordered
+    )
+    if _ordered_has_signed_thinking:
+        # Replay tool inputs from the stored (already credential-redacted, see
+        # build_assistant_message #19798) tool_calls so the verbatim replay
+        # never resurrects the pre-redaction input captured at response time.
+        # Order still comes from the ordered block list.
+        redacted_by_id: Dict[str, Any] = {}
+        for tc in m.get("tool_calls", []) or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function", {}) or {}
+            raw_args = fn.get("arguments", "{}")
+            try:
+                parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except (json.JSONDecodeError, ValueError):
+                parsed_args = {}
+            redacted_by_id[_sanitize_tool_id(tc.get("id", ""))] = parsed_args
+        ordered_out: List[Dict[str, Any]] = []
+        for b in ordered:
+            if not isinstance(b, dict):
+                continue
+            btype = b.get("type")
+            if btype == "tool_use":
+                tid = _sanitize_tool_id(b.get("id", ""))
+                tinput = redacted_by_id.get(tid)
+                if tinput is None:
+                    tinput = b.get("input") if isinstance(b.get("input"), (dict, list)) else {}
+                ordered_out.append({
+                    "type": "tool_use",
+                    "id": tid,
+                    "name": b.get("name", ""),
+                    "input": tinput,
+                })
+            elif btype in {"thinking", "redacted_thinking"}:
+                ordered_out.append(copy.deepcopy(b))
+            elif btype == "text":
+                txt = b.get("text")
+                if isinstance(txt, str) and txt:
+                    ordered_out.append({"type": "text", "text": txt})
+            # Unknown block types are dropped — Anthropic would reject them.
+        if ordered_out:
+            return {"role": "assistant", "content": ordered_out}
+
     content = m.get("content", "")
     blocks = _extract_preserved_thinking_blocks(m)
     if content:
