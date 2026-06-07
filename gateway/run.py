@@ -3217,7 +3217,7 @@ class GatewayRunner:
         raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
 
         value = raw.lower()
-        if not value or value in {"normal", "default", "standard", "off", "none"}:
+        if not value or value in {"normal", "default", "standard", "off", "none", "auto"}:
             return None
         if value in {"fast", "priority", "on"}:
             return "priority"
