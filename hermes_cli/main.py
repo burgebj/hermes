@@ -425,6 +425,13 @@ try:
                 _early_redact = _early_sec_cfg.get("redact_secrets")
                 if _early_redact is not None:
                     os.environ["HERMES_REDACT_SECRETS"] = str(_early_redact).lower()
+        # Bridge security.redact_level → HERMES_REDACT_LEVEL (same timing constraint)
+        if "HERMES_REDACT_LEVEL" not in os.environ:
+            _early_sec_cfg2 = _early_cfg_raw.get("security", {})
+            if isinstance(_early_sec_cfg2, dict):
+                _early_level = _early_sec_cfg2.get("redact_level")
+                if _early_level is not None:
+                    os.environ["HERMES_REDACT_LEVEL"] = str(_early_level).lower()
         _early_net_cfg = _early_cfg_raw.get("network", {})
         if isinstance(_early_net_cfg, dict) and _early_net_cfg.get("force_ipv4"):
             _FORCE_IPV4_EARLY = True

@@ -5,9 +5,20 @@ before they reach log files, verbose output, or gateway logs.
 
 Short tokens (< 18 chars) are fully masked. Longer tokens preserve
 the first 6 and last 4 characters for debuggability.
+
+Redaction level is controlled by ``security.redact_level`` in config.yaml
+(bridged to ``HERMES_REDACT_LEVEL`` at startup, same timing semantics as
+``redact_secrets``):
+
+  basic    — API keys, tokens, private keys, JWTs, DB passwords (default, current behaviour)
+  standard — basic + credit cards (Luhn-validated), US SSNs, IBANs
+  strict   — standard + email addresses, IPv4 addresses
+
+Validators (entropy, Luhn) reduce false positives on high-entropy requirements.
 """
 
 import logging
+import math
 import os
 import re
 
@@ -66,6 +77,18 @@ _SENSITIVE_BODY_KEYS = frozenset({
 # downgrade — see `_log_redaction_status()` in gateway/run.py and cli.py.
 _REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "true", "yes", "on"}
 
+# Redaction level — controls which additional pattern categories fire.
+# Snapshotted at import time alongside _REDACT_ENABLED for the same
+# security reason. Bridged from config.yaml security.redact_level by
+# hermes_cli/main.py before setup_logging() imports this module.
+#   basic    — prefix patterns, ENV assigns, JSON fields, auth headers,
+#              private keys, DB connstrings, JWTs, Telegram tokens (default)
+#   standard — basic + credit cards (Luhn-validated), US SSNs, IBANs
+#   strict   — standard + email addresses, IPv4 addresses
+_REDACT_LEVEL = os.getenv("HERMES_REDACT_LEVEL", "basic").lower().strip()
+if _REDACT_LEVEL not in {"basic", "standard", "strict"}:
+    _REDACT_LEVEL = "basic"
+
 # Known API key prefixes -- match the prefix + contiguous token chars
 _PREFIX_PATTERNS = [
     r"sk-[A-Za-z0-9_-]{10,}",           # OpenAI / OpenRouter / Anthropic (sk-ant-*)
@@ -104,6 +127,14 @@ _PREFIX_PATTERNS = [
     r"mem0_[A-Za-z0-9]{10,}",           # Mem0 Platform API key
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
+    # --- Additional patterns ported from nachos-dlp ---
+    r"AC[A-Za-z0-9]{32}",               # Twilio Account SID
+    r"SK[A-Za-z0-9]{32}",               # Twilio Auth Token / API Key
+    r"[A-Za-z0-9]{32}-us[0-9]{1,2}",    # Mailchimp API key (<key>-usN)
+    r"Bot\.[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27}",  # Discord bot token
+    r"[A-Za-z0-9+/]{88}",               # Azure Storage Account Key (base64, 88 chars)
+    r"whsec_[A-Za-z0-9+/]{32,}",        # Stripe webhook signing secret
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[-A-Za-z0-9+/=]{20,}",  # Azure SAS sig
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name
@@ -424,6 +455,12 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
             return phone[:4] + "****" + phone[-4:]
         text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
 
+    # PII passes — only fire at standard/strict level
+    if _REDACT_LEVEL in {"standard", "strict"}:
+        text = _redact_pii(text)
+        if _REDACT_LEVEL == "strict":
+            text = _redact_strict_pii(text)
+
     return text
 
 
@@ -483,6 +520,160 @@ def _has_http_method_substring(text: str) -> bool:
     """Cheap pre-check before scanning for access-log request targets."""
     upper = text.upper()
     return any(method in upper for method in _HTTP_METHOD_SUBSTRINGS)
+
+
+# ── Validators ───────────────────────────────────────────────────────────────
+# Ported from @nacho-labs/nachos-dlp — reduce false positives on patterns
+# that require additional structural validation beyond regex shape.
+
+
+def _shannon_entropy(value: str) -> float:
+    """Calculate Shannon entropy (bits per character) of a string.
+
+    Used to screen high-entropy-required patterns (e.g. AWS secret keys)
+    and avoid masking low-entropy constants and placeholders.
+
+    >>> round(_shannon_entropy("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 1)
+    0.0
+    >>> _shannon_entropy("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") > 4.0
+    True
+    """
+    if not value:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in value:
+        freq[ch] = freq.get(ch, 0) + 1
+    length = len(value)
+    return -sum((c / length) * math.log2(c / length) for c in freq.values())
+
+
+def _luhn_valid(number: str) -> bool:
+    """Validate a credit card number string using the Luhn algorithm.
+
+    Strips spaces and dashes before checking.
+
+    >>> _luhn_valid("4111111111111111")
+    True
+    >>> _luhn_valid("4111111111111112")
+    False
+    >>> _luhn_valid("378282246310005")  # Amex test
+    True
+    """
+    digits = "".join(c for c in number if c.isdigit())
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    total = 0
+    reverse = digits[::-1]
+    for i, d in enumerate(reverse):
+        n = int(d)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+# ── PII patterns (standard / strict levels only) ─────────────────────────────
+
+# Credit card numbers: 13-19 digits, optionally separated by spaces or dashes.
+# Groups: the matched card number string.
+# Validated with Luhn before redacting to eliminate false positives.
+_CREDIT_CARD_RE = re.compile(
+    r"(?<!\d)"
+    r"(\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1,4}"  # 16-digit: Visa/MC/Discover
+    r"|3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}"           # 15-digit: Amex
+    r"|3(?:0[0-5]|[68]\d)\d{11}"                    # 14-digit: Diners
+    r")"
+    r"(?!\d)"
+)
+
+# US Social Security Numbers: NNN-NN-NNNN or NNN NN NNNN or NNNNNNNNN
+# Excludes all-zero segments (000-00-0000, etc.) to avoid trivial false positives.
+_SSN_RE = re.compile(
+    r"(?<!\d)"
+    r"(?!000|666|9\d\d)"      # AAA block exclusions
+    r"(\d{3})"
+    r"[-\s]"
+    r"(?!00)"
+    r"(\d{2})"
+    r"[-\s]"
+    r"(?!0000)"
+    r"(\d{4})"
+    r"(?!\d)"
+)
+
+# IBAN: 2-letter country + 2 check digits + up to 30 alphanumeric chars
+# Optionally space-separated groups of 4 (printable format).
+_IBAN_RE = re.compile(
+    r"\b([A-Z]{2}\d{2}[A-Z0-9]{4,30}|[A-Z]{2}\d{2}(?:\s[A-Z0-9]{4})+(?:\s[A-Z0-9]{1,4})?)\b"
+)
+
+# Email addresses (strict level only).
+# Conservative pattern — avoids matching template placeholders like {email}.
+_EMAIL_RE = re.compile(
+    r"(?<![{<])\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b(?![}>])"
+)
+
+# IPv4 addresses (strict level only). Excludes loopback, link-local, and
+# obviously-fake addresses to avoid false positives in log output and config.
+_IPV4_RE = re.compile(
+    r"(?<!\d)"
+    r"((?!0\.|127\.|169\.254\.|255\.255\.255\.255)"
+    r"(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?))"
+    r"(?!\d)"
+)
+
+
+def _redact_pii(text: str) -> str:
+    """Apply PII redaction passes (standard level and above).
+
+    Covers credit cards (Luhn-validated), US SSNs, and IBANs.
+    Safe to call on any string — non-matching text passes through unchanged.
+    """
+    # Credit cards — gate on digit density, then Luhn-validate each candidate
+    def _redact_cc(m: re.Match) -> str:
+        raw = m.group(0)
+        digits = "".join(c for c in raw if c.isdigit())
+        if _luhn_valid(digits):
+            # Preserve format (last 4 digits for debuggability)
+            if len(digits) < 18:
+                return "****-****-****-" + digits[-4:]
+            return "***" + digits[-4:]
+        return raw  # failed Luhn — pass through
+
+    if any(c.isdigit() for c in text):
+        text = _CREDIT_CARD_RE.sub(_redact_cc, text)
+
+    # US SSN — NNN-NN-NNNN
+    if "-" in text or " " in text:
+        text = _SSN_RE.sub(r"***-**-\3", text)
+
+    # IBAN
+    if any(c.isalpha() and c.isupper() for c in text):
+        text = _IBAN_RE.sub(lambda m: m.group(0)[:4] + "****", text)
+
+    return text
+
+
+def _redact_strict_pii(text: str) -> str:
+    """Apply strict-level PII passes (email and IPv4).
+
+    Only fires when redact_level is 'strict'. Email redaction in particular
+    has a higher false-positive risk in tool output (URLs, config files).
+    """
+    # Email addresses
+    if "@" in text:
+        text = _EMAIL_RE.sub(lambda m: m.group(0).split("@")[0][:2] + "***@***", text)
+
+    # IPv4 addresses (non-loopback, non-link-local)
+    if "." in text:
+        text = _IPV4_RE.sub(
+            lambda m: ".".join(m.group(1).split(".")[:2]) + ".***.***", text
+        )
+
+    return text
 
 
 class RedactingFormatter(logging.Formatter):

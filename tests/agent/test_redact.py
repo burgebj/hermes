@@ -482,3 +482,136 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+# ── Additional API key prefix tests (nachos-dlp patterns) ────────────────────
+
+class TestAdditionalPrefixes:
+    """Patterns ported from @nacho-labs/nachos-dlp not previously covered."""
+
+    def test_twilio_account_sid(self):
+        sid = "AC" + "a" * 32
+        result = redact_sensitive_text(f"TWILIO_SID={sid}", force=True)
+        assert "a" * 16 not in result
+
+    def test_stripe_webhook_secret(self):
+        secret = "whsec_" + "A" * 40
+        result = redact_sensitive_text(f"STRIPE_WEBHOOK={secret}", force=True)
+        assert "A" * 20 not in result
+
+    def test_mailchimp_api_key(self):
+        # Mailchimp keys are <32chars>-us3 format
+        key = "a" * 32 + "-us3"
+        result = redact_sensitive_text(f"MC_KEY={key}", force=True)
+        assert "a" * 16 not in result
+
+
+# ── Validators ────────────────────────────────────────────────────────────────
+
+class TestValidators:
+    """Shannon entropy and Luhn algorithm helpers."""
+
+    def test_entropy_low_for_constant(self):
+        from agent.redact import _shannon_entropy
+        assert _shannon_entropy("A" * 40) == 0.0
+
+    def test_entropy_high_for_real_key(self):
+        from agent.redact import _shannon_entropy
+        # Real AWS-style key has entropy > 4.0 bits per char
+        assert _shannon_entropy("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") > 4.0
+
+    def test_entropy_empty_string(self):
+        from agent.redact import _shannon_entropy
+        assert _shannon_entropy("") == 0.0
+
+    def test_luhn_valid_visa_test_card(self):
+        from agent.redact import _luhn_valid
+        assert _luhn_valid("4111111111111111") is True
+
+    def test_luhn_valid_amex_test_card(self):
+        from agent.redact import _luhn_valid
+        assert _luhn_valid("378282246310005") is True
+
+    def test_luhn_invalid_number(self):
+        from agent.redact import _luhn_valid
+        assert _luhn_valid("4111111111111112") is False
+
+    def test_luhn_too_short(self):
+        from agent.redact import _luhn_valid
+        assert _luhn_valid("41111") is False
+
+    def test_luhn_handles_spaces(self):
+        from agent.redact import _luhn_valid
+        assert _luhn_valid("4111 1111 1111 1111") is True
+
+
+# ── PII redaction (standard level) ───────────────────────────────────────────
+
+class TestStandardPII:
+    """Credit cards, SSNs, and IBANs — only fire at standard/strict level."""
+
+    @pytest.fixture(autouse=True)
+    def _set_standard_level(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_LEVEL", "standard")
+
+    def test_visa_card_redacted(self):
+        result = redact_sensitive_text("card: 4111 1111 1111 1111", force=True)
+        assert "4111 1111 1111 1111" not in result
+        assert "1111" in result  # last 4 preserved
+
+    def test_amex_card_redacted(self):
+        result = redact_sensitive_text("amex: 378282246310005", force=True)
+        assert "378282246310005" not in result
+
+    def test_invalid_luhn_passes_through(self):
+        # Not a valid card number — Luhn check should let it through
+        result = redact_sensitive_text("4111 1111 1111 1112", force=True)
+        assert "4111 1111 1111 1112" in result
+
+    def test_ssn_redacted(self):
+        result = redact_sensitive_text("SSN: 123-45-6789", force=True)
+        assert "123-45-6789" not in result
+        assert "6789" in result  # last 4 preserved in ***-**-NNNN format
+
+    def test_ssn_invalid_area_passes_through(self):
+        # 000-xx-xxxx is invalid — must pass through
+        result = redact_sensitive_text("fake: 000-12-3456", force=True)
+        assert "000-12-3456" in result
+
+    def test_iban_redacted(self):
+        result = redact_sensitive_text("IBAN: GB82WEST12345698765432", force=True)
+        assert "WEST12345698765432" not in result
+
+    def test_pii_not_fired_at_basic_level(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_LEVEL", "basic")
+        # At basic level, credit cards should pass through
+        result = redact_sensitive_text("card: 4111 1111 1111 1111", force=True)
+        assert "4111 1111 1111 1111" in result
+
+
+# ── PII redaction (strict level) ─────────────────────────────────────────────
+
+class TestStrictPII:
+    """Email addresses and IPv4 — only fire at strict level."""
+
+    @pytest.fixture(autouse=True)
+    def _set_strict_level(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_LEVEL", "strict")
+
+    def test_email_redacted(self):
+        result = redact_sensitive_text("contact: alice@example.com", force=True)
+        assert "alice@example.com" not in result
+        assert "al" in result  # prefix preserved
+
+    def test_ipv4_redacted(self):
+        result = redact_sensitive_text("server at 192.168.1.10", force=True)
+        assert "192.168.1.10" not in result
+
+    def test_loopback_not_redacted(self):
+        result = redact_sensitive_text("localhost at 127.0.0.1", force=True)
+        assert "127.0.0.1" in result
+
+    def test_email_not_fired_at_standard_level(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_LEVEL", "standard")
+        result = redact_sensitive_text("contact: alice@example.com", force=True)
+        assert "alice@example.com" in result
