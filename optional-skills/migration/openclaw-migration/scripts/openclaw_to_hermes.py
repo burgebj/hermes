@@ -395,6 +395,13 @@ def backup_existing(path: Path, backup_root: Path) -> Optional[Path]:
     return dest
 
 
+def safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 # ── Brand rewriting ─────────────────────────────────────────
 # Replace OpenClaw brand names with Hermes in migrated text so that
 # memory entries, user profiles, SOUL.md, and workspace instructions
@@ -758,7 +765,7 @@ class Migrator:
             ws_path = Path(ws).expanduser().resolve()
             # Only use it if it exists and is outside the source_root tree
             # (otherwise the standard relative-path logic already covers it).
-            if ws_path.is_dir():
+            if safe_is_dir(ws_path):
                 try:
                     ws_path.relative_to(self.source_root)
                 except ValueError:

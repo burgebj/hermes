@@ -172,6 +172,40 @@ def _make_minimal_migrator(mod, tmp_path, **overrides):
     return mod.Migrator(**defaults)
 
 
+def test_configured_workspace_permission_error_is_ignored(tmp_path, monkeypatch):
+    mod = _load()
+    source = tmp_path / "openclaw"
+    source.mkdir()
+    target = tmp_path / "hermes"
+    target.mkdir()
+    unreadable_workspace = (tmp_path / "root-workspace").resolve()
+    (source / "openclaw.json").write_text(
+        json.dumps({"agents": {"defaults": {"workspace": str(unreadable_workspace)}}}),
+        encoding="utf-8",
+    )
+    original_is_dir = mod.Path.is_dir
+
+    def raising_is_dir(path):
+        if path == unreadable_workspace:
+            raise PermissionError("permission denied")
+        return original_is_dir(path)
+
+    monkeypatch.setattr(mod.Path, "is_dir", raising_is_dir)
+
+    migrator = mod.Migrator(
+        source_root=source,
+        target_root=target,
+        execute=False,
+        workspace_target=None,
+        overwrite=False,
+        migrate_secrets=False,
+        output_dir=None,
+        selected_options=set(),
+    )
+
+    assert migrator._custom_workspace is None
+
+
 def test_dry_run_report_includes_rerun_next_step(tmp_path):
     mod = _load()
     migrator = _make_minimal_migrator(mod, tmp_path)
