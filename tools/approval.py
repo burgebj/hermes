@@ -435,13 +435,16 @@ DANGEROUS_PATTERNS = [
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
     (rf'\b(cp|mv|install)\b.*\s["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config file"),
-    (rf'\bsed\s+-[^\s]*i.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
+    # -i can appear as its own token after other flags (`sed -n -i s/.../ f`)
+    # or combined (`sed -ni`); match any -...i flag token anywhere in the args,
+    # mirroring the perl/ruby coverage. `sed -E '...' f` (read, no -i) is safe.
+    (rf'\bsed\b.*(?:^|\s)-[^\s]*i\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
     (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
     # In-place edit of a Hermes-managed security file (~/.hermes/config.yaml or
     # .env). sed -i bypasses the redirection/tee patterns above because it
     # mutates the file directly. Pairs the file_tools write_file/patch deny so
     # the terminal side is not an open door. See #14639.
-    (rf'\bsed\s+-[^\s]*i.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
+    (rf'\bsed\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
     (rf'\bsed\s+--in-place\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (long flag)"),
     # perl -i and ruby -i perform the same in-place mutation as sed -i but are
     # not caught by the -e/-c script-execution pattern above (which targets code
@@ -452,6 +455,19 @@ DANGEROUS_PATTERNS = [
     # anywhere in the args, not just the first token — `perl -e '...'` (code
     # eval, no -i) does not trip because it has no `-...i` flag token.
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    # awk -i inplace / gawk -i inplace is GNU awk's in-place edit extension —
+    # the same direct-mutation escalation as the sed -i (#14639) and perl/ruby -i
+    # (a6a4e6f9d) pairings, reached through the one standard in-place editor those
+    # patterns do not cover. Loading the `inplace` extension rewrites
+    # ~/.hermes/config.yaml (or .env) directly; the mtime-keyed config cache
+    # reloads it mid-session, so the agent can flip approvals.mode off and bypass
+    # the gate. The extension is requested via `-i` (short form of `--include`),
+    # so GNU getopt accepts every load form: `-i inplace`, `-iinplace` (glued),
+    # `-i=inplace`, and the long `--include inplace` / `--include=inplace`. Match
+    # all of them so an alternate spelling is not a free bypass. Read-only awk
+    # ('{print}' with no inplace include) lacks the token and does not trip.
+    # Sibling follow-up to #14639 / a6a4e6f9d.
+    (rf'\b(?:g?awk)\b.*?(?:-i[\s=]?|--include[\s=])inplace\b.*?(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (awk -i inplace)"),
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
     (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),

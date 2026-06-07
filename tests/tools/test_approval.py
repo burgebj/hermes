@@ -424,6 +424,28 @@ class TestHermesConfigWriteProtection:
         dangerous, key, desc = detect_dangerous_command("sed --in-place 's/manual/off/' ~/.hermes/config.yaml")
         assert dangerous is True
 
+    def test_sed_in_place_separate_token_config(self):
+        # -i can split out after another flag (`sed -n -i s/.../ config`).
+        # Pairs the perl/ruby separate-token coverage from b04c6e95f.
+        dangerous, key, desc = detect_dangerous_command(
+            "sed -n -i 's/manual/off/' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+
+    def test_sed_in_place_i_after_expr_env(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "sed -e 's/x/y/' -i ~/.hermes/.env"
+        )
+        assert dangerous is True
+
+    def test_sed_read_only_expr_safe(self):
+        # `sed -E '...' config` is a read transform (stdout), not in-place;
+        # the widened pattern must NOT trip on it.
+        dangerous, key, desc = detect_dangerous_command(
+            "sed -E 's/a/b/' ~/.hermes/config.yaml"
+        )
+        assert dangerous is False
+
     def test_custom_hermes_home(self):
         dangerous, key, desc = detect_dangerous_command("echo x | tee $HERMES_HOME/config.yaml")
         assert dangerous is True
@@ -470,6 +492,70 @@ class TestHermesConfigWriteProtection:
         # the perl/ruby -i pattern must not fire on it.
         dangerous, key, desc = detect_dangerous_command(
             "perl -wne 'print' ~/.hermes/config.yaml"
+        )
+        assert dangerous is False
+
+    def test_awk_in_place_config(self):
+        # `awk -i inplace` is GNU awk's in-place edit extension — the same
+        # direct mutation as sed -i / perl -i, the one standard in-place
+        # editor those patterns did not cover.
+        dangerous, key, desc = detect_dangerous_command(
+            "awk -i inplace '{gsub(/manual/,\"off\")}1' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+        assert "hermes config" in desc.lower() or "in-place" in desc.lower()
+
+    def test_gawk_in_place_env(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "gawk -i inplace '{print}' ~/.hermes/.env"
+        )
+        assert dangerous is True
+
+    def test_awk_in_place_hermes_home_override(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "awk -i inplace '{print}' $HERMES_HOME/config.yaml"
+        )
+        assert dangerous is True
+
+    def test_awk_in_place_glued_flag(self):
+        # GNU getopt accepts the include arg glued to -i: `-iinplace`.
+        dangerous, key, desc = detect_dangerous_command(
+            "awk -iinplace '{gsub(/manual/,\"off\")}1' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+
+    def test_awk_in_place_equals_flag(self):
+        # `-i=inplace` is another accepted short-form spelling.
+        dangerous, key, desc = detect_dangerous_command(
+            "awk -i=inplace '{print}' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+
+    def test_awk_in_place_long_include_flag(self):
+        # `--include` is the long form of `-i`; `--include inplace` loads the
+        # same extension and must not be a free bypass.
+        dangerous, key, desc = detect_dangerous_command(
+            "gawk --include inplace '{print}' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+
+    def test_awk_in_place_long_include_equals_flag(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "gawk --include=inplace '{print}' ~/.hermes/.env"
+        )
+        assert dangerous is True
+
+    def test_read_only_awk_on_config_safe(self):
+        # Read-only awk has no `-i inplace` token and must not trip.
+        dangerous, key, desc = detect_dangerous_command(
+            "awk '{print}' ~/.hermes/config.yaml"
+        )
+        assert dangerous is False
+
+    def test_awk_in_place_non_sensitive_path_safe(self):
+        # `awk -i inplace` on a non-Hermes path must not false-positive.
+        dangerous, key, desc = detect_dangerous_command(
+            "awk -i inplace '{print}' /tmp/scratch.txt"
         )
         assert dangerous is False
 
