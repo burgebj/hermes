@@ -79,6 +79,14 @@ class TurnResult:
     # of riding a CPU-spinning or auth-broken process. Mirrors openclaw
     # beta.8's "retire timed-out app-server clients" fix.
     should_retire: bool = False
+    # Token usage for THIS turn, parsed from the terminal `turn/completed`
+    # event's `turn.usage` block when codex reports it. None when codex did
+    # not surface usage (older app-server builds, interrupted/aborted turns).
+    # Other transports (bedrock/chat_completions/anthropic) already expose
+    # per-turn usage; the codex app-server path was the lone blind spot
+    # (issue #36801) — without this the runtime cannot see a session growing
+    # toward the context window until the backend 400s and the session resets.
+    usage: Optional[dict] = None
 
 
 # Markers we accept as terminal even when codex never emits turn/completed.
@@ -574,13 +582,32 @@ class CodexAppServerSession:
 
             if method == "turn/completed":
                 turn_complete = True
-                turn_status = (
-                    (note.get("params") or {}).get("turn") or {}
-                ).get("status")
+                turn_obj = (note.get("params") or {}).get("turn") or {}
+                turn_status = turn_obj.get("status")
+                # Capture per-turn token usage when codex reports it. The
+                # app-server nests it under turn.usage; tolerate both the
+                # {input_tokens,output_tokens,total_tokens} dict shape and a
+                # bare int total. Advisory only — never raises.
+                raw_usage = turn_obj.get("usage")
+                if isinstance(raw_usage, dict):
+                    inp = raw_usage.get("input_tokens")
+                    out = raw_usage.get("output_tokens")
+                    tot = raw_usage.get("total_tokens")
+                    if tot is None and isinstance(inp, int):
+                        tot = inp + (out or 0)
+                    result.usage = {
+                        "input_tokens": inp or 0,
+                        "output_tokens": out or 0,
+                        "total_tokens": tot or 0,
+                    }
+                elif isinstance(raw_usage, int):
+                    result.usage = {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": raw_usage,
+                    }
                 if turn_status and turn_status not in {"completed", "interrupted"}:
-                    err_obj = (
-                        (note.get("params") or {}).get("turn") or {}
-                    ).get("error")
+                    err_obj = turn_obj.get("error")
                     if err_obj:
                         err_msg = _format_responses_error(err_obj, str(turn_status))
                         # If the turn failed for an auth/refresh reason,

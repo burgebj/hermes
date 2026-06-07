@@ -170,6 +170,12 @@ def run_codex_app_server_turn(
         "error": turn.error,
         "codex_thread_id": turn.thread_id,
         "codex_turn_id": turn.turn_id,
+        # Per-turn token usage from the codex app-server `turn/completed`
+        # event (issue #36801). None when codex did not report it. Surfaced
+        # so the conversation loop can observe context growth on this runtime
+        # path the way the chat-completions path already does — the
+        # prerequisite signal for proactive compaction (left to a follow-up).
+        "codex_usage": getattr(turn, "usage", None),
     }
 
 

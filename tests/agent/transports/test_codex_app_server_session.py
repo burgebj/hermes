@@ -195,6 +195,9 @@ class TestRunTurn:
                    for m in r.projected_messages)
         # turn_id propagated for downstream session-DB linkage
         assert r.turn_id == "turn-fake-001"
+        # No usage block on the event → usage stays None (no regression for
+        # older app-server builds / omitted usage).
+        assert r.usage is None
 
     def test_rich_content_turn_is_collapsed_to_text_payload(self):
         client = FakeClient()
@@ -1059,3 +1062,63 @@ class TestClassifyOAuthFailure:
             "[stderr] token has expired, run codex login",
         )
         assert hint is not None
+
+
+class TestTurnUsage:
+    """Per-turn token usage extraction off the terminal turn/completed event.
+
+    Without this the codex app-server runtime is blind to a session growing
+    toward the context window until the backend 400s and hard-resets the
+    session (issue #36801, root cause #2). Other transports already surface
+    per-turn usage; these pin the codex app-server path.
+    """
+
+    @staticmethod
+    def _run_turn_with(usage):
+        """Drive one happy-path turn whose turn/completed carries `usage`."""
+        client = FakeClient()
+        turn = {"id": "tu1", "status": "completed", "error": None}
+        if usage is not None:
+            turn["usage"] = usage
+        client.queue_notification(
+            "item/completed",
+            item={"type": "agentMessage", "id": "m1", "text": "ok"},
+            threadId="t", turnId="tu1",
+        )
+        client.queue_notification(
+            "turn/completed", threadId="t", turn=turn,
+        )
+        s = make_session(client)
+        return s.run_turn("hi", turn_timeout=2.0)
+
+    def test_turn_completed_dict_usage_is_extracted(self):
+        r = self._run_turn_with(
+            {"input_tokens": 272000, "output_tokens": 1200,
+             "total_tokens": 273200}
+        )
+        assert r.usage == {
+            "input_tokens": 272000,
+            "output_tokens": 1200,
+            "total_tokens": 273200,
+        }
+
+    def test_turn_completed_missing_usage_is_none(self):
+        # Older app-server builds (and aborted turns) omit usage entirely;
+        # the parse must leave usage as None rather than fabricate zeros.
+        r = self._run_turn_with(None)
+        assert r.usage is None
+
+    def test_turn_completed_total_derived_when_absent(self):
+        # codex may report inputs/outputs without a precomputed total; the
+        # parser derives total = input + output so the loop has a usable sum.
+        r = self._run_turn_with({"input_tokens": 100, "output_tokens": 5})
+        assert r.usage["total_tokens"] == 105
+        assert r.usage["input_tokens"] == 100
+        assert r.usage["output_tokens"] == 5
+
+    def test_turn_completed_bare_int_usage(self):
+        # Tolerate a bare-int total shape (some builds send just a number).
+        r = self._run_turn_with(273200)
+        assert r.usage["total_tokens"] == 273200
+        assert r.usage["input_tokens"] == 0
+        assert r.usage["output_tokens"] == 0
