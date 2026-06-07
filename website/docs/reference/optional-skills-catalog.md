@@ -198,6 +198,12 @@ hermes skills uninstall <skill-name>
 | [**sherlock**](/docs/user-guide/skills/optional/security/security-sherlock) | OSINT username search across 400+ social networks. Hunt down social media accounts by username. |
 | [**web-pentest**](/docs/user-guide/skills/optional/security/security-web-pentest) | Authorized web application penetration testing — reconnaissance, vulnerability analysis, proof-based exploitation, and professional reporting. Adapts Shannon's "No Exploit, No Report" methodology with hard guardrails for scope, authoriza... |
 
+## social-media
+
+| Skill | Description |
+|-------|-------------|
+| [**hermes-tweet**](/docs/user-guide/skills/optional/social-media/social-media-hermes-tweet) | Native Hermes Agent plugin workflow for Xquik X automation. Use when the user wants Hermes-native tools for X search, account reads, trends, posts, replies, likes, reposts, follows, direct messages, monitors, extraction jobs, draws, medi... |
+
 ## software-development
 
 | Skill | Description |
