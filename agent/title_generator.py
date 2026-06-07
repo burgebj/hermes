@@ -29,7 +29,7 @@ _TITLE_PROMPT = (
 def generate_title(
     user_message: str,
     assistant_response: str,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
 ) -> Optional[str]:
@@ -43,7 +43,24 @@ def generate_title(
     auxiliary call raises — the caller typically wires this to
     ``AIAgent._emit_auxiliary_failure`` so the user sees a warning instead
     of silently accumulating untitled sessions.
+
+    For local/custom endpoints (127.0.0.1 / localhost), title generation
+    is skipped entirely because llama.cpp cannot handle concurrent requests —
+    the title request hits the server while main generation is still running,
+    causing a timeout. The title can be set manually with ``/title`` or
+    when the session is renamed.
     """
+    # Skip title generation for local endpoints — concurrent requests corrupt
+    # llama.cpp responses. Title can be set manually via /title or session rename.
+    # Also matches 0.0.0.0 (all-interfaces bind) and [::1] (IPv6 localhost).
+    base_url = main_runtime.get("base_url", "") if main_runtime else ""
+
+    if base_url:
+        test_url = base_url.lower()
+        if any(pat in test_url for pat in ("127.0.0.1", "localhost", "0.0.0.0", "[::1]")):
+            logger.debug("Skipping auto-title for local endpoint %s", base_url)
+            return None
+
     # Truncate long messages to keep the request small
     user_snippet = user_message[:500] if user_message else ""
     assistant_snippet = assistant_response[:500] if assistant_response else ""
