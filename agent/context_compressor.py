@@ -61,6 +61,12 @@ SUMMARY_PREFIX = (
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
+# Metadata key added to context compression summary messages so that frontends
+# (CLI, Desktop, gateway, TUI) can distinguish them from real assistant/user
+# messages and filter or render them appropriately.
+# See https://github.com/NousResearch/hermes-agent/issues/38389
+COMPRESSED_SUMMARY_METADATA_KEY = "is_compressed_summary"
+
 # Handoff prefixes that shipped in earlier releases. A summary persisted under
 # one of these can be inherited into a resumed lineage (#35344); when it is
 # re-normalized on re-compaction we must strip the OLD prefix too, otherwise the
@@ -1543,6 +1549,18 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             return True
         return any(text.startswith(p) for p in _HISTORICAL_SUMMARY_PREFIXES)
 
+    @staticmethod
+    def _has_compressed_summary_metadata(message: Any) -> bool:
+        """Return True if *message* carries the ``is_compressed_summary`` flag.
+
+        Callers (frontends, CLI, gateway) can use this to distinguish context
+        compaction summaries from real assistant or user messages without
+        relying on content-prefix heuristics.
+        """
+        if not isinstance(message, dict):
+            return False
+        return bool(message.get(COMPRESSED_SUMMARY_METADATA_KEY))
+
     @classmethod
     def _find_latest_context_summary(
         cls,
@@ -2024,7 +2042,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
 
         if not _merge_summary_into_tail:
-            compressed.append({"role": summary_role, "content": summary})
+            compressed.append({
+                "role": summary_role,
+                "content": summary,
+                COMPRESSED_SUMMARY_METADATA_KEY: True,
+            })
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
@@ -2039,6 +2061,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                     merged_prefix,
                     prepend=True,
                 )
+                # Mark the merged message so frontends can identify it as
+                # containing a compression summary prefix.
+                msg[COMPRESSED_SUMMARY_METADATA_KEY] = True
                 _merge_summary_into_tail = False
             compressed.append(msg)
 
