@@ -1196,6 +1196,121 @@ class TestBangPrefixCommands:
 
 
 # ---------------------------------------------------------------------------
+# TestSlackThreadContextRehydration
+# ---------------------------------------------------------------------------
+
+
+class TestSlackThreadContextRehydration:
+    def _make_thread_event(self, text="continue", ts="1234567890.000002", user="U_USER"):
+        return {
+            "text": text,
+            "user": user,
+            "channel": "C123",
+            "channel_type": "channel",
+            "team": "T123",
+            "ts": ts,
+            "thread_ts": "1111111111.000001",
+        }
+
+    @pytest.mark.asyncio
+    async def test_active_thread_session_fetches_context_once_after_restart(self, adapter):
+        """Active persistent sessions should not suppress Slack thread
+        context forever.  After a gateway restart the in-memory context cache
+        is empty, so the next thread reply should rehydrate Slack-side thread
+        history once, then avoid repeating it on every subsequent reply."""
+        adapter._bot_user_id = "U_BOT"
+        adapter._team_bot_user_ids = {"T123": "U_BOT"}
+        adapter._channel_team = {"C123": "T123"}
+        adapter._has_active_session_for_thread = MagicMock(return_value=True)
+        adapter._fetch_thread_parent_text = AsyncMock(return_value="parent")
+        adapter._user_name_cache = {"U_USER": "Jamal"}
+        adapter._fetch_thread_context = AsyncMock(
+            return_value="[Thread context]\nJamal: earlier gift details\n[End]\n\n"
+        )
+
+        await adapter._handle_slack_message(self._make_thread_event())
+
+        adapter._fetch_thread_context.assert_awaited_once_with(
+            channel_id="C123",
+            thread_ts="1111111111.000001",
+            current_ts="1234567890.000002",
+            team_id="T123",
+        )
+        first_event = adapter.handle_message.await_args.args[0]
+        assert first_event.text.startswith("[Thread context]\nJamal: earlier gift details")
+        assert first_event.source.thread_id == "1111111111.000001"
+
+        adapter.handle_message.reset_mock()
+        await adapter._handle_slack_message(
+            self._make_thread_event(text="next reply", ts="1234567890.000003")
+        )
+
+        adapter._fetch_thread_context.assert_awaited_once()
+        second_event = adapter.handle_message.await_args.args[0]
+        assert second_event.text == "next reply"
+
+    @pytest.mark.asyncio
+    async def test_empty_thread_context_fetch_retries_next_reply(self, adapter):
+        """Do not mark rehydration complete when Slack returns no context."""
+        adapter._bot_user_id = "U_BOT"
+        adapter._team_bot_user_ids = {"T123": "U_BOT"}
+        adapter._channel_team = {"C123": "T123"}
+        adapter._has_active_session_for_thread = MagicMock(return_value=True)
+        adapter._fetch_thread_parent_text = AsyncMock(return_value="parent")
+        adapter._user_name_cache = {"U_USER": "Jamal"}
+        adapter._fetch_thread_context = AsyncMock(side_effect=["", "[Thread context]\nrecovered\n\n"])
+
+        await adapter._handle_slack_message(self._make_thread_event())
+        await adapter._handle_slack_message(
+            self._make_thread_event(text="retry", ts="1234567890.000003")
+        )
+
+        assert adapter._fetch_thread_context.await_count == 2
+        second_event = adapter.handle_message.await_args.args[0]
+        assert second_event.text.startswith("[Thread context]\nrecovered")
+
+    @pytest.mark.asyncio
+    async def test_thread_context_rehydration_key_is_thread_scoped(self, adapter):
+        """A different user in the same Slack thread should not duplicate context."""
+        adapter._bot_user_id = "U_BOT"
+        adapter._team_bot_user_ids = {"T123": "U_BOT"}
+        adapter._channel_team = {"C123": "T123"}
+        adapter._has_active_session_for_thread = MagicMock(return_value=True)
+        adapter._fetch_thread_parent_text = AsyncMock(return_value="parent")
+        adapter._user_name_cache = {"U_USER": "Jamal", "U_OTHER": "Pauline"}
+        adapter._fetch_thread_context = AsyncMock(return_value="[Thread context]\nshared\n\n")
+
+        await adapter._handle_slack_message(self._make_thread_event(user="U_USER"))
+        adapter.handle_message.reset_mock()
+        await adapter._handle_slack_message(
+            self._make_thread_event(text="other reply", ts="1234567890.000003", user="U_OTHER")
+        )
+
+        adapter._fetch_thread_context.assert_awaited_once()
+        second_event = adapter.handle_message.await_args.args[0]
+        assert second_event.text == "other reply"
+
+    @pytest.mark.asyncio
+    async def test_thread_context_rehydration_respects_per_user_thread_sessions(self, adapter):
+        """Per-user thread sessions need independent restart rehydration markers."""
+        adapter._bot_user_id = "U_BOT"
+        adapter._team_bot_user_ids = {"T123": "U_BOT"}
+        adapter._channel_team = {"C123": "T123"}
+        adapter._session_store = MagicMock(config=MagicMock(thread_sessions_per_user=True))
+        adapter._has_active_session_for_thread = MagicMock(return_value=True)
+        adapter._fetch_thread_parent_text = AsyncMock(return_value="parent")
+        adapter._user_name_cache = {"U_USER": "Jamal", "U_OTHER": "Pauline"}
+        adapter._fetch_thread_context = AsyncMock(return_value="[Thread context]\nshared\n\n")
+
+        await adapter._handle_slack_message(self._make_thread_event(user="U_USER"))
+        await adapter._handle_slack_message(
+            self._make_thread_event(text="other reply", ts="1234567890.000003", user="U_OTHER")
+        )
+
+        assert adapter._fetch_thread_context.await_count == 2
+
+
+# ---------------------------------------------------------------------------
 # TestIncomingDocumentHandling
 # ---------------------------------------------------------------------------
 

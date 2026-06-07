@@ -352,6 +352,16 @@ class SlackAdapter(BasePlatformAdapter):
         # Cache for _fetch_thread_context results: cache_key → _ThreadContextCache
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
         self._THREAD_CACHE_TTL = 60.0
+        # Track thread contexts already prepended to an inbound message in
+        # this gateway process.  Active sessions survive restarts, but the
+        # in-memory Slack thread cache does not; without this recovery marker
+        # a restarted gateway can treat an incomplete/sparse session as
+        # authoritative and only inject the thread parent quote.  Fetching
+        # once per process/thread rehydrates Slack-side context without
+        # prepending the full thread on every reply.  Entries are added only
+        # after a non-empty fetch so transient Slack/API failures can retry.
+        self._thread_context_injected_threads: set = set()
+        self._THREAD_CONTEXT_INJECTED_MAX = 5000
         # Track message IDs that should get reaction lifecycle (DMs / @mentions).
         self._reacting_message_ids: set = set()
         # Track active assistant thread status indicators so stop_typing can
@@ -2302,7 +2312,7 @@ class SlackAdapter(BasePlatformAdapter):
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
         routing_text = original_text or ""
         is_mentioned = bot_uid and f"<@{bot_uid}>" in routing_text
-        event_thread_ts = event.get("thread_ts")
+        event_thread_ts = str(event.get("thread_ts") or "")
         is_thread_reply = bool(event_thread_ts and event_thread_ts != ts)
 
         if not is_dm and bot_uid:
@@ -2356,13 +2366,33 @@ class SlackAdapter(BasePlatformAdapter):
                     for t in to_remove:
                         self._mentioned_threads.discard(t)
 
-        # When entering a thread for the first time (no existing session),
-        # fetch thread context so the agent understands the conversation.
-        if is_thread_reply and not self._has_active_session_for_thread(
-            channel_id=channel_id,
-            thread_ts=event_thread_ts,
-            user_id=user_id,
-        ):
+        # When entering a thread for the first time, fetch Slack thread
+        # context so the agent understands prior messages.  Also do a
+        # one-shot rehydration after gateway restarts: the persistent session
+        # index may say this thread is active, but in-memory context/cache can
+        # be empty or the prior turn may have failed before preserving the full
+        # thread.  The injected-thread marker prevents repeated duplication on
+        # every reply while still allowing recovery once per process/session
+        # scope.
+        active_thread_session = False
+        if is_thread_reply:
+            active_thread_session = self._has_active_session_for_thread(
+                channel_id=channel_id,
+                thread_ts=event_thread_ts,
+                user_id=user_id,
+            )
+        thread_injection_key = f"{team_id}:{channel_id}:{event_thread_ts}"
+        store_cfg = getattr(getattr(self, "_session_store", None), "config", None)
+        if getattr(store_cfg, "thread_sessions_per_user", False):
+            thread_injection_key = f"{thread_injection_key}:{user_id}"
+        should_fetch_thread_context = (
+            is_thread_reply
+            and (
+                not active_thread_session
+                or thread_injection_key not in self._thread_context_injected_threads
+            )
+        )
+        if should_fetch_thread_context:
             thread_context = await self._fetch_thread_context(
                 channel_id=channel_id,
                 thread_ts=event_thread_ts,
@@ -2371,6 +2401,11 @@ class SlackAdapter(BasePlatformAdapter):
             )
             if thread_context:
                 text = thread_context + text
+                self._thread_context_injected_threads.add(thread_injection_key)
+                if len(self._thread_context_injected_threads) > self._THREAD_CONTEXT_INJECTED_MAX:
+                    excess = len(self._thread_context_injected_threads) - self._THREAD_CONTEXT_INJECTED_MAX // 2
+                    for old_key in list(self._thread_context_injected_threads)[:excess]:
+                        self._thread_context_injected_threads.discard(old_key)
 
         # Determine message type
         msg_type = MessageType.TEXT
@@ -3086,13 +3121,14 @@ class SlackAdapter(BasePlatformAdapter):
         limit: int = 30,
     ) -> str:
         """Fetch recent thread messages to provide context when the bot is
-        mentioned mid-thread for the first time.
+        mentioned mid-thread for the first time, or when a restarted gateway
+        needs to rehydrate Slack-side thread history for an already-active
+        persistent session.
 
-        This method is only called when there is NO active session for the
-        thread (guarded at the call site by _has_active_session_for_thread).
-        That guard ensures thread messages are prepended only on the very
-        first turn — after that the session history already holds them, so
-        there is no duplication across subsequent turns.
+        The call site limits prepending to first-entry/no-session cases and
+        one successful rehydration per gateway process/session scope.  After a
+        non-empty fetch, the session history should hold the thread context, so
+        future turns do not need the full Slack thread prepended again.
 
         Results are cached for _THREAD_CACHE_TTL seconds per thread to avoid
         hammering conversations.replies (Tier 3, ~50 req/min).
