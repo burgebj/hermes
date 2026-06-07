@@ -818,6 +818,11 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
+
+            # Auto-subscribe the originating session so the agent that
+            # dispatched this task gets notified when it completes / blocks.
+            _maybe_auto_subscribe(conn, new_tid)
+
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -829,6 +834,35 @@ def _handle_create(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_create failed")
         return tool_error(f"kanban_create: {e}")
+
+
+def _maybe_auto_subscribe(conn: Any, task_id: str) -> None:
+    """Auto-subscribe the calling session to task completion / block events.
+
+    Only subscribes when gateway session context is available (platform + chat_id
+    are set).  No-op in CLI / cron / test sessions.  Failure is silent — best-effort.
+    """
+    try:
+        from gateway.session_context import get_session_env
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        if not platform or not chat_id:
+            return  # CLI session — no persistent channel to deliver to
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+        notifier_profile = os.environ.get("HERMES_PROFILE")
+
+        # Lazy-import to keep the module-level dependency light
+        from hermes_cli import kanban_db as _kb
+        _kb.add_notify_sub(
+            conn, task_id=task_id,
+            platform=platform, chat_id=chat_id,
+            thread_id=thread_id, user_id=user_id,
+            notifier_profile=notifier_profile,
+        )
+    except Exception:
+        # Best-effort — don't fail the parent kanban_create call
+        pass
 
 
 def _handle_unblock(args: dict, **kw) -> str:
