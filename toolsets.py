@@ -31,6 +31,8 @@ from typing import List, Dict, Any, Set, Optional
 _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
+    # Jina AI search/research tools (gated on JINA_API_KEY via check_fn)
+    "jina_search", "jina_read", "jina_embed", "jina_rerank",
     # Terminal + process management
     "terminal", "process",
     # File manipulation
@@ -96,6 +98,12 @@ TOOLSETS = {
     "search": {
         "description": "Web search only (no content extraction/scraping)",
         "tools": ["web_search"],
+        "includes": []
+    },
+
+    "jina": {
+        "description": "Jina AI search, reader extraction, embeddings, and reranking tools",
+        "tools": ["jina_search", "jina_read", "jina_embed", "jina_rerank"],
         "includes": []
     },
 
