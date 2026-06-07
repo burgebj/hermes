@@ -44,6 +44,100 @@ def _get_allowed() -> set[str]:
 # Cache for the config-based allowlist (loaded once per process).
 _config_passthrough: frozenset[str] | None = None
 
+# Hard-coded minimum set of well-known Hermes provider credential env var names.
+# Used as a fail-closed fallback when ``tools.environments.local`` cannot be
+# imported (e.g. partial install, import cycle during early bootstrap).
+#
+# This list mirrors the *hardcoded* subset of the full blocklist built by
+# ``_build_provider_env_blocklist()`` in tools/environments/local.py and is
+# intentionally conservative — it covers the highest-value credentials that
+# must NEVER leak into a sandbox child process regardless of whether the full
+# dynamic blocklist is available.  When local.py IS importable, the full
+# blocklist is authoritative and this set is ignored.
+#
+# The list here should stay in sync with the hardcoded block in
+# ``_build_provider_env_blocklist()`` for the most sensitive keys.  Adding a
+# new key here does NOT replace keeping it there as well.
+#
+# Fixes: https://github.com/NousResearch/hermes-agent/issues/37950
+_FALLBACK_PROVIDER_ENV_BLOCKLIST: frozenset[str] = frozenset({
+    # LLM provider API keys / base URLs (mirrors hardcoded block in local.py)
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_BASE",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "LLM_MODEL",
+    "GOOGLE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "TOGETHER_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "COHERE_API_KEY",
+    "FIREWORKS_API_KEY",
+    "XAI_API_KEY",
+    "HELICONE_API_KEY",
+    "PARALLEL_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+    "DAYTONA_API_KEY",
+    # Messaging bot tokens
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    # Messaging config vars (in local.py hardcoded block as "messaging" category)
+    "TELEGRAM_HOME_CHANNEL",
+    "TELEGRAM_HOME_CHANNEL_NAME",
+    "DISCORD_HOME_CHANNEL",
+    "DISCORD_HOME_CHANNEL_NAME",
+    "DISCORD_REQUIRE_MENTION",
+    "DISCORD_FREE_RESPONSE_CHANNELS",
+    "DISCORD_AUTO_THREAD",
+    "SLACK_HOME_CHANNEL",
+    "SLACK_HOME_CHANNEL_NAME",
+    "SLACK_ALLOWED_USERS",
+    "WHATSAPP_ENABLED",
+    "WHATSAPP_MODE",
+    "WHATSAPP_ALLOWED_USERS",
+    "SIGNAL_HTTP_URL",
+    "SIGNAL_ACCOUNT",
+    "SIGNAL_ALLOWED_USERS",
+    "SIGNAL_GROUP_ALLOWED_USERS",
+    "SIGNAL_HOME_CHANNEL",
+    "SIGNAL_HOME_CHANNEL_NAME",
+    "SIGNAL_IGNORE_STORIES",
+    # Home automation
+    "HASS_TOKEN",
+    "HASS_URL",
+    # Email credentials
+    "EMAIL_ADDRESS",
+    "EMAIL_PASSWORD",
+    "EMAIL_IMAP_HOST",
+    "EMAIL_SMTP_HOST",
+    "EMAIL_HOME_ADDRESS",
+    "EMAIL_HOME_ADDRESS_NAME",
+    # GitHub credentials
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GITHUB_APP_INSTALLATION_ID",
+    # Modal / Daytona tokens
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    # Gateway / dashboard
+    "HERMES_DASHBOARD_SESSION_TOKEN",
+    "GATEWAY_ALLOWED_USERS",
+    # System-level credentials
+    "SUDO_PASSWORD",
+})
+
 
 def _is_hermes_provider_credential(name: str) -> bool:
     """True if ``name`` is a Hermes-managed provider credential (API key,
@@ -59,11 +153,31 @@ def _is_hermes_provider_credential(name: str) -> bool:
     Non-Hermes API keys (TENOR_API_KEY, NOTION_TOKEN, etc.) are NOT
     in the blocklist and remain legitimately registerable — skills that
     wrap third-party APIs still work.
+
+    Fail-closed: if ``tools.environments.local`` cannot be imported
+    (partial install, import cycle, etc.), falls back to
+    ``_FALLBACK_PROVIDER_ENV_BLOCKLIST`` — a hardcoded minimum set of
+    well-known provider credentials — rather than returning ``False`` for
+    every name.  The fallback keeps the most sensitive keys protected even
+    when the full dynamic blocklist is unavailable.
+
+    Why: an ``except Exception: return False`` guard was the original
+    implementation, which meant any import failure turned the function
+    fail-open — a skill could register ``ANTHROPIC_TOKEN`` as passthrough
+    and receive it in the execute_code child process.
+    Test: simulate a broken import of tools.environments.local and verify
+    that _is_hermes_provider_credential("ANTHROPIC_TOKEN") still returns True.
     """
     try:
         from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
     except Exception:
-        return False
+        logger.warning(
+            "env passthrough: could not import _HERMES_PROVIDER_ENV_BLOCKLIST "
+            "from tools.environments.local — falling back to minimum hardcoded "
+            "blocklist to fail closed. Provider credentials may still be "
+            "protected, but the full dynamic blocklist is unavailable.",
+        )
+        return name in _FALLBACK_PROVIDER_ENV_BLOCKLIST
     return name in _HERMES_PROVIDER_ENV_BLOCKLIST
 
 
