@@ -205,6 +205,15 @@ def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
         return None
 
 
+def _is_memory_provider_submodule_file(path: Path) -> bool:
+    """Return whether *path* is safe to pre-load as a provider submodule."""
+    if path.name == "__init__.py":
+        return False
+    if path.name in {"setup.py", "conftest.py"}:
+        return False
+    return not (path.name.startswith("test_") or path.name.endswith("_test.py"))
+
+
 def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
     """Import a provider module and extract the MemoryProvider instance.
 
@@ -269,7 +278,7 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
         # Register submodules so relative imports work
         # e.g., "from .store import MemoryStore" in holographic plugin
         for sub_file in provider_dir.glob("*.py"):
-            if sub_file.name == "__init__.py":
+            if not _is_memory_provider_submodule_file(sub_file):
                 continue
             sub_name = sub_file.stem
             full_sub_name = f"{module_name}.{sub_name}"
@@ -282,7 +291,7 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
                     sys.modules[full_sub_name] = sub_mod
                     try:
                         sub_spec.loader.exec_module(sub_mod)
-                    except Exception as e:
+                    except (Exception, SystemExit) as e:
                         logger.debug("Failed to load submodule %s: %s", full_sub_name, e)
 
         try:
