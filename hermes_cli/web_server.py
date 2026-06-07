@@ -2055,6 +2055,28 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
 )
 
 
+def _get_all_aux_slots() -> Tuple[str, ...]:
+    """Return built-in + plugin-registered auxiliary slot keys.
+
+    Built-in slots come first (preserving ``_AUX_TASK_SLOTS`` order),
+    followed by plugin slots sorted alphabetically.  Duplicates (a plugin
+    registering a key that collides with a built-in) are suppressed.
+    """
+    seen = set(_AUX_TASK_SLOTS)
+    plugin_keys: list[str] = []
+    try:
+        from hermes_cli.plugins import get_plugin_auxiliary_tasks
+        for entry in get_plugin_auxiliary_tasks():
+            key = entry.get("key", "")
+            if key and key not in seen:
+                plugin_keys.append(key)
+                seen.add(key)
+    except Exception:
+        # Plugin discovery failure must not break the dashboard API.
+        _log.debug("Plugin auxiliary task lookup failed", exc_info=True)
+    return _AUX_TASK_SLOTS + tuple(sorted(plugin_keys))
+
+
 @app.get("/api/model/options")
 def get_model_options():
     """Return authenticated providers + their curated model lists.
@@ -2181,7 +2203,7 @@ def get_auxiliary_models():
             aux_cfg = {}
 
         tasks = []
-        for slot in _AUX_TASK_SLOTS:
+        for slot in _get_all_aux_slots():
             slot_cfg = aux_cfg.get(slot, {}) if isinstance(aux_cfg.get(slot), dict) else {}
             tasks.append({
                 "task": slot,
@@ -2277,7 +2299,7 @@ async def set_model_assignment(body: ModelAssignment):
             stale_aux: list[dict] = []
             aux_cfg = cfg.get("auxiliary", {})
             if isinstance(aux_cfg, dict):
-                for slot in _AUX_TASK_SLOTS:
+                for slot in _get_all_aux_slots():
                     slot_cfg = aux_cfg.get(slot)
                     if not isinstance(slot_cfg, dict):
                         continue
@@ -2310,7 +2332,7 @@ async def set_model_assignment(body: ModelAssignment):
 
         if task == "__reset__":
             # Reset every slot to provider="auto", model="" — keeps other fields intact.
-            for slot in _AUX_TASK_SLOTS:
+            for slot in _get_all_aux_slots():
                 slot_cfg = aux.get(slot)
                 if not isinstance(slot_cfg, dict):
                     slot_cfg = {}
@@ -2324,9 +2346,10 @@ async def set_model_assignment(body: ModelAssignment):
         if not provider:
             raise HTTPException(status_code=400, detail="provider required for auxiliary")
 
-        targets = [task] if task else list(_AUX_TASK_SLOTS)
+        _all_slots = _get_all_aux_slots()
+        targets = [task] if task else list(_all_slots)
         for slot in targets:
-            if slot not in _AUX_TASK_SLOTS:
+            if slot not in _all_slots:
                 raise HTTPException(status_code=400, detail=f"unknown auxiliary task: {slot}")
             slot_cfg = aux.get(slot)
             if not isinstance(slot_cfg, dict):
