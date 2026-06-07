@@ -3589,7 +3589,6 @@ class TestFTS5ToolCallMigration:
         finally:
             session_db.close()
 
-
 # ---------------------------------------------------------------------------
 # apply_wal_with_fallback — read-only probe tests
 # ---------------------------------------------------------------------------
