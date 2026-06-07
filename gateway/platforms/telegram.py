@@ -907,40 +907,45 @@ class TelegramAdapter(BasePlatformAdapter):
         After enough reconnect cycles the pool fills up entirely, causing
         ``Pool timeout: All connections in the connection pool are occupied.``
 
-        We reset ONLY ``_request[0]`` (the getUpdates request) — the general
-        request (``_request[1]``) is left untouched so concurrent
-        ``send_message`` / ``edit_message`` calls are never interrupted.
+        We reset BOTH the polling (``_request[0]``) and general (``_request[1]``)
+        request pools since either can be the source of pool exhaustion.
+        Reset is performed in a thread pool to avoid blocking the async
+        gateway loop — shutdown()/initialize() are cheap but must not
+        contend with the event loop.
 
-        Implementation note: accesses ``Bot._request[0]`` which is the
-        get-updates ``BaseRequest`` in the PTB 22.x internal tuple
-        ``(get_updates_request, general_request)``.  There is no public
-        accessor for the polling request; review if upgrading to PTB 23+.
+        Implementation note: accesses ``Bot._request[0]`` and ``[1]`` which is
+        the get-updates / general ``BaseRequest`` tuple in PTB 22.x.
+        Review if upgrading to PTB 23+.
         """
         if not (self._app and self._app.bot):
             return
         try:
-            # PTB 22.x: _request is a (get_updates, general) tuple;
-            # no public accessor exists for the polling request.
             polling_req = self._app.bot._request[0]  # noqa: SLF001
+            general_req = self._app.bot._request[1]  # noqa: SLF001
         except Exception:
             return
-        try:
-            await polling_req.shutdown()
-        except Exception:
-            logger.debug(
-                "[%s] Polling request shutdown failed (non-fatal)",
-                self.name, exc_info=True,
-            )
-        try:
-            await polling_req.initialize()
-            logger.debug(
-                "[%s] Polling request pool drained before reconnect", self.name
-            )
-        except Exception:
-            logger.debug(
-                "[%s] Polling request re-initialize failed (non-fatal)",
-                self.name, exc_info=True,
-            )
+
+        def _drain_one(name: str, req) -> None:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return
+            try:
+                coro = req.shutdown()
+                future = loop.run_in_executor(None, asyncio.run, coro)
+                future.result(timeout=5)
+            except Exception:
+                pass
+            try:
+                coro = req.initialize()
+                future = loop.run_in_executor(None, asyncio.run, coro)
+                future.result(timeout=5)
+                logger.debug("[%s] %s pool drained", self.name, name)
+            except Exception:
+                logger.debug("[%s] %s re-init failed (non-fatal)", self.name, name, exc_info=True)
+
+        _drain_one("Polling", polling_req)
+        _drain_one("General", general_req)
 
     async def _handle_polling_network_error(self, error: Exception) -> None:
         """Reconnect polling after a transient network interruption.
