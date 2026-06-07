@@ -1686,6 +1686,7 @@ def list_authenticated_providers(
             # (see hermes_cli/main.py::_save_custom_provider); older
             # configs or hand-edited files may still use a list.
             cfg_models = ep_cfg.get("models", [])
+            has_explicit_models = bool(cfg_models)
             if isinstance(cfg_models, dict):
                 for m in cfg_models:
                     if m and m not in models_list:
@@ -1715,7 +1716,10 @@ def list_authenticated_providers(
             discover = ep_cfg.get("discover_models", True)
             if isinstance(discover, str):
                 discover = discover.lower() not in {"false", "no", "0"}
-            if api_url and api_key and discover:
+            should_probe = bool(api_url) and bool(discover) and (
+                bool(api_key) or not has_explicit_models
+            )
+            if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models
                     live_models = fetch_api_models(api_key, api_url)

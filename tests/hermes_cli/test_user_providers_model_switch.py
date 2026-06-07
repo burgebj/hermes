@@ -180,6 +180,52 @@ def test_list_authenticated_providers_uses_live_models_for_user_provider(monkeyp
     assert user_prov["total_models"] == 2
 
 
+def test_list_authenticated_providers_probes_keyless_user_provider_when_models_empty(monkeypatch):
+    """Keyless ``providers:`` endpoints should still probe live /models.
+
+    Regression for #33595: Telegram /model only showed ``default_model`` for
+    local OpenAI-compatible endpoints declared under ``providers:`` when the
+    endpoint required no API key and ``models:`` was empty.
+    """
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url):
+        calls.append((api_key, base_url))
+        return ["some-model", "other-live-model"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    user_providers = {
+        "my-local": {
+            "name": "my-local",
+            "base_url": "http://192.168.0.107:1234/v1",
+            "api_key": "",
+            "default_model": "some-model",
+            "models": [],
+        }
+    }
+
+    providers = list_authenticated_providers(
+        current_provider="my-local",
+        user_providers=user_providers,
+        custom_providers=[],
+        max_models=50,
+    )
+
+    user_prov = next(
+        (p for p in providers if p.get("is_user_defined") and p["slug"] == "my-local"),
+        None,
+    )
+
+    assert user_prov is not None
+    assert calls == [("", "http://192.168.0.107:1234/v1")]
+    assert user_prov["models"] == ["some-model", "other-live-model"]
+    assert user_prov["total_models"] == 2
+
+
 def test_list_authenticated_providers_dict_models_without_default_model(monkeypatch):
     """Dict-format ``models:`` without a ``default_model`` must still expose
     every dict key, not collapse to an empty list."""
