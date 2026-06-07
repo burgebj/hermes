@@ -4414,7 +4414,10 @@ class GatewayRunner:
         _builtin_allowed_vars = (
             "TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
             "WHATSAPP_ALLOWED_USERS", "SLACK_ALLOWED_USERS",
-            "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
+            "SIGNAL_ALLOWED_USERS", "SIGNAL_ALLOWED_GROUPS",
+            "SIGNAL_ALLOWED_GROUP_USERS",
+            # Legacy alias (deprecated, treated as SIGNAL_ALLOWED_GROUPS on read)
+            "SIGNAL_GROUP_ALLOWED_USERS",
             "TELEGRAM_GROUP_ALLOWED_USERS",
             "TELEGRAM_GROUP_ALLOWED_CHATS",
             "EMAIL_ALLOWED_USERS",
@@ -7149,9 +7152,11 @@ class GatewayRunner:
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
+            Platform.SIGNAL: "SIGNAL_ALLOWED_GROUP_USERS",
         }
         platform_group_chat_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
+            Platform.SIGNAL: "SIGNAL_ALLOWED_GROUPS",
             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
         }
         platform_allow_all_map = {
@@ -7214,6 +7219,11 @@ class GatewayRunner:
         if source.chat_type in {"group", "forum"}:
             group_user_allowlist = os.getenv(platform_group_user_env_map.get(source.platform, ""), "").strip()
             group_chat_allowlist = os.getenv(platform_group_chat_env_map.get(source.platform, ""), "").strip()
+            # Signal legacy alias: the deprecated SIGNAL_GROUP_ALLOWED_USERS used
+            # to hold group IDs. When the new var is empty, fall back to the
+            # legacy one so existing deployments keep working.
+            if source.platform == Platform.SIGNAL and not group_chat_allowlist:
+                group_chat_allowlist = os.getenv("SIGNAL_GROUP_ALLOWED_USERS", "").strip()
         global_allowlist = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
 
         if not platform_allowlist and not group_user_allowlist and not group_chat_allowlist and not global_allowlist:
@@ -7242,14 +7252,16 @@ class GatewayRunner:
             # No allowlists configured -- check global allow-all flag
             return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
 
-        # Telegram can optionally authorize group traffic by chat ID.
-        # Keep this separate from TELEGRAM_GROUP_ALLOWED_USERS, which gates
+        # Some platforms (Telegram/Signal) can optionally authorize group traffic by chat ID.
+        # Keep this separate from TELEGRAM_GROUP_ALLOWED_USERS/SIGNAL_ALLOWED_GROUPS, which gate
         # the sender user ID for group/forum messages.
-        if group_chat_allowlist and source.chat_type in {"group", "forum"} and source.chat_id:
+        if group_chat_allowlist and source.chat_type in {"group", "forum"}:
             allowed_group_ids = {
                 chat_id.strip() for chat_id in group_chat_allowlist.split(",") if chat_id.strip()
             }
-            if "*" in allowed_group_ids or source.chat_id in allowed_group_ids:
+            # Signal platform stores the group ID in `chat_id_alt` (`None` for other platforms)
+            candidate_ids = {cid for cid in (source.chat_id, source.chat_id_alt) if cid}
+            if candidate_ids and ("*" in allowed_group_ids or (candidate_ids & allowed_group_ids)):
                 return True
 
         # Backward-compat shim for #15027: prior to PR #17686,
@@ -7294,14 +7306,22 @@ class GatewayRunner:
         if global_allowlist:
             allowed_ids.update(uid.strip() for uid in global_allowlist.split(",") if uid.strip())
 
-        # "*" in any allowlist means allow everyone (consistent with
-        # SIGNAL_GROUP_ALLOWED_USERS precedent)
+        # "*" in any allowlist means allow everyone (consistent with the
+        # SIGNAL_ALLOWED_GROUP_USERS default behavior)
         if "*" in allowed_ids:
             return True
 
         check_ids = {user_id}
         if "@" in user_id:
             check_ids.add(user_id.split("@")[0])
+
+        # Signal: signal-cli may report a sender under either its E.164 phone
+        # number or its service ID (UUID/PNI).  The adapter populates both
+        # representations on SessionSource (user_id + user_id_alt) when it
+        # has them, so checking both forms keeps an allowlist holding one
+        # representation matching senders reported under the other.
+        if source.platform == Platform.SIGNAL and source.user_id_alt:
+            check_ids.add(source.user_id_alt)
 
         # WhatsApp: resolve phone↔LID aliases from bridge session mapping files
         if source.platform == Platform.WHATSAPP:
@@ -7401,6 +7421,13 @@ class GatewayRunner:
                 Platform.TELEGRAM: (
                     "TELEGRAM_GROUP_ALLOWED_USERS",
                     "TELEGRAM_GROUP_ALLOWED_CHATS",
+                ),
+                Platform.SIGNAL: (
+                    "SIGNAL_ALLOWED_GROUPS",
+                    "SIGNAL_ALLOWED_GROUP_USERS",
+                    # Legacy alias — keep so the deprecated var still suppresses
+                    # pairing-code spam on unauthorized DMs
+                    "SIGNAL_GROUP_ALLOWED_USERS",
                 ),
                 Platform.QQBOT: ("QQ_GROUP_ALLOWED_USERS",),
             }
