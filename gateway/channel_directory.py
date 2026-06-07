@@ -244,15 +244,44 @@ def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
 # Read / resolve
 # ---------------------------------------------------------------------------
 
+def _empty_directory() -> Dict[str, Any]:
+    return {"updated_at": None, "platforms": {}}
+
+
 def load_directory() -> Dict[str, Any]:
-    """Load the cached channel directory from disk."""
+    """Load the cached channel directory from disk.
+
+    The cache file is user-visible state and can be hand-edited or left in a
+    partially migrated shape.  Treat parseable-but-invalid JSON as an empty
+    directory so callers like send_message(action="list") degrade gracefully
+    instead of crashing on ``.get``/iteration assumptions.
+    """
     if not DIRECTORY_PATH.exists():
-        return {"updated_at": None, "platforms": {}}
+        return _empty_directory()
     try:
         with open(DIRECTORY_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
-        return {"updated_at": None, "platforms": {}}
+        return _empty_directory()
+
+    if not isinstance(data, dict):
+        return _empty_directory()
+
+    platforms = data.get("platforms")
+    if not isinstance(platforms, dict):
+        data["platforms"] = {}
+        return data
+
+    normalized_platforms: Dict[str, List[Dict[str, Any]]] = {}
+    for platform_name, channels in platforms.items():
+        key = str(platform_name)
+        if not isinstance(channels, list):
+            normalized_platforms[key] = []
+            continue
+        normalized_platforms[key] = [ch for ch in channels if isinstance(ch, dict)]
+
+    data["platforms"] = normalized_platforms
+    return data
 
 
 def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:

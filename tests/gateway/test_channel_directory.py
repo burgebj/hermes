@@ -47,6 +47,40 @@ class TestLoadDirectory:
             result = load_directory()
         assert result["updated_at"] is None
 
+    def test_parseable_non_object_file_returns_empty_directory(self, tmp_path):
+        cache_file = tmp_path / "channel_directory.json"
+        cache_file.write_text(json.dumps([]))
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = load_directory()
+        assert result == {"updated_at": None, "platforms": {}}
+
+    def test_invalid_platforms_shape_is_normalized(self, tmp_path):
+        cache_file = tmp_path / "channel_directory.json"
+        cache_file.write_text(json.dumps({"updated_at": "now", "platforms": []}))
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = load_directory()
+        assert result["updated_at"] == "now"
+        assert result["platforms"] == {}
+
+    def test_invalid_channel_entries_are_ignored(self, tmp_path):
+        cache_file = tmp_path / "channel_directory.json"
+        cache_file.write_text(json.dumps({
+            "updated_at": "now",
+            "platforms": {
+                "telegram": [
+                    "not-a-channel",
+                    {"id": "123", "name": "Alice", "type": "dm"},
+                ],
+                "slack": "not-a-list",
+            },
+        }))
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = load_directory()
+        assert result["platforms"]["telegram"] == [
+            {"id": "123", "name": "Alice", "type": "dm"}
+        ]
+        assert result["platforms"]["slack"] == []
+
 
 class TestBuildChannelDirectoryWrites:
     def test_failed_write_preserves_previous_cache(self, tmp_path, monkeypatch):
