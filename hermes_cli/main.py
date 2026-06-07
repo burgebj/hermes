@@ -10686,17 +10686,33 @@ def _cmd_update_impl(args, gateway_mode: bool):
         install_group = "all"
 
         if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+            # Detect which venv (if any) the project uses.  The install.sh
+            # script always creates PROJECT_ROOT/venv/, but some install
+            # methods (Homebrew Python + pip install -e ., pipx, etc.) have
+            # no local venv at all.  Avoid unconditionally setting VIRTUAL_ENV
+            # to a non-existent path, which causes uv to fail with
+            # "Python interpreter not found at venv/bin/python3".
+            _local_venv = PROJECT_ROOT / "venv"
+            if not _local_venv.is_dir():
+                _local_venv = PROJECT_ROOT / ".venv"
+            uv_env: dict[str, str] | None = None
+            uv_cmd = [uv_bin, "pip"]
+            if _local_venv.is_dir():
+                uv_env = {**os.environ, "VIRTUAL_ENV": str(_local_venv)}
+            else:
+                # No local venv — install to the active interpreter's site-packages.
+                uv_cmd.append("--system")
             if _is_termux_env(uv_env):
+                assert uv_env is not None  # Termux always has a venv
                 uv_env.pop("PYTHONPATH", None)
                 uv_env.pop("PYTHONHOME", None)
                 install_group = "termux-all"
                 print("  → Termux detected: using uv + curated termux-all optional profile...")
             if _is_termux_env(uv_env) and _is_android_python():
                 print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
-                _install_psutil_android_compat([uv_bin, "pip"], env=uv_env)
+                _install_psutil_android_compat(uv_cmd, env=uv_env)
             _install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env, group=install_group
+                uv_cmd, env=uv_env, group=install_group
             )
         else:
             # Use sys.executable to explicitly call the venv's pip module,
