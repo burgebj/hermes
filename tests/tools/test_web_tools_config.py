@@ -685,3 +685,94 @@ def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env
 
     assert "EXA_API_KEY" in _web_requires_env()
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for #35970 — custom plugin backends should not silently
+# fall through to DDGS when configured via web.backend.
+# ---------------------------------------------------------------------------
+
+from agent.web_search_registry import WebSearchProvider
+
+class _StubWebProvider(WebSearchProvider):
+    def __init__(self, name, available=True):
+        self._name = name
+        self._available = available
+
+    @property
+    def name(self):
+        return self._name
+
+    def is_available(self):
+        return self._available
+
+    def supports_search(self):
+        return True
+
+    def supports_extract(self):
+        return True
+
+
+def _unregister(name):
+    import agent.web_search_registry as reg
+    try:
+        # registry stores by name internally; clear via reset helper if present
+        if hasattr(reg, "_PROVIDERS"):
+            reg._PROVIDERS.pop(name, None)
+        elif hasattr(reg, "_providers"):
+            reg._providers.pop(name, None)
+    except Exception:
+        pass
+
+
+def test_get_backend_returns_plugin_registered_name(monkeypatch):
+    """A backend name registered via web_search_registry should be returned
+    instead of falling through to env-var auto-detect (which would land on
+    DDGS / firecrawl)."""
+    from agent import web_search_registry as reg
+    from tools.web_tools import _get_backend
+
+    provider = _StubWebProvider("pkl-extract-test")
+    reg.register_provider(provider)
+    try:
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "pkl-extract-test"}):
+            assert _get_backend() == "pkl-extract-test"
+    finally:
+        _unregister("pkl-extract-test")
+
+
+def test_get_backend_unknown_and_unregistered_falls_through(monkeypatch):
+    """When the configured backend isn't in the hardcoded allowlist AND not
+    in the registry, fall back to the env-var auto-detect path (legacy)."""
+    from tools.web_tools import _get_backend
+
+    with patch("tools.web_tools._load_web_config", return_value={"backend": "nope-not-real"}):
+        with patch("tools.web_tools._has_env", return_value=False), \
+             patch("tools.web_tools._is_tool_gateway_ready", return_value=False), \
+             patch("tools.web_tools._ddgs_package_importable", return_value=False):
+            # Final default is "firecrawl"
+            assert _get_backend() == "firecrawl"
+
+
+def test_is_backend_available_uses_registry_for_plugin_backends(monkeypatch):
+    from agent import web_search_registry as reg
+    from tools.web_tools import _is_backend_available
+
+    provider = _StubWebProvider("pkl-extract-avail", available=True)
+    reg.register_provider(provider)
+    try:
+        assert _is_backend_available("pkl-extract-avail") is True
+    finally:
+        _unregister("pkl-extract-avail")
+
+
+def test_is_backend_available_respects_plugin_is_available_false(monkeypatch):
+    from agent import web_search_registry as reg
+    from tools.web_tools import _is_backend_available
+
+    provider = _StubWebProvider("pkl-extract-unavail", available=False)
+    reg.register_provider(provider)
+    try:
+        assert _is_backend_available("pkl-extract-unavail") is False
+    finally:
+        _unregister("pkl-extract-unavail")

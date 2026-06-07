@@ -133,6 +133,18 @@ def _get_backend() -> str:
     if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
         return configured
 
+    # Plugin-registered backends: when the configured name resolves to a
+    # provider registered via agent.web_search_registry, use it directly
+    # instead of silently falling through to env-var auto-detect (which
+    # would land on DDGS and emit a misleading error). See #35970.
+    if configured:
+        try:
+            from agent.web_search_registry import get_provider as _registry_get_provider
+            if _registry_get_provider(configured) is not None:
+                return configured
+        except Exception:
+            pass
+
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
     # tool gateway is configured for Nous subscribers.
@@ -218,6 +230,22 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    # Plugin-registered backends - defer availability to the providers own
+    # is_available() so per-capability overrides (web.search_backend etc.)
+    # also work for custom plugins. See #35970.
+    try:
+        from agent.web_search_registry import get_provider as _registry_get_provider
+        provider = _registry_get_provider(backend)
+        if provider is not None:
+            is_avail = getattr(provider, "is_available", None)
+            if callable(is_avail):
+                try:
+                    return bool(is_avail())
+                except Exception:
+                    return True
+            return True
+    except Exception:
+        pass
     return False
 
 
