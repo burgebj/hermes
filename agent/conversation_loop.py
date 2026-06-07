@@ -1439,8 +1439,14 @@ def run_conversation(
                                 error_details.append(f"response.status={_codex_resp_status}: {_codex_error_msg}")
                             else:
                                 # output_text fallback: stream backfill may have failed
-                                # but normalize can still recover from output_text
-                                _out_text = getattr(response, "output_text", None)
+                                # but normalize can still recover from output_text.
+                                # The OpenAI SDK property iterates response.output;
+                                # if the backend returns output=None, reading it raises
+                                # TypeError ("NoneType object is not iterable").
+                                _response_output = getattr(response, "output", None)
+                                _out_text = None
+                                if isinstance(_response_output, list):
+                                    _out_text = getattr(response, "output_text", None)
                                 _out_text_stripped = _out_text.strip() if isinstance(_out_text, str) else ""
                                 if _out_text_stripped:
                                     logger.debug(
@@ -1459,7 +1465,12 @@ def run_conversation(
                                         f"api_mode={agent.api_mode} provider={agent.provider}",
                                     )
                                     response_invalid = True
-                                    error_details.append("response.output is empty")
+                                    if _response_output is None:
+                                        error_details.append("response.output is None")
+                                    elif not isinstance(_response_output, list):
+                                        error_details.append("response.output is not a list")
+                                    else:
+                                        error_details.append("response.output is empty")
                 elif agent.api_mode == "anthropic_messages":
                     _tv = agent._get_transport()
                     if not _tv.validate_response(response):

@@ -736,6 +736,41 @@ def test_run_conversation_codex_empty_output_no_output_text_retries(monkeypatch)
     assert result["final_response"] == "Recovered"
 
 
+def test_run_conversation_codex_none_output_does_not_read_output_text(monkeypatch):
+    """The OpenAI SDK output_text property iterates response.output.
+    If a malformed backend response has output=None, validation must retry
+    instead of raising TypeError while reading output_text."""
+    agent = _build_agent(monkeypatch)
+    calls = {"api": 0}
+
+    class _SdkLikeMalformedResponse:
+        output = None
+        usage = SimpleNamespace(input_tokens=5, output_tokens=3, total_tokens=8)
+        status = "completed"
+        model = "gpt-5-codex"
+
+        @property
+        def output_text(self):
+            for output in self.output:
+                if output.type == "message":
+                    return "unreachable"
+            return ""
+
+    def _fake_api_call(api_kwargs):
+        calls["api"] += 1
+        if calls["api"] == 1:
+            return _SdkLikeMalformedResponse()
+        return _codex_message_response("Recovered")
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
+
+    result = agent.run_conversation("Say hello")
+
+    assert calls["api"] >= 2
+    assert result["completed"] is True
+    assert result["final_response"] == "Recovered"
+
+
 def test_run_conversation_codex_refreshes_after_401_and_retries(monkeypatch):
     agent = _build_agent(monkeypatch)
     calls = {"api": 0, "refresh": 0}
