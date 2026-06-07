@@ -689,7 +689,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     agent.tool_progress_callback(
                         "tool.completed", function_name, None, None,
                         duration=tool_duration, is_error=is_error,
-                        result=function_result,
                     )
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
@@ -745,6 +744,13 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # image tool result never poisons canonical session history.
         # String results pass through unchanged.
         _tool_content = agent._tool_result_content_for_active_model(name, function_result)
+        # Safety: ensure tool content is always a string or list (OpenAI
+        # format requirement). Some tool handlers may return dicts (e.g.
+        # structured errors from plugins) which strict providers like
+        # DeepSeek reject with HTTP 400.  Serialize non-string, non-list
+        # values so the conversation stays recoverable. (#17381)
+        if not isinstance(_tool_content, (str, list)):
+            _tool_content = json.dumps(_tool_content, ensure_ascii=False, default=str)
         messages.append(make_tool_result_message(name, _tool_content, tc.id))
 
         # ── Per-tool /steer drain ───────────────────────────────────
@@ -793,7 +799,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         try:
             function_args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError as e:
-            logger.warning(f"Unexpected JSON error after validation: {e}")
+            logging.warning(f"Unexpected JSON error after validation: {e}")
             function_args = {}
         if not isinstance(function_args, dict):
             function_args = {}
@@ -1320,7 +1326,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent.tool_progress_callback(
                     "tool.completed", function_name, None, None,
                     duration=tool_duration, is_error=_is_error_result,
-                    result=function_result,
                 )
             except Exception as cb_err:
                 logging.debug(f"Tool progress callback error: {cb_err}")
@@ -1357,6 +1362,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Unwrap _multimodal dicts to an OpenAI-style content list
         # (see parallel path for rationale). String results pass through.
         _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
+        # Safety: ensure tool content is always a string or list (OpenAI
+        # format requirement). Some tool handlers may return dicts (e.g.
+        # structured errors from plugins) which strict providers like
+        # DeepSeek reject with HTTP 400.  Serialize non-string, non-list
+        # values so the conversation stays recoverable. (#17381)
+        if not isinstance(_tool_content, (str, list)):
+            _tool_content = json.dumps(_tool_content, ensure_ascii=False, default=str)
         messages.append(make_tool_result_message(function_name, _tool_content, tool_call.id))
 
         # ── Per-tool /steer drain ───────────────────────────────────
