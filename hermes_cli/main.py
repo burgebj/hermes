@@ -2830,6 +2830,8 @@ def select_provider_and_model(args=None):
         _model_flow_stepfun(config, current_model)
     elif selected_provider == "bedrock":
         _model_flow_bedrock(config, current_model)
+    elif selected_provider == "vertex":
+        _model_flow_vertex(config, current_model)
     elif selected_provider == "azure-foundry":
         _model_flow_azure_foundry(config, current_model)
     elif selected_provider in {
@@ -5786,6 +5788,80 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
         print(f"  Endpoint: {mantle_base_url}")
     else:
         print("  No change.")
+
+
+def _model_flow_vertex(config, current_model=""):
+    """Google Vertex AI provider flow.
+
+    Credentials come from a service account JSON file or gcloud ADC —
+    no API key prompt. Region defaults to 'global' (required for Gemini
+    3.x previews). Models are shown from the curated Vertex catalog.
+    """
+    from hermes_cli.auth import (
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+    )
+    from hermes_cli.config import load_config, save_config
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    # 1. Credential status — display only, no prompt needed
+    creds_path = (
+        os.environ.get("VERTEX_CREDENTIALS_PATH", "").strip()
+        or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    )
+    if creds_path:
+        short = creds_path if len(creds_path) <= 40 else f"...{creds_path[-37:]}"
+        print(f"  Credentials: {short} \u2713")
+    else:
+        print("  Credentials: Application Default Credentials (ADC)")
+        print("  (Set VERTEX_CREDENTIALS_PATH or GOOGLE_APPLICATION_CREDENTIALS")
+        print("   to a service account JSON file, or run")
+        print("   `gcloud auth application-default login`.)")
+    print()
+
+    # 2. Region override (optional)
+    from agent.vertex_adapter import resolve_vertex_region
+    current_region = resolve_vertex_region()
+    try:
+        region_input = input(f"  Region [{current_region}]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    region = region_input or current_region
+    if region != current_region:
+        from hermes_cli.config import save_env_value
+        save_env_value("VERTEX_REGION", region)
+        print(f"  Region saved: {region}")
+        print()
+
+    # 3. Model selection from curated catalog
+    model_list = _PROVIDER_MODELS.get("vertex", [])
+    if not model_list:
+        model_list = [
+            "google/gemini-3.1-flash-lite-preview",
+            "google/gemini-3.5-flash",
+            "google/gemini-2.5-pro",
+        ]
+
+    selected = _prompt_model_selection(model_list, current_model)
+    if not selected:
+        print("  No change.")
+        return
+
+    _save_model_choice(selected)
+
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = "vertex"
+    model.pop("base_url", None)
+    model.pop("api_mode", None)
+    save_config(cfg)
+    deactivate_provider()
+    print(f"  Default model set to: {selected} (via Google Vertex AI, {region})")
 
 
 def _model_flow_bedrock(config, current_model=""):
