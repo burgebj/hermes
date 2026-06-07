@@ -1,0 +1,62 @@
+version: 1
+project: hermes-agent
+id_pattern: HERMES-T###
+
+status_values: [todo, ready, claimed, active, waiting, review, done, cancelled]
+type_values: [feature, bugfix, docs, test, refactor, maintenance, release, security, research, coordination]
+priority_values: [high, medium, low]
+
+defaults:
+  claim_lease_minutes: 60
+  commit_mode: task
+
+concurrency:
+  rule: parallel tasks may not claim overlapping modify paths unless one task explicitly depends on the other
+  guarded_statuses: [claimed, active, review]
+
+required_task_fields:
+  - id
+  - goal
+  - title
+  - status
+  - type
+  - priority
+  - scope
+  - acceptance
+  - verification
+  - docs
+  - commit
+
+task_shape:
+  id: HERMES-T###
+  goal: HERMES-G##
+  title: human readable task title
+  status: todo | ready | claimed | active | waiting | review | done | cancelled
+  type: feature | bugfix | docs | test | refactor | maintenance | release | security | research | coordination
+  priority: high | medium | low
+  assignee: any | named-agent-or-profile
+  source: [path-or-request]
+  depends_on: [HERMES-T###]
+  blocked_by: [human-readable blocker]
+  scope:
+    read: [path]
+    modify: [path]
+    do_not_touch: [path]
+  acceptance: [verifiable criterion]
+  verification:
+    commands: [command]
+  docs:
+    update: [path]
+    check: [path]
+  commit:
+    mode: task | none | pr
+    message: "HERMES-T###: short description"
+  claim:
+    by: agent-name
+    at: ISO-8601 timestamp
+    lease_until: ISO-8601 timestamp
+    session: optional session id
+  evidence:
+    commands: [command -> result]
+    paths: [path]
+    commit: optional commit hash

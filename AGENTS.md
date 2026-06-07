@@ -15,6 +15,35 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+## go-workflow Agent Orchestration
+
+This repo uses repo-contained **go-workflow** for agentic task orchestration.
+Treat `.go-workflow/` as the canonical source of truth; `.hermes/` remains only
+legacy/compatibility context unless a task explicitly targets it. Treat `tasks.md`
+as the human cockpit rendered from `.go-workflow/tasks.yaml`.
+
+Before editing when runnable work exists:
+
+```bash
+python3 scripts/next_task.py --validate
+python3 scripts/next_task.py --list
+python3 scripts/next_task.py --claim --agent <agent-or-profile>
+```
+
+Then read the generated `.go-workflow/runs/*-handoff.md` and stay inside the
+task's `scope.modify` paths. Do not run parallel workers on overlapping modify
+paths; guarded statuses are `claimed`, `active`, and `review`.
+
+To record phase evidence and finish completed work:
+
+```bash
+python3 scripts/gate.py --task-id T### --phase verify --evidence "task_verification_run=<command/result>"
+python3 scripts/finish_task.py T### --evidence "<command/result>" --agent <agent-or-profile>
+```
+
+Keep secrets, profile-local config, runtime state, caches, and generated logs out
+of the repo. Use one commit per task unless changes are inseparable.
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.

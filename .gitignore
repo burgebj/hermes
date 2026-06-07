@@ -78,6 +78,12 @@ web/public/ds-assets/
 .release_notes.md
 mini-swe-agent/
 
+# Agent Project Workspace runtime state
+.hermes/runs/*
+!.hermes/runs/.gitkeep
+.hermes/state/*
+!.hermes/state/.gitkeep
+
 # Nix
 .direnv/
 .nix-stamps/
@@ -103,6 +109,16 @@ config/mcporter.json
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
 docs/superpowers/*
+# Repo-local go-workflow runtime state
+.go-workflow/runs/*
+!.go-workflow/runs/.gitkeep
+.go-workflow/state/*
+!.go-workflow/state/.gitkeep
+
+# Python build/cache artifacts
+*.py[cod]
+*.egg-info/
+
 # Working directory for the Hermes Agent's session state (~/.hermes/ at runtime;
 # also created in-repo when an agent operates in this checkout). Plans, audit
 # logs, and per-session caches are never artifacts of the codebase.

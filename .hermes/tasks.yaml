@@ -1,0 +1,76 @@
+version: 1
+project: hermes-agent
+queue_policy:
+  primary_human_view: tasks.md
+  claim_command: python3 scripts/next_task.py --claim --agent <agent-name>
+  finish_command: python3 scripts/finish_task.py HERMES-T### "short description" --all
+  lease_minutes: 60
+tasks:
+- id: HERMES-T001
+  goal: HERMES-G01
+  title: Implement repo-local Agent Project Workspace workflow
+  status: done
+  type: maintenance
+  priority: high
+  assignee: hermes-default
+  source:
+  - "Telegram request 2026-05-28: Implementeer agent_project_workspace workflow in deze repo"
+  depends_on: []
+  blocked_by: []
+  scope:
+    read:
+    - AGENTS.md
+    - README.md
+    - .gitignore
+    modify:
+    - .hermes/
+    - scripts/next_task.py
+    - scripts/finish_task.py
+    - tasks.md
+    - AGENTS.md
+    - README.md
+    - .gitignore
+    do_not_touch:
+    - ~/.hermes/.env
+    - ~/.hermes/config.yaml
+    - venv/
+    - .venv/
+  acceptance:
+  - "Repo has a `.hermes/project.md` contract, task schema, task queue, agent prompts, run/state directories, and claim/finish scripts."
+  - "`scripts/next_task.py` lists, inspects, claims runnable tasks, writes handoffs, records leases, and blocks overlapping guarded modify scopes."
+  - "`scripts/finish_task.py` validates queue shape, task evidence, docs metadata, dependencies, and guarded path conflicts before committing completed work."
+  - "`AGENTS.md` and `README.md` document the workflow for future agents and maintainers."
+  verification:
+    commands:
+    - python3 scripts/next_task.py --list
+    - python3 scripts/next_task.py --task HERMES-T001 --json
+    - python3 scripts/finish_task.py --validate-only HERMES-T001
+    - python3 -m py_compile scripts/next_task.py scripts/finish_task.py
+  docs:
+    check:
+    - README.md
+    - AGENTS.md
+    update:
+    - README.md
+    - AGENTS.md
+    - tasks.md
+  commit:
+    mode: task
+    message: 'HERMES-T001: add repo task orchestration contract'
+  evidence:
+    paths:
+    - .hermes/project.md
+    - .hermes/task-schema.yaml
+    - .hermes/tasks.yaml
+    - .hermes/agents/worker-prompt.md
+    - .hermes/agents/reviewer-prompt.md
+    - scripts/next_task.py
+    - scripts/finish_task.py
+    - tasks.md
+    - AGENTS.md
+    - README.md
+    - .gitignore
+    commands:
+    - python3 scripts/next_task.py --list
+    - python3 scripts/finish_task.py --validate-only HERMES-T001
+    - python3 -m py_compile scripts/next_task.py scripts/finish_task.py
