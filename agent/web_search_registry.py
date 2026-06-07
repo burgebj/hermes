@@ -16,8 +16,8 @@ The active provider is chosen by configuration with this precedence:
 2. ``web.backend`` (shared fallback).
 3. If exactly one capability-eligible provider is registered AND available,
    use it.
-4. Legacy preference order — ``firecrawl`` → ``parallel`` → ``tavily`` →
-   ``exa`` → ``searxng`` → ``brave-free`` → ``ddgs`` — filtered by
+    4. Legacy preference order — ``local-web-scraper`` → ``firecrawl`` → ``parallel`` →
+   ``tavily`` → ``exa`` → ``searxng`` → ``brave-free`` → ``ddgs`` — filtered by
    availability. Matches the historic ``tools.web_tools._get_backend()``
    candidate order so installs that never set a config key keep landing
    on the same provider they did before the plugin migration.
@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from agent.web_search_provider import WebSearchProvider
 
@@ -114,12 +114,12 @@ def _read_config_key(*path: str) -> Optional[str]:
 
 
 # Legacy preference order — preserves behaviour for users who set no
-# ``web.backend`` / ``web.<capability>_backend`` config key at all. Matches
-# the historic candidate order in :func:`tools.web_tools._get_backend`
-# (paid providers first so existing paid setups don't get downgraded to
-# a free tier on upgrade). Filtered by ``is_available()`` at walk time so
-# we don't surface a provider the user has no credentials for.
+# ``web.backend`` / ``web.<capability>_backend`` config key at all.
+# Free/self-hosted providers come first so they are preferred when available;
+# paid SaaS providers follow as fallbacks. Filtered by ``is_available()`` at
+# walk time so we don't surface a provider the user has no credentials for.
 _LEGACY_PREFERENCE = (
+    "local-web-scraper",  # free, self-hosted (httpx+trafilatura+ddgs)
     "firecrawl",
     "parallel",
     "tavily",
@@ -243,3 +243,103 @@ def _reset_for_tests() -> None:
     """Clear the registry. **Test-only.**"""
     with _lock:
         _providers.clear()
+
+
+# ---------------------------------------------------------------------------
+# Runtime fallback chain
+# ---------------------------------------------------------------------------
+
+def _is_provider_failure(result: Dict[str, Any]) -> bool:
+    """Return True when a provider result indicates the call failed.
+
+    Detection rules:
+
+    * ``success: False`` → failure.
+    * ``success: True`` but empty ``data.web`` → failure (0 results).
+    * List result where every entry has an ``error`` key → failure.
+    * List result with at least one content-bearing entry → NOT a failure
+      (partial success is good enough to return to the user).
+    * Empty list → failure.
+    """
+    if not result:
+        return True
+    if result.get("success") is False:
+        return True
+    # Dict-shaped: {"success": True, "data": {"web": [...]}}
+    data = result.get("data")
+    if isinstance(data, dict):
+        web = data.get("web")
+        if isinstance(web, list) and not web:
+            return True
+    # List-shaped: [{"url": ..., "content": ...}, ...]
+    if isinstance(result, list):
+        if not result:
+            return True
+        if all(isinstance(r, dict) and r.get("error") for r in result):
+            return True
+    return False
+
+
+def resolve_fallback_chain(*, capability: str) -> List[WebSearchProvider]:
+    """Return an ordered list of providers to try for *capability*.
+
+    Used by the web_tools dispatcher to implement "try provider A, if it
+    fails try provider B" semantics. The chain includes all registered
+    providers that support *capability*, ordered by :data:`_LEGACY_PREFERENCE`
+    with any unrecognised providers appended alphabetically.
+
+    If the user has set an explicit ``web.backend`` (or per-capability
+    variant), that provider is still first — but the chain provides
+    automatic fallback when it fails mid-call.
+    """
+    with _lock:
+        snapshot = dict(_providers)
+
+    def _capable(p: WebSearchProvider) -> bool:
+        if capability == "search":
+            return bool(p.supports_search())
+        if capability == "extract":
+            return bool(p.supports_extract())
+        return False
+
+    def _is_available_safe(p: WebSearchProvider) -> bool:
+        try:
+            return bool(p.is_available())
+        except Exception:
+            return False
+
+    # Start with explicitly configured provider (if any)
+    configured = (
+        _read_config_key("web", f"{capability}_backend")
+        or _read_config_key("web", "backend")
+    )
+    chain: List[WebSearchProvider] = []
+    seen: set = set()
+
+    if configured:
+        p = snapshot.get(configured)
+        if p and _capable(p):
+            chain.append(p)
+            seen.add(p.name)
+
+    # Add providers in legacy preference order
+    for name in _LEGACY_PREFERENCE:
+        p = snapshot.get(name)
+        if p and p.name not in seen and _capable(p) and _is_available_safe(p):
+            chain.append(p)
+            seen.add(p.name)
+
+    # Append any remaining capable+available providers alphabetically
+    for p in sorted(snapshot.values(), key=lambda x: x.name):
+        if p.name not in seen and _capable(p) and _is_available_safe(p):
+            chain.append(p)
+            seen.add(p.name)
+
+    if chain:
+        logger.debug(
+            "Web %s fallback chain: %s",
+            capability,
+            " → ".join(p.name for p in chain),
+        )
+
+    return chain
