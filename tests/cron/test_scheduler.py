@@ -2441,10 +2441,11 @@ class TestDeliverResultTimeoutCancelsFuture:
     coroutine so it cannot duplicate-send after the standalone fallback.
     """
 
-    def test_live_adapter_timeout_cancels_future_and_falls_back(self):
+    def test_live_adapter_timeout_assumes_delivered_no_duplicate(self):
         """End-to-end: live adapter hangs past the 60s budget, _deliver_result
-        patches the timeout down to a fast value, confirms future.cancel() fires,
-        and verifies the standalone fallback path still delivers."""
+        cancels the orphan future, assumes the message was already dispatched,
+        and does NOT fall through to the standalone path (which would cause a
+        duplicate)."""
         from gateway.config import Platform
         from concurrent.futures import Future
 
@@ -2497,11 +2498,12 @@ class TestDeliverResultTimeoutCancelsFuture:
                 loop=loop,
             )
 
-        # 1. The orphan future was cancelled on timeout (the bug fix)
+        # 1. The orphan future was cancelled on timeout
         assert cancel_calls == [True], "future.cancel() must fire on TimeoutError"
-        # 2. The standalone fallback delivered — no double send, no silent drop
+        # 2. Delivery succeeded (no error returned)
         assert result is None, f"expected successful delivery, got error: {result!r}"
-        standalone_send.assert_awaited_once()
+        # 3. Standalone path was NOT called — avoids duplicate messages
+        standalone_send.assert_not_awaited()
 
     def test_live_adapter_thread_fallback_records_delivery_error(self):
         """A cron target with an explicit topic must not be marked clean if

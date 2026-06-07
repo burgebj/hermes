@@ -827,6 +827,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
+                send_result = None
                 if text_to_send:
                     from agent.async_utils import safe_schedule_threadsafe
                     future = safe_schedule_threadsafe(
@@ -839,8 +840,17 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         try:
                             send_result = future.result(timeout=60)
                         except TimeoutError:
+                            # The send was already dispatched on the gateway
+                            # event loop; future.cancel() cannot un-send it.
+                            # Treat as delivered to avoid duplicate messages.
                             future.cancel()
-                            raise
+                            logger.warning(
+                                "Job '%s': live adapter send to %s:%s timed "
+                                "out after 60s; message was already "
+                                "dispatched, assuming delivered",
+                                job["id"], platform_name, chat_id,
+                            )
+                            delivered = True
                         if send_result and not getattr(send_result, "success", True):
                             err = getattr(send_result, "error", "unknown")
                             logger.warning(
