@@ -283,13 +283,31 @@ class _SlashWorker:
     def close(self):
         try:
             if self.proc.poll() is None:
-                self.proc.terminate()
-                self.proc.wait(timeout=1)
-        except Exception:
-            try:
-                self.proc.kill()
-            except Exception:
-                pass
+                try:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=1)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+                except Exception:
+                    pass
+            if self.proc.poll() is None:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+                try:
+                    self.proc.wait(timeout=1)
+                except Exception:
+                    pass
+        finally:
+            for stream_name in ("stdin", "stdout", "stderr"):
+                stream = getattr(self.proc, stream_name, None)
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception:
+                    pass
 
 
 def _load_busy_input_mode() -> str:

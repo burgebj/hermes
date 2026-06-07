@@ -15,6 +15,29 @@ from cli import HermesCLI
 from rich.console import Console
 
 
+def _install_parent_death_signal() -> None:
+    """On Linux, terminate this worker when its gateway parent exits.
+
+    The dashboard PTY path can kill the TUI/gateway process abruptly when a
+    browser tab or proxy drops the websocket. Installing this in the child
+    process avoids using ``preexec_fn`` from the multithreaded gateway parent.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        import signal
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+        # Close the race where the parent exited before prctl was installed.
+        if os.getppid() == 1:
+            os._exit(0)
+    except Exception:
+        pass
+
+
 def _run(cli: HermesCLI, command: str) -> str:
     cmd = (command or "").strip()
     if not cmd:
@@ -44,6 +67,8 @@ def _run(cli: HermesCLI, command: str) -> str:
 
 
 def main():
+    _install_parent_death_signal()
+
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--session-key", required=True)
     p.add_argument("--model", default="")

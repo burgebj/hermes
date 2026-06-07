@@ -2,6 +2,7 @@
 
 import io
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -127,6 +128,66 @@ def test_write_json_unrelated_value_error_re_raises(server):
     server._real_stdout = _BadValue()
     with pytest.raises(ValueError, match="something else entirely"):
         server.write_json({"x": 1})
+
+
+def test_slash_worker_close_waits_after_kill(server):
+    """A timed-out slash worker should be SIGKILLed and reaped."""
+    worker = server._SlashWorker.__new__(server._SlashWorker)
+
+    class _FakeProc:
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+            self.wait_calls = 0
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired("slash_worker", timeout)
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    proc = _FakeProc()
+    worker.proc = proc
+
+    worker.close()
+
+    assert proc.terminated is True
+    assert proc.killed is True
+    assert proc.wait_calls == 2
+
+
+def test_slash_worker_child_installs_linux_parent_death_signal(monkeypatch):
+    """The worker process should terminate if its gateway parent disappears."""
+    from tui_gateway import slash_worker
+
+    calls = []
+
+    class _FakeLibc:
+        def prctl(self, *args):
+            calls.append(args)
+            return 0
+
+    fake_ctypes = types.SimpleNamespace(
+        CDLL=lambda *args, **kwargs: _FakeLibc()
+    )
+
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    monkeypatch.setattr(slash_worker.sys, "platform", "linux")
+    monkeypatch.setattr(slash_worker.os, "getppid", lambda: 12345)
+
+    slash_worker._install_parent_death_signal()
+
+    assert calls
+    assert calls[0][0] == 1  # PR_SET_PDEATHSIG
 
 
 def test_write_json_non_serializable_payload_re_raises(server):

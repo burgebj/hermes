@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import sys
 import time
 
@@ -210,6 +211,46 @@ class TestPtyBridgeClose:
                 reaped = True
                 break
         assert reaped, f"pid {pid} still running after close()"
+
+    @pytest.mark.live_system_guard_bypass
+    def test_close_terminates_child_process_group(self):
+        """PTY teardown must reap descendants, not only the root process."""
+        script = (
+            "import os, signal, subprocess, sys; "
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "code = 'import signal, time; "
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(30)'; "
+            "p = subprocess.Popen([sys.executable, '-c', code]); "
+            "print(p.pid, flush=True); "
+            "p.wait()"
+        )
+        bridge = PtyBridge.spawn([sys.executable, "-c", script])
+        child_pid = None
+        try:
+            output = _read_until(bridge, b"\n")
+            child_pid = int(output.decode(errors="ignore").strip().splitlines()[0])
+            bridge.close()
+
+            deadline = time.monotonic() + 3.0
+            reaped = False
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    reaped = True
+                    break
+            assert reaped, f"grandchild pid {child_pid} still running after close()"
+        finally:
+            bridge.close()
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 @skip_on_windows
