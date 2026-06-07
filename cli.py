@@ -41,7 +41,7 @@ from collections import deque
 from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -159,6 +159,20 @@ def realign_markdown_tables(*args, **kwargs):
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+
+_CODEX_USAGE_CACHE_TTL_SECONDS = 5 * 60
+_CODEX_USAGE_RETRY_SECONDS = 60
+
+
+def _fetch_account_usage_for_status_bar(provider: str, *, base_url: Optional[str] = None, api_key: Optional[str] = None):
+    """Lazy shim for status-bar account-usage fetches.
+
+    Keep ``agent.account_usage`` out of module import time; it pulls the OpenAI
+    SDK chain and should only load when the Codex usage bar actually refreshes.
+    """
+    from agent.account_usage import fetch_account_usage
+
+    return fetch_account_usage(provider, base_url=base_url, api_key=api_key)
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -3473,6 +3487,11 @@ class HermesCLI:
         self._resize_recovery_lock = threading.Lock()
         self._resize_recovery_timer = None
         self._resize_recovery_pending = False
+        self._account_usage_snapshot = None
+        self._account_usage_last_fetch = 0.0
+        self._account_usage_fetch_inflight = False
+        self._account_usage_fetch_error = None
+        self._account_usage_lock = threading.Lock()
 
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
@@ -3635,6 +3654,126 @@ class HermesCLI:
         safe_percent = max(0, min(100, percent_used or 0))
         filled = round((safe_percent / 100) * width)
         return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
+
+    def _account_usage_is_codex_context(self) -> bool:
+        provider = str(getattr(self, "provider", "") or "").strip().lower()
+        requested_provider = str(getattr(self, "requested_provider", "") or "").strip().lower()
+        if provider == "openai-codex" or requested_provider == "openai-codex":
+            return True
+        if provider and provider not in {"auto", "openrouter"}:
+            return False
+        if requested_provider and requested_provider not in {"auto", "openrouter"}:
+            return False
+        agent = getattr(self, "agent", None)
+        agent_provider = str(getattr(agent, "provider", "") or "").strip().lower()
+        if agent_provider == "openai-codex":
+            return True
+        if agent_provider and agent_provider not in {"auto", "openrouter"}:
+            return False
+        base_url = str(getattr(self, "base_url", "") or getattr(agent, "base_url", "") or "").strip().lower()
+        if "chatgpt.com/backend-api" in base_url or base_url.endswith("/codex"):
+            return True
+        model = str(getattr(self, "model", "") or "").strip().lower()
+        return (
+            provider in {"", "auto", "openrouter"}
+            and requested_provider in {"", "auto", "openrouter"}
+            and ("codex" in model or model.startswith("gpt-5"))
+        )
+
+    @staticmethod
+    def _format_account_usage_reset(dt: Optional[datetime], *, weekly: bool = False) -> str:
+        if not dt:
+            return "--"
+        try:
+            local_dt = dt.astimezone() if dt.tzinfo else dt.replace(tzinfo=timezone.utc).astimezone()
+        except Exception:
+            local_dt = dt
+        if weekly:
+            return f"{local_dt.month}/{local_dt.day} {local_dt.hour:02d}:{local_dt.minute:02d}"
+        return f"{local_dt.hour:02d}:{local_dt.minute:02d}"
+
+    @staticmethod
+    def _account_usage_window_label(window, index: int) -> str:
+        raw = str(getattr(window, "label", "") or "").strip().lower()
+        if index == 0 or raw in {"session", "primary", "primary window", "5h", "5 hour", "5 hours"}:
+            return "5시간"
+        if index == 1 or raw in {"weekly", "week", "secondary", "secondary window", "1w", "1 week"}:
+            return "1주"
+        return getattr(window, "label", None) or f"창 {index + 1}"
+
+    def _render_account_usage_bar_text(self, snapshot) -> str:
+        if not snapshot or str(getattr(snapshot, "provider", "") or "").lower() != "openai-codex":
+            return ""
+        windows = tuple(getattr(snapshot, "windows", ()) or ())
+        if not windows:
+            return ""
+        parts = ["Codex 사용량"]
+        for index, window in enumerate(windows[:2]):
+            used = getattr(window, "used_percent", None)
+            if used is None:
+                used_label = "--"
+            else:
+                used_label = f"{max(0, min(100, round(float(used))))}%"
+            label = self._account_usage_window_label(window, index)
+            reset = self._format_account_usage_reset(getattr(window, "reset_at", None), weekly=index >= 1)
+            parts.append(f"{label} {used_label} 사용 · {reset} 리셋")
+        return " │ ".join(parts)
+
+    def _refresh_account_usage_background(self) -> None:
+        try:
+            snapshot = _fetch_account_usage_for_status_bar(
+                "openai-codex",
+                base_url=getattr(self, "base_url", None),
+                api_key=getattr(self, "api_key", None),
+            )
+            with self._account_usage_lock:
+                self._account_usage_snapshot = snapshot
+                self._account_usage_fetch_error = None
+        except Exception as exc:
+            with self._account_usage_lock:
+                self._account_usage_fetch_error = str(exc)
+        finally:
+            with self._account_usage_lock:
+                self._account_usage_last_fetch = time.monotonic()
+                self._account_usage_fetch_inflight = False
+            self._invalidate(min_interval=0.0)
+
+    def _get_cached_account_usage(self):
+        if not self._account_usage_is_codex_context():
+            return None
+        should_fetch = False
+        with self._account_usage_lock:
+            snapshot = getattr(self, "_account_usage_snapshot", None)
+            last_fetch = float(getattr(self, "_account_usage_last_fetch", 0.0) or 0.0)
+            now = time.monotonic()
+            ttl = _CODEX_USAGE_CACHE_TTL_SECONDS if snapshot else _CODEX_USAGE_RETRY_SECONDS
+            stale = not last_fetch or (now - last_fetch) >= ttl
+            if stale and not getattr(self, "_account_usage_fetch_inflight", False):
+                self._account_usage_fetch_inflight = True
+                should_fetch = True
+        if should_fetch:
+            if getattr(self, "_app", None):
+                thread = threading.Thread(target=self._refresh_account_usage_background, daemon=True)
+                thread.start()
+            else:
+                self._refresh_account_usage_background()
+                with self._account_usage_lock:
+                    snapshot = getattr(self, "_account_usage_snapshot", None)
+        return snapshot
+
+    def _get_account_usage_bar_fragments(self, width: Optional[int] = None):
+        if getattr(self, '_model_picker_state', None):
+            return []
+        snapshot = getattr(self, "_account_usage_snapshot", None)
+        if not snapshot and not self._account_usage_is_codex_context():
+            return []
+        snapshot = self._get_cached_account_usage() if self._account_usage_is_codex_context() else snapshot
+        text = self._render_account_usage_bar_text(snapshot)
+        if not text:
+            return []
+        width = width or self._get_tui_terminal_width()
+        text = self._trim_status_bar_text(f" {text} ", width)
+        return [("class:account-usage-bar", text)]
 
     @staticmethod
     def _format_prompt_elapsed(prompt_start_time: Optional[float], prompt_duration: float, live: bool = False) -> str:
@@ -13107,6 +13246,24 @@ class HermesCLI:
         """
         return []
 
+    def _get_account_usage_tui_widget(self):
+        """Return the Codex account-usage status line widget when applicable."""
+        if not self._account_usage_is_codex_context():
+            return None
+        cli_ref = self
+        return ConditionalContainer(
+            Window(
+                content=FormattedTextControl(lambda: cli_ref._get_account_usage_bar_fragments()),
+                height=1,
+                wrap_lines=False,
+            ),
+            filter=Condition(
+                lambda: cli_ref._status_bar_visible
+                and not getattr(cli_ref, "_status_bar_suppressed_after_resize", False)
+                and bool(cli_ref._get_account_usage_bar_fragments())
+            ),
+        )
+
     def _register_extra_tui_keybindings(self, kb, *, input_area) -> None:
         """Register extra keybindings on the TUI ``KeyBindings`` object.
 
@@ -13158,6 +13315,7 @@ class HermesCLI:
                 model_picker_widget,
                 spinner_widget,
                 spacer,
+                self._get_account_usage_tui_widget(),
                 *self._get_extra_tui_widgets(),
                 status_bar,
                 input_rule_top,
@@ -14996,6 +15154,7 @@ class HermesCLI:
             'prompt': '',
             'prompt-working': '#888888 italic',
             'hint': '#888888 italic',
+            'account-usage-bar': 'bg:#111827 #93C5FD',
             'status-bar': 'bg:#1a1a2e #C0C0C0',
             'status-bar-strong': 'bg:#1a1a2e #FFD700 bold',
             'status-bar-dim': 'bg:#1a1a2e #8B8682',

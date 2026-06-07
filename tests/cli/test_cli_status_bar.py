@@ -1,9 +1,11 @@
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+import threading
 from unittest.mock import MagicMock, patch
 
 from cli import HermesCLI
+from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 
 
 def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
@@ -12,6 +14,16 @@ def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
     cli_obj.session_start = datetime.now() - timedelta(minutes=14, seconds=32)
     cli_obj.conversation_history = [{"role": "user", "content": "hi"}]
     cli_obj.agent = None
+    cli_obj.provider = None
+    cli_obj.requested_provider = None
+    cli_obj.base_url = None
+    cli_obj.api_key = None
+    cli_obj._app = None
+    cli_obj._account_usage_snapshot = None
+    cli_obj._account_usage_last_fetch = 0.0
+    cli_obj._account_usage_fetch_inflight = False
+    cli_obj._account_usage_fetch_error = None
+    cli_obj._account_usage_lock = threading.Lock()
     return cli_obj
 
 
@@ -53,6 +65,109 @@ def _attach_agent(
 
 
 class TestCLIStatusBar:
+    def test_account_usage_bar_renders_codex_limits_when_snapshot_is_cached(self):
+        cli_obj = _make_cli(model="gpt-5.5")
+        now = datetime.now().astimezone()
+        cli_obj._account_usage_snapshot = AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=now,
+            plan="Pro",
+            windows=(
+                AccountUsageWindow(label="Session", used_percent=31.0, reset_at=now.replace(hour=1, minute=31, second=0, microsecond=0)),
+                AccountUsageWindow(label="Weekly", used_percent=63.0, reset_at=now.replace(month=5, day=31, hour=6, minute=0, second=0, microsecond=0)),
+            ),
+        )
+        cli_obj._account_usage_last_fetch = time.monotonic()
+
+        fragments = cli_obj._get_account_usage_bar_fragments(width=100)
+        text = "".join(fragment for _style, fragment in fragments)
+
+        assert text == " Codex 사용량 │ 5시간 31% 사용 · 01:31 리셋 │ 1주 63% 사용 · 5/31 06:00 리셋 "
+
+    def test_account_usage_bar_refreshes_stale_snapshot_once_and_uses_cache(self, monkeypatch):
+        cli_obj = _make_cli(model="gpt-5.5")
+        cli_obj.provider = "openai-codex"
+        cli_obj.base_url = "https://chatgpt.com/backend-api/codex"
+        cli_obj.api_key = None
+        cli_obj._account_usage_snapshot = None
+        cli_obj._account_usage_last_fetch = 0.0
+        cli_obj._account_usage_fetch_inflight = False
+        cli_obj._account_usage_fetch_error = None
+        cli_obj._account_usage_lock = threading.Lock()
+        calls = []
+        snapshot = AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now().astimezone(),
+            windows=(AccountUsageWindow(label="Session", used_percent=10.0),),
+        )
+        monkeypatch.setattr(
+            "cli._fetch_account_usage_for_status_bar",
+            lambda provider, base_url=None, api_key=None: calls.append((provider, base_url, api_key)) or snapshot,
+            raising=False,
+        )
+
+        assert cli_obj._get_cached_account_usage() is snapshot
+        assert cli_obj._get_cached_account_usage() is snapshot
+
+        assert calls == [("openai-codex", "https://chatgpt.com/backend-api/codex", None)]
+
+    def test_account_usage_bar_hidden_for_non_codex_provider(self):
+        cli_obj = _make_cli(model="claude-sonnet-4")
+        cli_obj.provider = "anthropic"
+
+        assert cli_obj._get_account_usage_bar_fragments(width=100) == []
+
+    def test_account_usage_bar_does_not_retry_before_retry_interval_after_failure(self, monkeypatch):
+        cli_obj = _make_cli(model="gpt-5.5")
+        cli_obj.provider = "openai-codex"
+        cli_obj.base_url = "https://chatgpt.com/backend-api/codex"
+        cli_obj.api_key = None
+        cli_obj._account_usage_snapshot = None
+        cli_obj._account_usage_last_fetch = time.monotonic()
+        cli_obj._account_usage_fetch_inflight = False
+        cli_obj._account_usage_fetch_error = "network down"
+        calls = []
+        monkeypatch.setattr(
+            "cli._fetch_account_usage_for_status_bar",
+            lambda provider, base_url=None, api_key=None: calls.append(provider),
+            raising=False,
+        )
+
+        assert cli_obj._get_cached_account_usage() is None
+        assert calls == []
+
+    def test_account_usage_bar_ignores_gpt5_model_on_explicit_non_codex_provider(self):
+        cli_obj = _make_cli(model="gpt-5.5")
+        cli_obj.provider = "anthropic"
+
+        assert cli_obj._account_usage_is_codex_context() is False
+        assert cli_obj._get_account_usage_bar_fragments(width=100) == []
+
+    def test_account_usage_bar_allows_openrouter_provider_when_requested_provider_is_codex(self, monkeypatch):
+        cli_obj = _make_cli(model="gpt-5.5")
+        cli_obj.provider = "openrouter"
+        cli_obj.requested_provider = "openai-codex"
+        cli_obj.base_url = "https://openrouter.ai/api/v1"
+        calls = []
+        snapshot = AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now().astimezone(),
+            windows=(AccountUsageWindow(label="Session", used_percent=27.0),),
+        )
+        monkeypatch.setattr(
+            "cli._fetch_account_usage_for_status_bar",
+            lambda provider, base_url=None, api_key=None: calls.append((provider, base_url, api_key)) or snapshot,
+            raising=False,
+        )
+
+        fragments = cli_obj._get_account_usage_bar_fragments(width=100)
+
+        assert "27%" in "".join(fragment for _style, fragment in fragments)
+        assert calls == [("openai-codex", "https://openrouter.ai/api/v1", None)]
+
     def test_context_style_thresholds(self):
         cli_obj = _make_cli()
 
