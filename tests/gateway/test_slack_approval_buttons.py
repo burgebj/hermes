@@ -470,6 +470,99 @@ class TestSlackThreadContext:
         assert "DO NOT INCLUDE THIS" not in context
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_context_bot_attachments_fallback(self):
+        """Bot messages with empty top-level text but attachment content
+        (e.g. Datadog, PagerDuty alerts) should be included in thread context
+        by falling back to attachments[].text or attachments[].fallback."""
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": "1000.0", "user": "U1", "text": "Parent"},
+                {
+                    "ts": "1000.05",
+                    "bot_id": "B_DATADOG",
+                    "user": "U_DD",
+                    "text": "",  # empty top-level text
+                    "attachments": [
+                        {
+                            "text": "CPU usage is at 98% on prod-server-01",
+                            "fallback": "CPU alert on prod-server-01",
+                        }
+                    ],
+                },
+                {"ts": "1000.1", "user": "U1", "text": "Current"},
+            ]
+        })
+        adapter._user_name_cache = {"U1": "Alice", "U_DD": "Datadog"}
+
+        context = await adapter._fetch_thread_context(
+            channel_id="C1", thread_ts="1000.0", current_ts="1000.1", team_id="T1"
+        )
+
+        assert "CPU usage is at 98% on prod-server-01" in context
+        assert "Datadog" in context
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_context_bot_attachments_fallback_field(self):
+        """When attachments[].text is empty, fall back to attachments[].fallback."""
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": "1000.0", "user": "U1", "text": "Parent"},
+                {
+                    "ts": "1000.05",
+                    "bot_id": "B_PAGERDUTY",
+                    "user": "U_PD",
+                    "text": "",
+                    "attachments": [
+                        {
+                            "text": "",
+                            "fallback": "Incident #1234: Service down in us-east-1",
+                        }
+                    ],
+                },
+                {"ts": "1000.1", "user": "U1", "text": "Current"},
+            ]
+        })
+        adapter._user_name_cache = {"U1": "Alice", "U_PD": "PagerDuty"}
+
+        context = await adapter._fetch_thread_context(
+            channel_id="C1", thread_ts="1000.0", current_ts="1000.1", team_id="T1"
+        )
+
+        assert "Incident #1234: Service down in us-east-1" in context
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_context_empty_text_no_attachments_skipped(self):
+        """Messages with empty text AND empty/no attachments should still be skipped."""
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {"ts": "1000.0", "user": "U1", "text": "Parent"},
+                {
+                    "ts": "1000.05",
+                    "bot_id": "B_EMPTY",
+                    "user": "U_EMPTY",
+                    "text": "",
+                    "attachments": [{"text": "", "fallback": ""}],
+                },
+                {"ts": "1000.1", "user": "U1", "text": "Current"},
+            ]
+        })
+        adapter._user_name_cache = {"U1": "Alice"}
+
+        context = await adapter._fetch_thread_context(
+            channel_id="C1", thread_ts="1000.0", current_ts="1000.1", team_id="T1"
+        )
+
+        # Only the parent message should appear, empty attachment message skipped
+        assert "Parent" in context
+        assert context.count("[thread parent]") == 1
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_parent_text_from_cache(self):
         """_fetch_thread_parent_text should reuse the thread-context cache
         when it is warm, avoiding an extra conversations.replies call."""

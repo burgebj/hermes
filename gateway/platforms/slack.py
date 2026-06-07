@@ -3110,6 +3110,23 @@ class SlackAdapter(BasePlatformAdapter):
                     continue
 
                 msg_text = msg.get("text", "").strip()
+
+                # Some bot messages (e.g. Datadog, PagerDuty, Grafana) use the
+                # legacy Slack "attachments" format instead of top-level text.
+                # When the top-level text is empty, fall back to the first
+                # attachment's text or fallback field so the thread context is
+                # not silently dropped.
+                if not msg_text:
+                    for att in msg.get("attachments", []):
+                        att_text = att.get("text", "").strip()
+                        if att_text:
+                            msg_text = att_text
+                            break
+                        att_fallback = att.get("fallback", "").strip()
+                        if att_fallback:
+                            msg_text = att_fallback
+                            break
+
                 if not msg_text:
                     continue
 
