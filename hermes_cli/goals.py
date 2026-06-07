@@ -8,7 +8,9 @@ goal is done, turn budget is exhausted, the user pauses/clears it, or the
 user sends a new message (which takes priority and pauses the goal loop).
 
 State is persisted in SessionDB's ``state_meta`` table keyed by
-``goal:<session_id>`` so ``/resume`` picks it up.
+``goal:<session_id>`` so ``/resume`` picks it up. Compression rotates the
+session id, so unfinished goal state is explicitly migrated to the continuation
+session.
 
 Design notes / invariants:
 
@@ -277,6 +279,45 @@ def clear_goal(session_id: str) -> None:
         return
     state.status = "cleared"
     save_goal(session_id, state)
+
+
+def migrate_goal_to_session(
+    old_session_id: str,
+    new_session_id: str,
+    *,
+    reason: str = "session switch",
+) -> bool:
+    """Move an unfinished persistent goal across a logical-session boundary.
+
+    Goal state is persisted under ``goal:<session_id>``. Context compression
+    intentionally rotates the SQLite session id while continuing the same user
+    task, so the standing goal must be rebound to the continuation session.
+
+    Returns True when a goal was copied to ``new_session_id``. Finished or
+    cleared goals are left untouched and return False.
+    """
+    if not old_session_id or not new_session_id or old_session_id == new_session_id:
+        return False
+
+    state = load_goal(old_session_id)
+    if state is None or state.status in {"done", "cleared"}:
+        return False
+
+    save_goal(new_session_id, state)
+
+    migrated_from = state
+    migrated_from.status = "cleared"
+    migrated_from.paused_reason = (
+        f"migrated to continuation session {new_session_id} ({reason})"
+    )
+    save_goal(old_session_id, migrated_from)
+    logger.debug(
+        "GoalManager: migrated goal from %s to %s (%s)",
+        old_session_id,
+        new_session_id,
+        reason,
+    )
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -907,6 +948,7 @@ __all__ = [
     "load_goal",
     "save_goal",
     "clear_goal",
+    "migrate_goal_to_session",
     "judge_goal",
     "run_kanban_goal_loop",
 ]

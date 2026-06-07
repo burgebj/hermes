@@ -252,6 +252,41 @@ class TestGoalManager:
         assert mgr2.state.goal == "do the thing"
         assert mgr2.is_active()
 
+    def test_migrate_goal_to_compression_continuation_session(self, hermes_home):
+        """Compression rotates the SQLite session id; the logical /goal must follow.
+
+        Regression: goals were keyed only as goal:<old_session_id>, so after a
+        /compress or automatic compaction created a continuation session, the
+        next turn's GoalManager(new_session_id) saw no active goal.
+        """
+        from hermes_cli.goals import GoalManager, migrate_goal_to_session, save_goal
+
+        old_mgr = GoalManager(session_id="goal-before-compress", default_max_turns=7)
+        old_mgr.set("finish the long-running task")
+        old_mgr.state.turns_used = 3
+        old_mgr.state.subgoals.append("preserve this criterion too")
+        save_goal(old_mgr.session_id, old_mgr.state)
+
+        migrated = migrate_goal_to_session(
+            "goal-before-compress",
+            "goal-after-compress",
+            reason="compression",
+        )
+
+        assert migrated is True
+        new_mgr = GoalManager(session_id="goal-after-compress")
+        assert new_mgr.state is not None
+        assert new_mgr.state.goal == "finish the long-running task"
+        assert new_mgr.state.status == "active"
+        assert new_mgr.state.max_turns == 7
+        assert new_mgr.state.turns_used == 3
+        assert new_mgr.state.subgoals == ["preserve this criterion too"]
+
+        old_mgr_reloaded = GoalManager(session_id="goal-before-compress")
+        assert not old_mgr_reloaded.is_active()
+        assert old_mgr_reloaded.state.status == "cleared"
+        assert "goal-after-compress" in (old_mgr_reloaded.state.paused_reason or "")
+
     def test_evaluate_after_turn_done(self, hermes_home):
         """Judge says done → status=done, no continuation."""
         from hermes_cli import goals
