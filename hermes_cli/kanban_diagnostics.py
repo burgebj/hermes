@@ -974,6 +974,86 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_run_status_desync(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Task lane disagrees with its active run: the task sits in ``ready``
+    (no live claim) while its latest ``task_run`` is still open and
+    ``running``.
+
+    This is the run/status desync seen after a worker crash + reclaim
+    (#36910): ``detect_crashed_workers`` / ``release_stale_claims`` drop
+    the task back to ``ready`` and close the run on the normal path, but
+    if a run row is ever left open while the task is reset — a host that
+    died mid-transaction, an out-of-band SQL edit, a non-host reclaim
+    that couldn't close the remote run — the board (which derives lanes
+    from ``tasks.status``) shows the work in *Ready* even though a run is
+    still flagged ``running``. Operators can't trust board state, and the
+    dispatcher may treat the active work as available.
+
+    Fire only on the unambiguous desync: ``status == 'ready'``, no
+    ``claim_lock`` (a live claim means the task is genuinely being
+    worked — that's the normal in-flight state, not a desync), and the
+    newest run is ``status == 'running'`` with no ``ended_at``. A
+    correctly-reclaimed task has its run closed (``ended_at`` set,
+    ``status`` in crashed/reclaimed/...), so it never trips this.
+    """
+    if _task_field(task, "status") != "ready":
+        return []
+    # A live claim_lock means the dispatcher considers this task in
+    # flight; ``_rule_stranded_in_ready`` already skips those too. Only
+    # the unclaimed-but-running-run case is a true desync.
+    if _task_field(task, "claim_lock"):
+        return []
+    if not runs:
+        return []
+    # Newest run = highest id (runs are created monotonically per task).
+    newest = max(runs, key=lambda r: int(_task_field(r, "id", 0) or 0))
+    if _task_field(newest, "status") != "running":
+        return []
+    if _task_field(newest, "ended_at") is not None:
+        return []
+
+    run_id = _task_field(newest, "id")
+    run_profile = _task_field(newest, "profile")
+    assignee = _task_field(task, "assignee") or ""
+    # Note: a server-side ``reclaim`` action is intentionally NOT offered
+    # here — ``kanban_db.reclaim_task`` only acts on tasks already in
+    # ``running`` state, and this task is ``ready``. The operator path is
+    # to inspect the open run and re-dispatch (or stop the worker).
+    actions: list[DiagnosticAction] = []
+    task_id = _task_field(task, "id")
+    if task_id:
+        actions.append(DiagnosticAction(
+            kind="cli_hint",
+            label=f"Inspect runs: hermes kanban runs {task_id}",
+            payload={"command": f"hermes kanban runs {task_id}"},
+            suggested=True,
+        ))
+
+    return [Diagnostic(
+        kind="run_status_desync",
+        severity="error",
+        title="Board lane out of sync with active run",
+        detail=(
+            f"This task is in the Ready lane but run #{run_id} is still "
+            f"flagged running (no end time recorded). The board derives "
+            f"lane placement from the task status, so active work is "
+            f"showing as available. Reclaim the task to close the stale "
+            f"run and resync, or confirm the worker for run #{run_id} "
+            f"has actually stopped."
+        ),
+        actions=actions,
+        first_seen_at=now,
+        last_seen_at=now,
+        count=1,
+        run_id=int(run_id) if run_id is not None else None,
+        data={
+            "run_id": run_id,
+            "run_profile": run_profile,
+            "assignee": assignee,
+        },
+    )]
+
+
 # Registry — order matters: rules higher on the list render first when
 # severity ties. Add new rules here.
 _RULES: list[RuleFn] = [
@@ -985,6 +1065,7 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_run_status_desync,
 ]
 
 
@@ -999,6 +1080,7 @@ DIAGNOSTIC_KINDS = (
     "stuck_in_blocked",
     "block_unblock_cycling",
     "stranded_in_ready",
+    "run_status_desync",
 )
 
 

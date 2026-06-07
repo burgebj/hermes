@@ -748,3 +748,75 @@ def test_severity_at_or_above_uses_threshold_semantics():
     assert kd.severity_at_or_above("error", "critical") is False
     assert kd.severity_at_or_above("mystery", "warning") is False
     assert kd.severity_at_or_above("warning", None) is True
+
+
+# ---------------------------------------------------------------------------
+# run_status_desync (#36910) — task in Ready while its newest run is still
+# flagged running with no ended_at (post-crash/reclaim board desync).
+# ---------------------------------------------------------------------------
+
+
+def _open_run(run_id=1, status="running", ended_at=None, profile="dev"):
+    return {
+        "id": run_id,
+        "status": status,
+        "ended_at": ended_at,
+        "profile": profile,
+        "outcome": None,
+    }
+
+
+def test_run_status_desync_fires_when_ready_with_open_running_run():
+    """Reproduces #36910: tasks.status=ready, no claim, newest task_run is
+    running with no ended_at → the board shows active work in Ready."""
+    task = _task(status="ready", assignee="lucca-senior-dev", claim_lock=None)
+    runs = [_open_run(run_id=7, status="running", ended_at=None,
+                      profile="lucca-senior-dev")]
+    diags = kd.compute_task_diagnostics(task, [], runs)
+    desync = [d for d in diags if d.kind == "run_status_desync"]
+    assert len(desync) == 1
+    d = desync[0]
+    assert d.severity == "error"
+    assert d.run_id == 7
+    assert d.data["run_id"] == 7
+    assert "#7" in d.detail
+
+
+def test_run_status_desync_silent_when_run_closed():
+    """A correctly-reclaimed task has its run closed (ended_at set) — the
+    normal recovery path must NOT trip this rule."""
+    task = _task(status="ready", assignee="x", claim_lock=None)
+    runs = [_open_run(run_id=3, status="reclaimed", ended_at=1000)]
+    diags = kd.compute_task_diagnostics(task, [], runs)
+    assert [d for d in diags if d.kind == "run_status_desync"] == []
+
+
+def test_run_status_desync_silent_when_claim_lock_held():
+    """A live claim_lock means the task is genuinely in flight (the
+    dispatcher just set running on the run + lock on the task between our
+    two reads); that's not a desync."""
+    task = _task(status="ready", assignee="x", claim_lock="host:abc")
+    runs = [_open_run(run_id=4, status="running", ended_at=None)]
+    diags = kd.compute_task_diagnostics(task, [], runs)
+    assert [d for d in diags if d.kind == "run_status_desync"] == []
+
+
+def test_run_status_desync_uses_newest_run_only():
+    """An older open run must not fire if the newest run is properly
+    closed — only the latest attempt defines the current lane."""
+    task = _task(status="ready", assignee="x", claim_lock=None)
+    runs = [
+        _open_run(run_id=1, status="running", ended_at=None),
+        _open_run(run_id=2, status="crashed", ended_at=2000),
+    ]
+    diags = kd.compute_task_diagnostics(task, [], runs)
+    assert [d for d in diags if d.kind == "run_status_desync"] == []
+
+
+def test_run_status_desync_silent_when_not_ready():
+    """A genuinely running task (status=running) is the expected state,
+    not a desync."""
+    task = _task(status="running", assignee="x", claim_lock=None)
+    runs = [_open_run(run_id=5, status="running", ended_at=None)]
+    diags = kd.compute_task_diagnostics(task, [], runs)
+    assert [d for d in diags if d.kind == "run_status_desync"] == []
