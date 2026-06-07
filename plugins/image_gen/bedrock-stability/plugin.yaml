@@ -1,0 +1,5 @@
+name: bedrock-stability
+version: 1.0.0
+description: "AWS Bedrock Stability AI image generation backend (stability.sd3-5-large-v1:0 / stable-image-core-v1:1 / stable-image-ultra-v1:1, all in us-west-2). Uses AWS SDK credential chain; saves images to $HERMES_HOME/cache/images/."
+author: NousResearch
+kind: backend
