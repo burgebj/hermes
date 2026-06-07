@@ -2446,20 +2446,23 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         from hermes_cli.runtime_provider import _detect_api_mode_for_url
 
         base_lower = configured_base_url.lower()
-        provider = "custom"
+        provider = configured_provider or "custom"
         api_mode = _detect_api_mode_for_url(configured_base_url) or "chat_completions"
-        if (
-            base_url_hostname(configured_base_url) == "chatgpt.com"
-            and "/backend-api/codex" in base_lower
-        ):
-            provider = "openai-codex"
-            api_mode = "codex_responses"
-        elif base_url_hostname(configured_base_url) == "api.anthropic.com":
-            provider = "anthropic"
-            api_mode = "anthropic_messages"
-        elif "api.kimi.com/coding" in base_lower:
-            provider = "custom"
-            api_mode = "anthropic_messages"
+        # URL-based provider detection only runs when the user hasn't
+        # explicitly set delegation.provider — configured values always win.
+        if not configured_provider:
+            if (
+                base_url_hostname(configured_base_url) == "chatgpt.com"
+                and "/backend-api/codex" in base_lower
+            ):
+                provider = "openai-codex"
+                api_mode = "codex_responses"
+            elif base_url_hostname(configured_base_url) == "api.anthropic.com":
+                provider = "anthropic"
+                api_mode = "anthropic_messages"
+            elif "api.kimi.com/coding" in base_lower:
+                provider = "custom"
+                api_mode = "anthropic_messages"
 
         # Explicit delegation.api_mode in config always wins. Lets users force
         # a transport for non-standard endpoints the URL heuristic can't detect.
@@ -2516,21 +2519,14 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
 
 def _load_config() -> dict:
-    """Load delegation config from CLI_CONFIG or persistent config.
+    """Load delegation config from persistent config, hot-reloading on file change.
 
-    Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
-    to the persistent config (hermes_cli/config.py load_config()) so that
-    ``delegation.model`` / ``delegation.provider`` are picked up regardless
-    of the entry point (CLI, gateway, cron).
+    Always reads through ``hermes_cli.config.load_config()`` which uses mtime-based
+    cache invalidation — changes to ``config.yaml`` take effect on the next call
+    without needing a /reset. The old CLI_CONFIG short-circuit was an optimisation
+    that blocked mid-session config changes; ``load_config()`` is already fast
+    (mtime-cached, ~0.2ms when unchanged) so there's no meaningful penalty.
     """
-    try:
-        from cli import CLI_CONFIG
-
-        cfg = CLI_CONFIG.get("delegation") or {}
-        if cfg:
-            return cfg
-    except Exception:
-        pass
     try:
         from hermes_cli.config import load_config
 
