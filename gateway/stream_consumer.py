@@ -827,6 +827,7 @@ class GatewayStreamConsumer:
                 result = await self.adapter.send(
                     chat_id=self.chat_id,
                     content=chunk,
+                    reply_to=self._initial_reply_to_id,
                     metadata=self.metadata,
                 )
                 if result.success:
