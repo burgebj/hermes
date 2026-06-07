@@ -1133,6 +1133,8 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".ts": "text/plain",
     ".py": "text/plain",
     ".sh": "text/plain",
+    ".html": "text/html",
+    ".htm": "text/html",
 }
 
 
