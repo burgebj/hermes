@@ -8,8 +8,6 @@ Log files produced:
     agent.log   — INFO+, all agent/tool/session activity (the main log)
     errors.log  — WARNING+, errors and warnings only (quick triage)
     gateway.log — INFO+, gateway-only events (created when mode="gateway")
-    gui.log     — INFO+, dashboard/websocket/TUI-gateway events
-                  (created when mode="gui")
 
 All files use ``RotatingFileHandler`` with ``RedactingFormatter`` so
 secrets are never written to disk.
@@ -17,8 +15,6 @@ secrets are never written to disk.
 Component separation:
     gateway.log only receives records from ``gateway.*`` loggers —
     platform adapters, session management, slash commands, delivery.
-    gui.log receives dashboard-side records from ``hermes_cli.web_server``,
-    ``hermes_cli.pty_bridge``, ``tui_gateway.*``, and ``uvicorn.*``.
     agent.log remains the catch-all (everything goes there).
 
 Session context:
@@ -30,6 +26,7 @@ Session context:
 import logging
 import os
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, Sequence
@@ -150,12 +147,6 @@ COMPONENT_PREFIXES = {
     "tools": ("tools",),
     "cli": ("hermes_cli", "cli"),
     "cron": ("cron",),
-    "gui": (
-        "hermes_cli.web_server",
-        "hermes_cli.pty_bridge",
-        "tui_gateway",
-        "uvicorn",
-    ),
 }
 
 
@@ -193,11 +184,9 @@ def setup_logging(
         Number of rotated backup files to keep.
         Defaults to 3 or the value from config.yaml ``logging.backup_count``.
     mode
-        Caller context: ``"cli"``, ``"gateway"``, ``"gui"``, ``"cron"``.
+        Caller context: ``"cli"``, ``"gateway"``, ``"cron"``.
         When ``"gateway"``, an additional ``gateway.log`` file is created
         that receives only gateway-component records.
-        When ``"gui"``, an additional ``gui.log`` file is created that
-        receives dashboard and TUI-gateway component records.
     force
         Re-run setup even if it has already been called.
 
@@ -254,18 +243,6 @@ def setup_logging(
             backup_count=3,
             formatter=RedactingFormatter(_LOG_FORMAT),
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gateway"]),
-        )
-
-    # --- gui.log (INFO+, dashboard/tui-gateway components) -----------------
-    if mode == "gui":
-        _add_rotating_handler(
-            root,
-            log_dir / "gui.log",
-            level=logging.INFO,
-            max_bytes=10 * 1024 * 1024,
-            backup_count=5,
-            formatter=RedactingFormatter(_LOG_FORMAT),
-            log_filter=_ComponentFilter(COMPONENT_PREFIXES["gui"]),
         )
 
     if _logging_initialized and not force:
@@ -353,6 +330,11 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._stat_dev: Optional[int] = None
         self._stat_ino: Optional[int] = None
         self._record_stream_stat()
+        # Cooldown for rotation failure: when another process (e.g. Gateway
+        # NSSM service) holds the log file open, rotation fails with
+        # PermissionError.  Without cooldown, every subsequent emit() would
+        # trigger shouldRollover()→doRollover() and burn ~1.5s retrying.
+        self._rotation_fail_time: float = 0.0
 
     def _chmod_if_managed(self):
         if self._managed:
@@ -423,7 +405,19 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         # so the syscall is sub-microsecond on a hot file.
         if self.stream is not None or os.path.exists(self.baseFilename):
             self._reopen_if_externally_rotated()
-        super().emit(record)
+        try:
+            super().emit(record)
+        except PermissionError:
+            # Rotation inside the stdlib emit() failed (file locked by another
+            # Hermes process on Windows).  Fall back: write directly to the
+            # current stream, bypassing rotation entirely.
+            try:
+                if self.stream is not None:
+                    msg = self.format(record)
+                    self.stream.write(msg + self.terminator)
+                    self.stream.flush()
+            except Exception:
+                self.handleError(record)
 
     def _open(self):
         stream = super()._open()
@@ -431,11 +425,33 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         return stream
 
     def doRollover(self):
-        super().doRollover()
-        self._chmod_if_managed()
-        # Our own rollover writes a new baseFilename; refresh the snapshot
-        # so the next emit doesn't mistake it for external rotation.
-        self._record_stream_stat()
+        """Best-effort log rotation with cooldown.
+
+        When another Hermes process (e.g. Gateway NSSM service on Windows)
+        holds the log file open, ``os.rename()`` inside the stdlib rotation
+        fails with ``PermissionError``.  Retry with backoff, then enter a
+        60-second cooldown — during cooldown every subsequent ``emit()``
+        skips rotation instantly instead of burning 1.5s per call.
+        The file may exceed ``maxBytes``; the Gateway process will rotate
+        it on its own cycle.
+        """
+        now = time.monotonic()
+        if now - self._rotation_fail_time < 60.0:
+            return  # Cooldown active — skip rotation
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                super().doRollover()
+                self._chmod_if_managed()
+                self._record_stream_stat()
+                self._rotation_fail_time = 0.0  # Reset on success
+                return
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    time.sleep(0.5 * (attempt + 1))  # 0.5 → 1.0 → 1.5s backoff
+        # All attempts failed — start 60s cooldown
+        self._rotation_fail_time = now
 
 
 def _add_rotating_handler(
