@@ -76,8 +76,23 @@ export function SkillsHub({ gw, onClose, t }: SkillsHubProps) {
     setInstalling(true)
     setErr('')
 
-    gw.request<{ installed?: boolean; name?: string }>('skills.manage', { action: 'install', query: name })
-      .then(() => onClose())
+    gw.request<SkillsInstallResponse>('skills.manage', { action: 'install', query: name })
+      .then(r => {
+        if (r?.review_required) {
+          setInfo(r.info ?? { name })
+          setErr(r.message ?? 'Review required before installing this skill.')
+
+          return
+        }
+
+        if (r?.installed) {
+          onClose()
+
+          return
+        }
+
+        setErr('install failed')
+      })
       .catch((e: unknown) => setErr(rpcErrorMessage(e)))
       .finally(() => setInstalling(false))
   }
@@ -287,6 +302,12 @@ export function SkillsHub({ gw, onClose, t }: SkillsHubProps) {
       {info?.path ? <Text color={t.color.muted}>path: {info.path}</Text> : null}
       {!info && !err ? <Text color={t.color.muted}>loading…</Text> : null}
       {err ? <Text color={t.color.label}>error: {err}</Text> : null}
+      {info?.skill_md_preview ? (
+        <>
+          <Text color={t.color.muted}>SKILL.md preview</Text>
+          <Text color={t.color.text}>{info.skill_md_preview}</Text>
+        </>
+      ) : null}
       {installing ? <Text color={t.color.accent}>installing…</Text> : null}
 
       <OverlayHint t={t}>i reinspect · x reinstall · Enter/Esc back · q close</OverlayHint>
@@ -299,6 +320,16 @@ interface SkillInfo {
   description?: string
   name?: string
   path?: string
+  skill_md_preview?: string
+}
+
+interface SkillsInstallResponse {
+  info?: SkillInfo
+  installed?: boolean
+  message?: string
+  name?: string
+  review_required?: boolean
+  status?: string
 }
 
 interface SkillsHubProps {
