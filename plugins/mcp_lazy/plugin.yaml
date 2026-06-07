@@ -1,0 +1,7 @@
+name: mcp_lazy
+version: "0.1.0"
+description: "Config-gated lazy MCP tool schema loading. Replaces full MCP schemas with request-time stubs and promotes selected tools on demand via load_mcp_tools."
+author: Interstellar-code
+hooks:
+  - transform_tools
+  - on_session_reset

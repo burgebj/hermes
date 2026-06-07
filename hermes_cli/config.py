@@ -1991,6 +1991,12 @@ DEFAULT_CONFIG = {
         "max_parallel_jobs": None,
     },
 
+    # MCP lazy-loading Phase 1 (opt-in; no behavior change when disabled).
+    "mcp": {
+        "lazy_loading": False,
+        "lazy_stub_max_desc": 200,
+    },
+
     # Kanban multi-agent coordination — controls the dispatcher loop that
     # spawns workers for ready tasks. The dispatcher ticks every N seconds
     # (default 60), reclaims stale claims, promotes dependency-satisfied

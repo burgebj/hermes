@@ -205,3 +205,16 @@ class TestConfigIssueDataclass:
         a = ConfigIssue("error", "msg", "hint")
         b = ConfigIssue("error", "msg", "hint")
         assert a == b
+
+
+class TestMcpLazyConfigValidation:
+    """Phase 1 lazy-MCP config should be accepted as a valid root section."""
+
+    def test_mcp_lazy_root_section_no_issues(self):
+        issues = validate_config_structure({
+            "mcp": {
+                "lazy_loading": True,
+                "lazy_stub_max_desc": 200,
+            },
+        })
+        assert issues == []
