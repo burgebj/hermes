@@ -12,6 +12,7 @@ This module provides:
 - hermes config wizard   - Re-run setup wizard
 """
 
+import base64
 import copy
 import logging
 import os
@@ -222,7 +223,7 @@ _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
 # save_config() + migrate_config() write via atomic_yaml_write which
 # produces a fresh inode, so stat() sees a new mtime_ns and the next
 # load repopulates automatically — no explicit invalidation hook.
-_LOAD_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+_LOAD_CONFIG_CACHE: Dict[str, Tuple[Any, ...]] = {}
 # (path, mtime_ns, size) -> cached raw yaml dict. Same pattern as
 # _LOAD_CONFIG_CACHE but for read_raw_config() — used when callers want
 # the user's on-disk values without defaults merged in.
@@ -4883,6 +4884,86 @@ def _expand_env_vars(obj):
     return obj
 
 
+def _is_secret_file_ref(obj) -> bool:
+    return isinstance(obj, dict) and "__secret_file" in obj
+
+
+def _resolve_secret_file_ref(ref: Dict[str, Any]) -> str:
+    """Resolve a declarative secret-file reference from config.yaml.
+
+    The on-disk YAML contains only a path to a runtime secret file, keeping the
+    config declarative without embedding secret values in the Nix store or a
+    mutable .env. Supported form::
+
+        api_key:
+          __secret_file: /run/agenix/models-basic-auth
+          __secret_encoding: base64  # optional: raw (default) or base64
+
+    ``raw`` reads UTF-8 text and strips trailing newlines. ``base64`` strips
+    trailing newlines from the file bytes, then encodes the remaining bytes.
+    """
+    raw_path = str(ref["__secret_file"])
+    expanded_path = str(_expand_env_vars(raw_path))
+    path = Path(os.path.expanduser(expanded_path))
+    encoding = str(ref.get("__secret_encoding", "raw")).lower()
+
+    if encoding == "base64":
+        return base64.b64encode(path.read_bytes().rstrip(b"\r\n")).decode("ascii")
+    if encoding in {"raw", "text"}:
+        charset = str(ref.get("__secret_charset", "utf-8"))
+        return path.read_text(encoding=charset).rstrip("\r\n")
+    raise ValueError(f"Unsupported __secret_encoding for {path}: {encoding}")
+
+
+def _expand_config_refs(obj) -> Any:
+    """Recursively resolve runtime config references.
+
+    This includes existing ``${ENV_VAR}`` string references and declarative
+    ``__secret_file`` references.
+    """
+    if _is_secret_file_ref(obj):
+        return _resolve_secret_file_ref(obj)
+    if isinstance(obj, str):
+        return _expand_env_vars(obj)
+    if isinstance(obj, dict):
+        return {k: _expand_config_refs(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_config_refs(item) for item in obj]
+    return obj
+
+
+def _secret_paths_fingerprint(paths) -> Tuple[Tuple[str, Optional[int], Optional[int]], ...]:
+    fingerprint = []
+    for path in sorted(str(p) for p in paths):
+        try:
+            st = Path(path).stat()
+            fingerprint.append((path, st.st_mtime_ns, st.st_size))
+        except OSError:
+            fingerprint.append((path, None, None))
+    return tuple(fingerprint)
+
+
+def _secret_ref_fingerprint(obj) -> Tuple[Tuple[str, Optional[int], Optional[int]], ...]:
+    """Return stable stat data for secret files referenced by config."""
+    paths = set()
+
+    def collect(node) -> None:
+        if _is_secret_file_ref(node):
+            raw_path = str(node["__secret_file"])
+            expanded_path = str(_expand_env_vars(raw_path))
+            paths.add(str(Path(os.path.expanduser(expanded_path))))
+            return
+        if isinstance(node, dict):
+            for value in node.values():
+                collect(value)
+        elif isinstance(node, list):
+            for value in node:
+                collect(value)
+
+    collect(obj)
+    return _secret_paths_fingerprint(paths)
+
+
 def _items_by_unique_name(items):
     """Return a name-indexed dict only when all items have unique string names."""
     if not isinstance(items, list):
@@ -4899,19 +4980,31 @@ def _items_by_unique_name(items):
 
 
 def _preserve_env_ref_templates(current, raw, loaded_expanded=None):
-    """Restore raw ``${VAR}`` templates when a value is otherwise unchanged.
+    """Restore raw runtime refs when a value is otherwise unchanged.
 
-    ``load_config()`` expands env refs for runtime use. When a caller later
-    persists that config after modifying some unrelated setting, keep the
-    original on-disk template instead of writing the expanded plaintext
+    ``load_config()`` expands env/secret refs for runtime use. When a caller
+    later persists that config after modifying some unrelated setting, keep the
+    original on-disk template/ref instead of writing the expanded plaintext
     secret back to ``config.yaml``.
 
-    Prefer preserving the raw template when ``current`` still matches either
+    Prefer preserving the raw template/ref when ``current`` still matches either
     the value previously returned by ``load_config()`` for this config path or
-    the current environment expansion of ``raw``. This handles env-var
-    rotation between load and save while still treating mixed literal/template
-    string edits as caller-owned once their rendered value diverges.
+    the current expansion of ``raw``. This handles rotation between load and
+    save while still treating edits as caller-owned once their rendered value
+    diverges.
     """
+    if _is_secret_file_ref(raw):
+        if current == raw:
+            return raw
+        if isinstance(loaded_expanded, str) and current == loaded_expanded:
+            return raw
+        try:
+            if _resolve_secret_file_ref(raw) == current:
+                return raw
+        except Exception:
+            pass
+        return current
+
     if isinstance(current, str) and isinstance(raw, str) and re.search(r"\${[^}]+}", raw):
         if current == raw:
             return raw
@@ -5147,7 +5240,21 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
 
         cached = _LOAD_CONFIG_CACHE.get(path_key)
         if cached is not None and cache_key is not None and cached[:2] == cache_key:
-            return copy.deepcopy(cached[2]) if want_deepcopy else cached[2]
+            # New cache shape includes secret-file stat fingerprints so
+            # declarative secret rotations invalidate the cached expanded value
+            # even when config.yaml itself did not change. Keep the old 3-tuple
+            # shape compatible for already-running processes with pre-upgrade
+            # cache entries.
+            if len(cached) == 4:
+                cached_secret_fp = cached[2]
+                cached_config = cached[3]
+                current_secret_fp = _secret_paths_fingerprint(
+                    path for path, _, _ in cached_secret_fp
+                )
+                if current_secret_fp == cached_secret_fp:
+                    return copy.deepcopy(cached_config) if want_deepcopy else cached_config
+            else:
+                return copy.deepcopy(cached[2]) if want_deepcopy else cached[2]
 
         config = copy.deepcopy(DEFAULT_CONFIG)
 
@@ -5168,15 +5275,18 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 _warn_config_parse_failure(config_path, e)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-        expanded = _expand_env_vars(normalized)
+        secret_ref_fp = _secret_ref_fingerprint(normalized)
+        expanded = _expand_config_refs(normalized)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_key is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
             # (deepcopy=True) callers can mutate freely without affecting the
             # cached value, and ``load_config_readonly()`` (deepcopy=False)
-            # callers all see the same stable cached object.
+            # callers all see the same stable cached object. Secret-file refs
+            # participate in cache invalidation because the secret contents can
+            # rotate without config.yaml changing.
             cached_copy = copy.deepcopy(expanded)
-            _LOAD_CONFIG_CACHE[path_key] = (cache_key[0], cache_key[1], cached_copy)
+            _LOAD_CONFIG_CACHE[path_key] = (cache_key[0], cache_key[1], secret_ref_fp, cached_copy)
             # On the readonly path return the same cached object subsequent
             # calls will see — keeps "two readonly calls return the same
             # object" invariant that callers may rely on for identity checks.
