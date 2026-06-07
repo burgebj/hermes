@@ -1,0 +1,5 @@
+name: neosantara-provider
+kind: model-provider
+version: 1.0.0
+description: Neosantara - AI Gateway Indonesia
+author: Neosantara
