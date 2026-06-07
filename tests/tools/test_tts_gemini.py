@@ -2,6 +2,7 @@
 
 import base64
 import struct
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -254,6 +255,43 @@ class TestGenerateGeminiTts:
             _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), {})
 
         assert mock_post.call_args[0][0].startswith("https://custom-gemini.example.com/v1beta/")
+
+    def test_ogg_output_uses_telegram_voice_opus_args(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_gemini_response,
+    ):
+        from tools import tts_tool
+        from tools.tts_tool import _generate_gemini_tts
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return types.SimpleNamespace(returncode=0, stderr=b"")
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(tts_tool.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(tts_tool.subprocess, "run", fake_run)
+
+        output_path = str(tmp_path / "speech.ogg")
+        with patch("requests.post", return_value=mock_gemini_response):
+            assert _generate_gemini_tts("Hi", output_path, {}) == output_path
+
+        cmd = captured["cmd"]
+        assert cmd[0] == "/usr/bin/ffmpeg"
+        assert cmd[-1] == output_path
+        assert cmd == tts_tool._telegram_voice_opus_cmd(
+            "/usr/bin/ffmpeg",
+            cmd[cmd.index("-i") + 1],
+            output_path,
+        )
+        assert cmd[cmd.index("-vbr") + 1] == "on"
+        assert cmd[cmd.index("-application") + 1] == "voip"
+        assert cmd[cmd.index("-compression_level") + 1] == "10"
+        assert captured["kwargs"]["timeout"] == 30
 
 
 class TestGeminiInCheckRequirements:
