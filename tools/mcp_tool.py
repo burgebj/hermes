@@ -1911,21 +1911,28 @@ class MCPServerTask:
 
                 retries += 1
                 if retries > _MAX_RECONNECT_RETRIES:
+                    if retries == _MAX_RECONNECT_RETRIES + 1:
+                        logger.warning(
+                            "MCP server '%s' failed after %d fast reconnection attempts, "
+                            "dropping into slow background retry loop (%.0fs): %s",
+                            self.name, _MAX_RECONNECT_RETRIES, _MAX_BACKOFF_SECONDS, exc,
+                        )
+                    else:
+                        logger.debug(
+                            "MCP server '%s' slow background retry failed: %s",
+                            self.name, exc,
+                        )
+                    backoff = _MAX_BACKOFF_SECONDS
+                else:
                     logger.warning(
-                        "MCP server '%s' failed after %d reconnection attempts, "
-                        "giving up: %s",
-                        self.name, _MAX_RECONNECT_RETRIES, exc,
+                        "MCP server '%s' connection lost (attempt %d/%d), "
+                        "reconnecting in %.0fs: %s",
+                        self.name, retries, _MAX_RECONNECT_RETRIES,
+                        backoff, exc,
                     )
-                    return
+                    backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
-                logger.warning(
-                    "MCP server '%s' connection lost (attempt %d/%d), "
-                    "reconnecting in %.0fs: %s",
-                    self.name, retries, _MAX_RECONNECT_RETRIES,
-                    backoff, exc,
-                )
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                 # Check again after sleeping
                 if self._shutdown_event.is_set():
