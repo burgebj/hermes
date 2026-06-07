@@ -471,6 +471,11 @@ export const en: Translations = {
       change: 'Change',
       autoUseMain: 'auto · use main model',
       providerDefault: '(provider default)',
+      customModelPlaceholder: 'Type a model ID...',
+      customModelHint: 'Type any model ID your provider supports, even if it\'s not listed.',
+      addModel: 'Add model',
+      customBadge: 'custom',
+      removeCustomModel: 'Remove custom model',
       tasks: {
         vision: { label: 'Vision', hint: 'Image analysis' },
         web_extract: { label: 'Web extract', hint: 'Page summarization' },
@@ -1382,7 +1387,10 @@ export const en: Translations = {
     proNeedsSubscription: 'Pro models need a paid Nous subscription.',
     free: 'Free',
     freeTier: 'Free tier',
-    priceTitle: 'Input / Output price per million tokens'
+    priceTitle: 'Input / Output price per million tokens',
+    customModel: 'Custom model',
+    customModelPlaceholder: 'provider/model-id or model-id',
+    useCustomModel: 'Use custom model'
   },
 
   modelVisibility: {

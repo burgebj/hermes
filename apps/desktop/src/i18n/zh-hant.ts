@@ -591,6 +591,11 @@ export const zhHant = defineLocale({
       change: '變更',
       autoUseMain: '自動 · 使用主要模型',
       providerDefault: '(提供方預設)',
+      customModelPlaceholder: 'Type a model ID...',
+      customModelHint: 'Type any model ID your provider supports, even if it\'s not listed.',
+      addModel: 'Add model',
+      customBadge: 'custom',
+      removeCustomModel: 'Remove custom model',
       tasks: {
         vision: { label: '視覺', hint: '圖片分析' },
         web_extract: { label: '網頁擷取', hint: '頁面摘要' },
@@ -1486,7 +1491,10 @@ export const zhHant = defineLocale({
     proNeedsSubscription: 'Pro 模型需要付費 Nous 訂閱。',
     free: '免費',
     freeTier: '免費層',
-    priceTitle: '每百萬 Token 的輸入/輸出價格'
+    priceTitle: '每百萬 Token 的輸入/輸出價格',
+    customModel: 'Custom model',
+    customModelPlaceholder: 'provider/model-id or model-id',
+    useCustomModel: 'Use custom model',
   },
 
   modelVisibility: {

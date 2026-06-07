@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -13,8 +14,9 @@ import {
 } from '@/hermes'
 import type { AuxiliaryModelsResponse, ModelOptionProvider, StaleAuxAssignment } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { AlertTriangle, Cpu, Loader2 } from '@/lib/icons'
+import { AlertTriangle, Cpu, Loader2, Plus, X } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { $customModels, addCustomModel, removeCustomModel } from '@/store/custom-models'
 import { startManualProviderOAuth } from '@/store/onboarding'
 
 import { CONTROL_TEXT } from './constants'
@@ -107,6 +109,9 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   // place — mirrors the onboarding ApiKeyForm but scoped to the model picker.
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   const [activating, setActivating] = useState(false)
+  const [addingModel, setAddingModel] = useState(false)
+  const [newModelDraft, setNewModelDraft] = useState('')
+  const customModels = useStore($customModels)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -142,7 +147,24 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     [providers, selectedProvider]
   )
 
-  const selectedProviderModels = selectedProviderRow?.models ?? []
+  const selectedProviderModels = useMemo(() => {
+    const backend = selectedProviderRow?.models ?? []
+    const custom = customModels.filter(m => m.provider === selectedProvider).map(m => m.model)
+    const merged = [...backend]
+
+    for (const m of custom) {
+      if (!merged.includes(m)) {
+        merged.push(m)
+      }
+    }
+
+    return merged
+  }, [selectedProviderRow, selectedProvider, customModels])
+
+  const customModelsForProvider = useMemo(
+    () => new Set(customModels.filter(m => m.provider === selectedProvider).map(m => m.model)),
+    [selectedProvider, customModels]
+  )
 
   // An unconfigured provider was picked: no credentials yet, so there are no
   // models to choose. `api_key` providers can be activated inline (paste key);
@@ -155,10 +177,19 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     setApiKeyDraft('')
   }, [selectedProvider])
 
-  const auxDraftProviderModels = useMemo(
-    () => providers.find(provider => provider.slug === auxDraft.provider)?.models ?? [],
-    [auxDraft.provider, providers]
-  )
+  const auxDraftProviderModels = useMemo(() => {
+    const backend = providers.find(provider => provider.slug === auxDraft.provider)?.models ?? []
+    const custom = customModels.filter(m => m.provider === auxDraft.provider).map(m => m.model)
+    const merged = [...backend]
+
+    for (const m of custom) {
+      if (!merged.includes(m)) {
+        merged.push(m)
+      }
+    }
+
+    return merged
+  }, [auxDraft.provider, providers, customModels])
 
   const auxiliaryTaskLabel = useCallback((key: string) => m.tasks[key]?.label ?? key, [m.tasks])
 
@@ -342,9 +373,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   return (
     <div className="grid gap-6">
       <section>
-        <p className="mb-3 text-xs text-muted-foreground">
-          {m.appliesDesc}
-        </p>
+        <p className="mb-3 text-xs text-muted-foreground">{m.appliesDesc}</p>
         <div className="flex flex-wrap items-center gap-2">
           <Select onValueChange={setSelectedProvider} value={selectedProvider}>
             <SelectTrigger className={cn('min-w-40', CONTROL_TEXT)}>
@@ -397,7 +426,14 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                 <SelectContent>
                   {(selectedProviderModels.length ? selectedProviderModels : []).map(model => (
                     <SelectItem key={model} value={model}>
-                      {model}
+                      <span className="flex items-center gap-1.5">
+                        {model}
+                        {customModelsForProvider.has(model) && (
+                          <span className="rounded bg-muted px-1 py-0.5 text-[0.6rem] text-muted-foreground">
+                            {m.customBadge}
+                          </span>
+                        )}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -410,9 +446,84 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                 {applying && <Loader2 className="size-3.5 animate-spin" />}
                 {applying ? m.applying : t.common.apply}
               </Button>
+              <Button onClick={() => setAddingModel(true)} size="sm" title={m.addModel} variant="ghost">
+                <Plus className="size-3.5" />
+              </Button>
             </>
           )}
         </div>
+        {addingModel && !needsSetup && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Input
+              autoComplete="off"
+              autoFocus
+              className={cn('min-w-60 flex-1', CONTROL_TEXT)}
+              onChange={event => setNewModelDraft(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter' && newModelDraft.trim() && selectedProvider) {
+                  addCustomModel(selectedProvider, newModelDraft.trim())
+                  setSelectedModel(newModelDraft.trim())
+                  setNewModelDraft('')
+                  setAddingModel(false)
+                } else if (event.key === 'Escape') {
+                  setNewModelDraft('')
+                  setAddingModel(false)
+                }
+              }}
+              placeholder={m.customModelPlaceholder}
+              value={newModelDraft}
+            />
+            <Button
+              disabled={!newModelDraft.trim() || !selectedProvider}
+              onClick={() => {
+                addCustomModel(selectedProvider, newModelDraft.trim())
+                setSelectedModel(newModelDraft.trim())
+                setNewModelDraft('')
+                setAddingModel(false)
+              }}
+              size="sm"
+            >
+              {m.addModel}
+            </Button>
+            <Button
+              onClick={() => {
+                setNewModelDraft('')
+                setAddingModel(false)
+              }}
+              size="sm"
+              variant="ghost"
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+        )}
+        {addingModel && !needsSetup && <p className="mt-1 text-xs text-muted-foreground">{m.customModelHint}</p>}
+        {customModelsForProvider.size > 0 && !needsSetup && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {[...customModelsForProvider].map(model => (
+              <span
+                className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[0.68rem] text-muted-foreground"
+                key={model}
+              >
+                {model}
+                <button
+                  className="inline-flex rounded-sm p-0.5 hover:bg-destructive/20 hover:text-destructive"
+                  onClick={() => {
+                    removeCustomModel(selectedProvider, model)
+
+                    if (selectedModel === model) {
+                      setSelectedModel('')
+                    }
+                  }}
+                  title={m.removeCustomModel}
+                  type="button"
+                >
+                  <X className="size-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {needsSetup && !setupIsApiKey && (
           <p className="mt-2 text-xs text-muted-foreground">
             {selectedProviderRow?.auth_type === 'api_key'
@@ -445,9 +556,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             {m.resetAllToMain}
           </Button>
         </div>
-        <p className="mb-2 text-xs text-muted-foreground">
-          {m.auxiliaryDesc}
-        </p>
+        <p className="mb-2 text-xs text-muted-foreground">{m.auxiliaryDesc}</p>
         {switchStaleAux.length === 0 && persistentStaleAux.length > 0 && (
           <div className="mb-2.5">
             <StaleAuxWarning
@@ -537,9 +646,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                 }
                 description={
                   <span className="font-mono text-[0.68rem]">
-                    {isAuto
-                      ? m.autoUseMain
-                      : `${current.provider} · ${current.model || m.providerDefault}`}
+                    {isAuto ? m.autoUseMain : `${current.provider} · ${current.model || m.providerDefault}`}
                   </span>
                 }
                 key={meta.key}
