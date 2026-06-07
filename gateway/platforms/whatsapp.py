@@ -655,9 +655,20 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Build bridge subprocess environment.
             # Pass WHATSAPP_REPLY_PREFIX from config.yaml so the Node bridge
             # can use it without the user needing to set a separate env var.
-            bridge_env = os.environ.copy()
+            from tools.environments.local import (
+                _HERMES_PROVIDER_ENV_FORCE_PREFIX,
+                _sanitize_subprocess_env,
+            )
+
+            bridge_extra_env = {}
             if self._reply_prefix is not None:
-                bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
+                bridge_extra_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
+            allowed_users = os.getenv("WHATSAPP_ALLOWED_USERS")
+            if allowed_users is not None:
+                bridge_extra_env[
+                    f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}WHATSAPP_ALLOWED_USERS"
+                ] = allowed_users
+            bridge_env = _sanitize_subprocess_env(os.environ, bridge_extra_env)
 
             self._bridge_process = subprocess.Popen(
                 [

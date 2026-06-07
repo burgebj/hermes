@@ -13,6 +13,7 @@ Regression tests for two bugs in WhatsAppAdapter.connect():
 """
 
 import asyncio
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -189,6 +190,40 @@ class TestDataInitialized:
 
 class TestFileHandleClosedOnError:
     """Verify the bridge log file handle is closed on every failure path."""
+
+    @pytest.mark.asyncio
+    async def test_bridge_env_scrubs_operator_credentials(self, monkeypatch):
+        """Bridge subprocess gets required config, not parent credentials."""
+        adapter = _make_adapter()
+        adapter._reply_prefix = "Hermes:"
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-whatsapp-bridge-secret")
+        monkeypatch.setenv("GATEWAY_ALLOWED_USERS", "attacker")
+        monkeypatch.setenv("WHATSAPP_ALLOWED_USERS", "+15555550123")
+        monkeypatch.setenv("MODAL_TOKEN_SECRET", "modal-secret")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        mock_proc.returncode = 1
+        mock_fh = MagicMock()
+        mock_client_cls = _mock_aiohttp(status=503, json_data={})
+        patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
+
+        with ExitStack() as stack:
+            for item in (*patches[:4], *patches[5:]):
+                stack.enter_context(item)
+            popen = stack.enter_context(patch("subprocess.Popen", return_value=mock_proc))
+            result = await adapter.connect()
+
+        assert result is False
+        bridge_env = popen.call_args.kwargs["env"]
+        assert bridge_env["WHATSAPP_REPLY_PREFIX"] == "Hermes:"
+        assert bridge_env["PATH"] == "/usr/bin"
+        assert "OPENAI_API_KEY" not in bridge_env
+        assert bridge_env["WHATSAPP_ALLOWED_USERS"] == "+15555550123"
+        assert "GATEWAY_ALLOWED_USERS" not in bridge_env
+        assert "MODAL_TOKEN_SECRET" not in bridge_env
 
     @pytest.mark.asyncio
     async def test_closed_when_bridge_dies_phase1(self):
