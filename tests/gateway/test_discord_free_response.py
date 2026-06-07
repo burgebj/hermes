@@ -927,3 +927,32 @@ async def test_discord_auto_thread_skips_backfill(adapter, monkeypatch):
     adapter._fetch_channel_context.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_discord_require_mention_logs_info_on_drop(adapter, monkeypatch, caplog):
+    """When require_mention drops a message, log at INFO level with actionable guidance."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+
+    message = make_message(channel=FakeTextChannel(channel_id=123, name="general"), content="hello")
+
+    import logging
+    with caplog.at_level(logging.INFO, logger="plugins.platforms.discord.adapter"):
+        await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
+    assert any("Dropping message" in r.message and "require_mention=true" in r.message for r in caplog.records), \
+        f"Expected INFO log about require_mention drop, got: {[r.message for r in caplog.records]}"
+
+
+def test_apply_yaml_config_warns_on_empty_discord_cfg(caplog):
+    """When discord_cfg is empty (no explicit discord: block), warn at startup."""
+    import logging
+    from plugins.platforms.discord.adapter import _apply_yaml_config
+
+    with caplog.at_level(logging.WARNING, logger="plugins.platforms.discord.adapter"):
+        _apply_yaml_config({}, {})
+
+    assert any("no explicit 'discord:' config block" in r.message for r in caplog.records), \
+        f"Expected WARNING about missing discord config, got: {[r.message for r in caplog.records]}"
+
+

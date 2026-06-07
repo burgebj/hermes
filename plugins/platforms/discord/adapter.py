@@ -4793,6 +4793,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions and not mention_prefix:
+                    logger.info(
+                        "[%s] Dropping message in #%s (require_mention=true, no @mention). "
+                        "Set discord.require_mention: false or add channel to "
+                        "discord.free_response_channels to override.",
+                        self.name,
+                        getattr(message.channel, "name", message.channel.id),
+                    )
                     return
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
@@ -6382,6 +6389,13 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     update.  Returns ``None`` because no extras are seeded into
     ``PlatformConfig.extra`` directly (everything flows through env).
     """
+    if not discord_cfg:
+        logger.warning(
+            "Discord profile has no explicit 'discord:' config block — using "
+            "plugin defaults (require_mention=true, auto_thread=true). "
+            "Add a 'discord:' section to config.yaml to override. "
+            "See https://docs.hermes.agent/platforms/discord for options."
+        )
     if "require_mention" in discord_cfg and not os.getenv("DISCORD_REQUIRE_MENTION"):
         os.environ["DISCORD_REQUIRE_MENTION"] = str(discord_cfg["require_mention"]).lower()
     if "thread_require_mention" in discord_cfg and not os.getenv("DISCORD_THREAD_REQUIRE_MENTION"):
