@@ -225,7 +225,7 @@ OpenClaw 配置中 token 和 API 密钥的值支持三种格式：
 
 5. **测试消息平台** — 若迁移了平台 token，重启 gateway：`systemctl --user restart hermes-gateway`
 
-6. **检查会话策略** — 验证 `hermes config get session_reset` 是否符合预期。
+6. **检查会话策略** — 运行 `hermes config show` 并确认 `session_reset` 设置符合预期。
 
 7. **重新配对 WhatsApp** — WhatsApp 使用二维码配对（Baileys），不支持 token 迁移。运行 `hermes whatsapp` 进行配对。
 

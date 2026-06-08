@@ -161,8 +161,8 @@ metadata:
 # 对特定 skill 进行交互式配置
 hermes skills config gif-search
 
-# 查看所有 skill 配置
-hermes config get skills.config
+# 查看完整配置并定位 skill 配置
+hermes config show | grep -A20 '^skills:'
 ```
 
 ---
