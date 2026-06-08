@@ -1,94 +1,89 @@
-"""Tests for the auto-continue feature (#4493).
+"""Tests for strict gateway auto-continue resume-marker behavior.
 
-When the gateway restarts mid-agent-work, the session transcript ends on a
-tool result that the agent never processed.  The auto-continue logic detects
-this and prepends a system note to the next user message so the model
-finishes the interrupted work before addressing the new input.
+A trailing tool result alone is not sufficient to auto-continue gateway work.
+Only sessions explicitly marked ``resume_pending`` by gateway restart/shutdown
+recovery should receive the restart-resume system note.
 """
 
+from datetime import datetime
+
+from gateway.run import _is_fresh_gateway_interruption
+from gateway.session import SessionEntry
 
 
-def _simulate_auto_continue(agent_history: list, user_message: str) -> str:
-    """Reproduce the auto-continue injection logic from _run_agent().
-
-    This mirrors the exact code in gateway/run.py so we can test the
-    detection and message transformation without spinning up a full
-    gateway runner.
-    """
-    message = user_message
-    if agent_history and agent_history[-1].get("role") == "tool":
-        message = (
-            "[System note: Your previous turn was interrupted before you could "
-            "process the last tool result(s). The conversation history contains "
-            "tool outputs you haven't responded to yet. Please finish processing "
-            "those results and summarize what was accomplished, then address the "
-            "user's new message below.]\n\n"
-            + message
+def _simulate_strict_auto_continue(
+    *,
+    resume_entry: SessionEntry | None,
+    user_message: str,
+    window_secs: float = 3600,
+) -> str:
+    """Reproduce the strict resume-marker predicate from gateway/run.py."""
+    has_resume_pending = bool(
+        resume_entry is not None
+        and getattr(resume_entry, "resume_pending", False)
+    )
+    marker_is_fresh = (
+        _is_fresh_gateway_interruption(
+            getattr(resume_entry, "last_resume_marked_at", None),
+            window_secs=window_secs,
         )
-    return message
+        if has_resume_pending
+        else False
+    )
+    if has_resume_pending and marker_is_fresh:
+        return (
+            "[System note: Your previous turn in this session was interrupted "
+            "by a gateway restart. The conversation history below is intact. "
+            "If it contains unfinished tool result(s), process them first and "
+            "summarize what was accomplished, then address the user's new "
+            "message below.]\n\n"
+            + user_message
+        )
+    return user_message
 
 
-class TestAutoDetection:
-    """Test that trailing tool results are correctly detected."""
+def _pending_entry(*, marked_at=None) -> SessionEntry:
+    now = datetime.now()
+    return SessionEntry(
+        session_key="agent:main:telegram:dm:1",
+        session_id="sid",
+        created_at=now,
+        updated_at=now,
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=marked_at if marked_at is not None else now,
+    )
 
-    def test_trailing_tool_result_triggers_note(self):
-        history = [
-            {"role": "user", "content": "deploy the app"},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "call_1", "function": {"name": "terminal", "arguments": "{}"}}
-            ]},
-            {"role": "tool", "tool_call_id": "call_1", "content": "deployed successfully"},
-        ]
-        result = _simulate_auto_continue(history, "what happened?")
+
+class TestStrictResumeMarker:
+    def test_trailing_tool_result_without_marker_does_not_trigger_note(self):
+        result = _simulate_strict_auto_continue(
+            resume_entry=None,
+            user_message="what happened?",
+        )
+        assert result == "what happened?"
+
+    def test_explicit_resume_marker_triggers_note(self):
+        result = _simulate_strict_auto_continue(
+            resume_entry=_pending_entry(),
+            user_message="what happened?",
+        )
         assert "[System note:" in result
-        assert "interrupted" in result
-        assert "what happened?" in result
+        assert "gateway restart" in result
+        assert result.endswith("what happened?")
 
-    def test_trailing_assistant_message_no_note(self):
-        history = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "Hi there!"},
-        ]
-        result = _simulate_auto_continue(history, "how are you?")
-        assert "[System note:" not in result
-        assert result == "how are you?"
+    def test_pending_entry_without_marker_timestamp_fails_closed(self):
+        entry = _pending_entry()
+        entry.last_resume_marked_at = None
+        result = _simulate_strict_auto_continue(
+            resume_entry=entry,
+            user_message="start new work",
+        )
+        assert result == "start new work"
 
-    def test_empty_history_no_note(self):
-        result = _simulate_auto_continue([], "hello")
+    def test_empty_history_no_note_without_marker(self):
+        result = _simulate_strict_auto_continue(
+            resume_entry=None,
+            user_message="hello",
+        )
         assert result == "hello"
-
-    def test_trailing_user_message_no_note(self):
-        """Shouldn't happen in practice, but ensure no false positive."""
-        history = [
-            {"role": "user", "content": "hello"},
-        ]
-        result = _simulate_auto_continue(history, "hello again")
-        assert result == "hello again"
-
-    def test_multiple_tool_results_still_triggers(self):
-        """Multiple tool calls in a row — last one is still role=tool."""
-        history = [
-            {"role": "user", "content": "search and read"},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "call_1", "function": {"name": "search", "arguments": "{}"}},
-                {"id": "call_2", "function": {"name": "read", "arguments": "{}"}},
-            ]},
-            {"role": "tool", "tool_call_id": "call_1", "content": "found it"},
-            {"role": "tool", "tool_call_id": "call_2", "content": "file content here"},
-        ]
-        result = _simulate_auto_continue(history, "continue")
-        assert "[System note:" in result
-
-    def test_original_message_preserved_after_note(self):
-        """The user's actual message must appear after the system note."""
-        history = [
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c1", "function": {"name": "t", "arguments": "{}"}}
-            ]},
-            {"role": "tool", "tool_call_id": "c1", "content": "done"},
-        ]
-        result = _simulate_auto_continue(history, "now do X")
-        # System note comes first, then user's message
-        note_end = result.index("]\n\n")
-        user_msg_start = result.index("now do X")
-        assert user_msg_start > note_end

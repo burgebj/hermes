@@ -367,18 +367,13 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
     return _TELEGRAM_COMMAND_MENTION_RE.sub(_replace, text)
 
 
-# Only auto-continue interrupted gateway turns while the interruption is fresh.
-# Stale tool-tail/resume markers can otherwise revive an unrelated old task
-# after a gateway restart when the user's next message starts new work.
-#
-# The freshness signal is the timestamp of the last transcript row, which
-# ``hermes_state.get_messages`` carries on every persisted message.  This
-# handles the two auto-continue cases uniformly:
-#   * resume_pending (gateway restart/shutdown watchdog marked the session)
-#   * tool-tail     (last persisted message is a tool result the agent
-#                    never got to reply to)
-# In both cases "when did we last do anything on this transcript" is the
-# correct freshness question, so one signal replaces two divergent ones.
+# Only auto-continue gateway work that was explicitly marked as interrupted.
+# The trusted recovery signal is SessionEntry.last_resume_marked_at, written
+# by SessionStore.mark_resume_pending() for sessions still present in
+# GatewayRunner._running_agents after the restart/shutdown drain timeout.
+# Transcript shape (especially a trailing tool result) is intentionally NOT a
+# recovery signal: long-lived sessions can retain old unfinished history that
+# must not be revived by a later gateway restart.
 #
 # Default window: 1 hour.  This comfortably covers ``agent.gateway_timeout``
 # (30 min default) plus runtime slack — a legitimate long-running turn that
@@ -391,8 +386,9 @@ _AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT = 60 * 60
 def _coerce_gateway_timestamp(value: Any) -> Optional[float]:
     """Best-effort conversion of stored gateway timestamps to epoch seconds.
 
-    Missing/unparseable timestamps return None so legacy transcripts keep the
-    historical auto-continue behaviour instead of being silently dropped.
+    Missing/unparseable timestamps return None.  Callers that gate automatic
+    resume must treat None as stale/fail-closed unless they have an explicit
+    compatibility reason not to.
     Accepts: datetime, epoch seconds (int/float), epoch milliseconds (when
     the magnitude exceeds year-2286), ISO-8601 strings (with or without a
     trailing ``Z``), and numeric strings.
@@ -428,9 +424,8 @@ def _auto_continue_freshness_window() -> float:
     Reads ``HERMES_AUTO_CONTINUE_FRESHNESS`` (bridged from
     ``config.yaml`` ``agent.gateway_auto_continue_freshness`` at gateway
     startup, same pattern as ``HERMES_AGENT_TIMEOUT``).  Falls back to the
-    module default when unset or malformed.  Non-positive values disable
-    the freshness gate (restores the pre-fix "always fresh" behaviour for
-    users who want to opt out).
+    module default when unset or malformed.  Non-positive values disable only
+    the marker age gate; a session still needs an explicit resume marker.
     """
     raw = os.environ.get("HERMES_AUTO_CONTINUE_FRESHNESS")
     if raw is None or raw == "":
@@ -464,22 +459,22 @@ def _is_fresh_gateway_interruption(
 ) -> bool:
     """Return True when an interruption marker is fresh enough to auto-continue.
 
-    Unknown timestamps are treated as fresh for backward compatibility with
-    legacy transcripts (pre-dating timestamp persistence) and with in-memory
-    test scaffolding that constructs history entries without timestamps.
+    Unknown timestamps are treated as stale.  This is deliberate fail-closed
+    behaviour: if the gateway cannot prove when it explicitly marked a
+    running session as interrupted, it must not auto-continue old work.
 
-    A non-positive ``window_secs`` disables the gate (always fresh), which
-    restores the pre-fix behaviour for users who opt out via config.
+    A non-positive ``window_secs`` disables the age gate, but not the explicit
+    marker requirement; malformed/missing marker timestamps still fail closed.
     """
+    timestamp = _coerce_gateway_timestamp(value)
+    if timestamp is None:
+        return False
     window = (
         float(window_secs)
         if window_secs is not None
         else float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
     )
     if window <= 0:
-        return True
-    timestamp = _coerce_gateway_timestamp(value)
-    if timestamp is None:
         return True
     current = time.time() if now is None else now
     return current - timestamp <= window
@@ -663,9 +658,9 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
     """Return the ``timestamp`` of the last usable transcript row, if any.
 
     Skips metadata-only rows (``session_meta``, system injections) that are
-    dropped before being handed to the agent.  Returns ``None`` when no
-    usable row carries a timestamp — callers should treat that as "fresh"
-    for backward compatibility.
+    dropped before being handed to the agent.  This helper is intentionally
+    not used as an automatic-resume signal; transcript recency is not proof
+    that a gateway restart interrupted the current turn.
     """
     if not history:
         return None
@@ -4264,8 +4259,11 @@ class GatewayRunner:
         now = datetime.now()
         scheduled = 0
         for entry in candidates:
-            marker = entry.last_resume_marked_at or entry.updated_at
-            if marker is not None and (now - marker).total_seconds() > window:
+            if not _is_fresh_gateway_interruption(
+                entry.last_resume_marked_at,
+                now=now.timestamp(),
+                window_secs=window,
+            ):
                 continue
 
             # Already being resumed (e.g. scheduled at startup and still
@@ -18373,50 +18371,48 @@ class GatewayRunner:
             if _msn:
                 message = _msn + "\n\n" + message
 
-            # Auto-continue: if the loaded history ends with a tool result,
-            # the previous agent turn was interrupted mid-work (gateway
-            # restart, crash, SIGTERM).  Prepend a system note so the model
-            # finishes processing the pending tool results before addressing
-            # the user's new message.  (#4493)
+            # Auto-continue: only a session explicitly marked resume_pending
+            # by gateway restart/shutdown drain handling can prepend a system
+            # note that asks the model to finish interrupted work before
+            # addressing the user's new message.
             #
-            # Session-level resume_pending (set on drain-timeout shutdown)
-            # escalates the wording — the transcript's last role may be
-            # anything (tool, assistant with unfinished work, etc.), so we
-            # give a stronger, reason-aware instruction that subsumes the
-            # tool-tail case.
+            # Only a session-level resume_pending marker set by the gateway
+            # restart/shutdown watchdog is allowed to auto-continue, and even
+            # that marker must be fresh.  A bare tool tail remains in history
+            # for context, but no longer overrides the user's new message.
             #
-            # Freshness gate (#16802): both branches are gated on the age
-            # of the last persisted transcript row.  That is the correct
-            # "when did we last do anything here" signal for both the
-            # resume_pending path (restart watchdog) and the tool-tail
-            # path (in-flight tool loop killed).  We read ``history[-1]``
-            # here because ``agent_history`` has already stripped the
-            # ``timestamp`` field off tool/tool_call rows for API purity
-            # (see the `k != "timestamp"` filter above).  Rows without a
-            # timestamp (legacy transcripts) are treated as fresh so the
-            # historical auto-continue behaviour is preserved.
+            # Freshness reads the explicit marker timestamp written by
+            # SessionStore.mark_resume_pending().  Do not use transcript
+            # timestamps here: a long-lived chat can contain old tool-tail or
+            # abandoned work that should not become the restart recovery target.
             _freshness_window = _auto_continue_freshness_window()
-            _interruption_is_fresh = _is_fresh_gateway_interruption(
-                _last_transcript_timestamp(history),
-                window_secs=_freshness_window,
-            )
-
             _resume_entry = None
             if session_key:
                 try:
                     _resume_entry = self.session_store._entries.get(session_key)
                 except Exception:
                     _resume_entry = None
-            _is_resume_pending = bool(
+            _has_resume_pending = bool(
                 _resume_entry is not None
                 and getattr(_resume_entry, "resume_pending", False)
-                and _interruption_is_fresh
             )
-            _has_fresh_tool_tail = bool(
-                agent_history
-                and agent_history[-1].get("role") == "tool"
-                and _interruption_is_fresh
+            _resume_marker_is_fresh = (
+                _is_fresh_gateway_interruption(
+                    getattr(_resume_entry, "last_resume_marked_at", None),
+                    window_secs=_freshness_window,
+                )
+                if _has_resume_pending
+                else False
             )
+            if _has_resume_pending and not _resume_marker_is_fresh and session_key:
+                try:
+                    self.session_store.clear_resume_pending(session_key)
+                except Exception as _e:
+                    logger.debug(
+                        "clear stale resume_pending failed for %s: %s",
+                        session_key[:20], _e,
+                    )
+            _is_resume_pending = _has_resume_pending and _resume_marker_is_fresh
 
             if _is_resume_pending:
                 _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
@@ -18435,16 +18431,6 @@ class GatewayRunner:
                     f"message below.]\n\n"
                     + message
                 )
-            elif _has_fresh_tool_tail:
-                message = (
-                    "[System note: Your previous turn was interrupted before you could "
-                    "process the last tool result(s). The conversation history contains "
-                    "tool outputs you haven't responded to yet. Please finish processing "
-                    "those results and summarize what was accomplished, then address the "
-                    "user's new message below.]\n\n"
-                    + message
-                )
-
             # Consume one-shot /reload-skills note (if the user ran
             # /reload-skills since their last turn in this session). Same
             # queue pattern as CLI: prepend to the NEXT user message, then

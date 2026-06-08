@@ -878,18 +878,19 @@ DEFAULT_CONFIG = {
         # bot is dead and /restart.
         "gateway_notify_interval": 180,
         # Freshness window for the gateway auto-continue note (seconds).
-        # After a gateway crash/restart/SIGTERM mid-run, the next user
-        # message gets a "[System note: your previous turn was
+        # After a gateway restart/SIGTERM mid-run, sessions explicitly
+        # marked resume_pending get a "[System note: your previous turn was
         # interrupted — process the unfinished tool result(s) first]"
         # prepended so the model picks up where it left off.  That's the
-        # right behaviour while the interruption is fresh, but stale
-        # markers (transcript last touched hours or days ago) can revive
-        # an unrelated old task when the user's next message starts new
-        # work.  This window is the max age of the last persisted
-        # transcript row for which we still inject the continue note.
-        # Default 3600s comfortably covers a long turn (gateway_timeout
-        # default is 1800s) plus runtime slack.  Set to 0 to disable the
-        # gate and restore pre-fix behaviour (always inject).
+        # right behaviour while the marker is fresh, but stale markers can
+        # revive an unrelated old task when the user's next message starts
+        # new work.  This window is the max age of the explicit
+        # last_resume_marked_at marker for which we still inject the
+        # continue note.  A bare trailing tool result is not a resume
+        # marker.  Default 3600s comfortably covers a long turn
+        # (gateway_timeout default is 1800s) plus runtime slack.  Set to 0
+        # to disable only the marker age gate; an explicit marker is still
+        # required.
         "gateway_auto_continue_freshness": 3600,
         # How user-attached images are presented to the main model on each turn.
         #   "auto"   — attach natively when the active model reports
