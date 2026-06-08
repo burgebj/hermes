@@ -884,6 +884,11 @@ class ProcessRegistry:
                 "command": session.command,
                 "exit_code": session.exit_code,
                 "output": output_tail,
+                "platform": session.watcher_platform,
+                "chat_id": session.watcher_chat_id,
+                "user_id": session.watcher_user_id,
+                "user_name": session.watcher_user_name,
+                "thread_id": session.watcher_thread_id,
             })
 
     # ----- Query Methods -----
@@ -911,6 +916,11 @@ class ProcessRegistry:
             if text:
                 results.append((evt, text))
         return results
+
+    def mark_completion_consumed(self, session_id: str) -> None:
+        """Mark a completion notification as delivered/consumed."""
+        if session_id:
+            self._completion_consumed.add(session_id)
 
     def get(self, session_id: str) -> Optional[ProcessSession]:
         """Get a session by ID (running or finished)."""
