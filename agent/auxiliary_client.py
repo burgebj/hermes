@@ -4814,6 +4814,90 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Per-task concurrency limiting (#23324)
+# ---------------------------------------------------------------------------
+# Background auxiliary work (title generation, context compression, etc.) can
+# spawn unbounded concurrent LLM calls when many sessions are active.  During
+# provider incidents each call also retries / fans out across the fallback
+# chain, multiplying request volume on already-degraded endpoints.  A
+# per-task semaphore caps the in-flight calls so retry amplification stays
+# bounded.  Limits are read from ``auxiliary.<task>.max_concurrency`` in
+# config; absent / non-positive values mean "no limit" (legacy behavior).
+
+_aux_sync_semaphores: Dict[str, Tuple[int, threading.BoundedSemaphore]] = {}
+_aux_async_semaphores: Dict[Tuple[str, int], Tuple[int, Any]] = {}
+_aux_sem_lock = threading.Lock()
+
+
+def _get_task_max_concurrency(task: Optional[str]) -> Optional[int]:
+    """Return ``auxiliary.<task>.max_concurrency`` as a positive int, or None."""
+    if not task:
+        return None
+    task_config = _get_auxiliary_task_config(task)
+    raw = task_config.get("max_concurrency")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 1:
+        return None
+    return value
+
+
+def _acquire_sync_aux_semaphore(task: Optional[str]) -> Optional[threading.BoundedSemaphore]:
+    """Resolve the per-task sync semaphore, lazily creating it.
+
+    Returns ``None`` when no limit is configured; the caller then proceeds
+    unthrottled.  The semaphore is re-created when the configured limit
+    changes between calls so live config edits take effect.
+    """
+    limit = _get_task_max_concurrency(task)
+    if limit is None:
+        return None
+    with _aux_sem_lock:
+        entry = _aux_sync_semaphores.get(task)
+        if entry is None or entry[0] != limit:
+            sem = threading.BoundedSemaphore(limit)
+            _aux_sync_semaphores[task] = (limit, sem)
+            return sem
+        return entry[1]
+
+
+def _acquire_async_aux_semaphore(task: Optional[str]):
+    """Resolve the per-task async semaphore for the running event loop.
+
+    Returns ``None`` when no limit is configured or no loop is running.
+    asyncio semaphores are bound to their creating loop, so the cache is
+    keyed by ``(task, loop_id)``.
+    """
+    limit = _get_task_max_concurrency(task)
+    if limit is None:
+        return None
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    key = (task, id(loop))
+    with _aux_sem_lock:
+        entry = _aux_async_semaphores.get(key)
+        if entry is None or entry[0] != limit:
+            sem = asyncio.Semaphore(limit)
+            _aux_async_semaphores[key] = (limit, sem)
+            return sem
+        return entry[1]
+
+
+def _reset_aux_semaphores() -> None:
+    """Drop cached semaphores.  Test-only — production callers do not use this."""
+    with _aux_sem_lock:
+        _aux_sync_semaphores.clear()
+        _aux_async_semaphores.clear()
+
+
+# ---------------------------------------------------------------------------
 # Anthropic-compatible endpoint detection + image block conversion
 # ---------------------------------------------------------------------------
 
@@ -5077,6 +5161,45 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    sem = _acquire_sync_aux_semaphore(task)
+    if sem is not None:
+        sem.acquire()
+    try:
+        return _call_llm_impl(
+            task=task,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            main_runtime=main_runtime,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+    finally:
+        if sem is not None:
+            sem.release()
+
+
+def _call_llm_impl(
+    task: str = None,
+    *,
+    provider: str = None,
+    model: str = None,
+    base_url: str = None,
+    api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    messages: list,
+    temperature: float = None,
+    max_tokens: int = None,
+    tools: list = None,
+    timeout: float = None,
+    extra_body: dict = None,
+) -> Any:
+    """Inner implementation of ``call_llm`` — runs under the concurrency limit."""
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -5581,6 +5704,43 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
+    sem = _acquire_async_aux_semaphore(task)
+    if sem is not None:
+        await sem.acquire()
+    try:
+        return await _async_call_llm_impl(
+            task=task,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+    finally:
+        if sem is not None:
+            sem.release()
+
+
+async def _async_call_llm_impl(
+    task: str = None,
+    *,
+    provider: str = None,
+    model: str = None,
+    base_url: str = None,
+    api_key: str = None,
+    messages: list,
+    temperature: float = None,
+    max_tokens: int = None,
+    tools: list = None,
+    timeout: float = None,
+    extra_body: dict = None,
+) -> Any:
+    """Inner implementation of ``async_call_llm`` — runs under the concurrency limit."""
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
