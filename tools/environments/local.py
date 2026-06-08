@@ -39,6 +39,25 @@ def _msys_to_windows_path(cwd: str) -> str:
     return f"{drive}:{tail or chr(92)}"  # chr(92) = backslash, avoid raw-string escape
 
 
+def _windows_to_msys_path(cwd: str) -> str:
+    """Translate a native Windows path (``C:\\Users\\x``) to Git Bash / MSYS-style
+    POSIX form (``/c/Users/x``) so ``builtin cd`` inside bash can resolve it.
+
+    No-ops on non-Windows hosts or for paths that aren't in Windows form.
+    Returns the input unchanged when no translation applies. This is
+    idempotent — calling it on an already-MSYS path returns it as-is.
+    """
+    if not _IS_WINDOWS or not cwd:
+        return cwd
+    if len(cwd) >= 3 and cwd[1] == ":" and cwd[2] in "\\/":
+        drive = cwd[0].lower()
+        tail = cwd[3:].replace("\\", "/")
+        return f"/{drive}" + (f"/{tail}" if tail else "")
+    if cwd.startswith("\\\\") or cwd.startswith("//"):
+        return "//" + cwd.lstrip("\\/").replace("\\", "/")
+    return cwd
+
+
 def _resolve_safe_cwd(cwd: str) -> str:
     """Return ``cwd`` if it exists as a directory, else the nearest existing
     ancestor.  Falls back to ``tempfile.gettempdir()`` only if walking up the
@@ -495,6 +514,9 @@ class LocalEnvironment(BaseEnvironment):
             return candidate.rstrip("/") or "/"
 
         return "/tmp"
+
+    def _normalize_cwd_for_cd(self, cwd: str) -> str:
+        return _windows_to_msys_path(cwd)
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
