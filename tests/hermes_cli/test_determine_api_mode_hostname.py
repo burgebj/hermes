@@ -41,3 +41,42 @@ class TestAnthropicHostHardening:
         # proxies) expose the Anthropic protocol under a ``/anthropic`` suffix.
         # That convention must still resolve to anthropic_messages.
         assert determine_api_mode("", "https://api.minimax.io/anthropic") == "anthropic_messages"
+
+
+class TestKnownProviderHostHardening:
+    """The known-provider branch (``get_provider(provider) is not None``) must
+    apply the same hostname hardening as the unknown-provider branch. These
+    cases pass a REAL provider ("openai" → openrouter aggregator, transport
+    openai_chat) so ``get_provider`` returns non-None and the known-provider
+    branch — not the unknown one — decides the wire protocol.
+    """
+
+    def test_known_provider_native_openai_is_codex_responses(self):
+        assert determine_api_mode("openai", "https://api.openai.com/v1") == "codex_responses"
+
+    def test_known_provider_scheme_less_native_openai_is_codex_responses(self):
+        # base_url_hostname normalises scheme-less hosts (urlparse with a //
+        # prefix), so a scheme-less native endpoint still routes correctly —
+        # i.e. no regression vs the previous substring check for this input.
+        assert determine_api_mode("openai", "api.openai.com/v1") == "codex_responses"
+
+    def test_known_provider_openai_path_segment_falls_back_to_transport(self):
+        # A proxy whose path merely contains ``api.openai.com`` must not be
+        # misrouted to the OpenAI Responses protocol; it resolves to the
+        # provider transport default (openai_chat -> chat_completions).
+        assert (
+            determine_api_mode("openai", "https://gateway.example.test/api.openai.com/v1")
+            == "chat_completions"
+        )
+
+    def test_known_provider_openai_lookalike_host_falls_back_to_transport(self):
+        assert (
+            determine_api_mode("openai", "https://api.openai.com.evil.test/v1") == "chat_completions"
+        )
+
+    def test_known_provider_anthropic_path_suffix_still_wins(self):
+        # The ``/anthropic`` suffix convention must still win for known providers.
+        assert (
+            determine_api_mode("openai", "https://gateway.example.test/anthropic")
+            == "anthropic_messages"
+        )

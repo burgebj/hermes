@@ -507,14 +507,20 @@ def determine_api_mode(provider: str, base_url: str = "") -> str:
     pdef = get_provider(provider)
     if pdef is not None:
         # Even for known providers, check URL heuristics for special endpoints
-        # (e.g. kimi /coding endpoint needs anthropic_messages even on 'custom')
+        # (e.g. kimi /coding endpoint needs anthropic_messages even on 'custom').
+        # Match on the parsed hostname, not a substring: a path-style proxy
+        # ("https://gateway/api.openai.com/v1") or a lookalike host
+        # ("api.openai.com.evil/v1") must not be misrouted to the wrong wire
+        # protocol. This applies the same #13302 hostname hardening that the
+        # sibling unknown-provider branch below already uses.
         if base_url:
             url_lower = base_url.rstrip("/").lower()
-            if "api.kimi.com/coding" in url_lower:
+            hostname = base_url_hostname(base_url)
+            if hostname == "api.kimi.com" and "/coding" in url_lower:
                 return "anthropic_messages"
-            if url_lower.endswith("/anthropic") or "api.anthropic.com" in url_lower:
+            if url_lower.endswith("/anthropic") or hostname == "api.anthropic.com":
                 return "anthropic_messages"
-            if "api.openai.com" in url_lower:
+            if hostname == "api.openai.com":
                 return "codex_responses"
         return TRANSPORT_TO_API_MODE.get(pdef.transport, "chat_completions")
 
