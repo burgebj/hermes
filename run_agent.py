@@ -4625,6 +4625,20 @@ class AIAgent:
         OpenRouter forwards unknown extra_body fields to upstream providers.
         Some providers/routes reject `reasoning` with 400s, so gate it to
         known reasoning-capable model families and direct Nous Portal.
+
+        Empirically excluded providers (do NOT add to the whitelist without
+        re-testing server-side behavior):
+
+        * **xiaomi / MiMo (`mimo-v2.5-pro`):** the schema accepts
+          ``reasoning_effort`` at validation (rejects ``xhigh`` with
+          ``Input should be 'low', 'medium' or 'high'``), but the four
+          documented levels (``none``/``low``/``medium``/``high``) produce
+          statistically indistinguishable reasoning depth and accuracy on
+          AIME-class problems (4 efforts × N=5 on AIME 2025 II P2,
+          all Mann-Whitney U pairwise p > 0.1, 100% accuracy across all
+          20 trials; tested 2026-04-29 — see #17314 for the full
+          characterization). Forwarding the field to MiMo would just ship
+          a no-op, so the conservative default is correct here.
         """
         if base_url_host_matches(self._base_url_lower, "nousresearch.com"):
             return True
