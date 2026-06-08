@@ -14,12 +14,15 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
@@ -28,6 +31,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    SUPPORTED_VIDEO_TYPES,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +103,50 @@ class MattermostAdapter(BasePlatformAdapter):
         # Dedup cache (prevent reprocessing)
         self._dedup = MessageDeduplicator()
 
+        # Mattermost interactive message button state.
+        # approval_id -> {session_key, message_id, chat_id, thread_id, nonce}
+        self._approval_state: Dict[str, Dict[str, str]] = {}
+        self._approval_counter = itertools.count(1)
+
+        # Optional local HTTP bridge for Mattermost interactive message callbacks.
+        # Mattermost needs a reachable integration.url for buttons.
+        self._actions_public_url: str = (
+            config.extra.get("slash_public_url", "")
+            or os.getenv("MATTERMOST_SLASH_PUBLIC_URL", "")
+        ).rstrip("/")
+        self._actions_host: str = (
+            config.extra.get("slash_host", "")
+            or os.getenv("MATTERMOST_SLASH_HOST", "127.0.0.1")
+        )
+        self._actions_port: int = int(
+            config.extra.get("slash_port", "")
+            or os.getenv("MATTERMOST_SLASH_PORT", "9120")
+            or 9120
+        )
+        self._actions_runner: Any = None
+        self._actions_site: Any = None
+
+        slash_enabled_raw = (
+            config.extra.get("slash_commands_enabled", "")
+            or config.extra.get("slash_enabled", "")
+            or os.getenv("MATTERMOST_SLASH_COMMANDS_ENABLED", "")
+            or os.getenv("MATTERMOST_SLASH_ENABLED", "")
+        )
+        self._slash_enabled: bool = str(slash_enabled_raw).lower() in {
+            "1", "true", "yes", "on"
+        }
+        token_raw = str(
+            config.extra.get("slash_tokens", "")
+            or os.getenv("MATTERMOST_SLASH_TOKENS", "")
+        )
+        self._slash_tokens = {
+            token.strip() for token in re.split(r"[,;\s]+", token_raw) if token.strip()
+        }
+        self._slash_forward_channels = self._parse_slash_forward_channels(
+            config.extra.get("slash_forward_channels", "")
+            or os.getenv("MATTERMOST_SLASH_FORWARD_CHANNELS", "")
+        )
+
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
@@ -163,6 +211,36 @@ class MattermostAdapter(BasePlatformAdapter):
             logger.error("MM API PUT %s network error: %s", path, exc)
             return {}
 
+    @staticmethod
+    def _parse_slash_forward_channels(raw: Any) -> Dict[str, str]:
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items() if str(k) and str(v)}
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items() if str(k) and str(v)}
+        except Exception:
+            pass
+        mapping: Dict[str, str] = {}
+        for item in re.split(r"[;,\n]+", text):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" in item:
+                channel, target = item.split("=", 1)
+            elif ":" in item and item.count(":") == 1:
+                channel, target = item.split(":", 1)
+            else:
+                continue
+            channel = channel.strip()
+            target = target.strip()
+            if channel and target:
+                mapping[channel] = target
+        return mapping
+
     async def _upload_file(
         self, channel_id: str, file_data: bytes, filename: str, content_type: str = "application/octet-stream"
     ) -> Optional[str]:
@@ -187,6 +265,237 @@ class MattermostAdapter(BasePlatformAdapter):
             data = await resp.json()
             infos = data.get("file_infos", [])
             return infos[0]["id"] if infos else None
+
+    # ------------------------------------------------------------------
+    # Interactive button HTTP bridge
+    # ------------------------------------------------------------------
+
+    def _actions_url(self) -> str:
+        if self._actions_public_url:
+            return f"{self._actions_public_url}/mattermost/actions"
+        if self._actions_host not in {"", "127.0.0.1", "localhost"}:
+            return f"http://{self._actions_host}:{self._actions_port}/mattermost/actions"
+        return ""
+
+    def _should_start_bridge_server(self) -> bool:
+        """Return True when the local HTTP bridge is needed.
+
+        Mattermost approvals need a public action URL, but native slash-command
+        routing also needs the same aiohttp listener for /mattermost/slash. A
+        profile-local slash endpoint may intentionally bind loopback with no
+        public action URL, so do not gate the whole server only on _actions_url().
+        """
+        return bool(self._actions_url() or self._slash_enabled or self._slash_forward_channels)
+
+    @staticmethod
+    def _valid_forward_target(url: str) -> bool:
+        parsed = urlsplit(str(url or ""))
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    async def _handle_actions_health(self, request):
+        from aiohttp import web
+        return web.Response(text="ok")
+
+    async def _start_actions_server(self) -> None:
+        """Start local HTTP endpoint for Mattermost interactive message buttons."""
+        if self._actions_runner or not self._should_start_bridge_server():
+            return
+        try:
+            from aiohttp import web
+
+            app = web.Application()
+            app.router.add_post("/mattermost/actions", self._handle_action_request)
+            app.router.add_post("/mattermost/slash", self._handle_slash_request)
+            app.router.add_get("/health", self._handle_actions_health)
+            self._actions_runner = web.AppRunner(app)
+            await self._actions_runner.setup()
+            self._actions_site = web.TCPSite(
+                self._actions_runner, self._actions_host, self._actions_port
+            )
+            await self._actions_site.start()
+            logger.info(
+                "Mattermost: action callback server listening on %s:%s",
+                self._actions_host,
+                self._actions_port,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Mattermost: action callback server could not bind %s:%s: %s",
+                self._actions_host,
+                self._actions_port,
+                exc,
+            )
+            self._actions_runner = None
+            self._actions_site = None
+        except Exception as exc:
+            logger.warning("Mattermost: action callback server failed: %s", exc, exc_info=True)
+            self._actions_runner = None
+            self._actions_site = None
+
+    async def _stop_actions_server(self) -> None:
+        if self._actions_runner:
+            try:
+                await self._actions_runner.cleanup()
+            except Exception:
+                logger.debug("Mattermost: action callback server cleanup failed", exc_info=True)
+        self._actions_runner = None
+        self._actions_site = None
+
+    def _is_allowed_action_user(self, user_id: str) -> bool:
+        allowed_csv = os.getenv("MATTERMOST_ALLOWED_USERS", "").strip()
+        if not allowed_csv:
+            return os.getenv("MATTERMOST_ALLOW_ALL_USERS", "").lower() in {"1", "true", "yes", "on"}
+        allowed = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+        return "*" in allowed or user_id in allowed
+
+    async def _handle_slash_request(self, request):
+        from aiohttp import web
+        import aiohttp
+
+        if not self._slash_enabled:
+            return web.json_response({"error": "Mattermost slash commands are disabled"}, status=404)
+
+        try:
+            form = await request.post()
+            payload = {str(k): str(v) for k, v in form.items()}
+        except Exception:
+            return web.json_response({"response_type": "ephemeral", "text": "Invalid Hermes slash payload"}, status=400)
+
+        token = payload.get("token", "")
+        if self._slash_tokens:
+            if token not in self._slash_tokens:
+                logger.warning("Mattermost: rejected slash command with unknown token")
+                return web.json_response({"response_type": "ephemeral", "text": "Unauthorized Hermes slash command."}, status=403)
+        elif os.getenv("MATTERMOST_SLASH_ALLOW_UNVERIFIED", "").lower() not in {"1", "true", "yes", "on"}:
+            logger.warning("Mattermost: rejected slash command because no verification tokens are configured")
+            return web.json_response({"response_type": "ephemeral", "text": "Hermes slash command tokens are not configured."}, status=403)
+
+        channel_id = payload.get("channel_id", "")
+        forward_target = self._slash_forward_channels.get(channel_id)
+        if forward_target:
+            if not self._valid_forward_target(forward_target):
+                logger.error("Mattermost: refused invalid slash forward target for channel %s", channel_id)
+                return web.json_response({"response_type": "ephemeral", "text": "Hermes slash forwarding target is invalid."}, status=502)
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                    async with session.post(forward_target, data=payload) as resp:
+                        body = await resp.read()
+                        content_type = resp.headers.get("Content-Type", "application/json")
+                        logger.info(
+                            "Mattermost: forwarded slash command for channel %s to %s (HTTP %s)",
+                            channel_id,
+                            forward_target,
+                            resp.status,
+                        )
+                        return web.Response(status=resp.status, body=body, content_type=content_type.split(";", 1)[0])
+            except Exception as exc:
+                logger.error("Mattermost: slash forward to %s failed: %s", forward_target, exc, exc_info=True)
+                return web.json_response({"response_type": "ephemeral", "text": "Hermes slash forwarding failed."}, status=502)
+
+        command_name = payload.get("command", "").strip().lstrip("/")
+        text = payload.get("text", "").strip()
+        if not command_name:
+            return web.json_response({"response_type": "ephemeral", "text": "Missing Hermes command."}, status=400)
+        message_text = f"/{command_name} {text}".strip()
+
+        post_id = payload.get("post_id") or payload.get("postId") or ""
+        root_id = payload.get("root_id") or payload.get("rootId") or payload.get("thread_id") or ""
+        thread_id = root_id or post_id or None
+
+        source = self.build_source(
+            chat_id=channel_id,
+            chat_type="channel",
+            user_id=payload.get("user_id", ""),
+            user_name=payload.get("user_name", ""),
+            thread_id=thread_id,
+        )
+        source.message_id = post_id or None
+
+        event = MessageEvent(
+            text=message_text,
+            message_type=MessageType.COMMAND,
+            source=source,
+            raw_message=payload,
+            message_id=post_id or None,
+        )
+        await self.handle_message(event)
+        logger.info("Mattermost: accepted slash command /%s for channel %s", command_name, channel_id)
+        return web.json_response({
+            "response_type": "ephemeral",
+            "text": f"Running `/{command_name}` in Hermes…",
+        })
+
+    async def _handle_action_request(self, request):
+        from aiohttp import web
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ephemeral_text": "Invalid Hermes action payload"}, status=400)
+
+        context = body.get("context") or {}
+        approval_id = str(context.get("approval_id") or "")
+        nonce = str(context.get("nonce") or "")
+        action = str(context.get("action") or "")
+        user_id = str(body.get("user_id") or context.get("user_id") or "")
+        user_name = str(body.get("user_name") or body.get("user_username") or "user")
+
+        if not self._is_allowed_action_user(user_id):
+            logger.warning("Mattermost: unauthorized approval click by %s", user_id)
+            return web.json_response({"ephemeral_text": "You are not authorized to approve Hermes commands."})
+
+        state = self._approval_state.get(approval_id)
+        if not state:
+            return web.json_response({"ephemeral_text": "This Hermes approval is no longer pending."})
+        if not secrets.compare_digest(nonce, state.get("nonce", "")):
+            logger.warning("Mattermost: rejected approval click with invalid nonce for approval_id=%s", approval_id)
+            return web.json_response({"ephemeral_text": "Invalid Hermes approval callback."})
+
+        choice_map = {
+            "approve_once": "once",
+            "approve_session": "session",
+            "approve_always": "always",
+            "deny": "deny",
+        }
+        choice = choice_map.get(action, "deny")
+        label_map = {
+            "once": f"✅ Approved once by {user_name}",
+            "session": f"✅ Approved for session by {user_name}",
+            "always": f"✅ Approved permanently by {user_name}",
+            "deny": f"❌ Denied by {user_name}",
+        }
+        decision_text = label_map.get(choice, f"Resolved by {user_name}")
+
+        try:
+            from tools.approval import resolve_gateway_approval
+            count = resolve_gateway_approval(state["session_key"], choice)
+            if not count:
+                return web.json_response({"ephemeral_text": "No pending command to approve."})
+            logger.info(
+                "Mattermost button resolved %d approval(s) for session %s (choice=%s, user=%s)",
+                count,
+                state["session_key"],
+                choice,
+                user_id,
+            )
+        except Exception as exc:
+            logger.error("Mattermost: failed to resolve approval button: %s", exc, exc_info=True)
+            return web.json_response({"ephemeral_text": "Hermes failed to resolve the approval."}, status=500)
+
+        self._approval_state.pop(approval_id, None)
+
+        post_id = state.get("message_id") or str(body.get("post_id") or "")
+        if post_id:
+            try:
+                await self._api_put(
+                    f"posts/{post_id}/patch",
+                    {"message": state.get("message", "Command approval request"),
+                     "props": {"attachments": [{"text": decision_text}]}},
+                )
+            except Exception:
+                logger.debug("Mattermost: failed to patch approval message", exc_info=True)
+
+        return web.json_response({"update": {"message": decision_text, "props": {"attachments": []}}})
 
     # ------------------------------------------------------------------
     # Required overrides
@@ -221,6 +530,9 @@ class MattermostAdapter(BasePlatformAdapter):
             self._base_url,
         )
 
+        # Start the optional HTTP action bridge before sending any approval buttons.
+        await self._start_actions_server()
+
         # Start WebSocket in background.
         self._ws_task = asyncio.create_task(self._ws_loop())
         self._mark_connected()
@@ -243,6 +555,8 @@ class MattermostAdapter(BasePlatformAdapter):
         if self._ws:
             await self._ws.close()
             self._ws = None
+
+        await self._stop_actions_server()
 
         if self._session and not self._session.closed:
             await self._session.close()
@@ -280,18 +594,25 @@ class MattermostAdapter(BasePlatformAdapter):
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
 
+        thread_root = None
+        if self._reply_mode == "thread":
+            thread_anchor = reply_to
+            if not thread_anchor and metadata:
+                thread_anchor = metadata.get("thread_id") or metadata.get("root_id")
+            if thread_anchor:
+                # Ensure root_id points to the thread root, not a reply.
+                # Mattermost rejects non-root post IDs as root_id.
+                thread_root = await self._resolve_root_id(str(thread_anchor))
+
         last_id = None
         for chunk in chunks:
             payload: Dict[str, Any] = {
                 "channel_id": chat_id,
                 "message": chunk,
             }
-            # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                # Ensure root_id points to the thread root, not a reply.
-                # Mattermost rejects non-root post IDs as root_id.
-                resolved_root = await self._resolve_root_id(reply_to)
-                payload["root_id"] = resolved_root
+            # Thread support: root_id must point to the thread root.
+            if thread_root:
+                payload["root_id"] = thread_root
 
             data = await self._api_post("posts", payload)
             if not data or "id" not in data:
@@ -299,6 +620,84 @@ class MattermostAdapter(BasePlatformAdapter):
             last_id = data["id"]
 
         return SendResult(success=True, message_id=last_id)
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a Mattermost interactive-message approval prompt with buttons."""
+        action_url = self._actions_url()
+        if not action_url:
+            return SendResult(success=False, error="Mattermost action callback URL is not configured")
+
+        cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
+        approval_id = f"{next(self._approval_counter)}-{secrets.token_urlsafe(8)}"
+        nonce = secrets.token_urlsafe(24)
+        message = (
+            "⚠️ **Command Approval Required**\n"
+            f"```\n{cmd_preview}\n```\n"
+            f"Reason: {description}"
+        )
+
+        def _action(name: str, action: str, style: str = "default") -> Dict[str, Any]:
+            return {
+                "name": name,
+                "type": "button",
+                "style": style,
+                "integration": {
+                    "url": action_url,
+                    "context": {
+                        "approval_id": approval_id,
+                        "nonce": nonce,
+                        "action": action,
+                    },
+                },
+            }
+
+        payload: Dict[str, Any] = {
+            "channel_id": chat_id,
+            "message": message,
+            "props": {
+                "attachments": [
+                    {
+                        "text": "Choose how to handle this command:",
+                        "actions": [
+                            _action("Allow Once", "approve_once", "primary"),
+                            _action("Allow Session", "approve_session"),
+                            _action("Always Allow", "approve_always"),
+                            _action("Deny", "deny", "danger"),
+                        ],
+                    }
+                ]
+            },
+        }
+
+        thread_root = None
+        if self._reply_mode == "thread" and metadata:
+            thread_anchor = metadata.get("thread_id") or metadata.get("root_id")
+            if thread_anchor:
+                thread_root = await self._resolve_root_id(str(thread_anchor))
+        if thread_root:
+            payload["root_id"] = thread_root
+
+        data = await self._api_post("posts", payload)
+        if not data or "id" not in data:
+            return SendResult(success=False, error="Failed to create approval post")
+
+        message_id = str(data["id"])
+        self._approval_state[approval_id] = {
+            "session_key": session_key,
+            "message_id": message_id,
+            "chat_id": chat_id,
+            "thread_id": str(thread_root or ""),
+            "message": message,
+            "nonce": nonce,
+        }
+        return SendResult(success=True, message_id=message_id, raw_response=data)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return channel name and type."""
@@ -786,8 +1185,16 @@ class MattermostAdapter(BasePlatformAdapter):
         sender_id = post.get("user_id", "")
         sender_name = data.get("sender_name", "").lstrip("@") or sender_id
 
-        # Thread support: if the post is in a thread, use root_id.
-        thread_id = post.get("root_id") or None
+        # Thread support: route every non-DM channel turn into a Mattermost thread.
+        # Mattermost only sets root_id on replies; for a root channel post we use
+        # the post's own ID as the session/thread root so tool progress, approvals,
+        # streamed chunks, and final replies all stay under one conversation.
+        # DMs must not use the post ID as a thread/session key or every DM message
+        # becomes a separate session.
+        if channel_type_raw == "D":
+            thread_id = post.get("root_id") or None
+        else:
+            thread_id = post.get("root_id") or post_id or None
 
         # Determine message type.
         file_ids = post.get("file_ids") or []
@@ -815,14 +1222,23 @@ class MattermostAdapter(BasePlatformAdapter):
                 ) as resp:
                     if resp.status < 400:
                         file_data = await resp.read()
-                        from gateway.platforms.base import cache_image_from_bytes, cache_document_from_bytes
+                        from gateway.platforms.base import (
+                            cache_audio_from_bytes,
+                            cache_document_from_bytes,
+                            cache_image_from_bytes,
+                            cache_video_from_bytes,
+                        )
                         if mime.startswith("image/"):
                             local_path = cache_image_from_bytes(file_data, ext or ".png")
                             media_urls.append(local_path)
                             media_types.append(mime)
                         elif mime.startswith("audio/"):
-                            from gateway.platforms.base import cache_audio_from_bytes
                             local_path = cache_audio_from_bytes(file_data, ext or ".ogg")
+                            media_urls.append(local_path)
+                            media_types.append(mime)
+                        elif mime.startswith("video/"):
+                            video_ext = ext if ext.lower() in SUPPORTED_VIDEO_TYPES else ".mp4"
+                            local_path = cache_video_from_bytes(file_data, video_ext)
                             media_urls.append(local_path)
                             media_types.append(mime)
                         else:
@@ -840,6 +1256,8 @@ class MattermostAdapter(BasePlatformAdapter):
                 msg_type = MessageType.PHOTO
             elif any(m.startswith("audio/") for m in media_types):
                 msg_type = MessageType.VOICE
+            elif any(m.startswith("video/") for m in media_types):
+                msg_type = MessageType.VIDEO
             elif media_types:
                 msg_type = MessageType.DOCUMENT
 

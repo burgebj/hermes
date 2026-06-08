@@ -75,7 +75,7 @@ def _make_adapter():
     config = PlatformConfig(
         enabled=True,
         token="test-token",
-        extra={"url": "https://mm.example.com"},
+        extra={"url": "https://mm.example.com", "allowed_channels": []},
     )
     adapter = MattermostAdapter(config)
     return adapter
@@ -216,6 +216,301 @@ class TestMattermostSend:
         assert result.success is True
         payload = self.adapter._session.post.call_args[1]["json"]
         assert payload["root_id"] == "root_post"
+
+    @pytest.mark.asyncio
+    async def test_send_with_metadata_thread_id(self):
+        """When reply_mode is 'thread', metadata.thread_id should become root_id."""
+        self.adapter._reply_mode = "thread"
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"id": "post456"})
+        mock_resp.text = AsyncMock(return_value="")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_get_resp = AsyncMock()
+        mock_get_resp.status = 200
+        mock_get_resp.json = AsyncMock(return_value={"id": "root_from_metadata", "root_id": ""})
+        mock_get_resp.text = AsyncMock(return_value="")
+        mock_get_resp.__aenter__ = AsyncMock(return_value=mock_get_resp)
+        mock_get_resp.__aexit__ = AsyncMock(return_value=False)
+
+        self.adapter._session.post = MagicMock(return_value=mock_resp)
+        self.adapter._session.get = MagicMock(return_value=mock_get_resp)
+
+        result = await self.adapter.send(
+            "channel_1", "Reply!", metadata={"thread_id": "root_from_metadata"}
+        )
+
+        assert result.success is True
+        payload = self.adapter._session.post.call_args[1]["json"]
+        assert payload["root_id"] == "root_from_metadata"
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_posts_interactive_buttons_in_thread(self):
+        """Approval prompts should use Mattermost buttons and stay in thread."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._actions_public_url = "http://192.168.1.50:9120"
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={"id": "approval_post"})
+
+        result = await self.adapter.send_exec_approval(
+            chat_id="channel_1",
+            command="docker restart immich",
+            session_key="session-123",
+            description="dangerous command",
+            metadata={"thread_id": "root_post"},
+        )
+
+        assert result.success is True
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload["channel_id"] == "channel_1"
+        assert payload["root_id"] == "root_post"
+        actions = payload["props"]["attachments"][0]["actions"]
+        assert [a["name"] for a in actions] == [
+            "Allow Once", "Allow Session", "Always Allow", "Deny"
+        ]
+        assert actions[0]["integration"]["url"] == "http://192.168.1.50:9120/mattermost/actions"
+        approval_id = actions[0]["integration"]["context"]["approval_id"]
+        assert self.adapter._approval_state[approval_id]["session_key"] == "session-123"
+
+    @pytest.mark.asyncio
+    async def test_action_request_resolves_stored_approval(self, monkeypatch):
+        """Mattermost button callbacks should resolve the stored gateway approval."""
+        monkeypatch.setenv("MATTERMOST_ALLOWED_USERS", "user_123")
+        self.adapter._approval_state["approval-1"] = {
+            "session_key": "session-123",
+            "message_id": "approval_post",
+            "chat_id": "channel_1",
+            "thread_id": "root_post",
+            "message": "approval message",
+            "nonce": "nonce-123",
+        }
+        self.adapter._api_put = AsyncMock(return_value={})
+        calls = []
+
+        def fake_resolve(session_key, choice):
+            calls.append((session_key, choice))
+            return 1
+
+        monkeypatch.setattr("tools.approval.resolve_gateway_approval", fake_resolve)
+
+        class FakeRequest:
+            async def json(self):
+                return {
+                    "user_id": "user_123",
+                    "user_name": "alice",
+                    "context": {
+                        "approval_id": "approval-1",
+                        "nonce": "nonce-123",
+                        "action": "approve_session",
+                    },
+                }
+
+        response = await self.adapter._handle_action_request(FakeRequest())
+
+        assert response.status == 200
+        assert calls == [("session-123", "session")]
+        assert "approval-1" not in self.adapter._approval_state
+        self.adapter._api_put.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_action_request_rejects_invalid_nonce_without_consuming_state(self, monkeypatch):
+        """Button callbacks must include the per-approval nonce."""
+        monkeypatch.setenv("MATTERMOST_ALLOWED_USERS", "user_123")
+        self.adapter._approval_state["approval-1"] = {
+            "session_key": "session-123",
+            "message_id": "approval_post",
+            "chat_id": "channel_1",
+            "thread_id": "root_post",
+            "message": "approval message",
+            "nonce": "nonce-123",
+        }
+
+        class FakeRequest:
+            async def json(self):
+                return {
+                    "user_id": "user_123",
+                    "context": {
+                        "approval_id": "approval-1",
+                        "nonce": "wrong",
+                        "action": "approve_session",
+                    },
+                }
+
+        response = await self.adapter._handle_action_request(FakeRequest())
+
+        assert response.status == 200
+        assert "approval-1" in self.adapter._approval_state
+
+    @pytest.mark.asyncio
+    async def test_action_request_does_not_consume_state_when_no_pending_approval(self, monkeypatch):
+        """A stale tools.approval store should not burn the Mattermost button state."""
+        monkeypatch.setenv("MATTERMOST_ALLOWED_USERS", "user_123")
+        self.adapter._approval_state["approval-1"] = {
+            "session_key": "session-123",
+            "message_id": "approval_post",
+            "chat_id": "channel_1",
+            "thread_id": "root_post",
+            "message": "approval message",
+            "nonce": "nonce-123",
+        }
+
+        def fake_resolve(session_key, choice):
+            return 0
+
+        monkeypatch.setattr("tools.approval.resolve_gateway_approval", fake_resolve)
+
+        class FakeRequest:
+            async def json(self):
+                return {
+                    "user_id": "user_123",
+                    "context": {
+                        "approval_id": "approval-1",
+                        "nonce": "nonce-123",
+                        "action": "approve_session",
+                    },
+                }
+
+        response = await self.adapter._handle_action_request(FakeRequest())
+
+        assert response.status == 200
+        assert "approval-1" in self.adapter._approval_state
+
+    def test_bridge_server_starts_for_slash_endpoint_without_public_action_url(self):
+        """Profile-local slash endpoints may bind loopback without a public action URL."""
+        self.adapter._actions_public_url = ""
+        self.adapter._actions_host = "127.0.0.1"
+        self.adapter._slash_enabled = True
+
+        assert self.adapter._actions_url() == ""
+        assert self.adapter._should_start_bridge_server() is True
+
+    @pytest.mark.asyncio
+    async def test_slash_request_creates_command_event_without_trigger_id_as_message_id(self):
+        """Native Mattermost slash commands should become command events safely."""
+        self.adapter._slash_enabled = True
+        self.adapter._slash_tokens = {"tok123"}
+        self.adapter.handle_message = AsyncMock()
+
+        class FakeRequest:
+            async def post(self):
+                return {
+                    "token": "tok123",
+                    "command": "/approve",
+                    "text": "session",
+                    "channel_id": "channel_1",
+                    "user_id": "user_123",
+                    "user_name": "alice",
+                    "trigger_id": "ephemeral-trigger-not-a-post",
+                }
+
+        response = await self.adapter._handle_slash_request(FakeRequest())
+
+        assert response.status == 200
+        self.adapter.handle_message.assert_awaited_once()
+        event = self.adapter.handle_message.call_args[0][0]
+        assert event.text == "/approve session"
+        assert event.message_type.name == "COMMAND"
+        assert event.message_id is None
+        assert event.source.message_id is None
+        assert event.source.thread_id is None
+        assert event.raw_message["trigger_id"] == "ephemeral-trigger-not-a-post"
+
+    @pytest.mark.asyncio
+    async def test_slash_request_rejects_unknown_token(self):
+        self.adapter._slash_enabled = True
+        self.adapter._slash_tokens = {"tok123"}
+        self.adapter.handle_message = AsyncMock()
+
+        class FakeRequest:
+            async def post(self):
+                return {
+                    "token": "wrong",
+                    "command": "/status",
+                    "channel_id": "channel_1",
+                }
+
+        response = await self.adapter._handle_slash_request(FakeRequest())
+
+        assert response.status == 403
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_slash_request_forwards_configured_channel(self, monkeypatch):
+        """Router profile should forward selected channels to profile-local slash endpoints."""
+        self.adapter._slash_enabled = True
+        self.adapter._slash_tokens = {"tok123"}
+        self.adapter._slash_forward_channels = {
+            "channel_1": "http://127.0.0.1:9121/mattermost/slash"
+        }
+        self.adapter.handle_message = AsyncMock()
+        posted = []
+
+        class FakeForwardResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+            async def read(self):
+                return b'{"response_type":"ephemeral","text":"forwarded"}'
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                return False
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                return False
+            def post(self, url, data=None):
+                posted.append((url, data))
+                return FakeForwardResponse()
+
+        monkeypatch.setattr("aiohttp.ClientSession", FakeSession)
+
+        class FakeRequest:
+            async def post(self):
+                return {
+                    "token": "tok123",
+                    "command": "/profile",
+                    "channel_id": "channel_1",
+                    "user_id": "user_123",
+                }
+
+        response = await self.adapter._handle_slash_request(FakeRequest())
+
+        assert response.status == 200
+        assert posted == [("http://127.0.0.1:9121/mattermost/slash", {
+            "token": "tok123",
+            "command": "/profile",
+            "channel_id": "channel_1",
+            "user_id": "user_123",
+        })]
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_slash_request_rejects_invalid_forward_target(self):
+        self.adapter._slash_enabled = True
+        self.adapter._slash_tokens = {"tok123"}
+        self.adapter._slash_forward_channels = {"channel_1": "file:///tmp/bridge"}
+        self.adapter.handle_message = AsyncMock()
+
+        class FakeRequest:
+            async def post(self):
+                return {
+                    "token": "tok123",
+                    "command": "/profile",
+                    "channel_id": "channel_1",
+                    "user_id": "user_123",
+                }
+
+        response = await self.adapter._handle_slash_request(FakeRequest())
+
+        assert response.status == 502
+        self.adapter.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_without_thread_no_root_id(self):
@@ -365,6 +660,30 @@ class TestMattermostWebSocketParsing:
         assert self.adapter.handle_message.called
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.source.chat_type == "dm"
+        assert msg_event.source.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_root_channel_post_uses_own_id_as_thread_id(self):
+        """Root channel posts should become their own Mattermost thread root."""
+        post_data = {
+            "id": "root_post_abc",
+            "user_id": "user_123",
+            "channel_id": "chan_456",
+            "message": "@bot_user_id Start a session",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "O",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id == "root_post_abc"
 
     @pytest.mark.asyncio
     async def test_thread_id_from_root_id(self):
@@ -727,6 +1046,31 @@ class TestMattermostMediaTypes:
         msg = self.adapter.handle_message.call_args[0][0]
         assert msg.media_types == ["audio/ogg"]
         assert msg.media_types[0].startswith("audio/")
+
+    @pytest.mark.asyncio
+    async def test_video_media_type_is_full_mime_and_video_message(self):
+        """A video attachment should stay video, not degrade to a document."""
+        file_info = {"name": "clip.mp4", "mime_type": "video/mp4"}
+        self.adapter._api_get = AsyncMock(return_value=file_info)
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"MP4 fake")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        self.adapter._session = MagicMock()
+        self.adapter._session.get = MagicMock(return_value=mock_resp)
+
+        with patch("gateway.platforms.base.cache_video_from_bytes", return_value="/tmp/clip.mp4"), \
+             patch("gateway.platforms.base.cache_document_from_bytes"), \
+             patch("gateway.platforms.base.cache_image_from_bytes"):
+            await self.adapter._handle_ws_event(self._make_event(["file4"]))
+
+        msg = self.adapter.handle_message.call_args[0][0]
+        from gateway.platforms.base import MessageType
+        assert msg.message_type == MessageType.VIDEO
+        assert msg.media_types == ["video/mp4"]
+        assert msg.media_types[0].startswith("video/")
 
     @pytest.mark.asyncio
     async def test_document_media_type_is_full_mime(self):
