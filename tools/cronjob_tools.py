@@ -283,6 +283,18 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
             "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
             "thread_id": thread_id,
         }
+
+    # Fallback: reconstruct from DM session key (e.g. agent:main:weixin:dm:<chat_id>[:<thread_id>])
+    session_key = get_session_env("HERMES_SESSION_KEY")
+    parts = session_key.split(":") if session_key else []
+    if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main" and parts[3] == "dm":
+        return {
+            "platform": parts[2],
+            "chat_id": parts[4],
+            "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
+            "thread_id": parts[5] if len(parts) >= 6 else None,
+        }
+
     return None
 
 
