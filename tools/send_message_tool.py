@@ -138,8 +138,8 @@ SEND_MESSAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["send", "list"],
-                "description": "Action to perform. 'send' (default) sends a message. 'list' returns all available channels/contacts across connected platforms."
+                "enum": ["send", "list", "react"],
+                "description": "Action to perform. 'send' (default) sends a message. 'list' returns all available channels/contacts across connected platforms. 'react' sends a reaction emoji to the last message in the current conversation — 'message' should be the emoji (e.g. '👍'). For WhatsApp, this reacts to the message that triggered the current turn."
             },
             "target": {
                 "type": "string",
@@ -161,6 +161,9 @@ def send_message_tool(args, **kw):
 
     if action == "list":
         return _handle_list()
+
+    if action == "react":
+        return _handle_react(args)
 
     return _handle_send(args)
 
@@ -349,6 +352,94 @@ def _handle_send(args):
         return json.dumps(result)
     except Exception as e:
         return json.dumps(_error(f"Send failed: {e}"))
+
+
+def _handle_react(args):
+    """Send a reaction emoji to the last message in the current session.
+
+    For WhatsApp, this reacts to the message that triggered the current turn
+    (the user's last message). Uses the session's HERMES_SESSION_MESSAGE_ID
+    as the target message and HERMES_SESSION_CHAT_ID as the default chat.
+
+    Currently supports WhatsApp only.
+    """
+    from gateway.session_context import get_session_env
+
+    emoji = args.get("message", "")
+    if not emoji:
+        return tool_error("emoji is required — pass it as 'message' (e.g. '👍')")
+
+    # Get target chat_id from args or current session
+    target = args.get("target", "")
+    if target:
+        parts = target.split(":", 1)
+        platform_name = parts[0].strip().lower()
+        chat_id = parts[1].strip() if len(parts) > 1 else None
+    else:
+        platform_name = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        if not chat_id and platform_name == "whatsapp":
+            # Fallback for WhatsApp home channel
+            chat_id = get_session_env("HERMES_SESSION_USER_ID", "")
+        if not chat_id:
+            return tool_error("No target specified and no active session chat_id found")
+
+    message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+    if not message_id:
+        return tool_error("No message_id in session context — cannot react without a target message")
+
+    # Currently only WhatsApp is supported
+    if platform_name == "whatsapp":
+        return _send_whatsapp_reaction(chat_id, message_id, emoji)
+
+    return tool_error(f"Reactions are not yet supported for platform '{platform_name}'")
+
+
+def _send_whatsapp_reaction(chat_id, message_id, emoji):
+    """Send a WhatsApp reaction via the bridge HTTP API."""
+    try:
+        import aiohttp
+    except ImportError:
+        return tool_error("aiohttp not installed. Run: pip install aiohttp")
+
+    # Find the bridge port from the gateway config
+    try:
+        from gateway.config import load_gateway_config, Platform
+        config = load_gateway_config()
+        pconfig = config.platforms.get(Platform.WHATSAPP)
+        bridge_port = (pconfig.extra or {}).get("bridge_port", 3000) if pconfig else 3000
+    except Exception:
+        bridge_port = 3000
+
+    try:
+        import asyncio
+        async def _do_react():
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://127.0.0.1:{bridge_port}/react",
+                    json={
+                        "chatId": chat_id,
+                        "messageId": message_id,
+                        "emoji": emoji,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        return {
+                            "success": True,
+                            "platform": "whatsapp",
+                            "action": "react",
+                            "emoji": emoji,
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        }
+                    body = await resp.text()
+                    return _error(f"WhatsApp bridge reaction error ({resp.status}): {body}")
+
+        from model_tools import _run_async
+        return json.dumps(_run_async(_do_react()))
+    except Exception as e:
+        return json.dumps(_error(f"WhatsApp reaction failed: {e}"))
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):

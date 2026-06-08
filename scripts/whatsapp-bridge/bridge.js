@@ -9,6 +9,7 @@
  *   GET  /messages       - Long-poll for new incoming messages
  *   POST /send           - Send a message { chatId, message, replyTo? }
  *   POST /edit           - Edit a sent message { chatId, messageId, message }
+ *   POST /react          - React to a message { chatId, messageId, emoji }
  *   POST /send-media     - Send media natively { chatId, filePath, mediaType?, caption?, fileName? }
  *   POST /typing         - Send typing indicator { chatId }
  *   GET  /chat/:id       - Get chat info
@@ -144,6 +145,23 @@ function getContextInfo(messageContent) {
     }
   }
   return {};
+}
+
+// Extract a text snippet from a quoted (replied-to) message so the gateway
+// can inject reply context into the agent prompt.
+function getQuotedText(contextInfo) {
+  const quoted = contextInfo?.quotedMessage;
+  if (!quoted || typeof quoted !== 'object') return null;
+  if (quoted.conversation) return quoted.conversation;
+  if (quoted.extendedTextMessage?.text) return quoted.extendedTextMessage.text;
+  if (quoted.imageMessage) return quoted.imageMessage.caption || '[image]';
+  if (quoted.videoMessage) return quoted.videoMessage.caption || '[video]';
+  if (quoted.documentMessage) return quoted.documentMessage.caption || quoted.documentMessage.fileName || '[document]';
+  if (quoted.audioMessage || quoted.pttMessage) return '[audio]';
+  if (quoted.stickerMessage) return '[sticker]';
+  if (quoted.locationMessage) return '[location]';
+  if (quoted.contactMessage) return '[contact]';
+  return null;
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
@@ -321,6 +339,7 @@ async function startSocket() {
       const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
       const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
       const hasQuotedMessage = !!contextInfo?.quotedMessage;
+      const quotedText = getQuotedText(contextInfo);
 
       // Extract message body
       let body = '';
@@ -436,6 +455,7 @@ async function startSocket() {
         quotedParticipant,
         quotedRemoteJid,
         hasQuotedMessage,
+        quotedText,
         botIds,
         timestamp: msg.messageTimestamp,
       };
@@ -551,6 +571,35 @@ app.post('/edit', async (req, res) => {
     }
 
     res.json({ success: true, messageIds });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// React to a message
+app.post('/react', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, messageId, emoji, fromMe } = req.body;
+  if (!chatId || !messageId || !emoji) {
+    return res.status(400).json({ error: 'chatId, messageId, and emoji are required' });
+  }
+
+  try {
+    const reactionMessage = {
+      react: {
+        text: emoji,
+        key: {
+          remoteJid: chatId,
+          fromMe: fromMe === true || fromMe === 'true',
+          id: messageId,
+        },
+      },
+    };
+    await sendWithTimeout(chatId, reactionMessage);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

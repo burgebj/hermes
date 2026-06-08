@@ -969,6 +969,40 @@ class WhatsAppAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
+    async def send_reaction(
+        self,
+        chat_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        from_me: bool = False,
+    ) -> SendResult:
+        """Send a reaction (emoji) to a specific message via the WhatsApp bridge."""
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return SendResult(success=False, error=bridge_exit)
+        try:
+            import aiohttp
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/react",
+                json={
+                    "chatId": chat_id,
+                    "messageId": message_id,
+                    "emoji": emoji,
+                    "fromMe": from_me,
+                },
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    return SendResult(success=True, message_id=message_id)
+                else:
+                    error = await resp.text()
+                    return SendResult(success=False, error=error)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     async def edit_message(
         self,
         chat_id: str,
@@ -1288,6 +1322,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 chat_type=chat_type,
                 user_id=data.get("senderId"),
                 user_name=data.get("senderName"),
+                message_id=data.get("messageId"),
             )
             
             # Download media URLs to the local cache so agent tools
@@ -1382,6 +1417,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                reply_to_message_id=data.get("quotedMessageId"),
+                reply_to_text=data.get("quotedText"),
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
