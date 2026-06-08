@@ -1607,11 +1607,13 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
-        from dotenv import load_dotenv
-        try:
-            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="utf-8")
-        except UnicodeDecodeError:
-            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="latin-1")
+        # Use load_hermes_dotenv (not bare dotenv.load_dotenv) so external
+        # secret sources — Bitwarden Secrets Manager in particular — are
+        # resolved for cron jobs.  Without this, BSM-managed credentials
+        # remain as .env placeholders and every job gets HTTP 401s.
+        # Ref: https://github.com/NousResearch/hermes-agent/issues/33465
+        from hermes_cli.env_loader import load_hermes_dotenv
+        load_hermes_dotenv(hermes_home=str(_get_hermes_home()))
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
