@@ -298,6 +298,95 @@ class TestInvisibleUnicode:
         # shared set.
         assert isinstance(INVISIBLE_CHARS, frozenset)
 
+    # ── ZWJ emoji context (U+200D) — regression for #18581 ──────────
+
+    def test_zwj_in_emoji_context_not_flagged(self):
+        """U+200D inside an emoji ZWJ sequence (e.g. 🤸‍♀️ cartwheel
+        gymnast) must NOT trigger the invisible-unicode detector."""
+        # Cartwheel gymnast: 🤸 + ZWJ + ♀ + VS16
+        content = "Maintain your tension \U0001F938\u200d\u2640\ufe0f."
+        findings = scan_for_threats(content, scope="context")
+        assert not any("200D" in f for f in findings), (
+            f"ZWJ should NOT be flagged in emoji context: {findings}"
+        )
+
+    def test_zwj_between_ascii_still_blocked(self):
+        """U+200D between ASCII characters is the injection signal —
+        must still be flagged."""
+        content = "hel\u200dlo world"
+        findings = scan_for_threats(content, scope="context")
+        assert any("200D" in f for f in findings), (
+            f"ZWJ between ASCII chars MUST be flagged: {findings}"
+        )
+
+    def test_zwj_at_edges_still_blocked(self):
+        """U+200D at the start or end of text cannot be emoji context."""
+        findings = scan_for_threats("\u200dhello", scope="context")
+        assert any("200D" in f for f in findings)
+        findings = scan_for_threats("hello\u200d", scope="context")
+        assert any("200D" in f for f in findings)
+
+    def test_mixed_emoji_and_malicious_zwj(self):
+        """When content has both legitimate emoji ZWJ and malicious ZWJ
+        between ASCII, the malicious one must still be caught."""
+        content = "okay \U0001F938\u200d\u2640\ufe0f but hel\u200dlo is bad"
+        findings = scan_for_threats(content, scope="context")
+        assert any("200D" in f for f in findings), (
+            f"Malicious ZWJ must be flagged even with emoji present: {findings}"
+        )
+
+    def test_family_emoji_with_multiple_zwj(self):
+        """Family emoji uses multiple ZWJs — all should be allowed."""
+        # 👨 + ZWJ + 👩 + ZWJ + 👧
+        content = "Family \U0001F468\u200d\U0001F469\u200d\U0001F467 portrait"
+        findings = scan_for_threats(content, scope="context")
+        assert not any("200D" in f for f in findings), (
+            f"Multi-ZWJ family emoji should pass: {findings}"
+        )
+
+    def test_zwj_between_cjk_blocked(self):
+        """ZWJ between Chinese characters is NOT an emoji sequence —
+        must be flagged as potential injection."""
+        content = "\u5ffd\u7565\u200d\u6307\u4ee4"  # 忽略‍指令
+        findings = scan_for_threats(content, scope="context")
+        assert any("200D" in f for f in findings), (
+            f"ZWJ between CJK chars MUST be flagged: {findings}"
+        )
+
+    def test_zwj_between_non_ascii_latin_blocked(self):
+        """ZWJ between non-ASCII Latin characters (e.g. accented French)
+        is NOT an emoji sequence and must be flagged."""
+        content = "caf\u00e9\u200d\u00efgnore"  # café‍ïgnore
+        findings = scan_for_threats(content, scope="context")
+        assert any("200D" in f for f in findings), (
+            f"ZWJ between non-ASCII Latin MUST be flagged: {findings}"
+        )
+
+    def test_skin_tone_emoji_zwj_allowed(self):
+        """Person + skin tone + ZWJ + laptop (👩🏽‍💻) must pass."""
+        content = "coding \U0001F469\U0001F3FD\u200d\U0001F4BB"
+        findings = scan_for_threats(content, scope="context")
+        assert not any("200D" in f for f in findings), (
+            f"Skin-tone emoji ZWJ should be allowed: {findings}"
+        )
+
+    def test_heart_on_fire_emoji_allowed(self):
+        """Heart-on-fire (❤️‍🔥) is a common ZWJ emoji — must pass."""
+        content = "love \u2764\ufe0f\u200d\U0001F525"
+        findings = scan_for_threats(content, scope="context")
+        assert not any("200D" in f for f in findings), (
+            f"Heart-on-fire emoji should be allowed: {findings}"
+        )
+
+    def test_zwj_between_emoji_and_cjk_blocked(self):
+        """ZWJ between an emoji and a CJK character is not a valid
+        emoji sequence — must be flagged."""
+        content = "\U0001F938\u200d\u5ffd\u7565"  # 🤸‍忽略
+        findings = scan_for_threats(content, scope="context")
+        assert any("200D" in f for f in findings), (
+            f"ZWJ between emoji and CJK MUST be flagged: {findings}"
+        )
+
 
 # =========================================================================
 # first_threat_message helper

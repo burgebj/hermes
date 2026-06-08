@@ -184,6 +184,91 @@ def _compile() -> None:
 _compile()
 
 
+# ---------------------------------------------------------------------------
+# ZWJ (U+200D) emoji-aware scanning
+#
+# U+200D (Zero Width Joiner) is a legitimate Unicode mechanism for
+# constructing emoji sequences (gender, family, skin-tone combinations per
+# Unicode TR#51).  It must be allowed inside emoji grapheme clusters but
+# still blocked when used to hide invisible text between plain characters.
+#
+# The approach mirrors ``cronjob_tools._zwj_has_emoji_neighbour`` and
+# ``cronjob_tools._strip_legitimate_emoji_zwj``: inspect the codepoints
+# adjacent to each ZWJ (skipping over U+FE0F variation selectors) and check
+# whether they fall inside known emoji Unicode ranges.
+# ---------------------------------------------------------------------------
+
+# Codepoint ranges that contain emoji base characters.  Covers the SMP
+# pictographic ranges, Miscellaneous Symbols, Dingbats, Enclosed
+# Alphanumerics Supplement, and regional indicators — sufficient for all
+# ZWJ sequences defined in emoji-sequences.txt as of Unicode 16.0.
+_EMOJI_CP_RANGES: tuple[tuple[int, int], ...] = (
+    (0x1F000, 0x1FFFF),   # SMP pictographic ranges (faces, activities, objects…)
+    (0x2600,  0x27BF),    # Miscellaneous Symbols + Dingbats (⚕✈✳✴ etc.)
+    (0x2300,  0x23FF),    # Miscellaneous Technical (⌛⏳⏰⏱ etc.)
+    (0x1F1E6, 0x1F1FF),   # Regional indicator symbols (flag sequences)
+    (0x20E3,  0x20E3),    # Combining enclosing keycap
+    (0x2702,  0x27B0),    # Dingbats subset used in emoji
+    (0x25AA,  0x25FE),    # Small squares / geometric shapes used as emoji
+    (0x2B05,  0x2B55),    # Arrows & shapes used as emoji
+    (0x200D,  0x200D),    # ZWJ itself (when chained: emoji+ZWJ+ZWJ…)
+    (0xFE0F,  0xFE0F),    # VS16 (variation selector — presentational)
+    (0xFE0E,  0xFE0E),    # VS15 (variation selector — text)
+    # Skin tone modifiers — always appear adjacent to ZWJ in sequences.
+    (0x1F3FB, 0x1F3FF),
+    # Gender signs used in ZWJ sequences.
+    (0x2640,  0x2642),
+)
+
+_VS16 = 0xFE0F   # Variation Selector-16 (presentational emoji selector)
+
+
+def _is_emoji_cp(cp: int) -> bool:
+    """Return True if *cp* falls inside a known emoji codepoint range."""
+    return any(lo <= cp <= hi for lo, hi in _EMOJI_CP_RANGES)
+
+
+def _zwj_in_emoji_sequence(text: str, idx: int) -> bool:
+    """Return True when the ZWJ at *text[idx]* appears inside an emoji
+    grapheme cluster.
+
+    Scans left and right from *idx*, skipping over U+FE0F variation
+    selectors, then checks whether the nearest non-VS16 neighbours on
+    both sides are emoji codepoints.  This mirrors the approach already
+    proven in ``cronjob_tools._zwj_has_emoji_neighbour``.
+    """
+    # Walk left past any VS16 characters.
+    left = idx - 1
+    while left >= 0 and ord(text[left]) == _VS16:
+        left -= 1
+    # Walk right past any VS16 characters.
+    right = idx + 1
+    while right < len(text) and ord(text[right]) == _VS16:
+        right += 1
+    return (
+        left >= 0
+        and right < len(text)
+        and _is_emoji_cp(ord(text[left]))
+        and _is_emoji_cp(ord(text[right]))
+    )
+
+
+def _strip_legitimate_emoji_zwj(content: str) -> str:
+    """Remove ZWJ characters that are part of legitimate emoji sequences.
+
+    After stripping, any remaining ZWJ in the output is *not* part of an
+    emoji sequence and should be treated as suspicious invisible unicode.
+    """
+    if '\u200d' not in content:
+        return content
+    cleaned: list[str] = []
+    for idx, ch in enumerate(content):
+        if ch == '\u200d' and _zwj_in_emoji_sequence(content, idx):
+            continue
+        cleaned.append(ch)
+    return ''.join(cleaned)
+
+
 def scan_for_threats(content: str, scope: str = "context") -> List[str]:
     """Return a list of matched pattern IDs in ``content`` at the given scope.
 
@@ -207,8 +292,12 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
     findings: List[str] = []
 
     # Invisible unicode — single pass through the content set, not 17
-    # ``in`` lookups.
-    char_set = set(content)
+    # ``in`` lookups.  Before checking, strip ZWJ characters that are
+    # part of legitimate emoji sequences so they don't produce false
+    # positives (e.g. 🤸‍♀️, 👨‍👩‍👧).  Any ZWJ remaining after stripping
+    # is suspicious and should be reported.
+    content_for_invisible_scan = _strip_legitimate_emoji_zwj(content)
+    char_set = set(content_for_invisible_scan)
     invisible_hits = char_set & INVISIBLE_CHARS
     for ch in invisible_hits:
         findings.append(f"invisible_unicode_U+{ord(ch):04X}")
