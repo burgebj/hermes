@@ -414,6 +414,12 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     current_provider = config.get("llm_provider", "")
     current_model = config.get("llm_model", "")
     current_base_url = config.get("llm_base_url") or os.environ.get("HINDSIGHT_API_LLM_BASE_URL", "")
+    current_database_url = (
+        config.get("embed_database_url")
+        or config.get("database_url")
+        or config.get("HINDSIGHT_EMBED_API_DATABASE_URL")
+        or os.environ.get("HINDSIGHT_EMBED_API_DATABASE_URL", "")
+    )
 
     # The embedded daemon expects OpenAI wire format for these providers.
     daemon_provider = "openai" if current_provider in {"openai_compatible", "openrouter"} else current_provider
@@ -426,6 +432,8 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     }
     if current_base_url:
         env_values["HINDSIGHT_API_LLM_BASE_URL"] = str(current_base_url)
+    if current_database_url:
+        env_values["HINDSIGHT_EMBED_API_DATABASE_URL"] = str(current_database_url)
 
     idle_timeout = (
         config.get("idle_timeout")
