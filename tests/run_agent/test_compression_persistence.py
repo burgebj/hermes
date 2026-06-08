@@ -201,3 +201,98 @@ class TestGatewayHistoryOffsetAfterSplit:
         assert len(new_messages) == 0, (
             "Expected 0 messages with stale offset=200 (demonstrates the bug)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Part 3: tool_call argument validation on flush (#12731)
+# ---------------------------------------------------------------------------
+
+class TestFlushToolCallValidation:
+    """_flush_messages_to_session_db must repair corrupted tool_call arguments
+    before persisting, in both shapes the caller produces."""
+
+    def _make_agent(self, session_db):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+            from run_agent import AIAgent
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                model="test/model",
+                quiet_mode=True,
+                session_db=session_db,
+                session_id="validation-session",
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        return agent
+
+    def _first_tool_call(self, rows):
+        for row in rows:
+            tcs = row.get("tool_calls")
+            if tcs:
+                return tcs[0]
+        raise AssertionError("no tool_call row persisted")
+
+    def test_nested_shape_corrupted_args_are_repaired(self):
+        """{'function': {'arguments': ...}} — the shape already covered by the PR."""
+        from hermes_state import SessionDB
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            agent = self._make_agent(db)
+
+            corrupted = '{"path": "/etc/hosts", "content": "abc...[tru'
+            messages = [{
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "write_file", "arguments": corrupted},
+                }],
+            }]
+            agent._flush_messages_to_session_db(messages, None)
+
+            tc = self._first_tool_call(db.get_messages("validation-session"))
+            args = tc["function"]["arguments"]
+            _json.loads(args)  # must be valid JSON — no exception
+
+    def test_flat_shape_corrupted_args_are_repaired(self):
+        """{'name', 'arguments'} — the shape Branch A produces; previously slipped through."""
+        from hermes_state import SessionDB
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            agent = self._make_agent(db)
+
+            corrupted = '{"path": "/etc/hosts", "content": "abc...[tru'
+            messages = [{
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"name": "write_file", "arguments": corrupted}],
+            }]
+            agent._flush_messages_to_session_db(messages, None)
+
+            tc = self._first_tool_call(db.get_messages("validation-session"))
+            args = tc["arguments"]
+            _json.loads(args)
+
+    def test_valid_args_pass_through_unchanged(self):
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "t.db")
+            agent = self._make_agent(db)
+
+            valid = '{"path": "/tmp/x"}'
+            messages = [{
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"name": "write_file", "arguments": valid}],
+            }]
+            agent._flush_messages_to_session_db(messages, None)
+
+            tc = self._first_tool_call(db.get_messages("validation-session"))
+            assert tc["arguments"] == valid
