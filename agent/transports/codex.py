@@ -239,6 +239,12 @@ class ResponsesApiTransport(ProviderTransport):
         if max_tokens is not None and not is_codex_backend:
             kwargs["max_output_tokens"] = max_tokens
 
+        # GPT-5.5 / codex-gpt-5.5 on the Codex backend rejects reasoning,
+        # include, and store kwargs with 400. Strip them if present.
+        if is_codex_backend and (model.startswith("gpt-5.5") or model.startswith("codex-gpt-5.5")):
+            for _key in ("reasoning", "include", "store"):
+                kwargs.pop(_key, None)
+
         if is_xai_responses and session_id:
             existing_extra_headers = kwargs.get("extra_headers")
             merged_extra_headers: Dict[str, str] = {}
