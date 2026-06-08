@@ -377,6 +377,21 @@ class TestMattermostMultiImage:
         assert payload["channel_id"] == "channel123"
         assert len(payload["file_ids"]) == 3
 
+    def test_metadata_thread_id_sets_root_id(self, adapter, tmp_path):
+        """Mattermost native image batching must preserve thread metadata."""
+        adapter._reply_mode = "thread"
+        p = tmp_path / "img.png"
+        p.write_bytes(b"\x89PNG" + b"\x00" * 20)
+
+        _run(adapter.send_multiple_images(
+            "channel123",
+            [(f"file://{p}", "")],
+            metadata={"thread_id": "root_from_meta"},
+        ))
+
+        payload = adapter._api_post.await_args.args[1]
+        assert payload["root_id"] == "root_from_meta"
+
     def test_batch_over_5_chunks(self, adapter, tmp_path):
         """7 images → 2 posts (5 + 2)."""
         paths = []
