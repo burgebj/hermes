@@ -1195,7 +1195,8 @@ export default function ProfilesPage() {
           <div
             className={cn(
               themedBody,
-              "relative w-full max-w-lg border border-border bg-card shadow-2xl flex flex-col max-h-[90vh] overflow-y-auto",
+              "relative w-full max-w-lg border border-border bg-card shadow-2xl flex flex-col max-h-[90vh]",
+              editorKind === "model" ? "overflow-visible" : "overflow-y-auto",
             )}
           >
             <Button
