@@ -2878,6 +2878,45 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+
+# Reason patterns that indicate a parent-dependency block rather than a
+# human-review block.  When *all* parents are done, these should be
+# auto-promoted instead of staying sticky.  The patterns are deliberately
+# broad — workers phrase parent-wait reasons in many ways ("waiting for
+# parent", "parent not done", "depends on #X", etc.) and a false-negative
+# (leaving a parent-wait task stuck) is worse than a false-positive
+# (promoting a review block whose reason happens to mention "parent").
+_PARENT_WAIT_RE = re.compile(
+    r"(?:waiting|wait|blocked).*parent"
+    r"|parent.*(?:not|n't).*(?:done|complete|finish)"
+    r"|depends\s+on"
+    r"|parent.*(?:task|dep)",
+    re.IGNORECASE,
+)
+
+
+def _is_parent_wait_block(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True when the most recent ``blocked`` event's reason
+    indicates a parent-dependency wait rather than a human-review block.
+
+    This is used by ``recompute_ready`` to auto-promote tasks whose
+    parent-wait block is no longer relevant (all parents are done).
+    """
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row or not row["payload"]:
+        return False
+    try:
+        meta = json.loads(row["payload"])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    reason = meta.get("reason") or ""
+    return bool(_PARENT_WAIT_RE.search(reason))
+
 def recompute_ready(
     conn: sqlite3.Connection, failure_limit: int = None,
 ) -> int:
@@ -2925,7 +2964,23 @@ def recompute_ready(
                 # silently auto-recover.  ``unblock_task`` is the only
                 # legitimate exit (it emits ``"unblocked"`` which flips
                 # this predicate back).
-                continue
+                #
+                # Exception: parent-wait blocks (e.g. "waiting for parent
+                # task X") should auto-promote when all parents are done.
+                # The block was only because the parent hadn't finished;
+                # once it has, the reason no longer applies (#40312).
+                parents_for_sticky = conn.execute(
+                    "SELECT t.status FROM tasks t "
+                    "JOIN task_links l ON l.parent_id = t.id "
+                    "WHERE l.child_id = ?",
+                    (task_id,),
+                ).fetchall()
+                if parents_for_sticky and all(
+                    p["status"] in ("done", "archived") for p in parents_for_sticky
+                ) and _is_parent_wait_block(conn, task_id):
+                    pass  # fall through to promotion logic below
+                else:
+                    continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
                 "JOIN task_links l ON l.parent_id = t.id "

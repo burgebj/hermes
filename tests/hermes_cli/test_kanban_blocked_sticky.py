@@ -277,3 +277,151 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
 # (landed via #28754 / #28781).  The original PR shipped a duplicate test
 # here; dropped during salvage to avoid two assertions of the same contract.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# #40312 — parent-wait blocks must auto-promote when parents finish
+# ---------------------------------------------------------------------------
+
+
+def test_parent_wait_block_auto_promotes_when_parents_done(kanban_home: Path) -> None:
+    """A child blocked with a parent-wait reason (e.g. "waiting for parent
+    task X") must auto-promote when all parents complete.  This is the core
+    fix for #40312 — the sticky guard was incorrectly preserving these
+    blocks because it couldn't distinguish parent-wait from review blocks.
+
+    Scenario: child is created without parents, claimed by a worker, then
+    the worker discovers it needs a parent task.  It creates the parent,
+    links it, and blocks itself waiting for the parent to finish.
+    """
+    with kb.connect() as conn:
+        # Child starts running without parent dependency.
+        child = kb.create_task(conn, title="child task")
+        kb.recompute_ready(conn)  # promote todo -> ready (no parents)
+        kb.claim_task(conn, child)
+        assert kb.get_task(conn, child).status == "running"
+
+        # Worker discovers it needs a parent.  Create and link.
+        parent = kb.create_task(conn, title="parent task")
+        kb.link_tasks(conn, parent, child)
+
+        # Worker blocks itself waiting for the parent.
+        kb.block_task(
+            conn, child,
+            reason="waiting for parent task to complete",
+            expected_run_id=kb.get_task(conn, child).current_run_id,
+        )
+        assert kb.get_task(conn, child).status == "blocked"
+
+        # Parent completes — complete_task calls recompute_ready internally,
+        # which should auto-promote the parent-wait child.
+        kb.complete_task(conn, parent, result="parent done")
+        assert kb.get_task(conn, child).status == "ready"
+
+
+def test_parent_wait_block_with_depends_on_reason(kanban_home: Path) -> None:
+    """Workers may phrase parent-wait blocks as 'depends on #X'.
+    The auto-promote logic must catch this pattern too."""
+    with kb.connect() as conn:
+        child = kb.create_task(conn, title="dependent")
+        kb.recompute_ready(conn)  # promote todo -> ready (no parents)
+        kb.claim_task(conn, child)
+
+        parent = kb.create_task(conn, title="dependency")
+        kb.link_tasks(conn, parent, child)
+
+        kb.block_task(
+            conn, child,
+            reason="depends on #parent-task for config values",
+            expected_run_id=kb.get_task(conn, child).current_run_id,
+        )
+        assert kb.get_task(conn, child).status == "blocked"
+
+        kb.complete_task(conn, parent, result="done")
+        assert kb.get_task(conn, child).status == "ready"
+
+
+def test_review_block_stays_sticky_even_when_parents_done(kanban_home: Path) -> None:
+    """A review-required block must stay sticky even when all parents are
+    done — this is the existing #28712 behavior that must be preserved.
+    The #40312 fix only relaxes the guard for parent-wait reasons.
+    """
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+
+        # Complete parent first so child can be claimed.
+        kb.complete_task(conn, parent, result="ok")
+
+        kb.claim_task(conn, child)
+        kb.block_task(
+            conn, child,
+            reason="review-required: please verify the ACL change",
+            expected_run_id=kb.get_task(conn, child).current_run_id,
+        )
+        assert kb.get_task(conn, child).status == "blocked"
+
+        # Must NOT auto-promote — review blocks are sticky.
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 0
+        assert kb.get_task(conn, child).status == "blocked"
+
+
+def test_parent_wait_block_not_promoted_when_parents_incomplete(
+    kanban_home: Path,
+) -> None:
+    """A parent-wait block must NOT promote while any parent is still
+    running — the parent-wait reason is still valid."""
+    with kb.connect() as conn:
+        child = kb.create_task(conn, title="child")
+        kb.recompute_ready(conn)  # promote todo -> ready (no parents)
+        kb.claim_task(conn, child)
+
+        parent1 = kb.create_task(conn, title="parent 1")
+        parent2 = kb.create_task(conn, title="parent 2")
+        kb.link_tasks(conn, parent1, child)
+        kb.link_tasks(conn, parent2, child)
+
+        kb.block_task(
+            conn, child,
+            reason="waiting for parent tasks to finish",
+            expected_run_id=kb.get_task(conn, child).current_run_id,
+        )
+        kb.complete_task(conn, parent1, result="done")
+        # parent2 still running
+
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 0
+        assert kb.get_task(conn, child).status == "blocked"
+
+
+def test_parent_wait_block_with_no_reason_metadata_stays_sticky(
+    kanban_home: Path,
+) -> None:
+    """If the blocked event has no payload (e.g. direct DB manipulation),
+    the task should stay sticky — we can't determine intent."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+
+        # Complete parent first so child can be claimed.
+        kb.complete_task(conn, parent, result="ok")
+
+        kb.claim_task(conn, child)
+        kb.block_task(
+            conn, child,
+            reason="review-required: needs sign-off",
+            expected_run_id=kb.get_task(conn, child).current_run_id,
+        )
+
+        # Manually clear the payload to simulate a legacy/corrupted event.
+        conn.execute(
+            "UPDATE task_events SET payload = NULL "
+            "WHERE task_id = ? AND kind = 'blocked'",
+            (child,),
+        )
+        conn.commit()
+
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 0
+        assert kb.get_task(conn, child).status == "blocked"
