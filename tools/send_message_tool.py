@@ -1485,7 +1485,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
 
 
 async def _send_dingtalk(extra, chat_id, message):
-    """Send via DingTalk robot webhook.
+    """Send via DingTalk robot webhook with markdown formatting.
 
     Note: The gateway's DingTalk adapter uses per-session webhook URLs from
     incoming messages (dingtalk-stream SDK).  For cross-platform send_message
@@ -1501,10 +1501,16 @@ async def _send_dingtalk(extra, chat_id, message):
         webhook_url = extra.get("webhook_url") or os.getenv("DINGTALK_WEBHOOK_URL", "")
         if not webhook_url:
             return {"error": "DingTalk not configured. Set DINGTALK_WEBHOOK_URL env var or webhook_url in dingtalk platform extra config."}
+        # Normalize markdown for DingTalk's limited renderer
+        try:
+            from gateway.platforms.dingtalk import DingTalkAdapter
+            normalized = DingTalkAdapter._normalize_markdown(message[:20000])
+        except Exception:
+            normalized = message[:20000]
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 webhook_url,
-                json={"msgtype": "text", "text": {"content": message}},
+                json={"msgtype": "markdown", "markdown": {"title": "Hermes", "text": normalized}},
             )
             resp.raise_for_status()
             data = resp.json()
