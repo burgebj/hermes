@@ -2504,10 +2504,61 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             f"Set the appropriate environment variable or run 'hermes auth'."
         )
 
+    resolved_base_url = runtime.get("base_url") or ""
+    resolved_provider = (
+        configured_provider
+        if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM
+        else runtime.get("provider")
+    )
+
+    # #34318 / #34334: defense against credential/endpoint mismatch.
+    # If the user configured delegation.provider but resolution returned a
+    # base_url whose hostname doesn't match the well-known endpoint of the
+    # requested provider, the request would be routed to the wrong API with
+    # the wrong credentials (OpenRouter key → OpenAI endpoint = 401). Detect
+    # the mismatch before launching the child agent so the user gets a
+    # diagnostic instead of an opaque 401 from the wrong endpoint.
+    _provider_expected_hosts = {
+        "openrouter": ("openrouter.ai",),
+        "anthropic": ("api.anthropic.com",),
+        "openai": ("api.openai.com",),
+        "deepseek": ("api.deepseek.com",),
+        "moonshot": ("api.moonshot.cn", "api.moonshot.ai"),
+        "xai": ("api.x.ai",),
+        "google": ("generativelanguage.googleapis.com",),
+        "nous": ("inference-api.nousresearch.com",),
+        "groq": ("api.groq.com",),
+        "cerebras": ("api.cerebras.ai",),
+        "mistral": ("api.mistral.ai",),
+        "perplexity": ("api.perplexity.ai",),
+        "fireworks": ("api.fireworks.ai",),
+        "together": ("api.together.xyz",),
+        "minimax": ("api.minimaxi.chat", "api.minimax.chat"),
+        "zai": ("api.z.ai",),
+        "kimi-coding": ("api.moonshot.cn", "api.moonshot.ai"),
+    }
+    expected_hosts = _provider_expected_hosts.get(configured_provider.lower())
+    if expected_hosts and resolved_base_url:
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(resolved_base_url).hostname or "").lower()
+        except Exception:  # noqa: BLE001
+            host = ""
+        if host and not any(host == h or host.endswith("." + h) for h in expected_hosts):
+            raise ValueError(
+                f"Delegation credential mismatch: provider '{configured_provider}' "
+                f"resolved to base_url '{resolved_base_url}' (host '{host}') but expected "
+                f"one of {list(expected_hosts)}. The API key for '{configured_provider}' "
+                f"would be sent to the wrong endpoint and rejected. Check your "
+                f"~/.hermes/config.yaml (delegation.base_url override?) or .env file. "
+                f"If this is intentional, set delegation.base_url explicitly. "
+                f"See #34318."
+            )
+
     return {
         "model": configured_model or runtime.get("model") or None,
-        "provider": configured_provider if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM else runtime.get("provider"),
-        "base_url": runtime.get("base_url"),
+        "provider": resolved_provider,
+        "base_url": resolved_base_url or None,
         "api_key": api_key,
         "api_mode": runtime.get("api_mode"),
         "command": runtime.get("command"),

@@ -2730,3 +2730,146 @@ class TestFallbackModelInheritance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# #34318 / #34334 — credential/endpoint mismatch detection
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestDelegateCredentialEndpointMismatch(unittest.TestCase):
+    """Regression tests for #34318 + #34334.
+
+    delegate_task was sending the OpenRouter API key to OpenAI's endpoint
+    (resulting in 401 errors) when the runtime provider resolver returned
+    an unexpected base_url. The new validation detects this BEFORE the
+    request goes out and raises a diagnostic ValueError instead.
+    """
+
+    def test_openrouter_provider_with_openai_base_url_raises(self):
+        """Pathological case: provider=openrouter but base_url points at
+        api.openai.com. This is the #34318 reproduction shape."""
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "qwen/qwen3.7-max", "provider": "openrouter"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "qwen/qwen3.7-max",
+                "provider": "openrouter",
+                # The bug: base_url points at OpenAI instead of OpenRouter
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-or-v1-fake-openrouter-key",
+                "api_mode": "chat_completions",
+            }
+            with self.assertRaises(ValueError) as ctx:
+                _resolve_delegation_credentials(cfg, parent)
+
+        msg = str(ctx.exception)
+        self.assertIn("Delegation credential mismatch", msg)
+        self.assertIn("openrouter", msg)
+        self.assertIn("api.openai.com", msg)
+        self.assertIn("#34318", msg)
+
+    def test_anthropic_provider_with_wrong_base_url_raises(self):
+        """Same protection for Anthropic → wrong endpoint."""
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "claude-opus", "provider": "anthropic"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "claude-opus",
+                "provider": "anthropic",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-ant-fake",
+                "api_mode": "anthropic_messages",
+            }
+            with self.assertRaises(ValueError) as ctx:
+                _resolve_delegation_credentials(cfg, parent)
+
+        self.assertIn("anthropic", str(ctx.exception))
+        self.assertIn("api.openai.com", str(ctx.exception))
+
+    def test_correct_openrouter_endpoint_passes(self):
+        """Happy path: OpenRouter → openrouter.ai. No error."""
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "qwen/qwen3.7-max", "provider": "openrouter"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "qwen/qwen3.7-max",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "sk-or-v1-real",
+                "api_mode": "chat_completions",
+            }
+            creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(creds["provider"], "openrouter")
+
+    def test_correct_anthropic_endpoint_passes(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "claude-opus-4-6", "provider": "anthropic"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "claude-opus-4-6",
+                "provider": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "sk-ant-real",
+                "api_mode": "anthropic_messages",
+            }
+            creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "anthropic")
+
+    def test_subdomain_of_expected_host_passes(self):
+        """api.x.ai → xai. Subdomain matching with endswith('.host') logic."""
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "grok-4.3", "provider": "xai"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "grok-4.3",
+                "provider": "xai",
+                "base_url": "https://api.x.ai/v1",
+                "api_key": "xai-key",
+                "api_mode": "chat_completions",
+            }
+            creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "xai")
+
+    def test_unknown_provider_skips_validation(self):
+        """Custom/unknown provider: we have no expected-host list, so don't
+        block — let it through. Future custom providers added without
+        updating the validator should still work."""
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "custom-model", "provider": "my-private-provider"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "custom-model",
+                "provider": "my-private-provider",
+                "base_url": "https://random-host.example.com/v1",
+                "api_key": "custom-key",
+                "api_mode": "chat_completions",
+            }
+            # No raise — unknown providers bypass the validation.
+            creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["api_key"], "custom-key")
+
+    def test_empty_base_url_skips_validation(self):
+        """If the resolver returns no base_url, there's nothing to validate.
+        The downstream agent will inherit/derive the URL from elsewhere."""
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "qwen", "provider": "openrouter"}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve:
+            mock_resolve.return_value = {
+                "model": "qwen",
+                "provider": "openrouter",
+                "base_url": "",
+                "api_key": "or-key",
+                "api_mode": "chat_completions",
+            }
+            # No raise — empty base_url skips validation rather than blocking.
+            creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertIsNone(creds["base_url"])
