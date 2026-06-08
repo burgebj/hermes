@@ -279,6 +279,85 @@ def clear_goal(session_id: str) -> None:
     save_goal(session_id, state)
 
 
+def migrate_goal_session(old_session_id: str, new_session_id: str, *, db=None) -> bool:
+    """Move active/paused goal state across a verified compression split.
+
+    Returns True only when a live goal was copied from ``old_session_id`` to
+    ``new_session_id`` and the old row was made terminal/non-resumable. No-op
+    for blank/equal ids, absent/terminal old goals, existing child goals, or
+    relationships that are not verified compression continuations.
+    """
+    old_session_id = (old_session_id or "").strip()
+    new_session_id = (new_session_id or "").strip()
+    if not old_session_id or not new_session_id or old_session_id == new_session_id:
+        return False
+
+    db = db or _get_session_db()
+    if db is None:
+        return False
+
+    try:
+        if db.get_compression_tip(old_session_id) != new_session_id:
+            return False
+    except Exception as exc:
+        logger.debug(
+            "GoalManager: compression validation failed for %s -> %s: %s",
+            old_session_id,
+            new_session_id,
+            exc,
+        )
+        return False
+
+    old_key = _meta_key(old_session_id)
+    new_key = _meta_key(new_session_id)
+    try:
+        old_raw = db.get_meta(old_key)
+    except Exception as exc:
+        logger.debug("GoalManager: get_meta failed during migration: %s", exc)
+        return False
+    if not old_raw:
+        return False
+
+    try:
+        old_state = GoalState.from_json(old_raw)
+    except Exception as exc:
+        logger.warning(
+            "GoalManager: could not parse stored goal for migration %s -> %s: %s",
+            old_session_id,
+            new_session_id,
+            exc,
+        )
+        return False
+
+    if old_state.status not in {"active", "paused"}:
+        return False
+
+    migrated_old_state = GoalState.from_json(old_raw)
+    migrated_old_state.status = "cleared"
+    migrated_old_state.paused_reason = f"migrated to {new_session_id}"
+    migrated_raw = migrated_old_state.to_json()
+
+    try:
+        mover = getattr(db, "move_meta_if_target_absent", None)
+        if mover is None:
+            return False
+        moved = mover(
+            old_key,
+            new_key,
+            source_value=migrated_raw,
+            expected_source_value=old_raw,
+        )
+    except Exception as exc:
+        logger.debug(
+            "GoalManager: atomic goal migration failed %s -> %s: %s",
+            old_session_id,
+            new_session_id,
+            exc,
+        )
+        return False
+    return bool(moved)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Judge
 # ──────────────────────────────────────────────────────────────────────
@@ -545,6 +624,8 @@ class GoalManager:
 
     def resume(self, *, reset_budget: bool = True) -> Optional[GoalState]:
         if not self._state:
+            return None
+        if self._state.status != "paused":
             return None
         self._state.status = "active"
         self._state.paused_reason = None

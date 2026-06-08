@@ -2430,6 +2430,113 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
+    def _migrate_goal_for_compression_chain(
+        self,
+        old_session_id: str,
+        new_session_id: str,
+    ) -> bool:
+        """Move any live /goal row along a verified compression chain to its tip."""
+        old_session_id = str(old_session_id or "")
+        new_session_id = str(new_session_id or "")
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return False
+        db = getattr(self, "_session_db", None)
+        try:
+            chain = db.get_compression_chain(old_session_id) if db is not None else [old_session_id]
+        except Exception:
+            logger.debug(
+                "goal migration: compression chain lookup failed for %s",
+                old_session_id,
+                exc_info=True,
+            )
+            chain = [old_session_id]
+        if not chain or chain[-1] != new_session_id:
+            return False
+        try:
+            from hermes_cli.goals import migrate_goal_session
+        except Exception:
+            logger.debug("goal migration: goals module unavailable", exc_info=True)
+            return False
+        migrated = False
+        for candidate_session_id in chain[:-1]:
+            try:
+                if migrate_goal_session(candidate_session_id, new_session_id, db=db):
+                    migrated = True
+                    break
+            except Exception:
+                logger.debug(
+                    "goal migration failed for compression edge %s -> %s",
+                    candidate_session_id,
+                    new_session_id,
+                    exc_info=True,
+                )
+        return migrated
+
+    def _handle_compression_session_switch(
+        self,
+        *,
+        session_key: str,
+        session_entry: Any,
+        old_session_id: str,
+        new_session_id: str,
+        source: Optional[SessionSource] = None,
+        reason: str,
+    ):
+        """Update routing after a session compression split and migrate /goal state."""
+        old_session_id = str(old_session_id or "")
+        new_session_id = str(new_session_id or "")
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return session_entry
+
+        switched_entry = None
+        switch_session = getattr(self.session_store, "switch_session", None)
+        if callable(switch_session):
+            try:
+                candidate = switch_session(session_key, new_session_id)
+                if getattr(candidate, "session_id", None) == new_session_id:
+                    switched_entry = candidate
+            except Exception:
+                logger.debug("compression switch: session-store switch failed", exc_info=True)
+
+        original_entry = session_entry
+        if switched_entry is not None:
+            session_entry = switched_entry
+        elif session_entry is not None:
+            try:
+                session_entry.session_id = new_session_id
+            except Exception:
+                pass
+
+        # Keep direct-call tests and any already-held SessionEntry references in
+        # sync even when SessionStore.switch_session() returned a replacement.
+        if original_entry is not None and original_entry is not session_entry:
+            try:
+                original_entry.session_id = new_session_id
+            except Exception:
+                pass
+
+        store_entry = None
+        if switched_entry is None:
+            try:
+                entries = getattr(self.session_store, "_entries", None)
+                if isinstance(entries, dict) and session_key in entries:
+                    store_entry = entries[session_key]
+                    store_entry.session_id = new_session_id
+                    session_entry = store_entry
+            except Exception:
+                logger.debug("compression switch: session-store entry update failed", exc_info=True)
+
+            try:
+                self.session_store._save()
+            except Exception:
+                logger.debug("compression switch: session-store save failed", exc_info=True)
+
+        self._migrate_goal_for_compression_chain(old_session_id, new_session_id)
+
+        if source is not None and session_entry is not None:
+            self._sync_telegram_topic_binding(source, session_entry, reason=reason)
+        return session_entry
+
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
         if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
@@ -7974,7 +8081,8 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 logger.debug("Failed to read Telegram topic binding", exc_info=True)
                 binding = None
             if binding:
-                bound_session_id = str(binding.get("session_id") or "")
+                binding_session_id = str(binding.get("session_id") or "")
+                bound_session_id = binding_session_id
                 # Heal bindings that point at a pre-compression parent: walk
                 # the compression-continuation chain forward to its tip so the
                 # next message resumes the compressed child instead of
@@ -7998,19 +8106,35 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     ):
                         bound_session_id = canonical_session_id
                 if bound_session_id and bound_session_id != session_entry.session_id:
-                    # Route the override through SessionStore so the session_key
-                    # → session_id mapping is persisted to disk and the previous
-                    # lane session is ended cleanly. Mutating session_entry in
-                    # place here created a split-brain state where the JSON
-                    # index pointed at one id but code downstream used another.
-                    switched = self.session_store.switch_session(session_key, bound_session_id)
-                    if switched is not None:
-                        session_entry = switched
-                # If the stored binding pointed at a parent, rewrite it to the
-                # canonical descendant now that we've followed the chain.
+                    if bound_session_id != binding_session_id:
+                        # Route compression-tip repairs through the compression
+                        # switch path so session-store persistence, topic-binding
+                        # sync, and /goal state migration cannot drift apart.
+                        session_entry = self._handle_compression_session_switch(
+                            session_key=session_key,
+                            session_entry=session_entry,
+                            old_session_id=binding_session_id,
+                            new_session_id=bound_session_id,
+                            source=source,
+                            reason="compression-tip-walk",
+                        )
+                    else:
+                        # Ordinary/restored topic bindings are not compression
+                        # migrations. Preserve the normal session-store switch
+                        # semantics so the static topic lane resumes the bound
+                        # session even when get_compression_tip() returns the
+                        # same ID.
+                        switched = self.session_store.switch_session(
+                            session_key, bound_session_id,
+                        )
+                        if switched is not None:
+                            session_entry = switched
+                # If the stored binding pointed at a parent but this lane was
+                # already on the canonical descendant, rewrite the binding now.
                 if (
                     bound_session_id
-                    and bound_session_id != str(binding.get("session_id") or "")
+                    and bound_session_id != binding_session_id
+                    and bound_session_id == session_entry.session_id
                 ):
                     self._sync_telegram_topic_binding(
                         source, session_entry, reason="compression-tip-walk",
@@ -8389,10 +8513,12 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                                     # and searchable via session_search.
                                     _hyg_new_sid = _hyg_agent.session_id
                                     if _hyg_new_sid != session_entry.session_id:
-                                        session_entry.session_id = _hyg_new_sid
-                                        self.session_store._save()
-                                        self._sync_telegram_topic_binding(
-                                            source, session_entry,
+                                        session_entry = self._handle_compression_session_switch(
+                                            session_key=session_key,
+                                            session_entry=session_entry,
+                                            old_session_id=session_entry.session_id,
+                                            new_session_id=_hyg_new_sid,
+                                            source=source,
                                             reason="hygiene-compression",
                                         )
 
@@ -8692,10 +8818,13 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
-                session_entry.session_id = agent_result["session_id"]
-                self.session_store._save()
-                self._sync_telegram_topic_binding(
-                    source, session_entry, reason="agent-result-compression",
+                session_entry = self._handle_compression_session_switch(
+                    session_key=session_key,
+                    session_entry=session_entry,
+                    old_session_id=session_entry.session_id,
+                    new_session_id=agent_result["session_id"],
+                    source=source,
+                    reason="agent-result-compression",
                 )
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
@@ -10201,6 +10330,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 )
             except Exception:
                 pass
+
 
 
 
@@ -14402,8 +14532,14 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 )
                 entry = self.session_store._entries.get(session_key)
                 if entry:
-                    entry.session_id = agent.session_id
-                    self.session_store._save()
+                    self._handle_compression_session_switch(
+                        session_key=session_key,
+                        session_entry=entry,
+                        old_session_id=session_id,
+                        new_session_id=agent.session_id,
+                        source=source,
+                        reason="session-split-detected",
+                    )
 
                 # If this is a Telegram DM and source.thread_id was lost during
                 # the session split (synthetic / recovered event), restore it

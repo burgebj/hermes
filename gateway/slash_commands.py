@@ -2279,10 +2279,13 @@ class GatewaySlashCommandsMixin:
                 # into the NEW session so the original history stays searchable.
                 new_session_id = tmp_agent.session_id
                 if new_session_id != session_entry.session_id:
-                    session_entry.session_id = new_session_id
-                    self.session_store._save()
-                    self._sync_telegram_topic_binding(
-                        source, session_entry, reason="compress-command",
+                    session_entry = self._handle_compression_session_switch(
+                        session_key=session_key,
+                        session_entry=session_entry,
+                        old_session_id=session_entry.session_id,
+                        new_session_id=new_session_id,
+                        source=source,
+                        reason="compress-command",
                     )
 
                 self.session_store.rewrite_transcript(new_session_id, compressed)

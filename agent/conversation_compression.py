@@ -547,6 +547,12 @@ def compress_context(
                 except (ValueError, Exception) as e:
                     logger.debug("Could not propagate title on compression: %s", e)
             agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
+            try:
+                from hermes_cli.goals import migrate_goal_session
+
+                migrate_goal_session(old_session_id, agent.session_id, db=agent._session_db)
+            except Exception as goal_err:
+                logger.debug("GoalManager migration on compression failed: %s", goal_err)
             # Reset flush cursor — new session starts with no messages written
             agent._last_flushed_db_idx = 0
         except Exception as e:
