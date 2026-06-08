@@ -5485,6 +5485,34 @@ class TestFallbackAnthropicProvider:
         assert agent.api_mode == "chat_completions"
         assert agent.client is mock_client
 
+    def test_fallback_entry_api_mode_hint_sets_anthropic_messages(self, agent):
+        agent._fallback_activated = False
+        agent._fallback_model = {
+            "provider": "custom:krill",
+            "model": "deepseek-v4-pro",
+            "api_mode": "anthropic_messages",
+        }
+        agent._fallback_chain = [agent._fallback_model]
+        agent._fallback_index = 0
+
+        mock_client = MagicMock()
+        mock_client.base_url = "https://api.krill-ai.com/coding/v1"
+        mock_client.api_key = "***"
+
+        with (
+            patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)) as mock_resolve,
+            patch("agent.anthropic_adapter.build_anthropic_client") as mock_build,
+            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value=None),
+        ):
+            mock_build.return_value = MagicMock()
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        assert mock_resolve.call_args.kwargs["api_mode"] == "anthropic_messages"
+        assert agent.api_mode == "anthropic_messages"
+        assert agent._anthropic_client is not None
+        assert agent.client is None
+
 
 def test_aiagent_uses_copilot_acp_client():
     with (

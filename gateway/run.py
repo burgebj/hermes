@@ -1298,11 +1298,22 @@ def _try_resolve_fallback_provider() -> dict | None:
                     entry.get("provider") or runtime.get("provider"),
                     entry.get("model"),
                 )
+                # Per-fallback api_mode is the most specific transport hint. Runtime
+                # provider resolution still fills credentials/base_url; the entry hint
+                # wins so gateway-level auth fallback matches in-agent fallback behavior.
+                entry_api_mode = str(entry.get("api_mode") or "").strip()
+                if entry_api_mode not in {
+                    "chat_completions",
+                    "codex_responses",
+                    "anthropic_messages",
+                    "bedrock_converse",
+                }:
+                    entry_api_mode = ""
                 return {
                     "api_key": runtime.get("api_key"),
                     "base_url": runtime.get("base_url"),
                     "provider": runtime.get("provider"),
-                    "api_mode": runtime.get("api_mode"),
+                    "api_mode": entry_api_mode or runtime.get("api_mode"),
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),

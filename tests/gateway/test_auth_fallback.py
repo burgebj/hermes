@@ -113,3 +113,40 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
         assert calls == ["openrouter", "nous"]
         assert result["provider"] == "nous"
         assert result["model"] == "Hermes-4"
+
+    def test_fallback_providers_api_mode_overrides_runtime_mode(self, tmp_path, monkeypatch):
+        """gateway auth fallback honors per-entry api_mode from fallback_providers."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "fallback_providers:\n"
+            "  - provider: custom:krill\n"
+            "    model: deepseek-v4-pro\n"
+            "    api_mode: anthropic_messages\n"
+        )
+
+        monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+
+        def _mock_resolve(**kwargs):
+            assert kwargs.get("requested") == "custom:krill"
+            return {
+                "api_key": "krill-key",
+                "base_url": "https://api.krill-ai.com/coding/v1",
+                "provider": "custom",
+                "api_mode": "chat_completions",
+                "command": None,
+                "args": None,
+                "credential_pool": None,
+            }
+
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            side_effect=_mock_resolve,
+        ):
+            from gateway.run import _try_resolve_fallback_provider
+
+            result = _try_resolve_fallback_provider()
+
+        assert result is not None
+        assert result["provider"] == "custom"
+        assert result["model"] == "deepseek-v4-pro"
+        assert result["api_mode"] == "anthropic_messages"
