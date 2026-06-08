@@ -12,6 +12,7 @@ Provides speech-to-text transcription with six providers:
   - **xai** — xAI Grok STT API, requires ``XAI_API_KEY``. High accuracy,
     Inverse Text Normalization, diarization, 21 languages.
   - **elevenlabs** — ElevenLabs Scribe API, requires ``ELEVENLABS_API_KEY``.
+  - **mimo** — Xiaomi MiMo ASR API, requires ``MIMO_API_KEY``.
 
 Used by the messaging gateway to automatically transcribe voice messages
 sent by users on Telegram, Discord, WhatsApp, Slack, and Signal.
@@ -98,6 +99,8 @@ GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 OPENAI_BASE_URL = os.getenv("STT_OPENAI_BASE_URL", "https://api.openai.com/v1")
 XAI_STT_BASE_URL = os.getenv("XAI_STT_BASE_URL", "https://api.x.ai/v1")
 ELEVENLABS_STT_BASE_URL = os.getenv("ELEVENLABS_STT_BASE_URL", "https://api.elevenlabs.io/v1")
+DEFAULT_MIMO_STT_MODEL = os.getenv("STT_MIMO_MODEL", "mimo-v2.5-asr")
+MIMO_API_BASE_URL = os.getenv("MIMO_API_BASE", "https://api.xiaomimimo.com/v1")
 
 SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
 LOCAL_NATIVE_AUDIO_FORMATS = {".wav", ".aiff", ".aif"}
@@ -241,6 +244,7 @@ BUILTIN_STT_PROVIDERS = frozenset({
     "openai",
     "mistral",
     "xai",
+    "mimo",
 })
 
 
@@ -825,6 +829,14 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "mimo":
+            if get_env_value("MIMO_API_KEY") or get_env_value("XIAOMIMIMO_API_KEY"):
+                return "mimo"
+            logger.warning(
+                "STT provider 'mimo' configured but MIMO_API_KEY not set"
+            )
+            return "none"
+
         return provider  # Unknown — let it fail downstream
 
     # --- Auto-detect (no explicit provider): local > groq > openai > xai > elevenlabs -
@@ -861,6 +873,9 @@ def _get_provider(stt_config: dict) -> str:
     if get_env_value("ELEVENLABS_API_KEY"):
         logger.info("No local STT available, using ElevenLabs Scribe STT API")
         return "elevenlabs"
+    if get_env_value("MIMO_API_KEY") or get_env_value("XIAOMIMIMO_API_KEY"):
+        logger.info("No local STT available, using Xiaomi MiMo ASR")
+        return "mimo"
     return "none"
 
 
@@ -1615,6 +1630,141 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: mimo (Xiaomi MiMo ASR)
+# ---------------------------------------------------------------------------
+
+
+def _transcribe_mimo(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using Xiaomi MiMo ASR API.
+
+    Unlike Whisper-compatible providers, MiMo ASR uses the
+    ``/v1/chat/completions`` endpoint with base64-encoded audio input
+    and the ``api-key`` header for authentication.
+
+    Requires ``MIMO_API_KEY`` or ``XIAOMIMIMO_API_KEY`` environment variable.
+    """
+    import base64
+    import json
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+
+    api_key = get_env_value("MIMO_API_KEY") or get_env_value("XIAOMIMIMO_API_KEY")
+    if not api_key:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": "MIMO_API_KEY not set",
+        }
+
+    audio_path = Path(file_path)
+    try:
+        data = audio_path.read_bytes()
+    except OSError as e:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": f"Cannot read audio file: {e}",
+        }
+
+    audio_b64 = base64.b64encode(data).decode("ascii")
+
+    # Determine MIME type from file extension
+    suffix = audio_path.suffix.lower()
+    mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg"}
+    mime_type = mime_map.get(suffix, "audio/wav")
+
+    stt_config = _load_stt_config()
+    mimo_config = stt_config.get("mimo", {})
+    language = mimo_config.get("language", "auto")
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": f"data:{mime_type};base64,{audio_b64}",
+                        },
+                    }
+                ],
+            }
+        ],
+        "asr_options": {"language": language},
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    api_url = f"{MIMO_API_BASE_URL}/chat/completions"
+
+    # Retry config — matches NanoBot's pattern
+    max_retries = 3
+    backoff_s = (1.0, 2.0, 4.0)
+    retryable_status = {408, 429, 500, 502, 503, 504}
+
+    last_error = ""
+    for attempt in range(max_retries + 1):
+        req = Request(
+            api_url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "api-key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            transcript_text = result["choices"][0]["message"]["content"].strip()
+            logger.info(
+                "Transcribed %s via MiMo ASR (%s, %d chars)",
+                audio_path.name, model_name, len(transcript_text),
+            )
+            return {"success": True, "transcript": transcript_text, "provider": "mimo"}
+        except HTTPError as e:
+            status = e.code
+            last_error = f"HTTP {status}"
+            if status in retryable_status and attempt < max_retries:
+                logger.warning(
+                    "MiMo ASR transient HTTP %d (attempt %d/%d)",
+                    status, attempt + 1, max_retries + 1,
+                )
+                import time
+                time.sleep(backoff_s[attempt])
+                continue
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "transcript": "",
+                "error": f"MiMo ASR error: HTTP {status} {detail}",
+                "provider": "mimo",
+            }
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                logger.warning(
+                    "MiMo ASR transient error (attempt %d/%d): %s",
+                    attempt + 1, max_retries + 1, e,
+                )
+                import time
+                time.sleep(backoff_s[attempt])
+                continue
+
+    return {
+        "success": False,
+        "transcript": "",
+        "error": f"MiMo ASR failed after {max_retries + 1} attempts: {last_error}",
+        "provider": "mimo",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1691,6 +1841,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         elevenlabs_cfg = stt_config.get("elevenlabs", {})
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
         return _transcribe_elevenlabs(file_path, model_name)
+
+    if provider == "mimo":
+        mimo_cfg = stt_config.get("mimo", {})
+        model_name = model or mimo_cfg.get("model", DEFAULT_MIMO_STT_MODEL)
+        return _transcribe_mimo(file_path, model_name)
 
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
