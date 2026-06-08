@@ -154,6 +154,45 @@ def _codex_ack_message_response(text: str):
     )
 
 
+def _codex_final_answer_with_top_level_incomplete_response(text: str):
+    # Azure Foundry shape: top-level response.status="incomplete" but the
+    # output contains a `phase=final_answer, status=completed` message with
+    # substantive text content. See issue #27988.
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                phase="final_answer",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=text)],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="incomplete",
+        model="gpt-5.4",
+    )
+
+
+class _FakeResponsesStream:
+    def __init__(self, *, final_response=None, final_error=None):
+        self._final_response = final_response
+        self._final_error = final_error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def get_final_response(self):
+        if self._final_error is not None:
+            raise self._final_error
+        return self._final_response
+
+
 class _FakeCreateStream:
     """Iterable-only fake for ``responses.create(stream=True)`` outputs.
 
@@ -1349,6 +1388,121 @@ def test_normalize_codex_response_marks_commentary_only_message_as_incomplete(mo
 
     assert finish_reason == "incomplete"
     assert "inspect the repository" in (assistant_message.content or "")
+
+
+def test_normalize_codex_response_final_answer_overrides_top_level_incomplete(monkeypatch):
+    """Azure Foundry can set top-level `response.status="incomplete"` on
+    otherwise-complete gpt-5.x responses. A per-message
+    `phase=final_answer, status=completed` carrying substantive text
+    indicates the user-visible answer is complete; the top-level status
+    is an accounting/streaming-edge artifact and must not promote a
+    complete response to `finish_reason="incomplete"` (issue #27988).
+    """
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    assistant_message, finish_reason = _normalize_codex_response(
+        _codex_final_answer_with_top_level_incomplete_response(
+            "Briefly:\n\n- I'm Ramsay, your assistant."
+        )
+    )
+
+    assert finish_reason == "stop"
+    assert "Ramsay" in (assistant_message.content or "")
+
+
+def test_normalize_codex_response_top_level_incomplete_without_final_answer_phase_stays_incomplete(monkeypatch):
+    """Negative: if the top-level status is `incomplete` and there is no
+    `phase=final_answer` message in output, finish_reason must remain
+    `incomplete` so the continuation path can re-elicit the answer.
+    """
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="Partial...")],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="incomplete",
+        model="gpt-5.4",
+    )
+
+    _, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "incomplete"
+
+
+@pytest.mark.parametrize("top_level_status", ["queued", "in_progress"])
+def test_normalize_codex_response_final_answer_does_not_override_streaming_status(
+    monkeypatch, top_level_status
+):
+    """A `phase=final_answer` message must NOT short-circuit a response whose
+    top-level status is still `queued`/`in_progress`. The final_answer override
+    only exists to neutralize the Azure-Foundry top-level `incomplete` artifact;
+    a genuinely-streaming response can still emit more items, so it must stay
+    `finish_reason="incomplete"` and let the continuation path drain the stream
+    (regression for the over-broad override, Copilot review on #28039).
+    """
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                phase="final_answer",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="Interim answer.")],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status=top_level_status,
+        model="gpt-5.4",
+    )
+
+    _, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "incomplete"
+
+
+def test_normalize_codex_response_final_answer_does_not_override_per_item_in_progress(
+    monkeypatch,
+):
+    """Even with a top-level `completed` status and a `phase=final_answer`
+    message, a sibling output item that is still `in_progress` means the
+    stream is not done; finish_reason must stay `incomplete` rather than
+    `stop` (Copilot review on #28039).
+    """
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                phase="final_answer",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="Partial final.")],
+            ),
+            SimpleNamespace(
+                type="message",
+                status="in_progress",
+                content=[SimpleNamespace(type="output_text", text="")],
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="completed",
+        model="gpt-5.4",
+    )
+
+    _, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "incomplete"
 
 
 def test_normalize_codex_response_preserves_message_status_for_replay(monkeypatch):
