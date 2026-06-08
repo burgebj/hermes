@@ -165,6 +165,8 @@ _parallel_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
+_live_delivery_adapters = None
+_live_delivery_loop = None
 
 # Sequential (env/context-mutating) cron jobs — workdir/profile jobs that touch
 # process-global runtime state — must run one at a time, but must NOT block the
@@ -185,6 +187,28 @@ def _get_parallel_pool(max_workers: Optional[int]) -> concurrent.futures.ThreadP
         )
         _parallel_pool_max_workers = max_workers
     return _parallel_pool
+
+
+def _resolve_max_parallel_workers() -> Optional[int]:
+    """Resolve the configured parallel-worker cap for cron jobs."""
+    max_workers: Optional[int] = None
+    try:
+        env_par = os.getenv("HERMES_CRON_MAX_PARALLEL", "").strip()
+        if env_par:
+            max_workers = int(env_par) or None
+    except (ValueError, TypeError):
+        logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to unbounded")
+    if max_workers is None:
+        try:
+            user_cfg = load_config() or {}
+            cfg_par = (
+                user_cfg.get("cron", {}) if isinstance(user_cfg, dict) else {}
+            ).get("max_parallel_jobs")
+            if cfg_par is not None:
+                max_workers = int(cfg_par) or None
+        except Exception:
+            pass
+    return max_workers
 
 
 def _get_sequential_pool() -> concurrent.futures.ThreadPoolExecutor:
@@ -1392,8 +1416,14 @@ def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> 
             return False, f"Job '{job_id}' is already running; this manual run was not queued"
         _running_job_ids.add(job["id"])
 
-    pool = _get_sequential_pool() if _job_requires_sequential_pool(job) else _get_parallel_pool(None)
+    pool = (
+        _get_sequential_pool()
+        if _job_requires_sequential_pool(job)
+        else _get_parallel_pool(_resolve_max_parallel_workers())
+    )
     _ctx = contextvars.copy_context()
+    adapters = _live_delivery_adapters
+    loop = _live_delivery_loop
 
     def _run_and_release(j=job, ctx=_ctx):
         try:
@@ -1411,7 +1441,7 @@ def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> 
             delivery_error = None
             if should_deliver:
                 try:
-                    delivery_error = _deliver_result(j, deliver_content)
+                    delivery_error = _deliver_result(j, deliver_content, adapters=adapters, loop=loop)
                 except Exception as de:
                     delivery_error = str(de)
             if success and not final_response.strip():
@@ -2118,6 +2148,11 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
     Returns:
         Number of jobs executed (0 if another tick is already running)
     """
+    global _live_delivery_adapters, _live_delivery_loop
+    if adapters is not None and loop is not None:
+        _live_delivery_adapters = adapters
+        _live_delivery_loop = loop
+
     lock_dir, lock_file = _get_lock_paths()
     lock_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2155,23 +2190,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
-        _max_workers: Optional[int] = None
-        try:
-            _env_par = os.getenv("HERMES_CRON_MAX_PARALLEL", "").strip()
-            if _env_par:
-                _max_workers = int(_env_par) or None
-        except (ValueError, TypeError):
-            logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to unbounded")
-        if _max_workers is None:
-            try:
-                _ucfg = load_config() or {}
-                _cfg_par = (
-                    _ucfg.get("cron", {}) if isinstance(_ucfg, dict) else {}
-                ).get("max_parallel_jobs")
-                if _cfg_par is not None:
-                    _max_workers = int(_cfg_par) or None
-            except Exception:
-                pass
+        _max_workers = _resolve_max_parallel_workers()
 
         if verbose:
             logger.info(

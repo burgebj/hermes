@@ -302,6 +302,97 @@ class TestRunJobImmediate:
 
         sched._shutdown_parallel_pool()
 
+    def test_run_job_immediate_respects_parallel_pool_cap(self, monkeypatch):
+        """Immediate parallel jobs should use the configured shared pool cap."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 5m",
+            name="parallel-pool-cap-test"
+        )
+        job_id = job["id"]
+
+        seen = {}
+
+        class _DummyPool:
+            def submit(self, fn):
+                fn()
+                return MagicMock()
+
+        monkeypatch.setattr(sched, "_resolve_max_parallel_workers", lambda: 3)
+        def fake_get_parallel_pool(max_workers):
+            seen["value"] = max_workers
+            return _DummyPool()
+        monkeypatch.setattr(sched, "_get_parallel_pool", fake_get_parallel_pool)
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        dispatched, error = sched.run_job_immediate(job_id)
+
+        assert dispatched is True
+        assert error is None
+        assert seen["value"] == 3
+
+        sched._shutdown_parallel_pool()
+
+    def test_run_job_immediate_passes_live_adapter_context(self, monkeypatch):
+        """Immediate runs should reuse cached gateway adapters and loop when present."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 5m",
+            name="live-adapter-context-test"
+        )
+        job_id = job["id"]
+
+        class _InlinePool:
+            def submit(self, fn):
+                fn()
+                return MagicMock()
+
+        captured = {}
+        adapter_sentinel = {"matrix": object()}
+        loop_sentinel = object()
+        sched._live_delivery_adapters = adapter_sentinel
+        sched._live_delivery_loop = loop_sentinel
+
+        monkeypatch.setattr(sched, "_get_parallel_pool", lambda *_a, **_kw: _InlinePool())
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+
+        def fake_deliver(_job, _content, adapters=None, loop=None):
+            captured["adapters"] = adapters
+            captured["loop"] = loop
+            return None
+
+        monkeypatch.setattr(sched, "_deliver_result", fake_deliver)
+
+        dispatched, error = sched.run_job_immediate(job_id)
+
+        assert dispatched is True
+        assert error is None
+        assert captured["adapters"] is adapter_sentinel
+        assert captured["loop"] is loop_sentinel
+
+        sched._live_delivery_adapters = None
+        sched._live_delivery_loop = None
+        sched._shutdown_parallel_pool()
+
     def test_action_run_failed_manual_run_restores_schedule(self, monkeypatch):
         """A failed immediate manual run must not consume the next scheduled run."""
         import cron.scheduler as sched
@@ -336,6 +427,39 @@ class TestRunJobImmediate:
         assert result["success"] is True
         assert result["dispatched"] is True
         assert resolve_job_ref(job_id)["next_run_at"] == original_next_run_at
+
+        sched._shutdown_parallel_pool()
+
+    def test_action_run_does_not_force_due_timestamp_before_dispatch(self, monkeypatch):
+        """Manual runs should not stamp next_run_at=now before the immediate worker starts."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref
+        from tools.cronjob_tools import cronjob
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="manual-run-preserve-next-run"
+        )
+        job_id = job["id"]
+        original_next_run_at = resolve_job_ref(job_id)["next_run_at"]
+        seen_next_run_at = {}
+
+        def fake_run_job_immediate(job_ref, schedule_snapshot=None):
+            seen_next_run_at["value"] = resolve_job_ref(job_ref)["next_run_at"]
+            return False, "not dispatched for inspection"
+
+        monkeypatch.setattr(sched, "run_job_immediate", fake_run_job_immediate)
+
+        result = json.loads(cronjob(action="run", job_id=job_id))
+
+        assert result["success"] is True
+        assert result["dispatched"] is False
+        assert seen_next_run_at["value"] == original_next_run_at
 
         sched._shutdown_parallel_pool()
 

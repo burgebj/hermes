@@ -629,7 +629,16 @@ def cronjob(
                 "paused_reason": job.get("paused_reason"),
                 "next_run_at": job.get("next_run_at"),
             }
-            updated = trigger_job(job_id)
+            updated = update_job(
+                job_id,
+                {
+                    "enabled": True,
+                    "state": "scheduled",
+                    "paused_at": None,
+                    "paused_reason": None,
+                    "next_run_at": job.get("next_run_at"),
+                },
+            )
             try:
                 from cron.scheduler import run_job_immediate
                 dispatched, dispatch_error = run_job_immediate(job_id, schedule_snapshot=schedule_snapshot)
