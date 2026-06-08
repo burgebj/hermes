@@ -458,6 +458,108 @@ async def test_safe_sync_slash_commands_only_mutates_diffs():
 
 
 @pytest.mark.asyncio
+async def test_safe_sync_slash_commands_deletes_stale_before_creating():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    class _DesiredCommand:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, tree):
+            assert tree is not None
+            return dict(self._payload)
+
+    class _ExistingCommand:
+        def __init__(self, command_id, payload):
+            self.id = command_id
+            self.name = payload["name"]
+            self.type = SimpleNamespace(value=payload["type"])
+            self._payload = payload
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "application_id": 999,
+                **self._payload,
+                "name_localizations": {},
+                "description_localizations": {},
+            }
+
+    desired_kept = {
+        "name": "status",
+        "description": "Show Hermes session status",
+        "type": 1,
+        "options": [],
+        "nsfw": False,
+        "dm_permission": True,
+        "default_member_permissions": None,
+    }
+    desired_created = {
+        "name": "new-command",
+        "description": "New command added by update",
+        "type": 1,
+        "options": [],
+        "nsfw": False,
+        "dm_permission": True,
+        "default_member_permissions": None,
+    }
+    existing_deleted = _ExistingCommand(
+        13,
+        {
+            "name": "old-command",
+            "description": "Stale command from previous release",
+            "type": 1,
+            "options": [],
+            "nsfw": False,
+            "dm_permission": True,
+            "default_member_permissions": None,
+        },
+    )
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [
+            _DesiredCommand(desired_kept),
+            _DesiredCommand(desired_created),
+        ],
+        fetch_commands=AsyncMock(
+            return_value=[_ExistingCommand(11, desired_kept), existing_deleted]
+        ),
+    )
+    events = []
+
+    async def _delete_global_command(app_id, command_id):
+        events.append(("delete", app_id, command_id))
+
+    async def _upsert_global_command(app_id, payload):
+        events.append(("upsert", app_id, payload["name"]))
+        assert any(event[0] == "delete" for event in events)
+
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(side_effect=_upsert_global_command),
+        edit_global_command=AsyncMock(),
+        delete_global_command=AsyncMock(side_effect=_delete_global_command),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands()
+
+    assert summary == {
+        "total": 2,
+        "unchanged": 1,
+        "updated": 0,
+        "recreated": 0,
+        "created": 1,
+        "deleted": 1,
+    }
+    assert events == [("delete", 999, 13), ("upsert", 999, "new-command")]
+
+
+@pytest.mark.asyncio
 async def test_safe_sync_slash_commands_recreates_metadata_only_diffs():
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 

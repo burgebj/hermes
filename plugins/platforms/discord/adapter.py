@@ -1327,6 +1327,22 @@ class DiscordAdapter(BasePlatformAdapter):
             mutation_count += 1
             return result
 
+        # Discord enforces a hard 100 global-application-command cap.  When
+        # Hermes updates add or rename commands while stale commands still
+        # exist remotely, creating first can hit that cap before we ever delete
+        # the stale entries.  Delete commands that are no longer desired before
+        # attempting any creates; this keeps gateway restarts after
+        # ``hermes update`` from leaving Discord slash commands half-synced.
+        stale_existing_by_key = {
+            key: command
+            for key, command in existing_by_key.items()
+            if key not in desired_by_key
+        }
+        for key, current in stale_existing_by_key.items():
+            await mutate(http.delete_global_command, app_id, current.id)
+            existing_by_key.pop(key, None)
+            deleted += 1
+
         for key, desired in desired_by_key.items():
             current = existing_by_key.pop(key, None)
             if current is None:
@@ -1349,10 +1365,6 @@ class DiscordAdapter(BasePlatformAdapter):
 
             await mutate(http.edit_global_command, app_id, current.id, desired)
             updated += 1
-
-        for current in existing_by_key.values():
-            await mutate(http.delete_global_command, app_id, current.id)
-            deleted += 1
 
         return {
             "total": len(desired_payloads),
