@@ -10,7 +10,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 
-from hermes_cli.main import _session_browse_picker
+from hermes_cli.main import _session_browse_order_by_last_active, _session_browse_picker
 
 
 # ─── Sample session data ──────────────────────────────────────────────────────
@@ -408,6 +408,21 @@ class TestSessionBrowseArgparse:
 
         args = parser.parse_args(["browse", "--limit", "42"])
         assert args.limit == 42
+
+    def test_browse_sort_maps_started_to_default_order(self):
+        """The browse sort helper should preserve current start-time ordering by default."""
+        assert _session_browse_order_by_last_active("started") is False
+
+    def test_browse_sort_maps_last_active_to_activity_order(self):
+        """--sort last-active should request activity-time ordering from SessionDB."""
+        assert _session_browse_order_by_last_active("last-active") is True
+
+    def test_browse_sort_rejects_unknown_values(self):
+        """Invalid sort values should fail before reaching the database."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Unsupported session browse sort"):
+            _session_browse_order_by_last_active("title")
 
 
 # ─── Integration: cmd_sessions browse action ────────────────────────────────
