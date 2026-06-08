@@ -312,7 +312,7 @@ def sha256_file(path: Path) -> str:
 
 
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def normalize_text(text: str) -> str:
@@ -349,7 +349,10 @@ def resolve_secret_input(value: Any, env: Optional[Dict[str, str]] = None) -> Op
 def load_yaml_file(path: Path) -> Dict[str, Any]:
     if yaml is None or not path.exists():
         return {}
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+    except (yaml.YAMLError, UnicodeDecodeError):
+        return {}
     return data if isinstance(data, dict) else {}
 
 
@@ -367,7 +370,11 @@ def parse_env_file(path: Path) -> Dict[str, str]:
     if not path.exists():
         return {}
     data: Dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except UnicodeDecodeError:
+        return {}
+    for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -1262,9 +1269,9 @@ class Migrator:
             config_path = self.source_root / name
             if config_path.exists():
                 try:
-                    data = json.loads(config_path.read_text(encoding="utf-8"))
+                    data = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
                     return data if isinstance(data, dict) else {}
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
         return {}
 
@@ -1901,7 +1908,10 @@ class Migrator:
 
         all_incoming: List[str] = []
         for md_file in md_files:
-            entries = extract_markdown_entries(read_text(md_file))
+            try:
+                entries = extract_markdown_entries(read_text(md_file))
+            except (UnicodeDecodeError, OSError):
+                continue
             all_incoming.extend(entries)
 
         if not all_incoming:
