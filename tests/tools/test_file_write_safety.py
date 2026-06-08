@@ -24,6 +24,12 @@ class TestStaticDenyList:
     def test_etc_shadow_is_denied(self):
         assert _is_write_denied("/etc/shadow") is True
 
+    def test_current_hermes_home_env_is_denied(self, tmp_path: Path, monkeypatch):
+        hermes_home = tmp_path / "profiles" / "coder"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert _is_write_denied(str(hermes_home / ".env")) is True
+
 
 class TestSafeWriteRoot:
     """HERMES_WRITE_SAFE_ROOT should sandbox writes to a specific subtree."""
