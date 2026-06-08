@@ -4488,6 +4488,12 @@ class GatewayRunner:
                 "plugin discovery failed at gateway startup", exc_info=True,
             )
 
+        # Flush any platform names that failed to resolve at config-parse time
+        # (before plugins were loaded). Now that discover_plugins() has run,
+        # user platform plugins have registered their Platform pseudo-members
+        # and Platform._missing_ will resolve them correctly.
+        self.config.resolve_pending_platforms()
+
         # Register declarative shell hooks from cli-config.yaml.  Gateway
         # has no TTY, so consent has to come from one of the three opt-in
         # channels (--accept-hooks on launch, HERMES_ACCEPT_HOOKS env var,

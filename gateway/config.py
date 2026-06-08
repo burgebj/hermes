@@ -464,7 +464,12 @@ class GatewayConfig:
     """
     # Platform configurations
     platforms: Dict[Platform, PlatformConfig] = field(default_factory=dict)
-    
+
+    # Raw platform entries whose names couldn't be resolved to a Platform
+    # member at parse time (plugin not yet imported). Flushed into ``platforms``
+    # by ``resolve_pending_platforms()`` after discover_plugins() runs.
+    _pending_platforms: Dict[str, Any] = field(default_factory=dict)
+
     # Session reset policies by type
     default_reset_policy: SessionResetPolicy = field(default_factory=SessionResetPolicy)
     reset_by_type: Dict[str, SessionResetPolicy] = field(default_factory=dict)
@@ -608,12 +613,16 @@ class GatewayConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
         platforms = {}
+        pending_platforms = {}
         for platform_name, platform_data in data.get("platforms", {}).items():
             try:
                 platform = Platform(platform_name)
                 platforms[platform] = PlatformConfig.from_dict(platform_data)
             except ValueError:
-                pass  # Skip unknown platforms
+                # Platform name unknown at parse time — plugin not yet loaded.
+                # Stash raw data; resolve_pending_platforms() flushes these
+                # after discover_plugins() registers the Platform pseudo-member.
+                pending_platforms[platform_name] = platform_data
         
         reset_by_type = {}
         for type_name, policy_data in data.get("reset_by_type", {}).items():
@@ -658,6 +667,7 @@ class GatewayConfig:
 
         return cls(
             platforms=platforms,
+            _pending_platforms=pending_platforms,
             default_reset_policy=default_policy,
             reset_by_type=reset_by_type,
             reset_by_platform=reset_by_platform,
@@ -675,6 +685,26 @@ class GatewayConfig:
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
         )
+
+    def resolve_pending_platforms(self) -> None:
+        """Retry Platform() resolution for names that failed at parse time.
+
+        Call this after discover_plugins() has run so that user-installed
+        platform plugins (which register Platform pseudo-members via
+        platform_registry at import time) are now resolvable.
+        """
+        if not self._pending_platforms:
+            return
+        resolved = []
+        for platform_name, platform_data in self._pending_platforms.items():
+            try:
+                platform = Platform(platform_name)
+                self.platforms[platform] = PlatformConfig.from_dict(platform_data)
+                resolved.append(platform_name)
+            except ValueError:
+                pass  # Still unknown — plugin didn't register it
+        for name in resolved:
+            del self._pending_platforms[name]
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
         """Return the effective unauthorized-DM behavior for a platform."""
