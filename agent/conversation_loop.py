@@ -369,6 +369,7 @@ def run_conversation(
     task_id: str = None,
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
+    persist_user_timestamp: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -384,6 +385,8 @@ def run_conversation(
         persist_user_message: Optional clean user message to store in
             transcripts/history when user_message contains API-only
             synthetic prefixes.
+        persist_user_timestamp: Optional platform event timestamp to store
+            as metadata on that persisted user message.
                 or queuing follow-up prefetch work.
 
     Returns:
@@ -441,6 +444,7 @@ def run_conversation(
     agent._stream_callback = stream_callback
     agent._persist_user_message_idx = None
     agent._persist_user_message_override = persist_user_message
+    agent._persist_user_message_timestamp = persist_user_timestamp
     # Generate unique task_id if not provided to isolate VMs between concurrent tasks
     effective_task_id = task_id or str(uuid.uuid4())
     # Expose the active task_id so tools running mid-turn (e.g. delegate_task
