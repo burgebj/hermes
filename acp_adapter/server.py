@@ -1790,6 +1790,11 @@ class HermesACPAgent(acp.Agent):
 
     def _cmd_reset(self, args: str, state: SessionState) -> str:
         state.history.clear()
+        # Reset session token counters so the context usage bar shows 0
+        # after /new instead of accumulated stale values (#35823)
+        agent = state.agent
+        if hasattr(agent, "reset_session_state"):
+            agent.reset_session_state()
         self.session_manager.save_session(state.session_id)
         return "Conversation history cleared."
 
