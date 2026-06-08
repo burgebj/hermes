@@ -614,15 +614,30 @@ def resolve_skill_config_values(
 
 # ── Description extraction ────────────────────────────────────────────────
 
+# Align with `MAX_DESCRIPTION_LENGTH` in tools/skills_tool.py. The system
+# prompt skill index used to hard-truncate descriptions at 60 chars while
+# the runtime `skills_list()` tool allowed 1024 — which meant the LLM saw
+# a cut-off prefix like "Complete guide to using and extending Hermes
+# Agent — CLI ..." in the system prompt (where the routing decision is
+# actually made) and only got the full description after deciding to call
+# skills_list(). Descriptions under the limit are returned verbatim; over
+# the limit get truncated with a trailing ellipsis. See #13944.
+SKILL_INDEX_MAX_DESCRIPTION_LENGTH = 1024
+
 
 def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
-    """Extract a truncated description from parsed frontmatter."""
+    """Extract a (possibly truncated) description from parsed frontmatter.
+
+    Descriptions under ``SKILL_INDEX_MAX_DESCRIPTION_LENGTH`` are returned
+    verbatim. Longer ones are truncated to ``SKILL_INDEX_MAX_DESCRIPTION_LENGTH``
+    total characters, with a trailing ``"..."`` included in the budget.
+    """
     raw_desc = frontmatter.get("description", "")
     if not raw_desc:
         return ""
     desc = str(raw_desc).strip().strip("'\"")
-    if len(desc) > 60:
-        return desc[:57] + "..."
+    if len(desc) > SKILL_INDEX_MAX_DESCRIPTION_LENGTH:
+        return desc[: SKILL_INDEX_MAX_DESCRIPTION_LENGTH - 3] + "..."
     return desc
 
 
