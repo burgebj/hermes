@@ -2479,6 +2479,7 @@ def select_provider_and_model(args=None):
         load_config,
         get_env_value,
     )
+    from hermes_cli.ark_providers import ARK_PROVIDER_IDS
     from hermes_cli.providers import resolve_provider_full
 
     config = load_config()
@@ -2832,6 +2833,8 @@ def select_provider_and_model(args=None):
         _model_flow_bedrock(config, current_model)
     elif selected_provider == "azure-foundry":
         _model_flow_azure_foundry(config, current_model)
+    elif selected_provider in ARK_PROVIDER_IDS:
+        _model_flow_ark_provider(config, selected_provider, current_model)
     elif selected_provider in {
         "openai-api",
         "gemini",
@@ -5411,7 +5414,7 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "") -> tuple:
         if provider_id == "lmstudio" and allow_lmstudio_default:
             prompt = f"{key_env} (Enter for no-auth default {LMSTUDIO_NOAUTH_PLACEHOLDER!r}): "
         else:
-            prompt = f"{key_env} (or Enter to cancel): "
+            prompt = f"{key_env}: "
         try:
             entered = masked_secret_prompt(prompt).strip()
         except (KeyboardInterrupt, EOFError):
@@ -5428,7 +5431,7 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "") -> tuple:
             return "", True
         new_key = _prompt_new_key(allow_lmstudio_default=True)
         if not new_key:
-            print("Cancelled.")
+            print("No API key entered.")
             return "", True
         save_env_value(key_env, new_key)
         print("API key saved.")
@@ -5969,6 +5972,82 @@ def _model_flow_bedrock(config, current_model=""):
         print(f"  Default model set to: {selected} (via AWS Bedrock, {region})")
     else:
         print("  No change.")
+
+
+def _model_flow_ark_provider(config, provider_id, current_model=""):
+    """Volcengine and BytePlus Ark setup without live model discovery."""
+    from hermes_cli.ark_providers import (
+        ARK_CODING_PLAN_PROVIDER_IDS,
+        ark_provider_default_model,
+        ark_provider_models,
+    )
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+    )
+    from hermes_cli.config import get_env_value, load_config, save_config
+
+    del config
+
+    pconfig = PROVIDER_REGISTRY[provider_id]
+
+    existing_key = ""
+    for env_var in pconfig.api_key_env_vars:
+        existing_key = get_env_value(env_var) or os.getenv(env_var, "")
+        if existing_key:
+            break
+
+    existing_key, abort = _prompt_api_key(
+        pconfig, existing_key, provider_id=provider_id
+    )
+    if abort:
+        return
+
+    effective_base = pconfig.inference_base_url
+    if pconfig.base_url_env_var:
+        effective_base = (
+            get_env_value(pconfig.base_url_env_var)
+            or os.getenv(pconfig.base_url_env_var, "")
+            or effective_base
+        )
+
+    model_list = ark_provider_models(provider_id)
+    default_model = ark_provider_default_model(provider_id)
+
+    if provider_id in ARK_CODING_PLAN_PROVIDER_IDS:
+        current_or_default = (
+            current_model if current_model in model_list else default_model
+        )
+        selected = _prompt_model_selection(
+            model_list,
+            current_model=current_or_default,
+        )
+    else:
+        try:
+            selected = input(f"Model ID [{default_model}]: ").strip() or default_model
+        except (KeyboardInterrupt, EOFError):
+            print()
+            selected = None
+
+    if selected:
+        _save_model_choice(selected)
+
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = provider_id
+        model["base_url"] = effective_base
+        model.pop("api_mode", None)
+        save_config(cfg)
+        deactivate_provider()
+
+        print(f"Default model set to: {selected} (via {pconfig.name})")
+    else:
+        print("No change.")
 
 
 def _model_flow_api_key_provider(config, provider_id, current_model=""):

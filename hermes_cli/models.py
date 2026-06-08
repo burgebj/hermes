@@ -17,6 +17,16 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from hermes_cli import __version__ as _HERMES_VERSION
+from hermes_cli.ark_providers import (
+    BYTEPLUS_CODING_PLAN_MODELS,
+    BYTEPLUS_CODING_PROVIDER,
+    BYTEPLUS_PROVIDER,
+    BYTEPLUS_STANDARD_MODELS,
+    VOLCENGINE_CODING_PLAN_MODELS,
+    VOLCENGINE_CODING_PROVIDER,
+    VOLCENGINE_PROVIDER,
+    VOLCENGINE_STANDARD_MODELS,
+)
 
 # Identify ourselves so endpoints fronted by Cloudflare's Browser Integrity
 # Check (error 1010) don't reject the default ``Python-urllib/*`` signature.
@@ -212,6 +222,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gpt-4o-mini",
     ],
     "openai-codex": _codex_curated_models(),
+    VOLCENGINE_PROVIDER: list(VOLCENGINE_STANDARD_MODELS),
+    VOLCENGINE_CODING_PROVIDER: list(VOLCENGINE_CODING_PLAN_MODELS),
+    BYTEPLUS_PROVIDER: list(BYTEPLUS_STANDARD_MODELS),
+    BYTEPLUS_CODING_PROVIDER: list(BYTEPLUS_CODING_PLAN_MODELS),
     "xai-oauth": _xai_curated_models(),
     "copilot-acp": [
         "copilot-acp",
@@ -962,6 +976,27 @@ try:
 except Exception:
     pass
 
+
+def _move_provider_after(slug: str, target_slug: str) -> None:
+    """Move a canonical provider entry after another entry when both exist."""
+
+    slugs = [entry.slug for entry in CANONICAL_PROVIDERS]
+    if slug not in slugs or target_slug not in slugs or slug == target_slug:
+        return
+    entry = CANONICAL_PROVIDERS.pop(slugs.index(slug))
+    target_index = next(
+        (
+            index
+            for index, candidate in enumerate(CANONICAL_PROVIDERS)
+            if candidate.slug == target_slug
+        ),
+        len(CANONICAL_PROVIDERS) - 1,
+    )
+    CANONICAL_PROVIDERS.insert(target_index + 1, entry)
+
+
+_move_provider_after("custom", "volcengine-coding-plan")
+
 # Derived dicts — used throughout the codebase
 _PROVIDER_LABELS = {p.slug: p.label for p in CANONICAL_PROVIDERS}
 _PROVIDER_LABELS["custom"] = "Custom endpoint"  # special case: not a named provider
@@ -1114,6 +1149,20 @@ _PROVIDER_ALIASES = {
     "qwen": "alibaba",
     "alibaba-cloud": "alibaba",
     "qwen-portal": "qwen-oauth",
+    "volcano": "volcengine",
+    "volcano-engine": "volcengine",
+    "volcengine-api": "volcengine",
+    "volcengine-standard": "volcengine",
+    "volcengine_coding_plan": "volcengine-coding-plan",
+    "volcengine-coding": "volcengine-coding-plan",
+    "volcengine_coding": "volcengine-coding-plan",
+    "volcano-coding-plan": "volcengine-coding-plan",
+    "volcano_coding_plan": "volcengine-coding-plan",
+    "byteplus-api": "byteplus",
+    "byteplus-standard": "byteplus",
+    "byteplus_coding_plan": "byteplus-coding-plan",
+    "byteplus-coding": "byteplus-coding-plan",
+    "byteplus_coding": "byteplus-coding-plan",
     "gemini-cli": "google-gemini-cli",
     "gemini-oauth": "google-gemini-cli",
     "hf": "huggingface",

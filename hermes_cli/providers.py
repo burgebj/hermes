@@ -469,6 +469,47 @@ def get_provider(name: str) -> Optional[ProviderDef]:
             source="hermes",
         )
 
+    # Finally, resolve bundled/user provider plugins. This keeps the
+    # provider-profile plugin system in sync with the newer provider resolver
+    # used for config validation and setup status display.
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(canonical)
+    except Exception:
+        profile = None
+    if profile is not None and profile.name != "custom":
+        key_envs = tuple(
+            env
+            for env in profile.env_vars
+            if not env.endswith("_BASE_URL") and not env.endswith("_URL")
+        )
+        base_url_env = next(
+            (
+                env
+                for env in profile.env_vars
+                if env.endswith("_BASE_URL") or env.endswith("_URL")
+            ),
+            "",
+        )
+        api_mode = (profile.api_mode or "").strip()
+        transport = {
+            "anthropic_messages": "anthropic_messages",
+            "codex_responses": "codex_responses",
+        }.get(api_mode, "openai_chat")
+        return ProviderDef(
+            id=profile.name,
+            name=profile.display_name or profile.name,
+            transport=transport,
+            api_key_env_vars=key_envs or tuple(profile.env_vars),
+            base_url=profile.base_url,
+            base_url_env_var=base_url_env,
+            is_aggregator=False,
+            auth_type=profile.auth_type,
+            doc=profile.signup_url,
+            source="plugin",
+        )
+
     return None
 
 

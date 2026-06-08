@@ -59,6 +59,7 @@ def test_all_profiles_register():
 
     profiles = list_providers()
     names = sorted(p.name for p in profiles)
+    assert len(names) == len(set(names)), f"Duplicate provider profiles found: {names}"
     # Some plugin __init__.py files register multiple profiles, so the registry
     # count is >= the directory count (never less).
     assert len(names) >= plugin_dir_count, (
@@ -66,11 +67,23 @@ def test_all_profiles_register():
     )
 
     # Spot-check representative providers from different categories
-    for required in (
-        "openrouter", "anthropic", "custom", "bedrock", "openai-codex",
-        "minimax-oauth", "gmi", "xiaomi", "alibaba-coding-plan",
-    ):
-        assert required in names, f"Missing profile: {required}"
+    required_profiles = {
+        "openrouter",
+        "anthropic",
+        "custom",
+        "bedrock",
+        "openai-codex",
+        "minimax-oauth",
+        "gmi",
+        "xiaomi",
+        "alibaba-coding-plan",
+        "volcengine",
+        "volcengine-coding-plan",
+        "byteplus",
+        "byteplus-coding-plan",
+    }
+    missing = sorted(required_profiles - set(names))
+    assert not missing, f"Missing provider profiles: {missing}; registered={names}"
 
 
 def test_user_plugin_overrides_bundled(tmp_path, monkeypatch):

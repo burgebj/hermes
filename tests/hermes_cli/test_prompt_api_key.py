@@ -54,6 +54,26 @@ def test_first_time_cancelled(profile_env):
     assert abort is True
 
 
+def test_first_time_prompt_has_no_enter_cancel_or_default_copy(profile_env):
+    from hermes_cli import main as m
+
+    pconfig = _pconfig("deepseek")
+    prompts = []
+
+    def fake_secret_prompt(prompt):
+        prompts.append(prompt)
+        return "sk-abcdef"
+
+    with patch("hermes_cli.secret_prompt.masked_secret_prompt", fake_secret_prompt):
+        key, abort = m._prompt_api_key(pconfig, "", provider_id="deepseek")
+
+    assert key == "sk-abcdef"
+    assert abort is False
+    assert prompts == ["DEEPSEEK_API_KEY: "]
+    assert "enter" not in prompts[0].lower()
+    assert "default" not in prompts[0].lower()
+
+
 # Already configured — K / R / C ───────────────────────────────────────────────
 
 def test_keep_default_empty_input(profile_env):

@@ -11,6 +11,7 @@ from collections.abc import Callable
 _BACKSPACE_CHARS = {"\b", "\x7f"}
 _ENTER_CHARS = {"\r", "\n"}
 _EOF_CHARS = {"\x04", "\x1a"}
+_TERMINAL_NEWLINE = "\r\n"
 
 
 def _collect_masked_input(
@@ -27,16 +28,16 @@ def _collect_masked_input(
     while True:
         ch = read_char()
         if ch == "":
-            write("\n")
+            write(_TERMINAL_NEWLINE)
             raise EOFError
         if ch in _ENTER_CHARS:
-            write("\n")
+            write(_TERMINAL_NEWLINE)
             return "".join(value)
         if ch == "\x03":
-            write("\n")
+            write(_TERMINAL_NEWLINE)
             raise KeyboardInterrupt
         if ch in _EOF_CHARS:
-            write("\n")
+            write(_TERMINAL_NEWLINE)
             raise EOFError
         if ch in _BACKSPACE_CHARS:
             if value:
