@@ -4,7 +4,57 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from typing import Dict
+
+
+@contextmanager
+def _active_profile_home_scope():
+    """Scope ``get_hermes_home()`` to the active profile when the process env
+    points at the *root* Hermes home.
+
+    xAI credential probes resolve the auth store from
+    ``get_hermes_home() / "auth.json"``. When a named profile is active but
+    ``HERMES_HOME`` resolves to the root — e.g. the multi-profile dashboard
+    process, or a lazy tool-gate re-check after the per-invocation profile env
+    mutation is no longer in effect — the named profile's xAI credential (under
+    ``<root>/profiles/<name>/auth.json``) is missed and the xAI tools get gated
+    out. This recovers the active profile from the sticky ``active_profile``
+    file and scopes the home to it via the existing ``set_hermes_home_override``
+    ContextVar, so the auth layer's profile->global fallback resolves the right
+    store. No-op when already inside a profile, when no / ``default`` profile is
+    active, or on any error.
+    """
+    token = None
+    reset = None
+    try:
+        from hermes_constants import (
+            get_default_hermes_root,
+            get_hermes_home,
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        if get_hermes_home().resolve() == get_default_hermes_root().resolve():
+            from hermes_cli.profiles import get_active_profile, get_profile_dir
+
+            active = (get_active_profile() or "").strip()
+            if active and active != "default":
+                profile_dir = get_profile_dir(active)
+                if profile_dir.is_dir():
+                    token = set_hermes_home_override(str(profile_dir))
+                    reset = reset_hermes_home_override
+    except Exception:
+        token = None
+        reset = None
+    try:
+        yield
+    finally:
+        if token is not None and reset is not None:
+            try:
+                reset(token)
+            except Exception:
+                pass
 
 
 def has_xai_credentials() -> bool:
@@ -20,8 +70,11 @@ def has_xai_credentials() -> bool:
     Resolution order, fast-to-slow:
 
     1. ``XAI_API_KEY`` env var (cheapest; covers explicit-key users).
-    2. ``~/.hermes/auth.json`` has a non-empty ``providers.xai-oauth.tokens.access_token``
-       (single file read, no expiry check, no refresh).
+    2. The active profile's ``auth.json`` has a non-empty xAI access token —
+       either ``providers.xai-oauth.tokens.access_token`` or a
+       ``credential_pool["xai-oauth"]`` entry (single file read, no expiry
+       check, no refresh). Profile scoping handled by
+       :func:`_active_profile_home_scope`.
 
     Returns False on any exception so a corrupted auth store can't block
     other availability scans. Truthful refresh + expiry handling happens
@@ -32,15 +85,28 @@ def has_xai_credentials() -> bool:
     try:
         from hermes_constants import get_hermes_home
 
-        auth_path = get_hermes_home() / "auth.json"
-        if not auth_path.exists():
-            return False
-        store = json.loads(auth_path.read_text())
+        with _active_profile_home_scope():
+            auth_path = get_hermes_home() / "auth.json"
+            if not auth_path.exists():
+                return False
+            store = json.loads(auth_path.read_text())
         providers = store.get("providers") if isinstance(store, dict) else None
         xai_state = providers.get("xai-oauth") if isinstance(providers, dict) else None
         tokens = xai_state.get("tokens") if isinstance(xai_state, dict) else None
         access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
-        return bool(str(access_token or "").strip())
+        if str(access_token or "").strip():
+            return True
+        # Also honor a credential-pool entry (e.g. `hermes auth add`, source
+        # "manual") that has no providers.xai-oauth.tokens singleton.
+        pool = store.get("credential_pool") if isinstance(store, dict) else None
+        xai_pool = pool.get("xai-oauth") if isinstance(pool, dict) else None
+        if isinstance(xai_pool, list):
+            for entry in xai_pool:
+                if isinstance(entry, dict) and str(
+                    entry.get("access_token") or entry.get("runtime_api_key") or ""
+                ).strip():
+                    return True
+        return False
     except Exception:
         return False
 
@@ -73,6 +139,17 @@ def hermes_xai_user_agent() -> str:
 
 
 def resolve_xai_http_credentials(*, force_refresh: bool = False) -> Dict[str, str]:
+    """Resolve xAI HTTP bearer credentials, scoped to the active Hermes profile.
+
+    Thin wrapper that applies :func:`_active_profile_home_scope` so a named
+    profile's credential is found even when ``HERMES_HOME`` resolves to the
+    root (multi-profile dashboard, lazy tool-gate re-checks, sudo re-entry).
+    """
+    with _active_profile_home_scope():
+        return _resolve_xai_http_credentials(force_refresh=force_refresh)
+
+
+def _resolve_xai_http_credentials(*, force_refresh: bool = False) -> Dict[str, str]:
     """Resolve bearer credentials for direct xAI HTTP endpoints.
 
     Prefers Hermes-managed xAI OAuth credentials when available, then falls back
