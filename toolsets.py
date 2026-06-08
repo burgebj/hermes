@@ -50,6 +50,8 @@ _HERMES_CORE_TOOLS = [
     "todo", "memory",
     # Session history search
     "session_search",
+    # Unified source-backed knowledge recall
+    "knowledge_answer",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -225,6 +227,12 @@ TOOLSETS = {
     "session_search": {
         "description": "Search and recall past conversations with summarization",
         "tools": ["session_search"],
+        "includes": []
+    },
+
+    "knowledge": {
+        "description": "Source-backed recall across memory, skills, Markdown vaults, and sessions",
+        "tools": ["knowledge_answer"],
         "includes": []
     },
     
