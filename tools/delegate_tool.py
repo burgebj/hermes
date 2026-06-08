@@ -97,6 +97,101 @@ def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
     return "once"
 
 
+def _normalize_child_runtime_tuple(
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+    api_key: Optional[str],
+    api_mode: Optional[str],
+    explicit_provider: bool,
+    explicit_base_url: bool,
+    acp_command: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Keep child provider/model/base_url/api_mode tuples internally consistent.
+
+    Explicit ``delegation.base_url`` is a direct endpoint contract and must not
+    be rewritten. For inherited/provider-routed children, resolve the canonical
+    provider runtime and repair stale inherited transport fields when they do
+    not match the selected provider/model.
+    """
+    if (
+        explicit_base_url
+        or acp_command
+        or (provider or "").strip() in {"custom", "copilot-acp"}
+    ):
+        return provider, base_url, api_key, api_mode
+
+    provider_name = (provider or "").strip()
+    if not explicit_provider:
+        try:
+            from hermes_cli.models import detect_provider_for_model
+
+            detected = detect_provider_for_model(model or "", provider_name or "auto")
+        except Exception as exc:
+            logger.debug(
+                "Could not infer child provider from model '%s': %s",
+                model or "",
+                exc,
+            )
+            detected = None
+        if detected:
+            provider_name = detected[0] or provider_name
+
+    if not provider_name:
+        return provider, base_url, api_key, api_mode
+
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(
+            requested=provider_name,
+            target_model=(model or None),
+        )
+    except Exception as exc:
+        logger.debug(
+            "Could not normalize child runtime for provider '%s': %s",
+            provider_name,
+            exc,
+        )
+        return provider, base_url, api_key, api_mode
+
+    resolved_provider = runtime.get("provider") or provider_name
+    resolved_base_url = (runtime.get("base_url") or "").rstrip("/") or None
+    resolved_api_mode = runtime.get("api_mode") or None
+    resolved_api_key = runtime.get("api_key") or None
+    current_base_url = (base_url or "").rstrip("/") or None
+
+    provider_mismatch = bool(resolved_provider and provider != resolved_provider)
+    base_url_mismatch = bool(
+        resolved_base_url and current_base_url != resolved_base_url
+    )
+    api_mode_mismatch = bool(resolved_api_mode and api_mode != resolved_api_mode)
+    api_key_mismatch = bool(resolved_api_key and api_key != resolved_api_key)
+    missing_base_url = current_base_url is None and resolved_base_url is not None
+
+    if not (
+        provider_mismatch
+        or missing_base_url
+        or base_url_mismatch
+        or api_mode_mismatch
+        or api_key_mismatch
+    ):
+        return provider, base_url, api_key, api_mode
+
+    logger.info(
+        "Normalizing child runtime for provider '%s' and model '%s'",
+        resolved_provider,
+        model or "",
+    )
+    return (
+        resolved_provider or provider,
+        resolved_base_url or base_url,
+        resolved_api_key or api_key,
+        resolved_api_mode or api_mode,
+    )
+
+
 def _get_subagent_approval_callback():
     """Return the callback to install into subagent worker threads.
 
@@ -1090,6 +1185,19 @@ def _build_child_agent(
         # so run_agent.py initializes the CopilotACPClient.
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
+
+    effective_provider, effective_base_url, effective_api_key, effective_api_mode = (
+        _normalize_child_runtime_tuple(
+            provider=effective_provider,
+            model=effective_model,
+            base_url=effective_base_url,
+            api_key=effective_api_key,
+            api_mode=effective_api_mode,
+            explicit_provider=override_provider is not None,
+            explicit_base_url=override_base_url is not None,
+            acp_command=effective_acp_command,
+        )
+    )
 
     # Resolve reasoning config: delegation override > parent inherit
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
@@ -2372,9 +2480,10 @@ def _resolve_child_credential_pool(effective_provider: Optional[str], parent_age
     """Resolve a credential pool for the child agent.
 
     Rules:
-    1. Same provider as the parent -> share the parent's pool so cooldown state
-       and rotation stay synchronized.
-    2. Different provider -> try to load that provider's own pool.
+    1. Same provider and same pool provider as the parent -> share the parent's
+       pool so cooldown state and rotation stay synchronized.
+    2. Different provider, or stale parent pool -> try to load that provider's
+       own pool.
     3. No pool available -> return None and let the child keep the inherited
        fixed credential behavior.
     """
@@ -2384,7 +2493,11 @@ def _resolve_child_credential_pool(effective_provider: Optional[str], parent_age
     parent_provider = getattr(parent_agent, "provider", None) or ""
     parent_pool = getattr(parent_agent, "_credential_pool", None)
     if parent_pool is not None and effective_provider == parent_provider:
-        return parent_pool
+        parent_pool_provider = getattr(parent_pool, "provider", None)
+        if not isinstance(parent_pool_provider, str) or (
+            parent_pool_provider == effective_provider
+        ):
+            return parent_pool
 
     try:
         from agent.credential_pool import load_pool
