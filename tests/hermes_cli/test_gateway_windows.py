@@ -188,8 +188,8 @@ def _arrange_startup_fallback(monkeypatch, tmp_path, running_pids):
     return script_path, calls
 
 
-def test_gateway_cmd_script_uses_pythonw_without_replace_or_start_churn(monkeypatch):
-    """Scheduled Task wrapper should launch pythonw once and avoid replace loops."""
+def test_gateway_cmd_script_uses_hidden_powershell_pythonw_handoff(monkeypatch):
+    """Scheduled Task wrapper should hide cmd.exe and spawn pythonw once."""
     monkeypatch.setattr(gateway_windows, "_derive_venv_pythonw", lambda exe: exe.replace("python.exe", "pythonw.exe"))
 
     content = gateway_windows._build_gateway_cmd_script(
@@ -199,8 +199,10 @@ def test_gateway_cmd_script_uses_pythonw_without_replace_or_start_churn(monkeypa
         "--profile alice",
     )
 
+    assert "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command" in content
+    assert "Start-Process -WindowStyle Hidden" in content
     assert "pythonw.exe" in content
-    assert "gateway run" in content
+    assert "'gateway', 'run'" in content
     assert "--replace" not in content
     assert "start \"\"" not in content
     assert "exit /b 0" in content

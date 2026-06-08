@@ -108,6 +108,13 @@ def _quote_schtasks_arg(value: str) -> str:
     return '"' + value.replace('"', '\\"') + '"'
 
 
+def _quote_powershell_arg(value: str) -> str:
+    """Quote a literal for PowerShell single-quoted string parsing."""
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"refusing to quote value containing newline: {value!r}")
+    return "'" + value.replace("'", "''") + "'"
+
+
 # ---------------------------------------------------------------------------
 # schtasks.exe wrapper
 # ---------------------------------------------------------------------------
@@ -346,8 +353,9 @@ def _build_gateway_cmd_script(
     The script:
       - cd's into a stable working directory
       - exports HERMES_HOME, PYTHONIOENCODING, VIRTUAL_ENV
-      - invokes ``pythonw -m hermes_cli.main [--profile X] gateway run``
-        directly so the wrapper cmd.exe exits without a visible gateway console
+      - asks a hidden PowerShell helper to spawn
+        ``pythonw -m hermes_cli.main [--profile X] gateway run`` so the
+        Scheduled Task's wrapper cmd.exe does not leave a visible console
 
     We intentionally do NOT inline PATH overrides here — cmd.exe inherits
     the per-user PATH the Scheduled Task was created with, and forcibly
@@ -368,13 +376,33 @@ def _build_gateway_cmd_script(
     if profile_arg:
         prog_args.extend(profile_arg.split())
     prog_args.extend(["gateway", "run"])
-    # `pythonw.exe` is a GUI-subsystem executable: cmd.exe launches it and
-    # returns immediately, so the Scheduled Task action finishes without a
-    # visible console window. Do NOT use `start` here; that creates an extra
-    # wrapper process and made gateway lifecycle/status harder to reason about.
+    ps_arg_list = ", ".join(_quote_powershell_arg(a) for a in prog_args[1:])
+    ps_command = (
+        "Start-Process "
+        "-WindowStyle Hidden "
+        f"-FilePath {_quote_powershell_arg(prog_args[0])} "
+        f"-WorkingDirectory {_quote_powershell_arg(working_dir)} "
+        f"-ArgumentList @({ps_arg_list})"
+    )
+    # Launch `pythonw.exe` through a hidden PowerShell parent. Directly
+    # invoking `pythonw.exe` from a Scheduled Task `.cmd` wrapper can still
+    # leave the task's own cmd.exe window visible on Windows login/start.
     # Do NOT use `--replace` for service-managed starts; repeated /Run calls
     # should be idempotent, not churn parent/child takeover loops.
-    lines.append(" ".join(_quote_cmd_script_arg(a) for a in prog_args))
+    lines.append(
+        " ".join(
+            [
+                "powershell.exe",
+                "-WindowStyle",
+                "Hidden",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _quote_cmd_script_arg(ps_command),
+            ]
+        )
+    )
     lines.append("exit /b 0")
     return "\r\n".join(lines) + "\r\n"
 
