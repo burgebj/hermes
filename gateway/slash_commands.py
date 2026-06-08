@@ -3098,6 +3098,30 @@ class GatewaySlashCommandsMixin:
         lines.append("Invoke a bundle with `/<slug>` to load all its skills.")
         return "\n".join(lines)
 
+    def _approval_fallback_session_key(self, source) -> Optional[str]:
+        """Return the non-thread session key for a thread-scoped source.
+
+        When the user types /approve or /deny inside a thread but the agent
+        was running in the parent channel (common with
+        ``MATTERMOST_REPLY_MODE=thread`` and similar reply-to-thread configs),
+        the session key derived from ``source`` includes ``thread_id`` while
+        the pending approval was registered without one.  This helper returns
+        the channel-level session key so callers can fall back to it.
+
+        Returns ``None`` when no thread context exists, or when the source
+        is not a stamped-out dataclass we can rewrite.
+        """
+        if not getattr(source, "thread_id", None):
+            return None
+        try:
+            fallback_source = dataclasses.replace(
+                source, thread_id=None, message_id=None
+            )
+        except (TypeError, ValueError):
+            # Not a dataclass, or fields not present — give up silently.
+            return None
+        return self._session_key_for_source(fallback_source)
+
     async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /approve command — unblock waiting agent thread(s).
 
@@ -3125,11 +3149,20 @@ class GatewaySlashCommandsMixin:
             resolve_gateway_approval, has_blocking_approval,
         )
 
+        # Thread fallback: see _approval_fallback_session_key docstring.
+        _fallback_key = self._approval_fallback_session_key(source)
+
         if not has_blocking_approval(session_key):
-            if session_key in self._pending_approvals:
-                self._pending_approvals.pop(session_key)
-                return t("gateway.approval_expired")
-            return t("gateway.approve.no_pending")
+            if _fallback_key and has_blocking_approval(_fallback_key):
+                session_key = _fallback_key
+            else:
+                if session_key in self._pending_approvals:
+                    self._pending_approvals.pop(session_key)
+                    return t("gateway.approval_expired")
+                if _fallback_key and _fallback_key in self._pending_approvals:
+                    self._pending_approvals.pop(_fallback_key)
+                    return t("gateway.approval_expired")
+                return t("gateway.approve.no_pending")
 
         # Parse args: support "all", "all session", "all always", "session", "always"
         args = event.get_command_args().strip().lower().split()
@@ -3171,11 +3204,20 @@ class GatewaySlashCommandsMixin:
             resolve_gateway_approval, has_blocking_approval,
         )
 
+        # Thread fallback: see _approval_fallback_session_key docstring.
+        _fallback_key = self._approval_fallback_session_key(source)
+
         if not has_blocking_approval(session_key):
-            if session_key in self._pending_approvals:
-                self._pending_approvals.pop(session_key)
-                return t("gateway.deny.stale")
-            return t("gateway.deny.no_pending")
+            if _fallback_key and has_blocking_approval(_fallback_key):
+                session_key = _fallback_key
+            else:
+                if session_key in self._pending_approvals:
+                    self._pending_approvals.pop(session_key)
+                    return t("gateway.deny.stale")
+                if _fallback_key and _fallback_key in self._pending_approvals:
+                    self._pending_approvals.pop(_fallback_key)
+                    return t("gateway.deny.stale")
+                return t("gateway.deny.no_pending")
 
         args = event.get_command_args().strip().lower()
         resolve_all = "all" in args

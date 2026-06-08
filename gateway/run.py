@@ -13283,6 +13283,18 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         # - Other platforms should use explicit source.thread_id only
         if source.platform == Platform.SLACK:
             _progress_thread_id = source.thread_id or event_message_id
+        elif (
+            source.platform in (Platform.FEISHU, Platform.MATTERMOST)
+            and source.chat_type != "dm"
+        ):
+            # Channel @mention (no existing thread): source.thread_id is None,
+            # but the user's @mention post IS the thread root.  Fall back to
+            # event_message_id or source.message_id as the thread anchor so
+            # tool-progress bubbles are threaded under the triggering post
+            # instead of landing flat in the channel.  Scoped to non-DM
+            # Mattermost/Feishu so DMs (and other platforms) keep the plain
+            # source.thread_id behaviour and don't turn event ids into threads.
+            _progress_thread_id = source.thread_id or event_message_id or getattr(source, "message_id", None)
         else:
             _progress_thread_id = source.thread_id
         _progress_metadata = (
@@ -13290,9 +13302,17 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             if _progress_thread_id == source.thread_id
             else {"thread_id": _progress_thread_id}
         ) if _progress_thread_id else None
+        # reply_to for progress messages: use event_message_id when available
+        # (Telegram DM topics), fall back to source.message_id for platforms
+        # where _reply_anchor_for_event returns None (Mattermost, Feishu).
+        # source.chat_type != "dm" keeps DM progress bubbles from threading;
+        # _progress_thread_id already handles the new-thread case (channel
+        # @mention with no existing thread) via the message_id fallback.
         _progress_reply_to = (
-            event_message_id
-            if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
+            event_message_id or getattr(source, "message_id", None)
+            if source.platform in (Platform.FEISHU, Platform.MATTERMOST)
+            and (source.thread_id or _progress_thread_id)
+            and source.chat_type != "dm"
             else None
         )
 
@@ -13674,7 +13694,15 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 "reply_to_message_id": event_message_id,
             }
         else:
-            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
+            # Mirror _progress_metadata: use _progress_thread_id directly when
+            # it differs from source.thread_id (channel @mention new-thread
+            # fallback), else delegate to _thread_metadata_for_source for the
+            # normal existing-thread path.
+            _status_thread_metadata = (
+                self._thread_metadata_for_source(source, event_message_id)
+                if _progress_thread_id == source.thread_id
+                else {"thread_id": _progress_thread_id}
+            ) if _progress_thread_id else None
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():

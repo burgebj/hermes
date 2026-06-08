@@ -287,11 +287,15 @@ class MattermostAdapter(BasePlatformAdapter):
                 "message": chunk,
             }
             # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                # Ensure root_id points to the thread root, not a reply.
-                # Mattermost rejects non-root post IDs as root_id.
-                resolved_root = await self._resolve_root_id(reply_to)
-                payload["root_id"] = resolved_root
+            # Also supports metadata["thread_id"] for send_message tool path.
+            if self._reply_mode == "thread":
+                if reply_to:
+                    # Ensure root_id points to the thread root, not a reply.
+                    # Mattermost rejects non-root post IDs as root_id.
+                    resolved_root = await self._resolve_root_id(reply_to)
+                    payload["root_id"] = resolved_root
+                elif metadata and metadata.get("thread_id"):
+                    payload["root_id"] = metadata["thread_id"]
 
             data = await self._api_post("posts", payload)
             if not data or "id" not in data:
@@ -849,6 +853,7 @@ class MattermostAdapter(BasePlatformAdapter):
             user_id=sender_id,
             user_name=sender_name,
             thread_id=thread_id,
+            message_id=post_id,
         )
 
         # Per-channel ephemeral prompt
