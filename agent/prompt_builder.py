@@ -1449,6 +1449,76 @@ def _load_hermes_md(cwd_path: Path) -> str:
         return ""
 
 
+def _load_global_hermes_md() -> str:
+    """HERMES.md / .hermes.md from HERMES_HOME — global fallback, always loaded."""
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading global HERMES.md: %s", e)
+
+    for name in ["HERMES.md", ".hermes.md"]:
+        global_path = get_hermes_home() / name
+        if global_path.exists():
+            try:
+                content = global_path.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                content = _strip_yaml_frontmatter(content)
+                content = _scan_context_content(content, name)
+                result = f"## {name} (global)\n\n{content}"
+                return _truncate_content(result, name)
+            except Exception as e:
+                logger.debug("Could not read global HERMES.md: %s", e)
+    return ""
+
+
+def _load_global_agents_md() -> str:
+    """AGENTS.md from HERMES_HOME — global fallback, always loaded."""
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading global AGENTS.md: %s", e)
+
+    for name in ["AGENTS.md", "agents.md"]:
+        global_path = get_hermes_home() / name
+        if global_path.exists():
+            try:
+                content = global_path.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                content = _scan_context_content(content, name)
+                result = f"## {name} (global)\n\n{content}"
+                return _truncate_content(result, "AGENTS.md")
+            except Exception as e:
+                logger.debug("Could not read global AGENTS.md: %s", e)
+    return ""
+
+
+def _load_global_claude_md() -> str:
+    """CLAUDE.md from HERMES_HOME — global fallback, always loaded."""
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading global CLAUDE.md: %s", e)
+
+    for name in ["CLAUDE.md", "claude.md"]:
+        global_path = get_hermes_home() / name
+        if global_path.exists():
+            try:
+                content = global_path.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                content = _scan_context_content(content, name)
+                result = f"## {name} (global)\n\n{content}"
+                return _truncate_content(result, "CLAUDE.md")
+            except Exception as e:
+                logger.debug("Could not read global CLAUDE.md: %s", e)
+    return ""
+
+
 def _load_agents_md(cwd_path: Path) -> str:
     """AGENTS.md — top-level only (no recursive walk)."""
     for name in ["AGENTS.md", "agents.md"]:
@@ -1548,6 +1618,20 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
         if soul_content:
             sections.append(soul_content)
 
+    # Global HERMES.md / AGENTS.md / CLAUDE.md from HERMES_HOME — always appended after project context
+    global_hermes = _load_global_hermes_md()
+    if global_hermes:
+        sections.append(global_hermes)
+
+    global_agents = _load_global_agents_md()
+    if global_agents:
+        sections.append(global_agents)
+
+    global_claude = _load_global_claude_md()
+    if global_claude:
+        sections.append(global_claude)
+
     if not sections:
         return ""
+
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
