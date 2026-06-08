@@ -932,7 +932,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # Increment completed count
                 if job.get("repeat"):
                     job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                    
+
                     # Check if we've hit the repeat limit
                     times = job["repeat"].get("times")
                     completed = job["repeat"]["completed"]
@@ -941,9 +941,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         jobs.pop(i)
                         save_jobs(jobs)
                         return
-                
-                # Compute next run
-                job["next_run_at"] = compute_next_run(job["schedule"], now)
+
+                # Compute next run — protect against exceptions so save_jobs
+                # is always reached and the job doesn't get stuck with null.
+                try:
+                    job["next_run_at"] = compute_next_run(job["schedule"], now)
+                except Exception as exc:
+                    logger.error(
+                        "Job '%s': compute_next_run failed (%s); keeping previous next_run_at",
+                        job_id, exc,
+                    )
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't
