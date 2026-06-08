@@ -825,3 +825,132 @@ termux = ["rich>=14"]
 
     assert hm._load_installable_optional_extras(group="all") == ["mcp"]
     assert hm._load_installable_optional_extras(group="termux-all") == ["termux", "mcp"]
+
+
+class TestNodeRuntimeNpmResolution:
+    """Regression tests for #30271 — WSL must not run Windows npm against the
+    Linux checkout, and a failed Node refresh must not report success."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/mnt/c/Program Files/nodejs/npm",
+            "/mnt/c/Program Files/nodejs/npm.cmd",
+            "C:\\Program Files\\nodejs\\npm.exe",
+            "/usr/local/bin/npm.bat",
+        ],
+    )
+    def test_windows_npm_paths_detected(self, path):
+        from hermes_cli import main as hm
+
+        assert hm._is_windows_npm_path(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/usr/bin/npm",
+            "/root/.local/bin/npm",
+            "/home/u/.nvm/versions/node/v22/bin/npm",
+        ],
+    )
+    def test_linux_npm_paths_not_flagged(self, path):
+        from hermes_cli import main as hm
+
+        assert hm._is_windows_npm_path(path) is False
+
+    def test_resolve_rejects_windows_npm_and_rescans_path(self, monkeypatch):
+        """On WSL/Linux, a Windows npm from which() is refused and PATH is
+        re-scanned (skipping /mnt mounts) for a Linux-native npm."""
+        from hermes_cli import main as hm
+
+        monkeypatch.setattr(hm, "_is_windows", lambda: False)
+        monkeypatch.setenv(
+            "PATH", "/mnt/c/Program Files/nodejs:/root/.local/bin:/usr/bin"
+        )
+
+        def fake_which(cmd, path=None):
+            if path is None:
+                # Mirrors WSL: interop puts the Windows shim first on PATH.
+                return "/mnt/c/Program Files/nodejs/npm"
+            if path == "/root/.local/bin":
+                return "/root/.local/bin/npm"
+            return None
+
+        monkeypatch.setattr(hm.shutil, "which", fake_which)
+        assert hm._resolve_node_runtime_npm() == "/root/.local/bin/npm"
+
+    def test_resolve_returns_none_when_only_windows_npm(self, monkeypatch):
+        from hermes_cli import main as hm
+
+        monkeypatch.setattr(hm, "_is_windows", lambda: False)
+        monkeypatch.setenv("PATH", "/mnt/c/Program Files/nodejs:/usr/bin")
+
+        def fake_which(cmd, path=None):
+            if path is None:
+                return "/mnt/c/Program Files/nodejs/npm"
+            return None
+
+        monkeypatch.setattr(hm.shutil, "which", fake_which)
+        assert hm._resolve_node_runtime_npm() is None
+
+    def test_resolve_keeps_platform_npm_on_windows(self, monkeypatch):
+        from hermes_cli import main as hm
+
+        monkeypatch.setattr(hm, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            hm.shutil, "which", lambda cmd, path=None: "C:\\nodejs\\npm.cmd"
+        )
+        assert hm._resolve_node_runtime_npm() == "C:\\nodejs\\npm.cmd"
+
+    def test_node_failure_returns_failed_labels_and_warns(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from hermes_cli import main as hm
+
+        (tmp_path / "package.json").write_text("{}")
+        ui_tui = tmp_path / "ui-tui"
+        ui_tui.mkdir()
+        (ui_tui / "package.json").write_text("{}")
+
+        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(hm, "_resolve_node_runtime_npm", lambda: "/usr/bin/npm")
+        monkeypatch.setattr(
+            hm,
+            "_run_npm_install_deterministic",
+            lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr=""),
+        )
+
+        failed = hm._update_node_dependencies()
+        assert failed == ["repo root", "ui-tui, web workspaces"]
+        out = capsys.readouterr().out
+        assert "mixed state" in out
+
+    def test_node_success_returns_empty(self, tmp_path, monkeypatch):
+        from hermes_cli import main as hm
+
+        (tmp_path / "package.json").write_text("{}")
+        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(hm, "_resolve_node_runtime_npm", lambda: "/usr/bin/npm")
+        monkeypatch.setattr(
+            hm,
+            "_run_npm_install_deterministic",
+            lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+        )
+
+        assert hm._update_node_dependencies() == []
+
+    def test_wsl_windows_only_npm_flags_skip(self, tmp_path, monkeypatch, capsys):
+        from hermes_cli import main as hm
+        import hermes_constants
+
+        (tmp_path / "package.json").write_text("{}")
+        monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(hm, "_resolve_node_runtime_npm", lambda: None)
+        monkeypatch.setattr(hermes_constants, "is_wsl", lambda: True)
+        monkeypatch.setattr(
+            hm.shutil, "which", lambda cmd, path=None: "/mnt/c/nodejs/npm"
+        )
+
+        failed = hm._update_node_dependencies()
+        assert failed == ["repo root"]
+        assert "Windows npm" in capsys.readouterr().out
