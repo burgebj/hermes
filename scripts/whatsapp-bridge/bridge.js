@@ -28,7 +28,7 @@ import { randomBytes } from 'crypto';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
-import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { matchesAllowedUser, normalizeWhatsAppIdentifier, parseAllowedUsers } from './allowlist.js';
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -117,11 +117,6 @@ function trackSentMessageId(sent) {
       recentlySentIds.delete(recentlySentIds.values().next().value);
     }
   }
-}
-
-function normalizeWhatsAppId(value) {
-  if (!value) return '';
-  return String(value).replace(':', '@');
 }
 
 function getMessageContent(msg) {
@@ -242,8 +237,8 @@ async function startSocket() {
     if (type !== 'notify' && type !== 'append') return;
 
     const botIds = Array.from(new Set([
-      normalizeWhatsAppId(sock.user?.id),
-      normalizeWhatsAppId(sock.user?.lid),
+      normalizeWhatsAppIdentifier(sock.user?.id),
+      normalizeWhatsAppIdentifier(sock.user?.lid),
     ].filter(Boolean)));
 
     for (const msg of messages) {
@@ -316,10 +311,10 @@ async function startSocket() {
 
       const messageContent = getMessageContent(msg);
       const contextInfo = getContextInfo(messageContent);
-      const mentionedIds = Array.from(new Set((contextInfo?.mentionedJid || []).map(normalizeWhatsAppId).filter(Boolean)));
+      const mentionedIds = Array.from(new Set((contextInfo?.mentionedJid || []).map(normalizeWhatsAppIdentifier).filter(Boolean)));
       const quotedMessageId = contextInfo?.stanzaId || null;
-      const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
-      const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
+      const quotedParticipant = normalizeWhatsAppIdentifier(contextInfo?.participant || '') || null;
+      const quotedRemoteJid = normalizeWhatsAppIdentifier(contextInfo?.remoteJid || '') || null;
       const hasQuotedMessage = !!contextInfo?.quotedMessage;
 
       // Extract message body
