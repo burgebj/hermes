@@ -175,10 +175,10 @@ class TestFlushDeduplication:
 # ---------------------------------------------------------------------------
 
 class TestAppendToTranscriptSkipDb:
-    """Verify skip_db=True skips the SQLite write."""
+    """Verify skip_db=True skips SQLite but keeps the JSONL fallback."""
 
     def test_skip_db_prevents_sqlite_write(self, tmp_path):
-        """With skip_db=True and a real DB, message does NOT appear in SQLite."""
+        """With skip_db=True, SQLite stays empty but JSONL still advances."""
         from gateway.config import GatewayConfig
         from gateway.session import SessionStore
         from hermes_state import SessionDB
@@ -201,6 +201,11 @@ class TestAppendToTranscriptSkipDb:
         # SQLite should NOT have the message
         rows = db.get_messages(session_id)
         assert len(rows) == 0, f"Expected 0 DB rows with skip_db=True, got {len(rows)}"
+        transcript_path = tmp_path / f"{session_id}.jsonl"
+        assert transcript_path.exists()
+        lines = transcript_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["content"] == "hello world"
 
     def test_default_writes_to_sqlite(self, tmp_path):
         """Without skip_db, message appears in SQLite."""

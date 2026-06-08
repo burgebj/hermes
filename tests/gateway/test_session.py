@@ -545,8 +545,8 @@ class TestSessionStoreRewriteTranscript:
         assert reloaded == []
 
 
-class TestLoadTranscriptDBOnly:
-    """After spec 002, load_transcript reads only from state.db."""
+class TestLoadTranscriptFallback:
+    """SessionStore prefers DB but can fall back to JSONL transcripts."""
 
     def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
         import hermes_state
@@ -556,7 +556,7 @@ class TestLoadTranscriptDBOnly:
         result = store.load_transcript("nonexistent")
         assert result == []
 
-    def test_db_only_returns_messages(self, tmp_path, monkeypatch):
+    def test_db_returns_messages_when_present(self, tmp_path, monkeypatch):
         import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
@@ -570,6 +570,30 @@ class TestLoadTranscriptDBOnly:
         assert len(result) == 2
         assert result[0]["content"] == "db-q"
         assert result[1]["content"] == "db-a"
+
+    def test_falls_back_to_jsonl_when_db_has_no_rows(self, tmp_path, monkeypatch):
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        sid = "jsonl_fallback_session"
+        store._db.create_session(session_id=sid, source="gateway", model="m")
+
+        (tmp_path / f"{sid}.jsonl").write_text(
+            '\n'.join(
+                [
+                    json.dumps({"role": "user", "content": "from-jsonl-q"}),
+                    json.dumps({"role": "assistant", "content": "from-jsonl-a"}),
+                ]
+            )
+            + '\n',
+            encoding="utf-8",
+        )
+
+        result = store.load_transcript(sid)
+        assert len(result) == 2
+        assert result[0]["content"] == "from-jsonl-q"
+        assert result[1]["content"] == "from-jsonl-a"
 
 
 class TestSessionStoreSwitchSession:

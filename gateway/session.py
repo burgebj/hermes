@@ -756,6 +756,76 @@ class SessionStore:
             except OSError as e:
                 logger.debug("Could not remove temp file %s: %s", tmp_path, e)
             raise
+
+    def _transcript_path(self, session_id: str) -> Path:
+        """Return the legacy JSONL transcript path for a session."""
+        return self.sessions_dir / f"{session_id}.jsonl"
+
+    def _append_transcript_jsonl(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Append one transcript entry to the JSONL fallback log."""
+        try:
+            self.sessions_dir.mkdir(parents=True, exist_ok=True)
+            path = self._transcript_path(session_id)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(message, ensure_ascii=False, default=str))
+                f.write("\n")
+        except OSError as e:
+            logger.debug("Failed to append transcript JSONL for %s: %s", session_id, e)
+
+    def _rewrite_transcript_jsonl(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        """Rewrite the JSONL fallback log for a session."""
+        path = self._transcript_path(session_id)
+        if not messages:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.debug("Failed to remove empty transcript JSONL for %s: %s", session_id, e)
+            return
+
+        import tempfile
+
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.sessions_dir), suffix=".tmp", prefix=f".{session_id}_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for message in messages:
+                    f.write(json.dumps(message, ensure_ascii=False, default=str))
+                    f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            atomic_replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError as e:
+                logger.debug("Could not remove temp file %s: %s", tmp_path, e)
+            raise
+
+    def _load_transcript_jsonl(self, session_id: str) -> List[Dict[str, Any]]:
+        """Load transcript entries from the JSONL fallback log."""
+        path = self._transcript_path(session_id)
+        if not path.exists():
+            return []
+        try:
+            messages: List[Dict[str, Any]] = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    payload = json.loads(line)
+                    if isinstance(payload, dict):
+                        messages.append(payload)
+            return messages
+        except (OSError, json.JSONDecodeError) as e:
+            logger.debug("Failed to load transcript JSONL for %s: %s", session_id, e)
+            return []
     
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
@@ -1273,6 +1343,7 @@ class SessionStore:
                      _flush_messages_to_session_db(), preventing the
                      duplicate-write bug (#860).
         """
+        self._append_transcript_jsonl(session_id, message)
         if self._db and not skip_db:
             try:
                 self._db.append_message(
@@ -1302,8 +1373,9 @@ class SessionStore:
         """Replace the entire transcript for a session with new messages.
 
         Used by /retry, /undo, and /compress to persist modified conversation
-        history. state.db is the canonical store.
+        history. state.db stays canonical; JSONL is a recovery fallback.
         """
+        self._rewrite_transcript_jsonl(session_id, messages)
         if self._db:
             try:
                 self._db.replace_messages(session_id, messages)
@@ -1313,17 +1385,19 @@ class SessionStore:
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
 
-        state.db is the canonical store. The legacy JSONL fallback was removed
-        in spec 002 — pre-DB sessions on existing disks have already been
-        migrated (their DB row holds the full message history).
+        Prefer state.db. Fall back to the JSONL transcript when DB is
+        unavailable or returns no rows, so cached gateway sessions can still
+        resume after DB write failures or corruption.
         """
         if not self._db:
-            return []
+            return self._load_transcript_jsonl(session_id)
         try:
-            return self._db.get_messages_as_conversation(session_id)
+            messages = self._db.get_messages_as_conversation(session_id)
+            if messages:
+                return messages
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
-            return []
+        return self._load_transcript_jsonl(session_id)
 
     def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete, keeping rows for audit.
