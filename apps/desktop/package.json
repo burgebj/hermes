@@ -42,7 +42,13 @@
     "fmt": "prettier --write 'src/**/*.{ts,tsx}' 'electron/**/*.{js,cjs}' 'vite.config.ts'",
     "fix": "npm run lint:fix && npm run fmt",
     "test:ui": "vitest run --environment jsdom",
-    "preview": "node scripts/assert-root-install.cjs && vite preview --host 127.0.0.1 --port 4174"
+    "preview": "node scripts/assert-root-install.cjs && vite preview --host 127.0.0.1 --port 4174",
+    "dist:mac:x64": "cross-env npm_config_arch=x64 npm run build && npm run builder -- --mac --x64",
+    "dist:mac:arm64": "cross-env npm_config_arch=arm64 npm run build && npm run builder -- --mac --arm64",
+    "dist:mac:universal": "cross-env npm_config_arch=universal npm run build && npm run builder -- --mac --universal",
+    "dist:mac:dmg:x64": "cross-env npm_config_arch=x64 npm run build && npm run builder -- --mac dmg --x64",
+    "dist:mac:dmg:arm64": "cross-env npm_config_arch=arm64 npm run build && npm run builder -- --mac dmg --arm64",
+    "dist:mac:dmg:universal": "cross-env npm_config_arch=universal npm run build && npm run builder -- --mac dmg --universal"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.12.28",

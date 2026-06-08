@@ -1779,9 +1779,19 @@ async function applyUpdatesPosixInApp() {
     return { ok: false, backendUpdated: true, error: 'desktop rebuild failed' }
   }
 
+  const archSpecificRebuiltApp = path.join(
+    updateRoot,
+    'apps',
+    'desktop',
+    'release',
+    `mac-${process.arch}`,
+    'Hermes.app'
+  )
   const rebuiltApp = [
+    archSpecificRebuiltApp,
+    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', 'Hermes.app'),
     path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-arm64', 'Hermes.app'),
-    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', 'Hermes.app')
+    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-x64', 'Hermes.app')
   ].find(directoryExists)
   const targetApp = runningAppBundle()
 

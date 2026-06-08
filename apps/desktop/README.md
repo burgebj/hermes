@@ -75,11 +75,16 @@ npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 ### Building installers
 
 ```bash
-npm run dist:mac     # DMG + zip
-npm run dist:win     # NSIS + MSI
-npm run dist:linux   # AppImage + deb + rpm
-npm run pack         # unpacked app under release/ (no installer)
+npm run dist:mac             # DMG + zip for the current Mac architecture
+npm run dist:mac:x64         # Intel Mac DMG + zip
+npm run dist:mac:arm64       # Apple Silicon DMG + zip
+npm run dist:mac:universal   # Universal macOS DMG + zip
+npm run dist:win             # NSIS + MSI
+npm run dist:linux           # AppImage + deb + rpm
+npm run pack                 # unpacked app under release/ (no installer)
 ```
+
+When cross-building macOS artifacts on Apple Silicon, use the architecture-specific scripts instead of passing `--x64` directly to `electron-builder`. The scripts set `npm_config_arch` before `npm run build`, so native runtime deps such as `node-pty` are staged for the target CPU before packaging starts.
 
 Installers are built and uploaded to GitHub Releases manually. macOS/Windows signing & notarization happen automatically when the relevant credentials are present in the environment (`CSC_LINK` / `CSC_KEY_PASSWORD` / `APPLE_*` for macOS, `WIN_CSC_*` for Windows).
 

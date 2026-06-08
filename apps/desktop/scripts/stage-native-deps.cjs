@@ -35,15 +35,34 @@ const APP_ROOT = path.resolve(__dirname, '..')
 const REPO_ROOT = path.resolve(APP_ROOT, '..', '..')
 const STAGE_ROOT = path.join(APP_ROOT, 'build', 'native-deps')
 
-// The target arch may be overridden by electron-builder via npm_config_arch
-// (e.g. `npm run dist -- --arm64`); fall back to the build host's arch.
-const TARGET_ARCH = process.env.npm_config_arch || process.arch
+// The target arch may be overridden before `npm run build` via npm_config_arch
+// (for example `cross-env npm_config_arch=x64 npm run build`).  This matters
+// for cross-building macOS installers: electron-builder's `--x64` / `--arm64`
+// flags are not visible until AFTER the build script has staged native deps.
+const TARGET_ARCH = process.env.npm_config_arch || process.env.HERMES_DESKTOP_TARGET_ARCH || process.arch
 const TARGET_PLATFORM = process.platform
+
+function nativePrebuildArchs(targetArch = TARGET_ARCH, targetPlatform = TARGET_PLATFORM) {
+  if (targetPlatform === 'darwin' && targetArch === 'universal') {
+    return ['x64', 'arm64']
+  }
+  return [targetArch]
+}
+
+function prebuildIncludePatterns(targetPlatform = TARGET_PLATFORM, targetArch = TARGET_ARCH) {
+  return nativePrebuildArchs(targetArch, targetPlatform).flatMap(arch => [
+    `prebuilds/${targetPlatform}-${arch}/*.node`,
+    `prebuilds/${targetPlatform}-${arch}/*.dll`,
+    `prebuilds/${targetPlatform}-${arch}/*.exe`,
+    `prebuilds/${targetPlatform}-${arch}/spawn-helper`,
+    `prebuilds/${targetPlatform}-${arch}/conpty/*`
+  ])
+}
 
 // Modules to stage. The "from" path is the hoisted location in the workspace
 // root; "to" is the layout we want inside build/native-deps/.  The "include"
 // globs (relative to "from") select the runtime-essential files.  Anything
-// outside the include list is left behind (source, deps/, scripts/, etc.).
+// outside the include list is left behind (source, deps/, scripts, etc.).
 const NATIVE_DEPS = [
   {
     from: path.join(REPO_ROOT, 'node_modules', 'node-pty'),
@@ -56,12 +75,10 @@ const NATIVE_DEPS = [
       // Per-arch runtime payload. Explicit file types so we don't ship the
       // ~25 MB of .pdb debug symbols that prebuild-install bundles for
       // Windows crash analysis -- not used at runtime, would just bloat
-      // the installer.
-      `prebuilds/${TARGET_PLATFORM}-${TARGET_ARCH}/*.node`,
-      `prebuilds/${TARGET_PLATFORM}-${TARGET_ARCH}/*.dll`,
-      `prebuilds/${TARGET_PLATFORM}-${TARGET_ARCH}/*.exe`,
-      `prebuilds/${TARGET_PLATFORM}-${TARGET_ARCH}/spawn-helper`,
-      `prebuilds/${TARGET_PLATFORM}-${TARGET_ARCH}/conpty/*`
+      // the installer. Universal macOS builds need BOTH darwin prebuild dirs,
+      // because node-pty resolves `prebuilds/${platform}-${process.arch}` at
+      // runtime after Electron starts on the user's machine.
+      ...prebuildIncludePatterns()
     ]
   }
 ]
@@ -156,4 +173,12 @@ function main() {
   }
 }
 
-main()
+if (require.main === module) {
+  main()
+}
+
+module.exports = {
+  main,
+  nativePrebuildArchs,
+  prebuildIncludePatterns
+}
