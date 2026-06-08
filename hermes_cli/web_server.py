@@ -964,7 +964,7 @@ async def get_status():
         # Module not importable yet (early startup) — leave as [].
         pass
 
-    return {
+    result: dict[str, Any] = {
         "version": __version__,
         "release_date": __release_date__,
         "hermes_home": str(get_hermes_home()),
@@ -983,6 +983,17 @@ async def get_status():
         "auth_required": auth_required,
         "auth_providers": auth_providers,
     }
+    # Expose the ephemeral session token so remote Desktop clients (SSH
+    # tunnel, LAN) can auto-discover it instead of requiring manual
+    # copy-paste.  Only surface when the OAuth gate is NOT active — gated
+    # gateways use ticket-based auth instead.  The token is already sent
+    # on every /api/ request that passes auth_middleware; including it in
+    # the public status response simply avoids the chicken-and-egg problem
+    # where the Desktop needs the token to connect but can't fetch it
+    # without already having it.  See GH #40391.
+    if not auth_required:
+        result["session_token"] = _SESSION_TOKEN
+    return result
 
 
 @app.get("/api/system/stats")
@@ -8342,13 +8353,29 @@ def _ws_host_origin_is_allowed(ws: "WebSocket") -> bool:
     return _ws_host_origin_reason(ws) is None
 
 
-def _ws_request_reason(ws: "WebSocket") -> Optional[str]:
-    """First Host/Origin or peer-IP rejection reason, or None when allowed."""
+def _ws_request_reason(ws: "WebSocket", *, token_ok: bool = False) -> Optional[str]:
+    """First Host/Origin or peer-IP rejection reason, or None when allowed.
+
+    When *token_ok* is ``True`` the credential gate has already accepted the
+    request — the Host/Origin and peer-IP guards are DNS-rebinding defences
+    that protect the *credential* itself, but a valid token (32-byte random,
+    constant-time compared) is already unguessable, so the extra network-layer
+    checks are redundant and actively break remote-gateway / SSH-tunnel
+    scenarios where the Electron client can't satisfy both guards
+    simultaneously (see GH #38412, #40391).
+    """
+    if token_ok:
+        return None
     return _ws_host_origin_reason(ws) or _ws_client_reason(ws)
 
 
-def _ws_request_is_allowed(ws: "WebSocket") -> bool:
-    """Return True when the WebSocket upgrade matches dashboard boundaries."""
+def _ws_request_is_allowed(ws: "WebSocket", *, token_ok: bool = False) -> bool:
+    """Return True when the WebSocket upgrade matches dashboard boundaries.
+
+    See :func:`_ws_request_reason` for the *token_ok* bypass rationale.
+    """
+    if token_ok:
+        return True
     return _ws_host_origin_is_allowed(ws) and _ws_client_is_allowed(ws)
 
 
@@ -8638,16 +8665,16 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=4401, reason=_ws_close_reason(f"auth: {auth_reason}"))
         return
 
-    host_origin_reason = _ws_host_origin_reason(ws)
-    if host_origin_reason is not None:
-        _log.warning("pty refused: %s peer=%s", host_origin_reason, peer)
-        await ws.close(code=4403, reason=_ws_close_reason(host_origin_reason))
-        return
-
-    client_reason = _ws_client_reason(ws)
-    if client_reason is not None:
-        _log.warning("pty refused: %s", client_reason)
-        await ws.close(code=4408, reason=_ws_close_reason(client_reason))
+    # A valid credential (token / ticket / internal) proves identity; the
+    # Host/Origin and peer-IP guards defend against DNS rebinding *stealing*
+    # that credential, but a 32-byte random token is already unguessable.
+    # Bypassing these guards when auth succeeded unblocks remote-gateway and
+    # SSH-tunnel setups where the Electron client can't satisfy both checks
+    # simultaneously (GH #38412, #40391).
+    request_reason = _ws_request_reason(ws, token_ok=True)
+    if request_reason is not None:
+        _log.warning("pty refused: %s peer=%s", request_reason, peer)
+        await ws.close(code=4403, reason=_ws_close_reason(request_reason))
         return
 
     await ws.accept()
@@ -8761,11 +8788,12 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    if not _ws_auth_ok(ws):
+    auth_reason, _cred = _ws_auth_reason(ws)
+    if auth_reason is not None:
         await ws.close(code=4401)
         return
 
-    if not _ws_request_is_allowed(ws):
+    if not _ws_request_is_allowed(ws, token_ok=True):
         await ws.close(code=4403)
         return
 
@@ -8792,11 +8820,12 @@ async def pub_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    if not _ws_auth_ok(ws):
+    auth_reason, _cred = _ws_auth_reason(ws)
+    if auth_reason is not None:
         await ws.close(code=4401)
         return
 
-    if not _ws_request_is_allowed(ws):
+    if not _ws_request_is_allowed(ws, token_ok=True):
         await ws.close(code=4403)
         return
 
@@ -8820,11 +8849,12 @@ async def events_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    if not _ws_auth_ok(ws):
+    auth_reason, _cred = _ws_auth_reason(ws)
+    if auth_reason is not None:
         await ws.close(code=4401)
         return
 
-    if not _ws_request_is_allowed(ws):
+    if not _ws_request_is_allowed(ws, token_ok=True):
         await ws.close(code=4403)
         return
 
