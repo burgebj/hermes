@@ -1982,6 +1982,21 @@ def cmd_chat(args):
     """Run interactive chat CLI."""
     use_tui = _resolve_use_tui(args)
 
+    # Headless fallback: when a query is provided but stdin is not a TTY,
+    # force CLI mode regardless of HERMES_TUI env var.  This lets the
+    # kanban dispatcher (`chat -q "work kanban task ..."`) work in
+    # subprocess/headless environments where the TUI can't start.
+    _query = getattr(args, "query", None) or ""
+    if _query and not sys.stdin.isatty():
+        use_tui = False
+        os.environ.pop("HERMES_TUI", None)
+        # Debug: write a trace file to confirm this code is reached
+        try:
+            with open("/tmp/hermes-headless-trace.log", "a") as _tf:
+                _tf.write(f"HEADLESS: usetui={use_tui} query={_query[:60]} isatty={sys.stdin.isatty()}\n")
+        except Exception:
+            pass
+
     # Resolve --continue into --resume with the latest session or by name
     continue_val = getattr(args, "continue_last", None)
     if continue_val and not getattr(args, "resume", None):
@@ -2155,6 +2170,24 @@ def cmd_chat(args):
     }
     # Filter out None values
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+    # Headless fallback: when a query is provided but stdin is not a TTY,
+    # route to oneshot mode instead of interactive CLI.  This lets the
+    # kanban dispatcher (`chat -q "work kanban task ..."`) work without
+    # a TTY — the oneshot runner doesn't need the TUI and auto-completes
+    # kanban tasks via the safety net in run_oneshot().
+    _query = kwargs.get("query", "") or ""
+    if _query and not sys.stdin.isatty():
+        from hermes_cli.oneshot import run_oneshot
+
+        sys.exit(
+            run_oneshot(
+                _query,
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                toolsets=kwargs.get("toolsets"),
+            )
+        )
 
     try:
         cli_main(**kwargs)
