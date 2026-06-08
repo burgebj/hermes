@@ -1296,7 +1296,18 @@ def check_all_command_guards(command: str, env_type: str,
         from tools.tirith_security import check_command_security
         tirith_result = check_command_security(command)
     except ImportError:
-        pass  # tirith module not installed — allow
+        try:
+            from hermes_cli.config import load_config
+
+            sec = load_config().get("security", {}) or {}
+            if sec.get("tirith_enabled", True) and not sec.get("tirith_fail_open", True):
+                tirith_result = {
+                    "action": "block",
+                    "findings": [],
+                    "summary": "Tirith unavailable — blocked per tirith_fail_open: false",
+                }
+        except Exception:
+            pass
 
     # Dangerous command check (detection only, no approval)
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
