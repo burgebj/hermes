@@ -4947,12 +4947,14 @@ def _build_call_kwargs(
     timeout: float = 30.0,
     extra_body: Optional[dict] = None,
     base_url: Optional[str] = None,
+    stream: bool = False,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
     kwargs: Dict[str, Any] = {
         "model": model,
         "messages": messages,
         "timeout": timeout,
+        "stream": stream,
     }
 
     fixed_temperature = _fixed_temperature_for_model(model, base_url)
@@ -5070,6 +5072,7 @@ def call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    stream: bool = False,
 ) -> Any:
     """Centralized synchronous LLM call.
 
@@ -5174,7 +5177,7 @@ def call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        base_url=_base_info or resolved_base_url)
+        base_url=_base_info or resolved_base_url, stream=stream)
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     _client_base = str(getattr(client, "base_url", "") or "")
@@ -5184,6 +5187,25 @@ def call_llm(
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
     try:
+        if stream:
+            stream_obj = client.chat.completions.create(**kwargs)
+            collected_content = []
+            collected_usage = None
+            for chunk in stream_obj:
+                delta = getattr(chunk.choices[0].delta, "content", None) if chunk.choices else None
+                if delta:
+                    collected_content.append(delta)
+                if hasattr(chunk, "usage") and chunk.usage:
+                    collected_usage = chunk.usage
+            content = "".join(collected_content)
+            resp = SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content=content)
+                )]
+            )
+            if collected_usage:
+                resp.usage = collected_usage
+            return resp
         return _validate_llm_response(
             client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
