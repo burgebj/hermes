@@ -1547,6 +1547,44 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         assert kb.get_task(conn, c).status == "running"
 
 
+def test_dispatch_surfaces_ready_claim_race(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """If another dispatcher claims a ready row between SELECT and CAS,
+    the current tick must expose that race instead of looking idle.
+
+    This is the cockpit failure seen in the golden-loop canary: one
+    dispatcher reported ``spawned=[]`` while another dispatcher had already
+    claimed and spawned the task. Operators need a deterministic "claimed
+    elsewhere" bucket so JSON output does not imply no progress happened.
+    """
+    original_claim_task = kb.claim_task
+    spawns = []
+
+    def racing_claim(conn, task_id, **kwargs):
+        claimed = original_claim_task(conn, task_id, **kwargs)
+        assert claimed is not None
+        kb._set_worker_pid(conn, task_id, 12345)
+        return None
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+
+    monkeypatch.setattr(kb, "claim_task", racing_claim)
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="racy", assignee="alice")
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, task_id)
+
+    assert spawns == []
+    assert res.spawned == []
+    assert res.concurrent_claimed == [(task_id, "alice", "running", 12345)]
+    assert task is not None
+    assert task.status == "running"
+    assert task.worker_pid == 12345
+
+
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
     def boom(task, workspace):
         raise RuntimeError("spawn failed")

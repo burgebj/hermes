@@ -8,6 +8,7 @@ operator footgun that only manifests in long-running setups.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -92,6 +93,37 @@ def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypat
     assert captured.get("max_spawn") == 2, (
         f"CLI --max=2 must override config kanban.max_spawn=10; got {captured.get('max_spawn')!r}"
     )
+
+
+def test_cli_dispatch_json_reports_concurrent_claims(
+    isolated_kanban_home, monkeypatch, capsys
+):
+    """`dispatch --json` must surface tasks claimed by another dispatcher.
+
+    Otherwise an operator can see `spawned: []` while `kanban show` proves the
+    task was claimed/spawned by a racing gateway tick.
+    """
+    from hermes_cli import kanban as kb_cli
+    from hermes_cli import kanban_db
+
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"kanban": {}})
+    result = kanban_db.DispatchResult()
+    result.concurrent_claimed.append(("t_race", "worker-a", "running", 12345))
+    monkeypatch.setattr(kanban_db, "dispatch_once", lambda conn, **kw: result)
+
+    args = argparse.Namespace(dry_run=False, max=1, failure_limit=2, json=True)
+
+    assert kb_cli._cmd_dispatch(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["spawned"] == []
+    assert payload["concurrent_claimed"] == [
+        {
+            "task_id": "t_race",
+            "assignee": "worker-a",
+            "status": "running",
+            "worker_pid": 12345,
+        }
+    ]
 
 
 def test_cli_invalid_max_in_progress_silently_disables(isolated_kanban_home, monkeypatch):

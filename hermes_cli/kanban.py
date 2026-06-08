@@ -2159,6 +2159,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "assignee": who, "workspace": ws}
                 for (tid, who, ws) in res.spawned
             ],
+            "concurrent_claimed": [
+                {
+                    "task_id": tid,
+                    "assignee": who,
+                    "status": status,
+                    "worker_pid": pid,
+                }
+                for (tid, who, status, pid) in res.concurrent_claimed
+            ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
             "skipped_per_profile_capped": [
@@ -2186,6 +2195,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     for tid, who, ws in res.spawned:
         tag = " (dry)" if args.dry_run else ""
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
+    if res.concurrent_claimed:
+        print(f"Claimed elsewhere: {len(res.concurrent_claimed)}")
+        for tid, who, status, pid in res.concurrent_claimed:
+            pid_s = f" pid={pid}" if pid is not None else ""
+            print(f"  - {tid}  ->  {who or '-'}  status={status}{pid_s}")
     if res.auto_assigned_default:
         print(
             f"Auto-assigned to kanban.default_assignee={default_assignee!r}: "
@@ -2276,7 +2290,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     def _on_tick(res):
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
-        spawned_any = bool(res.spawned)
+        spawned_any = bool(res.spawned or res.concurrent_claimed)
         if ready_pending and not spawned_any:
             health_state["bad_ticks"] += 1
         else:
@@ -2302,7 +2316,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             return
         did_work = (
             res.reclaimed or res.crashed or res.timed_out or res.promoted
-            or res.spawned or res.auto_blocked or res.stale
+            or res.spawned or res.concurrent_claimed
+            or res.auto_blocked or res.stale
         )
         if did_work:
             print(
