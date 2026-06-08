@@ -2137,6 +2137,7 @@ class TestNewEndpoints:
         assert resp.json()["command"] == "hermes setup"
 
     def test_profiles_create_creates_wrapper_alias_when_safe(self, monkeypatch, tmp_path):
+        import sys
         import hermes_cli.profiles as profiles_mod
 
         wrapper_dir = tmp_path / "bin"
@@ -2149,9 +2150,13 @@ class TestNewEndpoints:
         )
 
         assert resp.status_code == 200
-        wrapper_path = wrapper_dir / "writer"
+        is_windows = sys.platform == "win32"
+        wrapper_path = wrapper_dir / ("writer.bat" if is_windows else "writer")
         assert wrapper_path.exists()
-        assert wrapper_path.read_text() == '#!/bin/sh\nexec hermes -p writer "$@"\n'
+        if is_windows:
+            assert wrapper_path.read_text() == "@echo off\n\nhermes -p writer %*\n\n"
+        else:
+            assert wrapper_path.read_text() == '#!/bin/sh\nexec hermes -p writer "$@"\n'
 
     def test_profiles_create_with_clone_from_default_copies_default_skills(self, monkeypatch):
         from hermes_constants import get_hermes_home

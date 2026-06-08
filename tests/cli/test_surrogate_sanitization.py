@@ -293,11 +293,13 @@ class TestApiMessagesSurrogateRecovery:
 class TestRunConversationSurrogateSanitization:
     """Integration: verify run_conversation sanitizes user_message."""
 
+    @patch("agent.model_metadata.get_model_context_length")
     @patch("run_agent.AIAgent._build_system_prompt")
     @patch("run_agent.AIAgent._interruptible_streaming_api_call")
     @patch("run_agent.AIAgent._interruptible_api_call")
-    def test_user_message_surrogates_sanitized(self, mock_api, mock_stream, mock_sys):
+    def test_user_message_surrogates_sanitized(self, mock_api, mock_stream, mock_sys, mock_ctx_len):
         """Surrogates in user_message are stripped before API call."""
+        mock_ctx_len.return_value = 8192
         from run_agent import AIAgent
 
         mock_sys.return_value = "system prompt"
