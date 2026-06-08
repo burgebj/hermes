@@ -313,6 +313,17 @@ class TestMemoryStoreReplace:
         result = store.replace("memory", "nonexistent", "new")
         assert result["success"] is False
 
+    def test_replace_no_match_returns_existing_previews(self, store):
+        store.add("memory", "fact A")
+        store.add("memory", "fact B with a much longer body that should be truncated to eighty characters in the preview")
+        result = store.replace("memory", "nonexistent", "new")
+        assert result["success"] is False
+        assert "existing_entries" in result
+        assert len(result["existing_entries"]) == 2
+        assert result["existing_entries"][0] == "fact A"
+        assert result["existing_entries"][1].endswith("...")
+        assert len(result["existing_entries"][1]) <= 83  # 80 + "..."
+
     def test_replace_ambiguous_match(self, store):
         store.add("memory", "server A runs nginx")
         store.add("memory", "server B runs nginx")
@@ -345,6 +356,14 @@ class TestMemoryStoreRemove:
     def test_remove_no_match(self, store):
         result = store.remove("memory", "nonexistent")
         assert result["success"] is False
+
+    def test_remove_no_match_returns_existing_previews(self, store):
+        store.add("memory", "fact A")
+        store.add("memory", "fact B")
+        result = store.remove("memory", "nonexistent")
+        assert result["success"] is False
+        assert "existing_entries" in result
+        assert result["existing_entries"] == ["fact A", "fact B"]
 
     def test_remove_empty_old_text(self, store):
         result = store.remove("memory", "  ")
