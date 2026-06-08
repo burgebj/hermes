@@ -4707,6 +4707,52 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
             if not quiet:
                 print("  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")
 
+    # ── Version 25 → 26: preserve platform_toolsets during display.platforms seed ──
+    # v26 added per-platform streaming defaults to display.platforms (telegram on,
+    # discord off). A previous draft of this migration incorrectly seeded
+    # platform_toolsets with empty lists for any platform found in display.platforms,
+    # silently wiping all tools for users who had custom toolset lists configured
+    # (issue #38798). The fix:
+    #   - display.platforms streaming defaults are filled by the DEFAULT_CONFIG
+    #     deep-merge in load_config() — no explicit migration write needed.
+    #   - platform_toolsets is NEVER assigned a default here; it is user-managed
+    #     and must be preserved exactly as-is.
+    #   - If platform_toolsets is absent (brand-new install reaching v26 via a
+    #     full migration pass), leave it unset — tools_config.py seeds it lazily
+    #     via setdefault() when the user first opens `hermes tools`.
+    if current_ver < 26:
+        config = read_raw_config()
+        pt = config.get("platform_toolsets")
+        if isinstance(pt, dict):
+            # Preserve all existing per-platform toolset lists.  Only add new
+            # per-platform keys that the user has never configured — never
+            # replace a key that already exists, even with an empty list.
+            touched = False
+            for platform, ts_list in list(pt.items()):
+                if not isinstance(ts_list, list):
+                    # Coerce malformed entries to empty list rather than
+                    # deleting them — safer than wiping unknown values.
+                    logger.warning(
+                        "platform_toolsets[%r] has unexpected type %s "
+                        "(expected list); coercing to [] during v25→v26 "
+                        "migration. Check your config file if tools are missing.",
+                        platform,
+                        type(ts_list).__name__,
+                    )
+                    pt[platform] = []
+                    touched = True
+            if touched:
+                config["platform_toolsets"] = pt
+                save_config(config)
+                results["config_added"].append(
+                    "platform_toolsets (coerced non-list entries to [])"
+                )
+                if not quiet:
+                    print(
+                        "  ✓ Preserved platform_toolsets: coerced non-list "
+                        "entries to [] (v25→v26)"
+                    )
+
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")
     
