@@ -266,6 +266,47 @@ def _serialize_slack_blocks_for_agent(blocks: list, max_chars: int = 6000) -> st
     return f"[Slack Block Kit payload for this message]\n```json\n{payload}\n```"
 
 
+def _extract_urls_from_slack_blocks(blocks: list) -> list[str]:
+    """Walk a Block Kit ``blocks`` tree and return URLs found on any element.
+
+    Returns URLs preserving discovery order with duplicates removed. Used to
+    surface the actionable links (``View graph``, ``View incident``, etc.)
+    embedded in bot-posted alerts so an agent reading the thread can fetch
+    or click them. The companion serializer
+    :func:`_serialize_slack_blocks_for_agent` deliberately strips ``url`` to
+    keep the JSON view compact and to avoid exposing arbitrary URLs through
+    the generic payload dump; this helper is the targeted opt-in for
+    use sites where URLs are the whole point of the message.
+    """
+    if not blocks:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _maybe_add(value: Any) -> None:
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            if value not in seen:
+                seen.add(value)
+                found.append(value)
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            # The common URL-bearing keys across Block Kit (buttons, link
+            # elements in rich_text, image accessories, etc.).
+            for key in ("url", "image_url", "external_url"):
+                if key in node:
+                    _maybe_add(node[key])
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(blocks)
+    return found
+
+
 def _apply_slack_proxy(client: Any, proxy_url: Optional[str]) -> None:
     """Apply a resolved proxy to a Slack SDK client or clear it explicitly."""
     if hasattr(client, "proxy"):
@@ -3181,6 +3222,31 @@ class SlackAdapter(BasePlatformAdapter):
                     continue
 
                 msg_text = msg.get("text", "").strip()
+
+                # Surface Block Kit content (button URLs, section mrkdwn) so
+                # bot-posted alerts (Honeycomb, PagerDuty, Datadog, GitHub
+                # bot, etc.) aren't reduced to just the title in ``text``.
+                # Many such alerts put nothing useful in ``text`` and put
+                # the URL / actionable content in ``blocks``. Without this,
+                # an agent replying in the thread can't see what the alert
+                # is actually about.
+                blocks = msg.get("blocks")
+                if blocks:
+                    extras: list[str] = []
+                    rich_text = _extract_text_from_slack_blocks(blocks).strip()
+                    if rich_text and rich_text not in msg_text:
+                        extras.append(rich_text)
+                    block_payload = _serialize_slack_blocks_for_agent(blocks).strip()
+                    if block_payload and block_payload not in msg_text:
+                        extras.append(block_payload)
+                    urls = _extract_urls_from_slack_blocks(blocks)
+                    new_urls = [u for u in urls if u not in msg_text and all(u not in e for e in extras)]
+                    if new_urls:
+                        extras.append("URLs: " + ", ".join(new_urls))
+                    if extras:
+                        addendum = "\n".join(extras)
+                        msg_text = (msg_text + "\n" + addendum).strip() if msg_text else addendum
+
                 if not msg_text:
                     continue
 

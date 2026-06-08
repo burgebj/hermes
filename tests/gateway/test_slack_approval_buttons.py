@@ -480,6 +480,107 @@ class TestSlackThreadContext:
         assert "メール要約: 本日の新着3件" in context
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_context_extracts_block_kit_parent(self):
+        """Bot-posted parents that put their content in ``blocks`` (Honeycomb,
+        PagerDuty, Datadog, GitHub bot, etc.) used to be reduced to just the
+        ``text`` field — typically only the alert title — which dropped the
+        URL/button payload that makes the alert useful to an agent replying
+        in the thread. The fetched context must now include serialized
+        Block Kit content so URLs and section text survive."""
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                # Bot-posted alert: title in `text`, URL only in `blocks`.
+                # Mirrors what Honeycomb, PagerDuty, etc. actually send.
+                {
+                    "ts": "1000.0",
+                    "bot_id": "B_ALERT",
+                    "subtype": "bot_message",
+                    "username": "alertbot",
+                    "text": "low_alerts (checkout)",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "*Trigger fired:* low_alerts",
+                            },
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "View graph"},
+                                    "url": "https://example.example/view/abc123",
+                                },
+                            ],
+                        },
+                    ],
+                },
+                # User reply that triggered the fetch.
+                {"ts": "1000.1", "user": "U1", "text": "what's going on?"},
+            ]
+        })
+        adapter._user_name_cache = {"U1": "Alice"}
+
+        context = await adapter._fetch_thread_context(
+            channel_id="C1",
+            thread_ts="1000.0",
+            current_ts="1000.1",
+            team_id="T1",
+        )
+
+        # Title still present.
+        assert "low_alerts (checkout)" in context
+        # URL from the action button must now surface.
+        assert "https://example.example/view/abc123" in context
+        # Marked as the thread parent.
+        assert "[thread parent]" in context
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_context_includes_blocks_only_parent(self):
+        """A parent message with empty ``text`` but non-empty ``blocks`` must
+        still be included — without this, alerts that put *everything* in
+        ``blocks`` (some webhook integrations do this) are silently dropped
+        because the ``if not msg_text: continue`` guard fires."""
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {
+                    "ts": "1000.0",
+                    "bot_id": "B_ALERT",
+                    "subtype": "bot_message",
+                    "username": "alertbot",
+                    "text": "",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "Build failed: <https://example.example/build/9|#9>",
+                            },
+                        },
+                    ],
+                },
+                {"ts": "1000.1", "user": "U1", "text": "looking"},
+            ]
+        })
+        adapter._user_name_cache = {"U1": "Alice"}
+
+        context = await adapter._fetch_thread_context(
+            channel_id="C1",
+            thread_ts="1000.0",
+            current_ts="1000.1",
+            team_id="T1",
+        )
+
+        assert "[thread parent]" in context
+        assert "https://example.example/build/9" in context
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_context_excludes_self_bot_replies(self):
         """Parent (non-self bot) is kept, self-bot child replies are dropped,
         user replies are kept."""
