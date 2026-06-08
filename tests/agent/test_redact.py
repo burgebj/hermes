@@ -45,6 +45,23 @@ class TestKnownPrefixes:
         result = redact_sensitive_text("AIzaSyB-abc123def456ghi789jklmno012345")
         assert "abc123def456" not in result
 
+    def test_google_oauth_access_token(self):
+        # Bare Google OAuth access token in tool output (no JSON key adjacency)
+        token = "ya29." + "a1b2c3d4e5" * 4  # 40 contiguous token chars
+        result = redact_sensitive_text(f"got token {token}")
+        assert "a1b2c3d4e5" * 4 not in result
+        assert "..." in result
+
+    def test_google_oauth_refresh_token(self):
+        token = "1//" + "0gAbCdEf_-" * 4  # url-safe base64, 40 chars
+        result = redact_sensitive_text(f"refresh={token}")
+        assert "0gAbCdEf" not in result
+
+    def test_google_oauth_short_non_token_unchanged(self):
+        # Negative: a short "1//foo" must NOT be redacted (no false positive)
+        text = "see path 1//foo for details"
+        assert redact_sensitive_text(text) == text
+
     def test_perplexity_key(self):
         result = redact_sensitive_text("pplx-abcdef123456789012345")
         assert "abcdef12345" not in result
