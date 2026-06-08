@@ -9,9 +9,14 @@ const BUILTIN: Record<string, keyof Translations["app"]["nav"]> = {
   "/cron": "cron",
   "/skills": "skills",
   "/plugins": "plugins",
+  "/mcp": "mcp",
+  "/channels": "channels",
+  "/webhooks": "webhooks",
+  "/pairing": "pairing",
   "/profiles": "profiles",
   "/config": "config",
   "/env": "keys",
+  "/system": "system",
   "/docs": "documentation",
 };
 
@@ -30,7 +35,10 @@ export function resolvePageTitle(
   }
   const key = BUILTIN[normalized];
   if (key) {
-    return t.app.nav[key];
+    const title = t.app.nav[key];
+    if (title) {
+      return title;
+    }
   }
   // Derive title from pathname: "/profiles" → "Profiles"
   const segment = normalized.slice(1);
