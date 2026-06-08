@@ -2795,5 +2795,135 @@ class TestFallbackModelInheritance(unittest.TestCase):
         self.assertIsNone(kwargs["fallback_model"])
 
 
+class TestDelegateModelOverride(unittest.TestCase):
+    """Coverage for the ``model`` parameter on ``delegate_task``.
+
+    Regression for #41821 (model param silently ignored) and #41814
+    (per-task model override). The contract:
+
+      1. Schema exposes ``model`` at the top level AND per-task.
+      2. Top-level ``model`` is forwarded to ``_build_child_agent``.
+      3. Per-task ``model`` (in ``tasks[]``) beats the top-level value.
+      4. When neither is set, the child uses the config-resolved
+         delegation model (``creds["model"]``) — existing behaviour.
+      5. Whitespace-only ``model`` is treated as omitted so it can't
+         silently override a real config value with an empty string.
+    """
+
+    def test_schema_exposes_model_top_level_and_per_task(self):
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        self.assertIn("model", props, "top-level 'model' missing from schema")
+        self.assertEqual(props["model"]["type"], "string")
+
+        task_props = props["tasks"]["items"]["properties"]
+        self.assertIn("model", task_props, "per-task 'model' missing from schema")
+        self.assertEqual(task_props["model"]["type"], "string")
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    def test_top_level_model_forwarded_to_child(self, mock_build, mock_run):
+        mock_build.return_value = MagicMock()
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed", "summary": "ok",
+            "api_calls": 1, "duration_seconds": 0.1,
+        }
+        parent = _make_mock_parent()
+        override = "anthropic/claude-haiku-4"
+
+        delegate_task(goal="t", model=override, parent_agent=parent)
+
+        mock_build.assert_called_once()
+        _, kwargs = mock_build.call_args
+        self.assertEqual(
+            kwargs["model"], override,
+            "top-level model= must reach _build_child_agent",
+        )
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    def test_per_task_model_beats_top_level(self, mock_build, mock_run):
+        mock_build.return_value = MagicMock()
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed", "summary": "ok",
+            "api_calls": 1, "duration_seconds": 0.1,
+        }
+        parent = _make_mock_parent()
+
+        delegate_task(
+            tasks=[{"goal": "g", "model": "openrouter/x-ai/grok-4"}],
+            model="anthropic/claude-haiku-4",
+            parent_agent=parent,
+        )
+
+        _, kwargs = mock_build.call_args
+        self.assertEqual(
+            kwargs["model"], "openrouter/x-ai/grok-4",
+            "per-task model must beat top-level model",
+        )
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    def test_no_model_falls_back_to_creds(self, mock_build, mock_run):
+        """When neither top-level nor per-task model is set, the child
+        must receive the config-resolved delegation model — i.e. the
+        pre-existing behaviour is preserved.
+        """
+        mock_build.return_value = MagicMock()
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed", "summary": "ok",
+            "api_calls": 1, "duration_seconds": 0.1,
+        }
+        parent = _make_mock_parent()
+
+        with patch(
+            "tools.delegate_tool._resolve_delegation_credentials",
+            return_value={
+                "model": "configured/model",
+                "provider": None,
+                "base_url": None,
+                "api_key": None,
+                "api_mode": None,
+                "command": None,
+                "args": None,
+            },
+        ):
+            delegate_task(goal="g", parent_agent=parent)
+
+        _, kwargs = mock_build.call_args
+        self.assertEqual(kwargs["model"], "configured/model")
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    def test_whitespace_model_treated_as_omitted(self, mock_build, mock_run):
+        """A whitespace-only model string must NOT clobber the configured
+        delegation model. Otherwise a model-emitted ``"model": "  "`` would
+        silently break delegation for users who rely on config-resolved
+        credentials.
+        """
+        mock_build.return_value = MagicMock()
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed", "summary": "ok",
+            "api_calls": 1, "duration_seconds": 0.1,
+        }
+        parent = _make_mock_parent()
+
+        with patch(
+            "tools.delegate_tool._resolve_delegation_credentials",
+            return_value={
+                "model": "configured/model",
+                "provider": None,
+                "base_url": None,
+                "api_key": None,
+                "api_mode": None,
+                "command": None,
+                "args": None,
+            },
+        ):
+            delegate_task(goal="g", model="   ", parent_agent=parent)
+
+        _, kwargs = mock_build.call_args
+        self.assertEqual(kwargs["model"], "configured/model")
+
+
 if __name__ == "__main__":
     unittest.main()
