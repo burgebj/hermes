@@ -1447,6 +1447,20 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
+            if not summary:
+                # Empty/whitespace completions are a common model quirk
+                # (content-filter empties, refusal stubs, rate-limited empty
+                # responses, some llama.cpp/Ollama overflow replies that return
+                # ""). Without this guard ``summary`` stays "" and we return the
+                # bare SUMMARY_PREFIX — a truthy but content-free handoff that
+                # slips past BOTH failure paths in ``compress()``, silently
+                # dropping the entire compacted window with zero recoverable
+                # anchors. Raise so the existing handler retries on the main
+                # model and/or routes to the deterministic static fallback,
+                # and leave ``self._previous_summary`` untouched so iterative
+                # state survives. (NOTE: ValueError, not RuntimeError — the
+                # latter is caught by the "no provider" branch below.)
+                raise ValueError("auxiliary summarizer returned empty content")
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0

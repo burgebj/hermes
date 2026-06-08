@@ -166,6 +166,49 @@ class TestCompress:
         assert c._last_summary_fallback_used is True
         assert c._last_summary_dropped_count == 3
 
+    def test_empty_summarizer_output_routes_to_fallback_not_window_drop(self):
+        """Data-loss regression: an empty summarizer completion must trigger the
+        deterministic fallback, not a content-free bare prefix that drops the
+        compacted window silently.
+        """
+        empty_response = MagicMock()
+        empty_response.choices = [MagicMock()]
+        empty_response.choices[0].message.content = "   "  # whitespace-only
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test/model",
+                protect_first_n=1,
+                protect_last_n=2,
+                quiet_mode=True,
+            )
+
+        msgs = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Please fix the empty-summary data loss"},
+            {"role": "assistant", "content": "Looking into the compressor now."},
+            {"role": "user", "content": "more context"},
+            {"role": "assistant", "content": "kept digging"},
+            {"role": "user", "content": "latest protected ask"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        with (
+            patch.object(c, "_find_tail_cut_by_tokens", return_value=5),
+            patch("agent.context_compressor.call_llm", return_value=empty_response),
+        ):
+            result = c.compress(msgs)
+
+        combined = "\n".join(str(m.get("content", "")) for m in result)
+        # The deterministic fallback fires and preserves recoverable anchors...
+        assert c._last_summary_fallback_used is True
+        assert c._last_summary_dropped_count > 0
+        assert "## Active Task" in combined
+        assert "Please fix the empty-summary data loss" in combined
+        # ...rather than emitting a bare, content-free handoff prefix.
+        assert combined.count(SUMMARY_PREFIX) <= 1
+        assert "Summary generation was unavailable" in combined
+
     def test_compression_increments_count(self, compressor):
         msgs = self._make_messages(10)
         # Default config (abort_on_summary_failure=False) — fallback path
@@ -248,13 +291,23 @@ class TestNonStringContent:
         assert isinstance(summary, str)
         assert summary.startswith(SUMMARY_PREFIX)
 
-    def test_none_content_coerced_to_empty(self):
+    def test_empty_content_is_treated_as_failure_not_bare_prefix(self):
+        """Regression: an empty summarizer completion must NOT become a bare,
+        content-free SUMMARY_PREFIX.
+
+        Returning the bare prefix is truthy, so it slips past both failure
+        paths in ``compress()`` and silently drops the entire compacted window.
+        ``_generate_summary`` must instead signal failure (return ``None``) so
+        the caller can abort or insert the deterministic static fallback, and it
+        must not wipe iterative-summary state with the empty string.
+        """
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = None
 
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True)
+        c._previous_summary = "prior accumulated summary"
 
         messages = [
             {"role": "user", "content": "do something"},
@@ -263,9 +316,13 @@ class TestNonStringContent:
 
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             summary = c._generate_summary(messages)
-        # None content → empty string → standardized compaction handoff prefix added
-        assert summary is not None
-        assert summary == SUMMARY_PREFIX
+        # Empty content → generation failure, not a content-free handoff.
+        assert summary is None
+        assert summary != SUMMARY_PREFIX
+        # Iterative-summary state must survive an empty completion.
+        assert c._previous_summary == "prior accumulated summary"
+        # A failure reason is recorded so the gateway can surface a warning.
+        assert c._last_summary_error == "auxiliary summarizer returned empty content"
 
     def test_summary_call_does_not_force_temperature(self):
         mock_response = MagicMock()
