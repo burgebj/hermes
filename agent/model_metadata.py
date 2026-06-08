@@ -558,15 +558,60 @@ def _coerce_reasonable_int(value: Any, minimum: int = 1024, maximum: int = 10_00
     return None
 
 
+def _is_gguf_family_match(key: str, base_suffix: str) -> bool:
+    """Check if key matches {family}.{suffix} pattern for GGUF models.
+    
+    For example, with base_suffix='context_length':
+    - 'laguna.context_length' ✓ (matches any family prefix)
+    - 'llama.context_length' ✓ 
+    - 'context_length' ✗ (no dot = not a family-prefixed key we're looking for via this path)
+    """
+    key_lower = str(key).lower()
+    expected_suffix = f".{base_suffix.lower()}"
+    return '.' in key_lower and key_lower.endswith(expected_suffix)
+
+
 def _extract_first_int(payload: Dict[str, Any], keys: tuple[str, ...]) -> Optional[int]:
-    keyset = {key.lower() for key in keys}
+    """Extract first integer matching any of the given keys from a nested payload.
+    
+    Handles both exact key matches and GGUF-style family prefix patterns (e.g., 
+    'laguna.context_length' when searching for base suffixes like 'context_length').
+    
+    The function checks:
+    - Keys with dots in them match exactly (e.g., 'laguna.context_length')
+    - Base suffixes without dots also match {family}.{suffix} patterns from GGUF models
+    """
+    exact_keys = {key.lower() for key in keys}
+    
     for mapping in _iter_nested_dicts(payload):
         for key, value in mapping.items():
-            if str(key).lower() not in keyset:
-                continue
-            coerced = _coerce_reasonable_int(value)
-            if coerced is not None:
-                return coerced
+            key_lower = str(key).lower()
+            
+            # Check exact match first (fast path)
+            if key_lower in exact_keys:
+                coerced = _coerce_reasonable_int(value)
+                if coerced is not None:
+                    return coerced
+            
+            # For base suffixes (no dot), also check GGUF family prefix pattern
+            else:
+                for pattern in keys:
+                    pattern_lower = pattern.lower()
+                    # Only match {family}.{suffix} patterns when the searched key is a simple suffix
+                    if '.' not in pattern_lower and _is_gguf_family_match(key, pattern):
+                        coerced = _coerce_reasonable_int(value)
+                        if coerced is not None:
+                            return coerced
+    
+    # Also check for any keys with dots that are directly in the search list (e.g., 'laguna.context_length')
+    dotted_keys = {k.lower() for k in keys if '.' in k}
+    for mapping in _iter_nested_dicts(payload):
+        for key, value in mapping.items():
+            if str(key).lower() in dotted_keys:
+                coerced = _coerce_reasonable_int(value)
+                if coerced is not None:
+                    return coerced
+    
     return None
 
 
