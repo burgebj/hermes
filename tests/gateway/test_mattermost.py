@@ -6,6 +6,131 @@ import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
 from gateway.config import Platform, PlatformConfig
+from gateway.run import (
+    _resolve_gateway_display_bool,
+    _resolve_progress_thread_id,
+)
+
+
+# ---------------------------------------------------------------------------
+# Platform & Config
+# ---------------------------------------------------------------------------
+
+class TestMattermostProgressThreadRouting:
+    def test_top_level_mattermost_progress_uses_event_message_id(self):
+        """Top-level Mattermost posts are valid thread roots for progress."""
+        assert _resolve_progress_thread_id(
+            Platform.MATTERMOST,
+            source_thread_id=None,
+            event_message_id="top_post_123",
+        ) == "top_post_123"
+
+    def test_threaded_mattermost_progress_prefers_existing_thread_root(self):
+        """Thread replies must keep using the root post, not the reply id."""
+        assert _resolve_progress_thread_id(
+            Platform.MATTERMOST,
+            source_thread_id="root_post_123",
+            event_message_id="reply_post_456",
+        ) == "root_post_123"
+
+    def test_telegram_progress_does_not_use_message_id_as_thread_id(self):
+        """Telegram message IDs are not forum topic IDs."""
+        assert _resolve_progress_thread_id(
+            Platform.TELEGRAM,
+            source_thread_id=None,
+            event_message_id="12345",
+        ) is None
+
+
+class TestMattermostDisplayHygiene:
+    def test_mattermost_requires_platform_opt_in_for_interim_assistant_messages(self):
+        """Global interim commentary must not make Mattermost leak scratch notes."""
+        user_config = {"display": {"interim_assistant_messages": True}}
+
+        assert _resolve_gateway_display_bool(
+            user_config,
+            "mattermost",
+            "interim_assistant_messages",
+            default=True,
+            platform=Platform.MATTERMOST,
+            require_platform_override_for={Platform.MATTERMOST},
+        ) is False
+
+    def test_mattermost_platform_opt_in_can_enable_interim_assistant_messages(self):
+        """Mattermost can still opt into commentary explicitly per platform."""
+        user_config = {
+            "display": {
+                "interim_assistant_messages": False,
+                "platforms": {
+                    "mattermost": {"interim_assistant_messages": True},
+                },
+            }
+        }
+
+        assert _resolve_gateway_display_bool(
+            user_config,
+            "mattermost",
+            "interim_assistant_messages",
+            default=True,
+            platform=Platform.MATTERMOST,
+            require_platform_override_for={Platform.MATTERMOST},
+        ) is True
+
+    def test_mattermost_requires_platform_opt_in_for_thinking_progress(self):
+        """Global thinking_progress must not surface internal analysis in Mattermost."""
+        user_config = {"display": {"thinking_progress": True}}
+
+        assert _resolve_gateway_display_bool(
+            user_config,
+            "mattermost",
+            "thinking_progress",
+            default=False,
+            platform=Platform.MATTERMOST,
+            require_platform_override_for={Platform.MATTERMOST},
+        ) is False
+
+    def test_mattermost_requires_platform_opt_in_for_show_reasoning(self):
+        """Global show_reasoning must not prepend scratch reasoning in Mattermost."""
+        user_config = {"display": {"show_reasoning": True}}
+
+        assert _resolve_gateway_display_bool(
+            user_config,
+            "mattermost",
+            "show_reasoning",
+            default=False,
+            platform=Platform.MATTERMOST,
+            require_platform_override_for={Platform.MATTERMOST},
+        ) is False
+
+    def test_mattermost_platform_opt_in_can_enable_show_reasoning(self):
+        user_config = {
+            "display": {
+                "show_reasoning": False,
+                "platforms": {"mattermost": {"show_reasoning": True}},
+            }
+        }
+
+        assert _resolve_gateway_display_bool(
+            user_config,
+            "mattermost",
+            "show_reasoning",
+            default=False,
+            platform=Platform.MATTERMOST,
+            require_platform_override_for={Platform.MATTERMOST},
+        ) is True
+
+    def test_global_thinking_progress_still_applies_to_other_platforms(self):
+        """The Mattermost guard must not silently neuter Telegram/other chats."""
+        user_config = {"display": {"thinking_progress": True}}
+
+        assert _resolve_gateway_display_bool(
+            user_config,
+            "telegram",
+            "thinking_progress",
+            default=False,
+            platform=Platform.TELEGRAM,
+            require_platform_override_for={Platform.MATTERMOST},
+        ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +343,31 @@ class TestMattermostSend:
         assert payload["root_id"] == "root_post"
 
     @pytest.mark.asyncio
+    async def test_send_uses_metadata_thread_id_for_progress_messages(self):
+        """Progress/status messages pass Mattermost thread context via metadata."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post_123", "root_id": ""})
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"id": "progress_post"})
+        mock_resp.text = AsyncMock(return_value="")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        self.adapter._session.post = MagicMock(return_value=mock_resp)
+
+        result = await self.adapter.send(
+            "channel_1",
+            "⚡ terminal...",
+            metadata={"thread_id": "root_post_123"},
+        )
+
+        assert result.success is True
+        payload = self.adapter._session.post.call_args[1]["json"]
+        assert payload["root_id"] == "root_post_123"
+
+    @pytest.mark.asyncio
     async def test_send_without_thread_no_root_id(self):
         """When reply_mode is 'off', reply_to should NOT set root_id."""
         self.adapter._reply_mode = "off"
@@ -238,6 +388,86 @@ class TestMattermostSend:
         assert "root_id" not in payload
 
     @pytest.mark.asyncio
+    async def test_send_with_invalid_thread_root_does_not_fall_back_flat(self):
+        """If Mattermost rejects root_id, never leak the reply into the channel."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "bad_root", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        result = await self.adapter.send("channel_1", "Reply!", reply_to="bad_root")
+
+        assert result.success is False
+        assert self.adapter._api_post.call_count == 1
+        payload = self.adapter._api_post.call_args_list[0][0][1]
+        assert payload["root_id"] == "bad_root"
+
+    @pytest.mark.asyncio
+    async def test_notify_send_with_invalid_thread_root_falls_back_flat_with_warning(self):
+        """Notify-worthy replies may fall back flat so the answer is not lost."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "bad_root", "root_id": ""})
+        self.adapter._last_post_status = 400
+        self.adapter._last_post_error = "api.context.invalid_param.app_error: invalid root_id"
+        self.adapter._api_post = AsyncMock(side_effect=[{}, {"id": "flat_final"}])
+
+        result = await self.adapter.send(
+            "channel_1",
+            "Final answer body",
+            reply_to="bad_root",
+            metadata={"notify": True},
+        )
+
+        assert result.success is True
+        assert result.message_id == "flat_final"
+        assert self.adapter._api_post.call_count == 2
+        threaded_payload = self.adapter._api_post.call_args_list[0][0][1]
+        flat_payload = self.adapter._api_post.call_args_list[1][0][1]
+        assert threaded_payload["root_id"] == "bad_root"
+        assert "root_id" not in flat_payload
+        assert flat_payload["channel_id"] == "channel_1"
+        assert "Mattermost thread delivery failed" in flat_payload["message"]
+        assert "Final answer body" in flat_payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_notify_send_with_server_error_does_not_fall_back_flat(self):
+        """Notify fallback is only for broken thread roots, not generic API failures."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post", "root_id": ""})
+        self.adapter._last_post_status = 500
+        self.adapter._last_post_error = "Internal Server Error"
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        result = await self.adapter.send(
+            "channel_1",
+            "Final answer body",
+            reply_to="root_post",
+            metadata={"notify": True},
+        )
+
+        assert result.success is False
+        assert self.adapter._api_post.call_count == 1
+        payload = self.adapter._api_post.call_args_list[0][0][1]
+        assert payload["root_id"] == "root_post"
+
+    @pytest.mark.asyncio
+    async def test_progress_send_with_invalid_thread_root_never_falls_back_flat(self):
+        """Tool/status/progress bubbles must stay quiet when the thread is broken."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_get = AsyncMock(return_value={"id": "bad_root", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        result = await self.adapter.send(
+            "channel_1",
+            "⚙️ terminal...",
+            metadata={"thread_id": "bad_root"},
+        )
+
+        assert result.success is False
+        assert self.adapter._api_post.call_count == 1
+        payload = self.adapter._api_post.call_args_list[0][0][1]
+        assert payload["root_id"] == "bad_root"
+
+    @pytest.mark.asyncio
     async def test_send_api_failure(self):
         """When API returns error, send should return failure."""
         mock_resp = AsyncMock()
@@ -252,6 +482,47 @@ class TestMattermostSend:
         result = await self.adapter.send("channel_1", "Hello!")
 
         assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_uses_metadata_thread_id(self, tmp_path):
+        """Local file uploads should keep Mattermost thread context from metadata."""
+        self.adapter._reply_mode = "thread"
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+        self.adapter._upload_file = AsyncMock(return_value="file_123")
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post_123", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={"id": "post_with_file"})
+
+        result = await self.adapter.send_image_file(
+            "channel_1",
+            str(image_path),
+            metadata={"thread_id": "root_post_123"},
+        )
+
+        assert result.success is True
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload["root_id"] == "root_post_123"
+        assert payload["file_ids"] == ["file_123"]
+
+    @pytest.mark.asyncio
+    async def test_send_multiple_images_uses_metadata_thread_id(self, tmp_path):
+        """Batched MEDIA image uploads should stay inside the Mattermost thread."""
+        self.adapter._reply_mode = "thread"
+        image_path = tmp_path / "example.png"
+        image_path.write_bytes(b"png")
+        self.adapter._upload_file = AsyncMock(return_value="file_123")
+        self.adapter._api_get = AsyncMock(return_value={"id": "root_post_123", "root_id": ""})
+        self.adapter._api_post = AsyncMock(return_value={"id": "post_with_file"})
+
+        await self.adapter.send_multiple_images(
+            "channel_1",
+            [(f"file://{image_path}", "")],
+            metadata={"thread_id": "root_post_123"},
+        )
+
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload["root_id"] == "root_post_123"
+        assert payload["file_ids"] == ["file_123"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +660,58 @@ class TestMattermostWebSocketParsing:
         assert self.adapter.handle_message.called
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.source.thread_id == "root_post_123"
+
+    @pytest.mark.asyncio
+    async def test_top_level_channel_post_seeds_thread_id_in_thread_mode(self):
+        """In thread reply mode, a top-level channel post is the thread root."""
+        self.adapter._reply_mode = "thread"
+        post_data = {
+            "id": "top_post_123",
+            "user_id": "user_123",
+            "channel_id": "chan_456",
+            "message": "@bot_user_id Start a threaded turn",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "O",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id == "top_post_123"
+        assert msg_event.source.message_id == "top_post_123"
+
+    @pytest.mark.asyncio
+    async def test_dm_post_does_not_seed_thread_id_in_thread_mode(self):
+        """Mattermost DMs stay one stable chat session unless they carry root_id."""
+        self.adapter._reply_mode = "thread"
+        post_data = {
+            "id": "dm_post_123",
+            "user_id": "user_123",
+            "channel_id": "dm_chan",
+            "message": "DM turn",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "D",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id is None
+        assert msg_event.source.message_id == "dm_post_123"
 
     @pytest.mark.asyncio
     async def test_invalid_post_json_ignored(self):
