@@ -4053,6 +4053,26 @@ def _normalize_vision_provider(provider: Optional[str]) -> str:
     return _normalize_aux_provider(provider)
 
 
+def _try_gemini_vision(model: Optional[str] = None) -> Tuple[Optional[Any], Optional[str]]:
+    """Create an OpenAI client pointed at Gemini's OpenAI-compatible API.
+    Uses GOOGLE_API_KEY (or GEMINI_API_KEY) and routes through the
+    /v1beta/openai/ endpoint so OpenAI-format image_url messages are accepted.
+    """
+    import httpx
+
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        _mark_provider_unhealthy("gemini", ttl=60)
+        return None, None
+    base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    _http_client = httpx.Client(timeout=120.0)
+    logger.info("VISION-FIX: _try_gemini_vision called — creating OpenAI client for Gemini")
+    return (
+        OpenAI(api_key=api_key, base_url=base_url, http_client=_http_client),
+        model or "gemini-2.0-flash-001",
+    )
+
+
 def _resolve_strict_vision_backend(
     provider: str,
     model: Optional[str] = None,
@@ -4071,6 +4091,8 @@ def _resolve_strict_vision_backend(
         return resolve_provider_client("openai-codex", model, is_vision=True)
     if provider == "anthropic":
         return _try_anthropic()
+    if provider == "gemini":
+        return _try_gemini_vision(model=model)
     if provider == "custom":
         return _try_custom_endpoint()
     return None, None
@@ -4263,6 +4285,18 @@ def resolve_vision_provider_client(
         if client is None:
             return requested, None, None
         return requested, client, final_model
+
+    # Gemini vision: use OpenAI-compatible endpoint so image_url is accepted
+    if requested == "gemini":
+        logger.info("VISION-FIX: resolve_vision_provider_client: gemini path hit, requested=%s", requested)
+        sync_client, default_model = _resolve_strict_vision_backend(
+            requested, resolved_model
+        )
+        if sync_client is not None:
+            logger.info("VISION-FIX: gemini client created, model=%s", default_model)
+            return _finalize(requested, sync_client, default_model)
+        else:
+            logger.warning("VISION-FIX: gemini client creation FAILED")
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                              api_mode=resolved_api_mode,
@@ -4702,6 +4736,10 @@ def _resolve_task_provider_model(
         cfg_provider, cfg_base_url = _expand_direct_api_alias(cfg_provider, cfg_base_url)
 
     if base_url:
+        # When a provider is explicitly given alongside the base_url, keep
+        # it so strict-vision-backend routing works (e.g. gemini).
+        if provider and provider not in {"", "auto"}:
+            return provider, resolved_model, base_url, api_key, resolved_api_mode
         return "custom", resolved_model, base_url, api_key, resolved_api_mode
     if provider:
         return provider, resolved_model, base_url, api_key, resolved_api_mode
@@ -4709,7 +4747,13 @@ def _resolve_task_provider_model(
     if task:
         # Config.yaml is the primary source for per-task overrides.
         if cfg_base_url and cfg_api_key:
-            # Both base_url and api_key explicitly set → custom endpoint.
+            # Both base_url and api_key explicitly set → custom endpoint,
+            # unless the provider is also explicitly set — in that case
+            # keep it so strict-vision-backend routing works (e.g. gemini).
+            if cfg_provider and cfg_provider != "auto":
+                logger.info("VISION-FIX: _resolve_task_provider_model returning provider=%s model=%s base=%s", cfg_provider, resolved_model, cfg_base_url)
+                return cfg_provider, resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
+            logger.info("VISION-FIX: _resolve_task_provider_model returning custom")
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
         if cfg_base_url and cfg_provider and cfg_provider != "auto":
             # base_url set without api_key but with a known provider — use
