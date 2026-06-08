@@ -30,8 +30,11 @@ from tools.delegate_tool import (
     _build_child_system_prompt,
     _extract_output_tail,
     _strip_blocked_tools,
+    _cap_toolsets_to_allowed,
+    _normalize_toolset_list,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    _resolve_delegation_profile_config,
 )
 
 
@@ -69,6 +72,7 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("delegation_profile", props)
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -1162,6 +1166,78 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["provider"])
 
 
+class TestDelegationProfileConfig(unittest.TestCase):
+    def test_named_profile_merges_over_base_delegation_config(self):
+        base = {
+            "model": "",
+            "provider": "",
+            "max_iterations": 50,
+            "child_timeout_seconds": 600,
+            "toolsets": ["terminal", "file"],
+            "allowed_toolsets": [],
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly", "web"],
+                    "allowed_toolsets": ["file_readonly", "web"],
+                    "max_iterations": 20,
+                }
+            },
+        }
+
+        cfg = _resolve_delegation_profile_config(base, "deepseek_aux")
+
+        self.assertEqual(cfg["provider"], "deepseek")
+        self.assertEqual(cfg["model"], "deepseek-v4-pro")
+        self.assertEqual(cfg["toolsets"], ["file_readonly", "web"])
+        self.assertEqual(cfg["allowed_toolsets"], ["file_readonly", "web"])
+        self.assertEqual(cfg["max_iterations"], 20)
+        self.assertEqual(cfg["child_timeout_seconds"], 600)
+        self.assertNotIn("profiles", cfg)
+
+    def test_profile_provider_does_not_inherit_global_direct_endpoint(self):
+        base = {
+            "provider": "custom",
+            "model": "local-model",
+            "base_url": "http://127.0.0.1:1234/v1",
+            "api_key": "local-key",
+            "api_mode": "anthropic_messages",
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly"],
+                    "allowed_toolsets": ["file_readonly"],
+                }
+            },
+        }
+
+        cfg = _resolve_delegation_profile_config(base, "deepseek_aux")
+
+        self.assertEqual(cfg["provider"], "deepseek")
+        self.assertEqual(cfg["model"], "deepseek-v4-pro")
+        self.assertNotIn("base_url", cfg)
+        self.assertNotIn("api_key", cfg)
+        self.assertNotIn("api_mode", cfg)
+
+    def test_missing_profile_is_user_facing_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            _resolve_delegation_profile_config({"profiles": {}}, "missing")
+
+        self.assertIn("Unknown delegation profile 'missing'", str(ctx.exception))
+
+    def test_hard_cap_rejects_composite_toolset_with_disallowed_includes(self):
+        result = _cap_toolsets_to_allowed(["debugging"], ["terminal", "file"])
+
+        self.assertEqual(result, [])
+
+    def test_invalid_toolset_list_fails_closed(self):
+        result = _normalize_toolset_list({"terminal": True})
+
+        self.assertEqual(result, [])
+
+
 class TestDelegationProviderIntegration(unittest.TestCase):
     """Integration tests: delegation config → _run_single_child → AIAgent construction."""
 
@@ -1198,6 +1274,338 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], "https://openrouter.ai/api/v1")
             self.assertEqual(kwargs["api_key"], "sk-or-delegation-key")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_named_profile_routes_model_and_caps_toolsets(self, mock_runtime, mock_cfg):
+        """delegation_profile selects a named provider/model/tool policy without scripts."""
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly", "web"],
+                    "allowed_toolsets": ["file_readonly", "web"],
+                    "max_iterations": 20,
+                }
+            },
+        }
+        mock_runtime.return_value = {
+            "model": "deepseek-v4-pro",
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "deepseek-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                goal="Read-only repo scout",
+                delegation_profile="deepseek_aux",
+                parent_agent=parent,
+            )
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "deepseek-v4-pro")
+            self.assertEqual(kwargs["provider"], "deepseek")
+            self.assertEqual(kwargs["base_url"], "https://api.deepseek.com/v1")
+            self.assertEqual(kwargs["api_key"], "deepseek-key")
+            self.assertEqual(kwargs["api_mode"], "chat_completions")
+            self.assertEqual(kwargs["max_iterations"], 20)
+            self.assertEqual(kwargs["enabled_toolsets"], ["file_readonly", "web"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_profile_allowed_toolsets_are_a_hard_cap(self, mock_runtime, mock_cfg):
+        """A read-only profile cannot be widened by a caller requesting file/terminal."""
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly"],
+                    "allowed_toolsets": ["file_readonly"],
+                }
+            },
+        }
+        mock_runtime.return_value = {
+            "model": "deepseek-v4-pro",
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "deepseek-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                goal="Read-only repo scout",
+                delegation_profile="deepseek_aux",
+                toolsets=["terminal", "file", "file_readonly"],
+                parent_agent=parent,
+            )
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["enabled_toolsets"], ["file_readonly"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_profile_cap_disables_kanban_auto_add(self, mock_runtime, mock_cfg):
+        """Hard-capped profiles must not be widened by HERMES_KANBAN_TASK auto-tools."""
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly"],
+                    "allowed_toolsets": ["file_readonly"],
+                }
+            },
+        }
+        mock_runtime.return_value = {
+            "model": "deepseek-v4-pro",
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "deepseek-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch.dict(os.environ, {"HERMES_KANBAN_TASK": "task-1"}, clear=False):
+            with patch("run_agent.AIAgent") as MockAgent:
+                mock_child = MagicMock()
+                mock_child.run_conversation.return_value = {
+                    "final_response": "done",
+                    "completed": True,
+                    "api_calls": 1,
+                }
+                MockAgent.return_value = mock_child
+
+                delegate_task(
+                    goal="Read-only repo scout",
+                    delegation_profile="deepseek_aux",
+                    parent_agent=parent,
+                )
+
+                _, kwargs = MockAgent.call_args
+                self.assertEqual(kwargs["enabled_toolsets"], ["file_readonly"])
+                self.assertEqual(kwargs["disabled_toolsets"], ["kanban"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_batch_ignores_top_level_toolsets(self, mock_run, mock_cfg):
+        """In batch mode, top-level toolsets must not leak into task children."""
+        mock_cfg.return_value = {"max_iterations": 50}
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "done",
+            "api_calls": 1,
+            "duration_seconds": 1.0,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            delegate_task(
+                goal="Ignored top-level goal",
+                tasks=[{"goal": "Actual task"}],
+                toolsets=["terminal"],
+                parent_agent=parent,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["enabled_toolsets"], ["hermes-cli"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_batch_profile_error_cleans_up_already_built_children(self, mock_runtime, mock_cfg):
+        """A later batch profile error must not leave earlier child agents active."""
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly"],
+                    "allowed_toolsets": ["file_readonly"],
+                }
+            },
+        }
+        mock_runtime.return_value = {
+            "model": "deepseek-v4-pro",
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "deepseek-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+        first_child = MagicMock()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = first_child
+            result = json.loads(
+                delegate_task(
+                    tasks=[
+                        {"goal": "A", "delegation_profile": "deepseek_aux"},
+                        {"goal": "B", "delegation_profile": "missing"},
+                    ],
+                    parent_agent=parent,
+                )
+            )
+
+        self.assertIn("Unknown delegation profile 'missing'", result["error"])
+        self.assertEqual(parent._active_children, [])
+        first_child.close.assert_called_once()
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_per_task_profile_overrides_top_level_profile(self, mock_runtime, mock_run, mock_cfg):
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly"],
+                    "allowed_toolsets": ["file_readonly"],
+                },
+                "gemini_aux": {
+                    "provider": "openrouter",
+                    "model": "google/gemini-3-flash-preview",
+                    "toolsets": ["web"],
+                    "allowed_toolsets": ["web"],
+                },
+            },
+        }
+
+        def _runtime(requested, target_model):
+            return {
+                "provider": requested,
+                "model": target_model,
+                "base_url": f"https://{requested}.example/v1",
+                "api_key": f"{requested}-key",
+                "api_mode": "chat_completions",
+            }
+
+        mock_runtime.side_effect = _runtime
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "done",
+            "api_calls": 1,
+            "duration_seconds": 1.0,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            delegate_task(
+                tasks=[
+                    {"goal": "A"},
+                    {"goal": "B", "delegation_profile": "gemini_aux"},
+                ],
+                delegation_profile="deepseek_aux",
+                parent_agent=parent,
+            )
+
+        first_kwargs = MockAgent.call_args_list[0].kwargs
+        second_kwargs = MockAgent.call_args_list[1].kwargs
+        self.assertEqual(first_kwargs["provider"], "deepseek")
+        self.assertEqual(first_kwargs["model"], "deepseek-v4-pro")
+        self.assertEqual(first_kwargs["enabled_toolsets"], ["file_readonly"])
+        self.assertEqual(second_kwargs["provider"], "openrouter")
+        self.assertEqual(second_kwargs["model"], "google/gemini-3-flash-preview")
+        self.assertEqual(second_kwargs["enabled_toolsets"], ["web"])
+
+    @patch("tools.delegate_tool._load_config")
+    def test_unknown_profile_returns_json_error(self, mock_cfg):
+        mock_cfg.return_value = {"max_iterations": 50, "profiles": {}}
+        parent = _make_mock_parent(depth=0)
+
+        result = json.loads(
+            delegate_task(
+                goal="No such profile",
+                delegation_profile="missing",
+                parent_agent=parent,
+            )
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("Unknown delegation profile 'missing'", result["error"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_profile_readonly_cap_degrades_orchestrator_to_leaf(self, mock_runtime, mock_cfg):
+        mock_cfg.return_value = {
+            "max_spawn_depth": 2,
+            "orchestrator_enabled": True,
+            "max_iterations": 50,
+            "profiles": {
+                "deepseek_aux": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "toolsets": ["file_readonly"],
+                    "allowed_toolsets": ["file_readonly"],
+                }
+            },
+        }
+        mock_runtime.return_value = {
+            "model": "deepseek-v4-pro",
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "deepseek-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                goal="Read-only repo scout",
+                role="orchestrator",
+                delegation_profile="deepseek_aux",
+                parent_agent=parent,
+            )
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["enabled_toolsets"], ["file_readonly"])
+            self.assertEqual(mock_child._delegate_role, "leaf")
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

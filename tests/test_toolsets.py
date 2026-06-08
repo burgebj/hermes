@@ -55,6 +55,12 @@ class TestResolveToolset:
         tools = resolve_toolset("web")
         assert set(tools) == {"web_search", "web_extract"}
 
+    def test_file_readonly_toolset_excludes_write_tools(self):
+        tools = resolve_toolset("file_readonly")
+        assert set(tools) == {"read_file", "search_files"}
+        assert "write_file" not in tools
+        assert "patch" not in tools
+
     def test_composite_toolset(self):
         tools = resolve_toolset("debugging")
         assert "terminal" in tools

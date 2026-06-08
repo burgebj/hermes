@@ -30,7 +30,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
-from toolsets import TOOLSETS
+from toolsets import TOOLSETS, resolve_toolset
 
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
@@ -359,6 +359,105 @@ def _normalize_role(r: Optional[str]) -> str:
     return "leaf"
 
 
+def _normalize_toolset_list(value: Any) -> Optional[List[str]]:
+    """Return a clean list of toolset names, preserving order and uniqueness.
+
+    Accepts YAML lists/tuples/sets and comma-separated strings. ``None`` means
+    "not configured"; an explicit empty list/string stays empty so profiles can
+    intentionally provide no tools. Unsupported types fail closed to an empty
+    list instead of widening child tools by falling back to inherited defaults.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw_items = value.replace("\n", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        logger.warning("Invalid toolset list value %r; using empty list", value)
+        return []
+
+    result: List[str] = []
+    seen = set()
+    for item in raw_items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _resolve_delegation_profile_config(cfg: dict, profile_name: Optional[str]) -> dict:
+    """Merge a named delegation profile over the base delegation config.
+
+    ``delegation.provider/model/base_url/...`` remains the backward-compatible
+    global default. ``delegation.profiles.<name>`` can override any of those
+    fields plus policy fields such as ``toolsets``, ``allowed_toolsets``, and
+    ``max_iterations`` for one delegate_task call. The returned dict excludes
+    the nested ``profiles`` map so downstream credential resolution sees a
+    normal delegation config.
+    """
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    base = dict(cfg)
+    profiles = base.pop("profiles", {})
+    name = str(profile_name or "").strip()
+    if not name:
+        return base
+
+    if not isinstance(profiles, dict) or name not in profiles:
+        available = sorted(str(k) for k in profiles.keys()) if isinstance(profiles, dict) else []
+        suffix = f" Available profiles: {', '.join(available)}." if available else " No profiles are configured."
+        raise ValueError(f"Unknown delegation profile '{name}'.{suffix}")
+
+    profile_cfg = profiles.get(name)
+    if not isinstance(profile_cfg, dict):
+        raise ValueError(f"Delegation profile '{name}' must be a mapping/object.")
+
+    merged = dict(base)
+    profile_provider = str(profile_cfg.get("provider") or "").strip()
+    profile_base_url = str(profile_cfg.get("base_url") or "").strip()
+    if profile_provider and not profile_base_url:
+        # A named provider profile should route through the runtime provider
+        # resolver. Do not let global direct-endpoint settings silently win
+        # over profile.provider just because base_url has higher precedence in
+        # _resolve_delegation_credentials(). Profiles that want a direct
+        # endpoint must set base_url themselves.
+        for direct_key in ("base_url", "api_key", "api_mode", "acp_command", "acp_args"):
+            if direct_key not in profile_cfg or not profile_cfg.get(direct_key):
+                merged.pop(direct_key, None)
+    for key, value in profile_cfg.items():
+        if key == "profiles":
+            continue
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def _cap_toolsets_to_allowed(
+    child_toolsets: List[str], allowed_toolsets: Optional[List[str]]
+) -> List[str]:
+    """Apply a profile hard-cap to child toolsets.
+
+    ``allowed_toolsets`` is intentionally stricter than normal parent
+    inheritance: if set, the child cannot regain terminal/file/delegation tools
+    by asking for them or by using role='orchestrator'. Composite caps such as
+    ``hermes-cli`` are expanded to the toolset names they contain.
+    """
+    if allowed_toolsets is None:
+        return child_toolsets
+    allowed = _expand_parent_toolsets(set(allowed_toolsets))
+    return [t for t in child_toolsets if t in allowed]
+
+
+def _toolset_cap_allows(toolset_name: str, allowed_toolsets: Optional[List[str]]) -> bool:
+    if allowed_toolsets is None:
+        return True
+    return toolset_name in _expand_parent_toolsets(set(allowed_toolsets))
+
+
 def _get_max_concurrent_children() -> int:
     """Read delegation.max_concurrent_children from config, falling back to
     DELEGATION_MAX_CONCURRENT_CHILDREN env var, then the default (3).
@@ -509,24 +608,24 @@ def _expand_parent_toolsets(parent_toolsets: set) -> set:
     or ``terminal``.  A simple name-based intersection would reject them
     because ``"web" != "hermes-cli"``.
 
-    This helper collects the tool names from each parent toolset, then adds
-    the names of any individual toolsets whose tools are a *subset* of the
-    parent's available tools.  The original parent toolset names are preserved.
+    This helper collects the fully resolved tool names from each parent toolset
+    (including nested ``includes``), then adds the names of any individual
+    toolsets whose fully resolved tools are a *subset* of the parent's
+    available tools.  The original parent toolset names are preserved.
     """
     parent_tool_names: set = set()
     for ts_name in parent_toolsets:
-        ts_def = TOOLSETS.get(ts_name)
-        if ts_def:
-            parent_tool_names.update(ts_def.get("tools", []))
+        if TOOLSETS.get(ts_name):
+            parent_tool_names.update(resolve_toolset(ts_name))
 
     if not parent_tool_names:
         return set(parent_toolsets)
 
     expanded = set(parent_toolsets)
-    for ts_name, ts_def in TOOLSETS.items():
+    for ts_name in TOOLSETS:
         if ts_name in expanded:
             continue
-        ts_tools = ts_def.get("tools", [])
+        ts_tools = resolve_toolset(ts_name)
         if ts_tools and set(ts_tools).issubset(parent_tool_names):
             expanded.add(ts_name)
     return expanded
@@ -922,6 +1021,12 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Optional hard cap from delegation profile policy. When set, the child
+    # cannot gain toolsets outside this list even if requested explicitly or
+    # via role='orchestrator'.
+    allowed_toolsets: Optional[List[str]] = None,
+    override_reasoning_effort: Optional[str] = None,
+    child_timeout_seconds: Optional[float] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -944,7 +1049,12 @@ def _build_child_agent(
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
     max_spawn = _get_max_spawn_depth()
     orchestrator_ok = _get_orchestrator_enabled() and child_depth < max_spawn
+    allowed_toolsets = _normalize_toolset_list(allowed_toolsets)
     effective_role = role if (role == "orchestrator" and orchestrator_ok) else "leaf"
+    if effective_role == "orchestrator" and not _toolset_cap_allows(
+        "delegation", allowed_toolsets
+    ):
+        effective_role = "leaf"
 
     # ── Subagent identity (stable across events, 0-indexed for TUI) ─────
     # subagent_id is generated here so the progress callback, the
@@ -976,12 +1086,13 @@ def _build_child_agent(
     else:
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
-    if toolsets:
+    requested_toolsets = _normalize_toolset_list(toolsets)
+    if requested_toolsets is not None:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
         # toolset names (e.g. web, terminal) are recognised during intersection.
         expanded_parent = _expand_parent_toolsets(parent_toolsets)
-        child_toolsets = [t for t in toolsets if t in expanded_parent]
+        child_toolsets = [t for t in requested_toolsets if t in expanded_parent]
         if _get_inherit_mcp_toolsets():
             child_toolsets = _preserve_parent_mcp_toolsets(
                 child_toolsets, parent_toolsets
@@ -1000,6 +1111,13 @@ def _build_child_agent(
     # test_intersection_preserves_delegation_bound test for the design rationale.
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
+    child_toolsets = _cap_toolsets_to_allowed(child_toolsets, allowed_toolsets)
+    child_disabled_toolsets: List[str] = []
+    if allowed_toolsets is not None and not _toolset_cap_allows("kanban", allowed_toolsets):
+        # model_tools auto-adds kanban in HERMES_KANBAN_TASK contexts after
+        # enabled_toolsets filtering. A profile hard-cap must also block that
+        # post-filter widening unless kanban is explicitly allowed.
+        child_disabled_toolsets = ["kanban"]
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -1095,7 +1213,10 @@ def _build_child_agent(
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
     child_reasoning = parent_reasoning
     try:
-        delegation_effort = str(delegation_cfg.get("reasoning_effort") or "").strip()
+        if override_reasoning_effort is not None:
+            delegation_effort = str(override_reasoning_effort or "").strip()
+        else:
+            delegation_effort = str(delegation_cfg.get("reasoning_effort") or "").strip()
         if delegation_effort:
             from hermes_constants import parse_reasoning_effort
 
@@ -1151,6 +1272,7 @@ def _build_child_agent(
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
         fallback_model=parent_fallback,
         enabled_toolsets=child_toolsets,
+        disabled_toolsets=child_disabled_toolsets,
         quiet_mode=True,
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
@@ -1180,6 +1302,8 @@ def _build_child_agent(
     child._subagent_id = subagent_id
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
+    if child_timeout_seconds is not None:
+        setattr(child, "_delegate_child_timeout_seconds", child_timeout_seconds)
     child._parent_turn_id = getattr(parent_agent, "_current_turn_id", "") or ""
 
     # Share a credential pool with the child when possible so subagents can
@@ -1540,7 +1664,14 @@ def _run_single_child(
 
         # Run child with a hard timeout to prevent indefinite blocking
         # when the child's API call or tool-level HTTP request hangs.
-        child_timeout = _get_child_timeout()
+        timeout_override = getattr(child, "_delegate_child_timeout_seconds", None)
+        if timeout_override is not None:
+            try:
+                child_timeout = max(30.0, float(timeout_override))
+            except (TypeError, ValueError):
+                child_timeout = _get_child_timeout()
+        else:
+            child_timeout = _get_child_timeout()
         _timeout_executor = ThreadPoolExecutor(
             max_workers=1,
             # Install a non-interactive approval callback in the worker thread
@@ -1967,6 +2098,39 @@ def _recover_tasks_from_json_string(
     return parsed, None
 
 
+def _cleanup_unstarted_children(
+    children: List[tuple[int, Dict[str, Any], Any]], parent_agent: Any
+) -> None:
+    """Close child agents that were built but will never be submitted.
+
+    _build_child_agent() registers each child in parent_agent._active_children
+    immediately so interrupts can reach queued workers. If a later batch task
+    fails validation before workers reach _run_single_child(), that runner's
+    finally block never executes; clean the already-built children here.
+    """
+    for _, _, child in reversed(children):
+        if hasattr(parent_agent, "_active_children"):
+            try:
+                lock = getattr(parent_agent, "_active_children_lock", None)
+                if lock:
+                    with lock:
+                        parent_agent._active_children.remove(child)
+                else:
+                    parent_agent._active_children.remove(child)
+            except ValueError:
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "Could not remove unstarted child from active_children: %s", exc
+                )
+
+        try:
+            if hasattr(child, "close"):
+                child.close()
+        except Exception:
+            logger.debug("Failed to close unstarted child agent", exc_info=True)
+
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -1976,6 +2140,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    delegation_profile: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2024,31 +2189,18 @@ def delegate_task(
             }
         )
 
-    # Load config
+    # Load base delegation config. Named profiles are resolved per task below so
+    # a batch can mix providers/tool policies while preserving the top-level
+    # profile as the default.
     cfg = _load_config()
-    default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
-    # Model-supplied max_iterations is ignored — the config value is authoritative
-    # so users get predictable budgets. The kwarg is retained for internal callers
-    # and tests; a model-emitted value here would only shrink the budget and
-    # surprise the user mid-run. Log and drop it if one slips through from a
-    # cached tool schema or a stale provider.
-    if max_iterations is not None and max_iterations != default_max_iter:
+    if max_iterations is not None:
         logger.debug(
             "delegate_task: ignoring caller-supplied max_iterations=%s; "
-            "using delegation.max_iterations=%s from config",
-            max_iterations, default_max_iter,
+            "delegation.max_iterations or profile.max_iterations is authoritative",
+            max_iterations,
         )
-    effective_max_iter = default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
-    try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
-    except ValueError as exc:
-        return tool_error(str(exc))
+    top_profile = str(delegation_profile or "").strip() or None
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -2070,7 +2222,13 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "delegation_profile": top_profile,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2107,7 +2265,42 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            task_profile = str(t.get("delegation_profile") or top_profile or "").strip() or None
+            try:
+                task_cfg = _resolve_delegation_profile_config(cfg, task_profile)
+                creds = _resolve_delegation_credentials(task_cfg, parent_agent)
+            except ValueError as exc:
+                _cleanup_unstarted_children(children, parent_agent)
+                return tool_error(str(exc))
+
+            configured_max_iter = task_cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
+            try:
+                effective_max_iter = max(1, int(configured_max_iter))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "delegation.max_iterations/profile.max_iterations=%r is not a valid integer; using default %d",
+                    configured_max_iter,
+                    DEFAULT_MAX_ITERATIONS,
+                )
+                effective_max_iter = DEFAULT_MAX_ITERATIONS
+
+            configured_timeout = task_cfg.get("child_timeout_seconds")
+            child_timeout_seconds = None
+            if configured_timeout is not None:
+                try:
+                    child_timeout_seconds = max(30.0, float(configured_timeout))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "delegation.child_timeout_seconds/profile.child_timeout_seconds=%r is not a valid number; using runtime default",
+                        configured_timeout,
+                    )
+
             task_acp_args = t.get("acp_args") if "acp_args" in t else None
+            task_toolsets = t.get("toolsets") if "toolsets" in t else None
+            if task_toolsets is None:
+                task_toolsets = task_cfg.get("toolsets")
+            allowed_toolsets = _normalize_toolset_list(task_cfg.get("allowed_toolsets"))
+
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
@@ -2115,7 +2308,7 @@ def delegate_task(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
-                toolsets=t.get("toolsets") or toolsets,
+                toolsets=task_toolsets,
                 model=creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
@@ -2126,13 +2319,21 @@ def delegate_task(
                 override_api_mode=creds["api_mode"],
                 override_acp_command=t.get("acp_command")
                 or acp_command
+                or task_cfg.get("acp_command")
                 or creds.get("command"),
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (
+                        acp_args
+                        if acp_args is not None
+                        else task_cfg.get("acp_args", creds.get("args"))
+                    )
                 ),
                 role=effective_role,
+                allowed_toolsets=allowed_toolsets,
+                override_reasoning_effort=task_cfg.get("reasoning_effort"),
+                child_timeout_seconds=child_timeout_seconds,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2548,7 +2749,8 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             f"Cannot resolve delegation provider '{configured_provider}': {exc}. "
             f"Check that the provider is configured (API key set, valid provider name), "
             f"or set delegation.base_url/delegation.api_key for a direct endpoint. "
-            f"Available providers: openrouter, nous, zai, kimi-coding, minimax."
+            f"Available providers include: openrouter, nous, anthropic, openai, deepseek, "
+            f"google, xai, zai, kimi-coding, minimax, and custom:<name>."
         ) from exc
 
     api_key = runtime.get("api_key", "")
@@ -2821,6 +3023,15 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "delegation_profile": {
+                "type": "string",
+                "description": (
+                    "Optional named profile from config.yaml delegation.profiles. "
+                    "Profiles can set provider/model/toolsets/allowed_toolsets "
+                    "for first-class aux workers (for example 'deepseek_aux'). "
+                    "Per-task delegation_profile overrides the top-level value."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -2835,6 +3046,10 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
+                        },
+                        "delegation_profile": {
+                            "type": "string",
+                            "description": "Per-task named delegation profile. Overrides the top-level delegation_profile.",
                         },
                         "acp_command": {
                             "type": "string",
@@ -2911,6 +3126,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        delegation_profile=args.get("delegation_profile"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
