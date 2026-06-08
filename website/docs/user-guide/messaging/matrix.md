@@ -86,6 +86,22 @@ If you are upgrading from a version that did not have `MATRIX_REQUIRE_MENTION`, 
 
 This guide walks you through the full setup process — from creating your bot account to sending your first message.
 
+### Response Streaming
+
+On most platforms Hermes streams its reply token-by-token (editing the message as it generates). On Matrix, streaming defaults to **buffer-only** mode: the reply is edited only at paragraph boundaries and on completion, rather than on a continuous cadence. This keeps `m.replace` edit traffic low and avoids the streaming cursor, which some Matrix clients render as a tofu/white-box glyph. The trade-off is that short, single-paragraph replies appear all at once.
+
+To make Matrix stream **progressively** (a live-typing feel), enable it in `~/.hermes/config.yaml`:
+
+```yaml
+streaming:
+  enabled: true
+  matrix_progressive: true   # progressive (token-cadence) edits on Matrix
+  edit_interval: 1.0         # seconds between edits — raise to ease rate limits
+  buffer_threshold: 28       # ...or flush after this many new characters
+```
+
+The streaming cursor stays suppressed on Matrix even in progressive mode, so you get smooth updates without the glyph artifact. Because progressive mode sends an edit roughly every `edit_interval` seconds, keep an eye on your homeserver's per-room rate limits; if you see `M_LIMIT_EXCEEDED` backoff in the logs, raise `edit_interval` / `buffer_threshold`.
+
 ## Step 1: Create a Bot Account
 
 You need a Matrix user account for the bot. There are several ways to do this:
@@ -233,6 +249,41 @@ The bot should connect to your homeserver and start syncing within a few seconds
 :::tip
 You can run `hermes gateway` in the background or as a systemd service for persistent operation. See the deployment docs for details.
 :::
+
+## Connect via Beeper
+
+[Beeper](https://www.beeper.com) is a hosted Matrix homeserver (`matrix.beeper.com`), so Hermes connects to it through this same Matrix adapter — no special integration. There are two Beeper-specific wrinkles:
+
+1. **No password login.** Beeper authenticates through its own email-code → JWT flow, not `m.login.password`. Hermes authenticates with an **access token** (it calls `/whoami`), so you just need to mint one once. `MATRIX_PASSWORD` will not work; `MATRIX_ACCESS_TOKEN` will.
+2. **Rooms are end-to-end encrypted**, so [E2EE](#end-to-end-encryption-e2ee) is required (`MATRIX_ENCRYPTION=true` plus the bot account's recovery key).
+
+### Step 1: Make a dedicated bot account
+
+Sign up a **second Beeper account** with its own email — that's the bot. Don't run Hermes as your primary Beeper account, or it would see (and could reply inside) every bridged chat in your inbox. From your main account, start a chat with the bot so there's a room to talk in.
+
+### Step 2: Mint an access token
+
+Use the helper script (standard library only, no install):
+
+```bash
+python3 scripts/beeper_login.py --email bot@example.com
+# enter the 6-digit code Beeper emails to that address
+```
+
+It runs Beeper's login flow (`api.beeper.com` → `org.matrix.login.jwt` at `matrix.beeper.com`) and prints `MATRIX_ACCESS_TOKEN`, `MATRIX_USER_ID`, and `MATRIX_DEVICE_ID`. Keep the token and device ID together — the device ID is tied to the bot's E2EE identity, so reuse it on every restart.
+
+### Step 3: Configure
+
+```bash
+MATRIX_HOMESERVER=https://matrix.beeper.com
+MATRIX_ACCESS_TOKEN=...        # from the helper
+MATRIX_DEVICE_ID=...           # from the helper — keep it stable
+MATRIX_ENCRYPTION=true         # Beeper rooms are encrypted
+MATRIX_RECOVERY_KEY=...        # bot account's Beeper recovery key (Settings → Encryption)
+MATRIX_ALLOWED_USERS=@you:beeper.com   # lock the bot to just you
+```
+
+Then start the gateway as usual. Because a direct chat with the bot is a 2-member room, Hermes treats it as a DM and responds to every message (no `@mention` needed).
 
 ## End-to-End Encryption (E2EE)
 

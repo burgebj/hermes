@@ -16928,7 +16928,10 @@ class GatewayRunner:
                     _buffer_only = False
                     if source.platform == Platform.MATRIX:
                         _effective_cursor = ""
-                        _buffer_only = True
+                        # Buffer-only (edit at segment breaks only) unless the
+                        # operator opts into progressive streaming.  Cursor stays
+                        # suppressed either way to avoid the tofu-glyph artifact.
+                        _buffer_only = not _scfg.matrix_progressive
                     # Fresh-final applies to Telegram only — other
                     # platforms either edit in place cheaply (Discord,
                     # Slack) or don't have the timestamp-on-edit
@@ -17955,7 +17958,10 @@ class GatewayRunner:
                         _buffer_only = False
                         if source.platform == Platform.MATRIX:
                             _effective_cursor = ""
-                            _buffer_only = True
+                            # Buffer-only (segment-break edits) unless the
+                            # operator opts into progressive streaming via
+                            # streaming.matrix_progressive.
+                            _buffer_only = not _scfg.matrix_progressive
                         # Fresh-final applies to Telegram only — other
                         # platforms either edit in place cheaply or don't
                         # have the edit-timestamp-stays-stale problem.

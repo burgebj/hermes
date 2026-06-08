@@ -187,6 +187,17 @@ class TestStreamingConfig:
         assert restored.buffer_threshold == 24
         assert restored.fresh_final_after_seconds == 60.0
 
+    def test_matrix_progressive_defaults_off(self):
+        # Matrix streams buffer-only (segment-break edits) by default.
+        assert StreamingConfig().matrix_progressive is False
+        assert StreamingConfig.from_dict({"enabled": "true"}).matrix_progressive is False
+
+    def test_matrix_progressive_roundtrips_and_coerces(self):
+        restored = StreamingConfig.from_dict({"matrix_progressive": "true"})
+        assert restored.matrix_progressive is True
+        # survives a to_dict -> from_dict roundtrip
+        assert StreamingConfig.from_dict(restored.to_dict()).matrix_progressive is True
+
 
 class TestGatewayConfigRoundtrip:
     def test_full_roundtrip(self):

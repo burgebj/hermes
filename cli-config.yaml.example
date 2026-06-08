@@ -547,6 +547,11 @@ streaming:
   # edit_interval: 0.3        # seconds between message edits
   # buffer_threshold: 40      # chars before forcing an edit flush
   # cursor: " ▉"              # cursor shown during streaming
+  # matrix_progressive: false # Matrix streams buffer-only (edit at paragraph
+  #                           # breaks / completion) by default; set true for
+  #                           # progressive token-cadence edits on Matrix
+  #                           # (cursor stays suppressed). Raise edit_interval /
+  #                           # buffer_threshold if you hit homeserver rate limits.
 
 # =============================================================================
 # Skills Configuration

@@ -2224,6 +2224,13 @@ DEFAULT_CONFIG = {
         # least this many seconds, so the platform timestamp reflects
         # completion time. Telegram only; other platforms ignore it.
         "fresh_final_after_seconds": 60.0,
+        # Matrix streams buffer-only by default (edit at paragraph breaks /
+        # completion, no streaming cursor) to keep m.replace traffic low and
+        # avoid the tofu-glyph some Matrix clients render for the cursor. Set
+        # true to let Matrix stream progressively (token-cadence edits, cursor
+        # still suppressed) — at the cost of more edits, so mind homeserver
+        # per-room rate limits.
+        "matrix_progressive": False,
     },
 
     # Session storage — controls automatic cleanup of ~/.hermes/state.db.

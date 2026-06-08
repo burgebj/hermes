@@ -383,6 +383,16 @@ class StreamingConfig:
     # Telegram only (other platforms ignore the setting).  Default 60s
     # matches the OpenClaw rollout.  Set to 0 to disable.
     fresh_final_after_seconds: float = 60.0
+    # Matrix streams in "buffer-only" mode by default: the reply is edited
+    # only at segment breaks (paragraph boundaries) and on completion, not on
+    # the time/character cadence used by other edit-capable platforms.  That
+    # keeps edit traffic low and sidesteps the streaming cursor, which some
+    # Matrix clients render as a tofu/white-box glyph.  The trade-off is that
+    # short, single-paragraph replies appear all at once.  Set this True to
+    # let Matrix stream progressively (token-cadence edits, cursor still
+    # suppressed) for a live-typing feel — at the cost of more m.replace
+    # edits, so mind your homeserver's per-room rate limits.
+    matrix_progressive: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -392,6 +402,7 @@ class StreamingConfig:
             "buffer_threshold": self.buffer_threshold,
             "cursor": self.cursor,
             "fresh_final_after_seconds": self.fresh_final_after_seconds,
+            "matrix_progressive": self.matrix_progressive,
         }
 
     @classmethod
@@ -410,6 +421,9 @@ class StreamingConfig:
             cursor=data.get("cursor", DEFAULT_STREAMING_CURSOR),
             fresh_final_after_seconds=_coerce_float(
                 data.get("fresh_final_after_seconds"), 60.0
+            ),
+            matrix_progressive=_coerce_bool(
+                data.get("matrix_progressive"), False
             ),
         )
 
