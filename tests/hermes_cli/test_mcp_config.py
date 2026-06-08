@@ -113,6 +113,48 @@ class TestMcpList:
         assert "myserver" in out
         assert "enabled" in out
 
+    def test_list_redacts_sensitive_url_query_values(self, tmp_path, capsys):
+        _seed_config(tmp_path, {
+            "remote": {"url": "https://a.b?key=supersecret"},
+        })
+        from hermes_cli.mcp_config import cmd_mcp_list
+
+        cmd_mcp_list()
+        out = capsys.readouterr().out
+        assert "key=***" in out
+        assert "supersecret" not in out
+
+    def test_redact_url_preserves_fragments(self):
+        from hermes_cli.mcp_config import _redact_url
+
+        url = "https://example.test/mcp?access_token=abc123#frag"
+
+        assert _redact_url(url) == "https://example.test/mcp?access_token=***#frag"
+
+    def test_redact_url_avoids_keyword_substring_false_positives(self):
+        from hermes_cli.mcp_config import _redact_url
+
+        url = (
+            "https://example.test/mcp?"
+            "monkey=banana&donkey=value&mistoken=plain&contesting=no&token=abc123"
+        )
+
+        assert (
+            _redact_url(url)
+            == "https://example.test/mcp?"
+            "monkey=banana&donkey=value&mistoken=plain&contesting=no&token=***"
+        )
+
+    def test_list_handles_non_string_url_values(self, tmp_path, capsys):
+        _seed_config(tmp_path, {
+            "remote": {"url": 12345},
+        })
+        from hermes_cli.mcp_config import cmd_mcp_list
+
+        cmd_mcp_list()
+        out = capsys.readouterr().out
+        assert "12345" in out
+
 
 # ---------------------------------------------------------------------------
 # Tests: cmd_mcp_remove
@@ -436,6 +478,41 @@ class TestMcpTest:
         out = capsys.readouterr().out
         assert "Connected" in out
         assert "Tools discovered: 2" in out
+
+    def test_test_redacts_sensitive_url_query_values(self, tmp_path, capsys, monkeypatch):
+        _seed_config(tmp_path, {
+            "ink": {"url": "https://example.test/mcp?access_token=supersecret&x=1"},
+        })
+
+        def mock_probe(name, config, **kw):
+            return []
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="ink"))
+        out = capsys.readouterr().out
+        assert "access_token=***" in out
+        assert "supersecret" not in out
+
+    def test_test_handles_non_string_url_values(self, tmp_path, capsys, monkeypatch):
+        _seed_config(tmp_path, {
+            "ink": {"url": 12345},
+        })
+
+        def mock_probe(name, config, **kw):
+            return []
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="ink"))
+        out = capsys.readouterr().out
+        assert "Transport: HTTP → 12345" in out
 
 
 # ---------------------------------------------------------------------------

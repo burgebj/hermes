@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+_SENSITIVE_QS_RE = re.compile(
+    r"(?i)([?&](?:[^&#=]*(?<![A-Za-z])(?:key|token|secret|password|apikey|access_token)(?![A-Za-z])[^&#=]*)=)([^&#]+)"
+)
+
+
+def _redact_url(url: Any) -> str:
+    """Mask sensitive-looking query parameter values in a URL."""
+    return _SENSITIVE_QS_RE.sub(r"\1***", str(url))
+
 
 _MCP_PRESETS: Dict[str, Dict[str, Any]] = {
     "codex": {
@@ -534,6 +543,7 @@ def cmd_mcp_list(args=None):
         # Transport info
         if "url" in cfg:
             url = cfg["url"]
+            url = _redact_url(url)
             # Truncate long URLs
             if len(url) > 28:
                 url = url[:25] + "..."
@@ -595,7 +605,7 @@ def cmd_mcp_test(args):
 
     # Show transport info
     if "url" in cfg:
-        _info(f"Transport: HTTP → {cfg['url']}")
+        _info(f"Transport: HTTP → {_redact_url(cfg['url'])}")
     else:
         cmd = cfg.get("command", "?")
         _info(f"Transport: stdio → {cmd}")
