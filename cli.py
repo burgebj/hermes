@@ -6509,6 +6509,90 @@ class HermesCLI(CLICommandsMixin):
 
 
 
+    def _handle_diff_command(self, cmd: str) -> None:
+        """Show git diff of changes in the current working directory."""
+        import subprocess as _sp
+
+        cwd = os.getenv("TERMINAL_CWD", os.getcwd())
+        parts = cmd.split()[1:]
+        stat_only = "--stat" in parts
+
+        # Validate cwd before invoking git, so we can give a precise error.
+        if not os.path.isdir(cwd):
+            _cprint(f"  {_DIM}Working directory does not exist: {cwd}{_RST}")
+            return
+
+        # Check if we're in a git repo
+        try:
+            _sp.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=cwd, capture_output=True, check=True, timeout=5,
+            )
+        except FileNotFoundError:
+            _cprint(f"  {_DIM}git is not installed or not in PATH.{_RST}")
+            return
+        except _sp.TimeoutExpired:
+            _cprint(f"  {_DIM}git timed out checking repository state.{_RST}")
+            return
+        except _sp.CalledProcessError:
+            _cprint(f"  {_DIM}Not a git repository.{_RST}")
+            return
+
+        try:
+            # Show stat summary
+            stat_result = _sp.run(
+                ["git", "diff", "--stat"],
+                cwd=cwd, capture_output=True, text=True, timeout=10,
+            )
+            staged_result = _sp.run(
+                ["git", "diff", "--cached", "--stat"],
+                cwd=cwd, capture_output=True, text=True, timeout=10,
+            )
+
+            stat_out = stat_result.stdout.strip()
+            staged_out = staged_result.stdout.strip()
+
+            if not stat_out and not staged_out:
+                _cprint(f"  {_DIM}No changes.{_RST}")
+                return
+
+            if staged_out:
+                _cprint(f"\n  {_BOLD}Staged:{_RST}")
+                self._console_print(_rich_text_from_ansi(staged_out))
+            if stat_out:
+                _cprint(f"\n  {_BOLD}Unstaged:{_RST}")
+                self._console_print(_rich_text_from_ansi(stat_out))
+
+            if stat_only:
+                return
+
+            # Show full diffs — staged and unstaged each in their own section.
+            if staged_out:
+                staged_full = _sp.run(
+                    ["git", "diff", "--cached"],
+                    cwd=cwd, capture_output=True, text=True, timeout=30,
+                )
+                staged_full_out = staged_full.stdout.strip()
+                if staged_full_out:
+                    _cprint(f"\n  {_BOLD}Staged diff:{_RST}")
+                    self._console_print(_rich_text_from_ansi(staged_full_out))
+            if stat_out:
+                unstaged_full = _sp.run(
+                    ["git", "diff"],
+                    cwd=cwd, capture_output=True, text=True, timeout=30,
+                )
+                unstaged_full_out = unstaged_full.stdout.strip()
+                if unstaged_full_out:
+                    _cprint(f"\n  {_BOLD}Unstaged diff:{_RST}")
+                    self._console_print(_rich_text_from_ansi(unstaged_full_out))
+
+        except _sp.TimeoutExpired:
+            _cprint(f"  {_DIM}Git diff timed out.{_RST}")
+        except FileNotFoundError:
+            _cprint(f"  {_DIM}git is not installed or not in PATH.{_RST}")
+        except Exception as e:
+            _cprint(f"  {_DIM}Git diff error: {e}{_RST}")
+
     def save_conversation(self):
         """Save the current conversation to a JSON snapshot under ~/.hermes/sessions/saved/.
 
@@ -7854,6 +7938,8 @@ class HermesCLI(CLICommandsMixin):
             self._status_bar_visible = not self._status_bar_visible
             state = "visible" if self._status_bar_visible else "hidden"
             self._console_print(f"  Status bar {state}")
+        elif canonical == "diff":
+            self._handle_diff_command(cmd_original)
         elif canonical == "verbose":
             self._toggle_verbose()
         elif canonical == "footer":
