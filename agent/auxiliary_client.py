@@ -258,6 +258,7 @@ def _compression_threshold_for_model(
     provider: Optional[str] = None,
     *,
     allow_codex_gpt55_autoraise: bool = True,
+    current_threshold: Optional[float] = None,
 ) -> Optional[float]:
     """Return a context-compression threshold override for specific models.
 
@@ -272,12 +273,23 @@ def _compression_threshold_for_model(
         ``allow_codex_gpt55_autoraise`` so the user can opt back down to the
         global default (the caller passes the config flag through here).
 
+    The Codex gpt-5.5 override is an *autoraise* — a floor, never a reduction.
+    When ``current_threshold`` is supplied and already meets or exceeds the
+    raised value, this returns ``None`` so the user's higher global threshold is
+    left untouched; lowering it would compact *earlier* than the user asked for,
+    the opposite of what the override promises.
+
     Returns a float in (0, 1] to override the global ``compression.threshold``
     config value, or ``None`` to leave the user's config value unchanged.
     """
     if _is_arcee_trinity_thinking(model):
         return 0.75
     if allow_codex_gpt55_autoraise and _is_codex_gpt55(model, provider):
+        if (
+            current_threshold is not None
+            and current_threshold >= _CODEX_GPT55_COMPACTION_THRESHOLD
+        ):
+            return None
         return _CODEX_GPT55_COMPACTION_THRESHOLD
     return None
 

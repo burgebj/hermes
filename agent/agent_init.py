@@ -1285,6 +1285,7 @@ def init_agent(
             agent.model,
             agent.provider,
             allow_codex_gpt55_autoraise=_codex_gpt55_autoraise,
+            current_threshold=compression_threshold,
         )
         if _model_cthresh is not None:
             _prev_threshold = compression_threshold

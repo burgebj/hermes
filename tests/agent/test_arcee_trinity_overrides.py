@@ -157,3 +157,35 @@ def test_compression_threshold_opt_out_does_not_disable_trinity() -> None:
         )
         == 0.75
     )
+
+
+def test_compression_threshold_codex_gpt55_autoraise_is_a_floor() -> None:
+    # "Autoraise" must never *lower* a user's threshold. When the global
+    # threshold already meets or exceeds the raised 0.85 value, the override
+    # backs off (returns None) so the user's higher value stands — lowering it
+    # would compact earlier than they asked for, the opposite of the intent.
+    assert (
+        _compression_threshold_for_model(
+            "gpt-5.5", "openai-codex", current_threshold=0.90
+        )
+        is None
+    )
+    assert (
+        _compression_threshold_for_model(
+            "gpt-5.5", "openai-codex", current_threshold=0.85
+        )
+        is None
+    )
+
+
+def test_compression_threshold_codex_gpt55_raises_below_floor() -> None:
+    # When the user's global threshold is below 0.85 (e.g. the 0.50 default),
+    # the autoraise still applies and bumps the trigger up to 0.85.
+    assert (
+        _compression_threshold_for_model(
+            "gpt-5.5", "openai-codex", current_threshold=0.50
+        )
+        == 0.85
+    )
+    # No current_threshold supplied → behave as before (apply the override).
+    assert _compression_threshold_for_model("gpt-5.5", "openai-codex") == 0.85
