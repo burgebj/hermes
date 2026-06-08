@@ -135,6 +135,19 @@ def invalidate_runtime_client(region: str) -> bool:
 # restarts. The fix is to evict the region's cached client so the next
 # attempt builds a new one.
 
+# Models that 400 on any non-default temperature/top_p with the Bedrock
+# Converse API: "'temperature' is deprecated for this model."
+# Mirrors anthropic_adapter._forbids_sampling_params() but kept local to avoid
+# a cross-adapter import. See issue #36151.
+_BEDROCK_NO_SAMPLING_PARAMS_SUBSTRINGS = ("opus-4-7", "opus-4-8", "opus-4.7", "opus-4.8")
+
+
+def _bedrock_forbids_sampling_params(model_id: str) -> bool:
+    """Return True for models that reject temperature/top_p in Converse."""
+    model_lower = model_id.lower()
+    return any(s in model_lower for s in _BEDROCK_NO_SAMPLING_PARAMS_SUBSTRINGS)
+
+
 _STALE_LIB_MODULE_PREFIXES = (
     "urllib3.",
     "botocore.",
@@ -900,10 +913,10 @@ def build_converse_kwargs(
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    if temperature is not None:
+    if temperature is not None and not _bedrock_forbids_sampling_params(model):
         kwargs["inferenceConfig"]["temperature"] = temperature
 
-    if top_p is not None:
+    if top_p is not None and not _bedrock_forbids_sampling_params(model):
         kwargs["inferenceConfig"]["topP"] = top_p
 
     if stop_sequences:
