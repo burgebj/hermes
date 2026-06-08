@@ -19,6 +19,29 @@ class DummyResponse:
         return self._payload
 
 
+def test_system_instruction_includes_role_field():
+    """systemInstruction must include 'role': 'system' for Gemma model compatibility.
+
+    Without the role field, Gemma models (e.g. gemma-4-31b-it) return
+    HTTP 500.  See https://github.com/NousResearch/hermes-agent/issues/27121
+    """
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ],
+        tools=[],
+        tool_choice=None,
+    )
+
+    assert "systemInstruction" in request
+    si = request["systemInstruction"]
+    assert si["role"] == "system"
+    assert si["parts"][0]["text"] == "You are a helpful assistant."
+
+
 def test_build_native_request_preserves_thought_signature_on_tool_replay():
     from agent.gemini_native_adapter import build_gemini_request
 
