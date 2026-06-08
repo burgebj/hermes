@@ -348,6 +348,18 @@ class TestExtractMedia:
         assert media == [("/tmp/x.jpg", False)]  # voice flag stays False
         assert "[[as_document]]" not in cleaned
 
+    def test_media_tag_skips_placeholder_path_tokens(self):
+        content = "MEDIA:<path>"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert cleaned == "MEDIA:<path>"
+
+    def test_media_tag_skips_regex_like_tokens(self):
+        content = r"MEDIA:\s*(?P<path>foo.ogg)"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert cleaned == r"MEDIA:\s*(?P<path>foo.ogg)"
+
     def test_both_directives_can_coexist(self):
         """A response could (rarely) contain both [[audio_as_voice]] for an
         ogg file AND [[as_document]] for an attached image. The voice flag

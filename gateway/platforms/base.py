@@ -1226,6 +1226,8 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MEDIA_LOCAL_PATH_PREFIX_RE = re.compile(r"^(?:~/|/|[A-Za-z]:[/\\])")
+
 
 def get_document_cache_dir() -> Path:
     """Return the document cache directory, creating it if it doesn't exist."""
@@ -2944,6 +2946,10 @@ class BasePlatformAdapter(ABC):
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+            if path and not _MEDIA_LOCAL_PATH_PREFIX_RE.match(path):
+                # Reject placeholders / malformed captures early so downstream
+                # send_* calls never see non-path artifacts.
+                continue
             if path:
                 try:
                     media.append((os.path.expanduser(path), has_voice_tag))
