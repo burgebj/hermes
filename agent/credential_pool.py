@@ -512,6 +512,16 @@ class CredentialPool:
         status_code: Optional[int],
         error_context: Optional[Dict[str, Any]] = None,
     ) -> PooledCredential:
+        # Single-entry pool: marking exhausted is pointless — nothing to rotate to.
+        # For single-key setups (common with Zhipu/GLM, DeepSeek, Moonshot),
+        # exhausted marking just paralyzes the worker until manual reset.
+        # Let the caller's retry/backoff logic handle transient 429s instead.
+        if len(self._entries) <= 1:
+            logger.info(
+                "credential pool: single-entry pool, skipping exhausted mark (status=%s)",
+                status_code,
+            )
+            return entry
         normalized_error = _normalize_error_context(error_context)
         # Permanent OAuth failures (token_invalidated, token_revoked, etc.)
         # transition to STATUS_DEAD instead of STATUS_EXHAUSTED.  Without this,
