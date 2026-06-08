@@ -732,6 +732,7 @@ class SlackAdapter(BasePlatformAdapter):
             logger.error(
                 "[Slack] slack-bolt not installed. Run: pip install slack-bolt",
             )
+            self._set_fatal_error("missing_dependency", "slack-bolt not installed", retryable=False)
             return False
 
         raw_token = self.config.token
@@ -739,9 +740,11 @@ class SlackAdapter(BasePlatformAdapter):
 
         if not raw_token:
             logger.error("[Slack] SLACK_BOT_TOKEN not set")
+            self._set_fatal_error("missing_credentials", "SLACK_BOT_TOKEN not set", retryable=False)
             return False
         if not app_token:
             logger.error("[Slack] SLACK_APP_TOKEN not set")
+            self._set_fatal_error("missing_credentials", "SLACK_APP_TOKEN not set", retryable=False)
             return False
 
         proxy_url = _resolve_slack_proxy_url()
