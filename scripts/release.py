@@ -66,6 +66,8 @@ AUTHOR_MAP = {
     "islam666@users.noreply.github.com": "islam666",
     "zhaolei.vc@bytedance.com": "zhaoleibd",
     "jeffrobodie@gmail.com": "jeffrobodie-glitch",
+    "lgray95@alumni.cmu.edu": "LiamDGray",
+    "liamdgray@gmail.com": "LiamDGray",
     "kyssta-exe@users.noreply.github.com": "kyssta-exe",
     "ali.zakaee.1997@gmail.com": "ITheEqualizer",
     "copii.list@gmail.com": "stremtec",

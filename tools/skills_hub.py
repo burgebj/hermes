@@ -3692,7 +3692,8 @@ def parallel_search_sources(
     if not active:
         return all_results, source_counts, timed_out_ids
 
-    with ThreadPoolExecutor(max_workers=min(len(active), 8)) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(len(active), 8))
+    try:
         futures = {}
         for src in active:
             lim = per_source_limits.get(src.source_id(), 50)
@@ -3718,6 +3719,11 @@ def parallel_search_sources(
                     "Skills browse timed out waiting for: %s",
                     ", ".join(timed_out_ids),
                 )
+    finally:
+        # Shutdown WITHOUT waiting — hanging threads (e.g. blocked network
+        # calls) must not block the caller past overall_timeout.
+        # cancel_futures=True (Python 3.9+) prevents queued-but-unstarted work.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return all_results, source_counts, timed_out_ids
 
