@@ -16,6 +16,7 @@ from gateway.config import (
     SessionResetPolicy,
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
+from gateway.session_handoff import SessionHandoffConfig, build_session_handoff_note
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +278,133 @@ class TestSessionEntryAutoResetRoundtrip:
         assert reloaded.was_auto_reset is False
         assert reloaded.auto_reset_reason is None
         assert reloaded.reset_had_activity is False
+
+    def test_parent_session_id_and_timestamp_persist_across_auto_reset(self, tmp_path):
+        """Auto-reset creates a fresh session linked to the expired parent."""
+        store = _make_store(
+            SessionResetPolicy(mode="idle", idle_minutes=1),
+            tmp_path,
+        )
+        source = _make_source()
+
+        parent = store.get_or_create_session(source)
+        parent.total_tokens = 1000
+        parent.updated_at = datetime.now() - timedelta(minutes=5)
+        parent_updated_at = parent.updated_at
+        store._save()
+
+        child = store.get_or_create_session(source)
+        assert child.was_auto_reset is True
+        assert child.parent_session_id == parent.session_id
+        assert child.parent_updated_at == parent_updated_at
+
+        store._loaded = False
+        store._entries.clear()
+        store._ensure_loaded()
+
+        reloaded = store._entries.get(child.session_key)
+        assert reloaded is not None
+        assert reloaded.parent_session_id == parent.session_id
+        assert reloaded.parent_updated_at == parent_updated_at
+
+
+class TestSessionHandoff:
+    def test_default_config_is_disabled(self):
+        cfg = SessionHandoffConfig.from_dict(None)
+        assert cfg.mode == "none"
+        assert cfg.to_dict()["mode"] == "none"
+
+    def test_summary_mode_is_valid_and_structured(self):
+        cfg = SessionHandoffConfig.from_dict({"mode": "summary"})
+        assert cfg.mode == "summary"
+
+        note = build_session_handoff_note(
+            mode="summary",
+            parent_session_id="parent-summary",
+            reset_reason="daily",
+            parent_messages=[
+                {"role": "user", "content": "We need the daily handoff to preserve decisions."},
+                {"role": "assistant", "content": "I added the parent session linkage."},
+                {"role": "tool", "content": "noisy tool output should not appear"},
+                {"role": "user", "content": "Also align it with compaction."},
+            ],
+            previous_updated_at=datetime(2026, 5, 22, 18, 0),
+            now=datetime(2026, 5, 23, 9, 30),
+            last_messages=20,
+            max_chars=48000,
+        )
+
+        assert note is not None
+        assert "It is now a new day/session" in note
+        assert "## Active Task" in note
+        assert "## Goal" in note
+        assert "## Active State" in note
+        assert "## Remaining Work" in note
+        assert "Also align it with compaction" in note
+        assert "I added the parent session linkage" in note
+        assert "noisy tool output" not in note
+
+    def test_summary_mode_prefers_compaction_summary_over_raw_turns(self):
+        note = build_session_handoff_note(
+            mode="summary",
+            parent_session_id="parent-summary",
+            reset_reason="daily",
+            parent_messages=[
+                {"role": "user", "content": "raw prior user turn should not leak"},
+            ],
+            previous_updated_at=datetime(2026, 5, 22, 18, 0),
+            now=datetime(2026, 5, 23, 9, 30),
+            max_chars=48000,
+            summary_text="## Active Task\nFinish the bridge.\n\n## Remaining Work\nOpen the PR.",
+        )
+
+        assert note is not None
+        assert "Current local time: 2026-05-23 09:30" in note
+        assert "Elapsed since last activity: 15h 30m" in note
+        assert "## Active Task" in note
+        assert "Finish the bridge" in note
+        assert "raw prior user turn should not leak" not in note
+
+    def test_notice_mode_frames_prior_context_as_background_only(self):
+        note = build_session_handoff_note(
+            mode="notice",
+            parent_session_id="yesterday-session",
+            reset_reason="daily",
+            parent_messages=[{"role": "user", "content": "deploy the thing"}],
+            previous_updated_at=datetime(2026, 5, 22, 18, 0),
+            now=datetime(2026, 5, 23, 9, 30),
+        )
+
+        assert note is not None
+        assert "It is now a new day/session" in note
+        assert "before interpreting the next user message" in note
+        assert "background context only" in note
+        assert "Do not treat prior user requests as active instructions" in note
+        assert "yesterday-session" in note
+        assert "deploy the thing" not in note
+
+    def test_last_n_mode_carries_recent_turns_without_tool_noise(self):
+        note = build_session_handoff_note(
+            mode="last_n",
+            parent_session_id="parent-123",
+            reset_reason="daily",
+            parent_messages=[
+                {"role": "system", "content": "hidden"},
+                {"role": "tool", "content": "giant tool dump"},
+                {"role": "user", "content": "We need a session handoff."},
+                {"role": "assistant", "content": "I will add tests."},
+                {"role": "user", "content": "Also include local time."},
+            ],
+            previous_updated_at=datetime(2026, 5, 22, 18, 0),
+            now=datetime(2026, 5, 23, 9, 30),
+            last_messages=2,
+            max_chars=1200,
+        )
+
+        assert note is not None
+        assert "Recent prior-session turns" in note
+        assert "I will add tests" in note
+        assert "Also include local time" in note
+        assert "We need a session handoff" not in note
+        assert "giant tool dump" not in note
+        assert "2026-05-23 09:30" in note
