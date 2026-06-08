@@ -509,6 +509,9 @@ class GatewayConfig:
     # fresh session exactly as if the reset policy had fired.  0 = disabled.
     session_store_max_age_days: int = 90
 
+    # Shutdown behavior
+    shutdown_notify: bool = True  # Notify active chats on gateway shutdown/restart
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -656,6 +659,8 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        shutdown_notify = _coerce_bool(data.get("shutdown_notify"), True)
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -674,6 +679,7 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            shutdown_notify=shutdown_notify,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -775,6 +781,9 @@ def load_gateway_config() -> GatewayConfig:
             if "always_log_local" in yaml_cfg:
                 gw_data["always_log_local"] = yaml_cfg["always_log_local"]
 
+            gateway_cfg = yaml_cfg.get("gateway", {})
+            if isinstance(gateway_cfg, dict) and "shutdown_notify" in gateway_cfg:
+                gw_data["shutdown_notify"] = _coerce_bool(gateway_cfg["shutdown_notify"], True)
             if "filter_silence_narration" in yaml_cfg:
                 gw_data["filter_silence_narration"] = yaml_cfg[
                     "filter_silence_narration"
@@ -790,7 +799,6 @@ def load_gateway_config() -> GatewayConfig:
             # ``gateway.platforms`` are loaded the same way as top-level
             # ``platforms``. Merge nested first so top-level config keeps
             # precedence, matching the existing gateway.streaming fallback.
-            gateway_cfg = yaml_cfg.get("gateway")
             gateway_platforms = gateway_cfg.get("platforms") if isinstance(gateway_cfg, dict) else None
             platforms_data = gw_data.setdefault("platforms", {})
             if not isinstance(platforms_data, dict):

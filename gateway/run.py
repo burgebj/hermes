@@ -5565,11 +5565,12 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
-            await self._notify_active_sessions_of_shutdown()
-            logger.info(
-                "Shutdown phase: notify_active_sessions done at +%.2fs",
-                _phase_elapsed(),
-            )
+            if getattr(self.config, "shutdown_notify", True):
+                await self._notify_active_sessions_of_shutdown()
+                logger.info(
+                    "Shutdown phase: notify_active_sessions done at +%.2fs",
+                    _phase_elapsed(),
+                )
 
             timeout = self._restart_drain_timeout
 
