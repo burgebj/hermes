@@ -8208,6 +8208,8 @@ def _update_via_zip(args):
             )
         _install_python_dependencies_with_optional_fallback(pip_cmd)
 
+    _reinstall_plugin_dependencies()
+
     _update_node_dependencies()
     _build_web_ui(PROJECT_ROOT / "web")
 
@@ -9256,6 +9258,170 @@ def _refresh_active_lazy_features() -> None:
             print(f"  ⚠ {feature} failed to refresh: {reason}")
         print("  Backends keep their previously-installed version; rerun")
         print("  `hermes update` once the upstream issue is resolved.")
+
+
+def _reinstall_plugin_dependencies() -> None:
+    """Reinstall active plugin ``pip_dependencies`` removed by venv sync.
+
+    ``hermes update`` refreshes core dependencies with ``uv pip install -e
+    .[all]``.  That can remove packages that are not declared in
+    ``pyproject.toml`` but are required by enabled plugins (for example the
+    selected Hindsight memory provider's ``hindsight-client`` dependency).
+
+    Best effort only: a plugin dependency failure should warn, not abort the
+    rest of the update.
+    """
+    import importlib.metadata
+    import re
+    import shutil
+
+    try:
+        import yaml as _yaml
+    except ImportError:
+        logger.debug("Plugin dep reinstall skipped: PyYAML not available")
+        return
+
+    def _read_manifest(manifest: Path) -> dict:
+        try:
+            data = _yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            logger.debug("Plugin dep reinstall skipped invalid manifest: %s", manifest)
+            return {}
+
+    def _manifest_path(plugin_dir: Path) -> Path | None:
+        for name in ("plugin.yaml", "plugin.yml"):
+            manifest = plugin_dir / name
+            if manifest.exists():
+                return manifest
+        return None
+
+    def _requirement_dist_name(requirement: str) -> str:
+        # Extract the distribution name from common PEP 508 forms such as
+        # ``hindsight-client>=0.4.22`` and ``foo[bar]~=1.2; python_version...``.
+        head = requirement.strip().split(";", 1)[0].strip()
+        return re.split(r"\s|\[|<|>|=|!|~", head, maxsplit=1)[0]
+
+    def _dependency_missing(requirement: str) -> bool:
+        dist_name = _requirement_dist_name(requirement)
+        if not dist_name:
+            return True
+        try:
+            importlib.metadata.version(dist_name)
+            return False
+        except importlib.metadata.PackageNotFoundError:
+            return True
+        except Exception:
+            return True
+
+    def _deps_from_manifest(manifest: Path) -> list[str]:
+        deps = _read_manifest(manifest).get("pip_dependencies", [])
+        if not isinstance(deps, list):
+            return []
+        return [dep for dep in deps if isinstance(dep, str) and dep.strip()]
+
+    def _active_plugin_manifests() -> list[Path]:
+        manifests: list[Path] = []
+        try:
+            from hermes_cli.config import cfg_get, load_config
+            from hermes_cli.plugins import PluginManager, get_bundled_plugins_dir
+            from plugins.memory import find_provider_dir
+
+            config = load_config()
+            memory_provider = cfg_get(config, "memory", "provider", default=None)
+            if isinstance(memory_provider, str) and memory_provider.strip():
+                provider_dir = find_provider_dir(memory_provider.strip())
+                if provider_dir:
+                    manifest = _manifest_path(provider_dir)
+                    if manifest:
+                        manifests.append(manifest)
+
+            plugins_cfg = config.get("plugins") if isinstance(config, dict) else {}
+            plugins_cfg = plugins_cfg if isinstance(plugins_cfg, dict) else {}
+            disabled = set(plugins_cfg.get("disabled", []) or [])
+            enabled = plugins_cfg.get("enabled", [])
+            enabled = set(enabled) if isinstance(enabled, list) else set()
+
+            manager = PluginManager()
+            bundled_root = get_bundled_plugins_dir()
+            discovered = []
+            discovered.extend(
+                manager._scan_directory(
+                    bundled_root,
+                    source="bundled",
+                    skip_names={"memory", "context_engine", "platforms", "model-providers"},
+                )
+            )
+            discovered.extend(
+                manager._scan_directory(bundled_root / "platforms", source="bundled")
+            )
+            discovered.extend(
+                manager._scan_directory(get_hermes_home() / "plugins", source="user")
+            )
+            if os.getenv("HERMES_ENABLE_PROJECT_PLUGINS", "").lower() in {"1", "true", "yes", "on"}:
+                discovered.extend(
+                    manager._scan_directory(Path.cwd() / ".hermes" / "plugins", source="project")
+                )
+
+            winners = {manifest.key or manifest.name: manifest for manifest in discovered}
+            for key, manifest_obj in winners.items():
+                if key in disabled or manifest_obj.name in disabled:
+                    continue
+                is_builtin_active = manifest_obj.source == "bundled" and manifest_obj.kind in {
+                    "backend",
+                    "platform",
+                }
+                is_user_enabled = key in enabled or manifest_obj.name in enabled
+                if not (is_builtin_active or is_user_enabled):
+                    continue
+                if manifest_obj.path:
+                    manifest = _manifest_path(Path(manifest_obj.path))
+                    if manifest:
+                        manifests.append(manifest)
+        except Exception as exc:
+            logger.debug("Plugin dep reinstall active-plugin scan failed: %s", exc)
+        return manifests
+
+    all_missing: list[str] = []
+    seen_manifests: set[Path] = set()
+    for manifest in _active_plugin_manifests():
+        resolved = manifest.resolve()
+        if resolved in seen_manifests:
+            continue
+        seen_manifests.add(resolved)
+        for dep in _deps_from_manifest(manifest):
+            if _dependency_missing(dep):
+                all_missing.append(dep)
+
+    unique_missing = list(dict.fromkeys(all_missing))
+    if not unique_missing:
+        return
+
+    print()
+    print(f"→ Reinstalling {len(unique_missing)} plugin dependencies: {', '.join(unique_missing)}")
+
+    uv_path = shutil.which("uv")
+    if not uv_path:
+        print("  ⚠ uv not found — cannot reinstall plugin dependencies")
+        print("  Plugin tools may not work until you manually install their deps.")
+        return
+
+    try:
+        result = subprocess.run(
+            [uv_path, "pip", "install", "--python", sys.executable, "--quiet"]
+            + unique_missing,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  ✓ {len(unique_missing)} plugin deps reinstalled")
+        else:
+            stderr = result.stderr.strip()
+            if len(stderr) > 200:
+                stderr = stderr[:200] + "..."
+            print(f"  ⚠ Failed to install some plugin deps: {stderr}")
+    except Exception as exc:
+        print(f"  ⚠ Plugin dep reinstall failed: {exc}")
 
 
 def _install_python_dependencies_with_optional_fallback(
@@ -10752,6 +10918,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _install_python_dependencies_with_optional_fallback(pip_cmd, group=install_group)
 
         _refresh_active_lazy_features()
+
+        _reinstall_plugin_dependencies()
 
         _update_node_dependencies()
         _build_web_ui(PROJECT_ROOT / "web")

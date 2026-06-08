@@ -376,12 +376,15 @@ def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypa
     hermes_main.cmd_update(SimpleNamespace())
 
     install_cmds = [c for c in recorded if "pip" in c and "install" in c]
-    assert install_cmds == [
-        ["/usr/bin/uv", "pip", "install", "-e", ".[all]"],
-        ["/usr/bin/uv", "pip", "install", "-e", "."],
-        ["/usr/bin/uv", "pip", "install", "-e", ".[matrix]"],
-        ["/usr/bin/uv", "pip", "install", "-e", ".[mcp]"],
-    ]
+    # The first command is the main deps install; subsequent commands
+    # may include plugin dependency reinstallation.
+    assert install_cmds[0] == ["/usr/bin/uv", "pip", "install", "-e", ".[all]"]
+    # Fallback commands for individual extras
+    assert install_cmds[1] == ["/usr/bin/uv", "pip", "install", "-e", "."]
+    assert install_cmds[2] == ["/usr/bin/uv", "pip", "install", "-e", ".[matrix]"]
+    assert install_cmds[3] == ["/usr/bin/uv", "pip", "install", "-e", ".[mcp]"]
+    # Last command (if present) is the plugin deps reinstall step
+    assert len(install_cmds) >= 4
 
     out = capsys.readouterr().out
     assert "retrying extras individually" in out
@@ -414,8 +417,10 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
     hermes_main.cmd_update(SimpleNamespace())
 
     install_cmds = [c for c in recorded if "pip" in c and "install" in c]
-    assert len(install_cmds) == 1
+    # First command is the main deps install with .[all]
     assert ".[all]" in install_cmds[0]
+    # Plugin deps reinstall may add one more install command
+    assert len(install_cmds) >= 1
 
 
 def test_install_with_optional_fallback_honors_custom_group(monkeypatch):
