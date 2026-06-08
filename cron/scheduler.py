@@ -156,6 +156,14 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
+# Sentinel: the tick was short-circuited before the agent was ever invoked —
+# a ``wakeAgent=false`` gate, empty no_agent script output, or a prompt that
+# resolved to nothing.  Like SILENT_MARKER it suppresses delivery, but it lets
+# the delivery loop log "agent not invoked" instead of the misleading "agent
+# returned [SILENT]" (issue #41923).  Kept distinct from SILENT_MARKER so the
+# genuine agent-returned-[SILENT] path keeps its own accurate log line.
+AGENT_NOT_INVOKED_MARKER = "[SILENT:agent-not-invoked]"
+
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
 # The tick function submits jobs here and returns immediately so the ticker
@@ -1438,7 +1446,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Mode:** no_agent (script)\n"
                 f"**Status:** silent (wakeAgent=false)\n"
             )
-            return True, silent_doc, SILENT_MARKER, None
+            return True, silent_doc, AGENT_NOT_INVOKED_MARKER, None
 
         if not output.strip():
             logger.info("Job '%s' (no_agent): empty stdout — silent run", job_id)
@@ -1449,7 +1457,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Mode:** no_agent (script)\n"
                 f"**Status:** silent (empty output)\n"
             )
-            return True, silent_doc, SILENT_MARKER, None
+            return True, silent_doc, AGENT_NOT_INVOKED_MARKER, None
 
         doc = (
             f"# Cron Job: {job_name}\n\n"
@@ -1498,7 +1506,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 "Script gate returned `wakeAgent=false` — agent skipped.\n"
             )
-            return True, silent_doc, SILENT_MARKER, None
+            return True, silent_doc, AGENT_NOT_INVOKED_MARKER, None
 
     try:
         prompt = _build_job_prompt(job, prerun_script=prerun_script)
@@ -1527,7 +1535,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return False, blocked_doc, "", str(block_exc)
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
-        return True, "", SILENT_MARKER, None
+        return True, "", AGENT_NOT_INVOKED_MARKER, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -2106,8 +2114,15 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 # Treat whitespace-only final responses the same as empty
                 # responses: do not deliver a blank message, and let the
                 # empty-response guard below mark the run as a soft failure.
-                should_deliver = bool(deliver_content.strip())
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+                deliver_stripped = deliver_content.strip()
+                should_deliver = bool(deliver_stripped)
+                if should_deliver and success and deliver_stripped == AGENT_NOT_INVOKED_MARKER:
+                    # Short-circuited before the agent ran (wakeAgent=false gate,
+                    # empty script output, or no prompt). The specific cause was
+                    # already logged in run_job; don't claim the agent replied.
+                    logger.info("Job '%s': agent not invoked — skipping delivery", job["id"])
+                    should_deliver = False
+                elif should_deliver and success and SILENT_MARKER in deliver_stripped.upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
 
