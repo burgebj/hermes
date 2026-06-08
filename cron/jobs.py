@@ -381,11 +381,31 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
     """
     now = _hermes_now()
 
-    if schedule["kind"] == "once":
+    # Be tolerant of malformed / legacy schedules, exactly like every other
+    # reader in this module already is (``_recoverable_oneshot_run_at``,
+    # ``_compute_grace_seconds``, ``_get_due_jobs_locked`` all use
+    # ``schedule.get("kind")``). A non-dict schedule, or a dict missing
+    # ``kind`` / ``minutes`` / ``expr``, can reach here from a hand-edited or
+    # pre-migration jobs.json. This is the only function in the file that
+    # subscripted ``schedule`` directly, so it was the lone writer that could
+    # raise KeyError/TypeError on such input. Crucially it runs on the WRITE
+    # path (``mark_job_run`` -> ``compute_next_run``) which has no try/except,
+    # so a raise there meant the run was never recorded, ``next_run_at`` was
+    # never advanced, and the job re-fired (re-spending tokens) on every 60s
+    # tick forever. Returning None instead routes the job to the existing safe
+    # error/terminal handling in ``mark_job_run`` (recurring -> state="error",
+    # one-shot/unknown -> completed) rather than crash-looping.
+    if not isinstance(schedule, dict):
+        return None
+    kind = schedule.get("kind")
+
+    if kind == "once":
         return _recoverable_oneshot_run_at(schedule, now, last_run_at=last_run_at)
 
-    elif schedule["kind"] == "interval":
-        minutes = schedule["minutes"]
+    elif kind == "interval":
+        minutes = schedule.get("minutes")
+        if not isinstance(minutes, (int, float)) or isinstance(minutes, bool):
+            return None
         if last_run_at:
             # Next run is last_run + interval
             last = _ensure_aware(datetime.fromisoformat(last_run_at))
@@ -395,7 +415,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             next_run = now + timedelta(minutes=minutes)
         return next_run.isoformat()
 
-    elif schedule["kind"] == "cron":
+    elif kind == "cron":
         if not HAS_CRONITER:
             logger.warning(
                 "Cannot compute next run for cron schedule %r: 'croniter' is "
@@ -405,6 +425,9 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
                 schedule.get("expr"),
             )
             return None
+        expr = schedule.get("expr")
+        if not expr:
+            return None
         # Use last_run_at as the croniter base when available, consistent
         # with interval jobs.  This ensures that after a crash/restart,
         # the next run is anchored to the actual last execution time
@@ -412,7 +435,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         base_time = now
         if last_run_at:
             base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
-        cron = croniter(schedule["expr"], base_time)
+        cron = croniter(expr, base_time)
         next_run = cron.get_next(datetime)
         return next_run.isoformat()
 

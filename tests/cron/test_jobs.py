@@ -172,6 +172,31 @@ class TestComputeNextRun:
     def test_unknown_kind_returns_none(self):
         assert compute_next_run({"kind": "unknown"}) is None
 
+    def test_missing_kind_returns_none(self):
+        # A dict with no "kind" key (hand-edited / pre-migration jobs.json)
+        # must not raise KeyError — it should be treated like an unknown kind.
+        assert compute_next_run({}) is None
+
+    def test_non_dict_schedule_returns_none(self):
+        # Legacy jobs.json sometimes stored the raw schedule string instead of
+        # the parsed dict. compute_next_run must tolerate that without raising.
+        assert compute_next_run("every 10m") is None
+        assert compute_next_run(None) is None
+
+    def test_interval_missing_minutes_returns_none(self):
+        # An interval schedule with no usable "minutes" value can't produce a
+        # next run; return None rather than raising KeyError on subscripting.
+        assert compute_next_run({"kind": "interval"}) is None
+        assert compute_next_run({"kind": "interval", "minutes": None}) is None
+        assert compute_next_run({"kind": "interval", "minutes": "soon"}) is None
+
+    def test_cron_missing_expr_returns_none(self):
+        pytest.importorskip("croniter")
+        # A cron schedule with no expression can't be evaluated; return None
+        # instead of raising KeyError.
+        assert compute_next_run({"kind": "cron"}) is None
+        assert compute_next_run({"kind": "cron", "expr": ""}) is None
+
 
 # =========================================================================
 # Job CRUD (with tmp file storage)
@@ -580,6 +605,79 @@ class TestMarkJobRun:
 
         updated = get_job("oneshot-test")
         assert updated is not None
+        assert updated["next_run_at"] is None
+        assert updated["enabled"] is False
+        assert updated["state"] == "completed"
+
+    def test_malformed_interval_schedule_does_not_crash_mark_job_run(self, tmp_cron_dir):
+        """A recurring job whose schedule is missing required fields must not
+        crash mark_job_run.
+
+        Before the compute_next_run hardening, a hand-edited / pre-migration
+        ``schedule`` dict that lacked ``minutes`` raised KeyError on the write
+        path: run_job would succeed, then mark_job_run -> compute_next_run blew
+        up, the run was never recorded, next_run_at stayed in the past, and the
+        job re-fired on every tick forever. Now the bad schedule is routed to
+        the safe recurring error state instead, so the run IS recorded and the
+        spin loop is broken.
+        """
+        jobs = [{
+            "id": "malformed-interval",
+            "prompt": "Recurring",
+            # interval schedule with no "minutes" — compute_next_run used to
+            # subscript schedule["minutes"] and raise KeyError here.
+            "schedule": {"kind": "interval", "display": "every ?"},
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "next_run_at": "2020-01-01T00:00:00+00:00",
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }]
+        save_jobs(jobs)
+
+        # Must not raise.
+        mark_job_run("malformed-interval", success=True)
+
+        updated = get_job("malformed-interval")
+        assert updated is not None
+        # The run was recorded (loop broken).
+        assert updated["last_run_at"] is not None
+        assert updated["last_status"] == "ok"
+        # Recurring kind with no computable next run -> safe error state,
+        # never silently disabled and never crash-looping.
+        assert updated["enabled"] is True
+        assert updated["state"] == "error"
+
+    def test_missing_kind_schedule_does_not_crash_mark_job_run(self, tmp_cron_dir):
+        """A schedule dict with no ``kind`` (terminal/unknown) must record the
+        run and complete the job rather than raising KeyError."""
+        jobs = [{
+            "id": "no-kind",
+            "prompt": "Once",
+            "schedule": {"display": "?"},  # no "kind"
+            "repeat": {"times": None, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "next_run_at": "2020-01-01T00:00:00+00:00",
+            "last_run_at": None,
+            "last_status": None,
+            "last_error": None,
+            "last_delivery_error": None,
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }]
+        save_jobs(jobs)
+
+        # Must not raise.
+        mark_job_run("no-kind", success=True)
+
+        updated = get_job("no-kind")
+        assert updated is not None
+        assert updated["last_run_at"] is not None
+        # Unknown kind has no future run -> terminal completion (not a crash).
         assert updated["next_run_at"] is None
         assert updated["enabled"] is False
         assert updated["state"] == "completed"
