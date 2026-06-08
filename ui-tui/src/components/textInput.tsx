@@ -438,6 +438,7 @@ export function TextInput({
   columns = 80,
   value,
   onChange,
+  onBackspaceAtStart,
   onPaste,
   onSubmit,
   mask,
@@ -469,9 +470,11 @@ export function TextInput({
   const redo = useRef<{ cursor: number; value: string }[]>([])
 
   const cbChange = useRef(onChange)
+  const cbBackspaceAtStart = useRef(onBackspaceAtStart)
   const cbSubmit = useRef(onSubmit)
   const cbPaste = useRef(onPaste)
   cbChange.current = onChange
+  cbBackspaceAtStart.current = onBackspaceAtStart
   cbSubmit.current = onSubmit
   cbPaste.current = onPaste
 
@@ -1050,6 +1053,14 @@ export function TextInput({
       } else if (range && (k.backspace || delFwd)) {
         v = v.slice(0, range.start) + v.slice(range.end)
         c = range.start
+      } else if (k.backspace && c === 0) {
+        const merged = cbBackspaceAtStart.current?.(v)
+
+        if (merged) {
+          commit(merged.value, merged.cursor)
+        }
+
+        return
       } else if (k.backspace && c > 0) {
         if (wordMod) {
           const t = wordLeft(v, c)
@@ -1279,6 +1290,7 @@ interface TextInputProps {
   focus?: boolean
   mask?: string
   mouseApiRef?: MutableRefObject<null | TextInputMouseApi>
+  onBackspaceAtStart?: (current: string) => { cursor: number; value: string } | null
   onChange: (v: string) => void
   onPaste?: (
     e: PasteEvent

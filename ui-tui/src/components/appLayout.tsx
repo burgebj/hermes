@@ -308,6 +308,7 @@ const ComposerPane = memo(function ComposerPane({
                 <TextInput
                   columns={inputColumns}
                   mouseApiRef={inputMouseRef}
+                  onBackspaceAtStart={composer.mergeContinuationBackspace}
                   onChange={composer.updateInput}
                   onPaste={composer.handleTextPaste}
                   onSubmit={composer.submit}
