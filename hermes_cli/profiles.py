@@ -170,11 +170,15 @@ def _clone_all_copytree_ignore(source_dir: Path):
 _DEFAULT_EXPORT_EXCLUDE_ROOT = frozenset({
     # Infrastructure
     "hermes-agent",         # repo checkout (multi-GB)
+    "hermes-agent-prclean",  # temporary/source checkout
     ".worktrees",           # git worktrees
     "profiles",             # other profiles — never recursive-export
-    "bin",                  # installed binaries (tirith, etc.)
+    "bin",                  # installed binaries (tirith etc.) shared per-host
+    "node",                 # managed Node runtime
     "node_modules",         # npm packages
-    # Databases & runtime state
+    "lsp",                  # managed LSP runtimes and node_modules
+    # Large local backups / runtime state
+    "backups", "state-snapshots", "heapdumps", "kanban",
     "state.db", "state.db-shm", "state.db-wal",
     "hermes_state.db",
     "response_store.db", "response_store.db-shm", "response_store.db-wal",
@@ -185,6 +189,7 @@ _DEFAULT_EXPORT_EXCLUDE_ROOT = frozenset({
     "errors.log",
     ".hermes_history",
     # Caches (regenerated on use)
+    "cache",                # volatile browser/tool caches
     "image_cache", "audio_cache", "document_cache",
     "browser_screenshots", "checkpoints",
     "sandboxes",
