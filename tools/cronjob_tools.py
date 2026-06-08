@@ -622,8 +622,61 @@ def cronjob(
             return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
 
         if normalized in {"run", "run_now", "trigger"}:
-            updated = trigger_job(job_id)
-            return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
+            existing_snapshot = job.get("manual_run_schedule_snapshot")
+            schedule_snapshot = existing_snapshot if isinstance(existing_snapshot, dict) else {
+                "enabled": job.get("enabled", True),
+                "state": job.get("state"),
+                "paused_at": job.get("paused_at"),
+                "paused_reason": job.get("paused_reason"),
+                "next_run_at": job.get("next_run_at"),
+            }
+            updated = update_job(
+                job_id,
+                {
+                    "enabled": True,
+                    "state": "scheduled",
+                    "paused_at": None,
+                    "paused_reason": None,
+                    "next_run_at": job.get("next_run_at"),
+                },
+            )
+            try:
+                from cron.scheduler import (
+                    _job_has_required_live_delivery_context,
+                    _job_requires_live_delivery_context,
+                    _queue_manual_run_for_tick,
+                    _resolve_live_delivery_context,
+                    run_job_immediate,
+                )
+
+                live_adapters, live_loop = _resolve_live_delivery_context()
+                has_live_context = _job_has_required_live_delivery_context(
+                    updated or job,
+                    adapters=live_adapters,
+                    loop=live_loop,
+                )
+                if _job_requires_live_delivery_context(updated or job) and not has_live_context:
+                    _queue_manual_run_for_tick(job_id, schedule_snapshot)
+                    dispatched = False
+                    dispatch_error = (
+                        "Job requires live gateway delivery context; queued for the next gateway tick"
+                    )
+                else:
+                    dispatched, dispatch_error = run_job_immediate(job_id, schedule_snapshot=schedule_snapshot)
+            except Exception as _e:
+                dispatched, dispatch_error = False, str(_e)
+            current_job = resolve_job_ref(job_id) or updated
+            result = {
+                "success": True,
+                "job": _format_job(current_job),
+                "dispatched": dispatched,
+            }
+            if not dispatched:
+                result["note"] = (
+                    dispatch_error
+                    or "Job scheduled for next tick. Start the gateway if you need automatic execution."
+                )
+            return json.dumps(result, indent=2)
 
         if normalized == "update":
             updates: Dict[str, Any] = {}
