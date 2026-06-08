@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.nousresearch/hermes-agent",
+  "title": "Hermes Agent",
+  "description": "Control Hermes Agent conversations, messaging, approvals, and events over MCP.",
+  "version": "0.15.1",
+  "websiteUrl": "https://hermes-agent.nousresearch.com/docs/guides/hermes-as-an-mcp-server",
+  "repository": {
+    "url": "https://github.com/NousResearch/hermes-agent",
+    "source": "github",
+    "id": "1024554267"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "hermes-agent[mcp]",
+      "version": "0.15.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ]
+    }
+  ]
+}

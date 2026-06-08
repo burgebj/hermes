@@ -1,6 +1,8 @@
 """Regression tests for packaging metadata in pyproject.toml."""
 
+import json
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -11,11 +13,26 @@ def _load_optional_dependencies():
     return project["optional-dependencies"]
 
 
-def _load_package_data():
+def _load_setuptools_config():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
         tool = tomllib.load(handle)["tool"]
-    return tool["setuptools"]["package-data"]
+    return tool["setuptools"]
+
+
+def _load_package_data():
+    return _load_setuptools_config()["package-data"]
+
+
+def test_mcp_registry_name_is_lowercase_and_matches_readme_marker():
+    """Official MCP server names should stay canonical and lowercase."""
+    root = Path(__file__).resolve().parents[1]
+    server_json = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert server_json["name"] == "io.github.nousresearch/hermes-agent"
+    assert server_json["name"] == server_json["name"].lower()
+    assert re.search(r"<!--\s*mcp-name:\s*io\.github\.nousresearch/hermes-agent\s*-->", readme)
 
 
 def test_matrix_extra_not_in_all():
@@ -154,3 +171,48 @@ def test_nested_bundled_plugin_metadata_is_packaged():
     assert "**/plugin.yaml" in plugin_data
     assert "**/plugin.yml" in plugin_data
     assert "**/README.md" in plugin_data
+
+
+def test_mcp_serve_module_is_packaged_for_registry_launch():
+    """The MCP registry entry launches `hermes mcp serve` from the PyPI wheel.
+
+    `hermes_cli.main` imports the top-level `mcp_serve` module for that
+    subcommand, so the module must be listed explicitly in setuptools'
+    `py-modules` list.
+    """
+    py_modules = _load_setuptools_config()["py-modules"]
+
+    assert "mcp_serve" in py_modules
+
+
+def test_mcp_registry_package_launches_cli_with_mcp_extra():
+    """Registry installs should include the MCP SDK and invoke `hermes mcp serve`.
+
+    The package identifier includes the `[mcp]` extra so clients using a
+    Python package runner (for example `uvx`) install the optional MCP SDK.
+    The package runner commonly infers the executable from the package name,
+    so the `hermes-agent` console script must dispatch through the main CLI
+    instead of the legacy direct-agent entry point.
+    """
+    root = Path(__file__).resolve().parents[1]
+    server_json = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    package = server_json["packages"][0]
+    project = pyproject["project"]
+
+    assert server_json["version"] == project["version"]
+    assert package["version"] == project["version"]
+    assert package["registryType"] == "pypi"
+    assert package["registryBaseUrl"] == "https://pypi.org"
+    assert package["identifier"] == "hermes-agent[mcp]"
+    assert package["runtimeHint"] == "uvx"
+    assert [arg["value"] for arg in package["packageArguments"]] == ["mcp", "serve"]
+    assert project["scripts"]["hermes-agent"] == "hermes_cli.main:main"
+
+
+def test_mcp_server_docs_match_registry_identifier():
+    root = Path(__file__).resolve().parents[1]
+    server_json = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    docs = (root / "website/docs/guides/hermes-as-an-mcp-server.md").read_text(encoding="utf-8")
+
+    assert f'`"identifier": "{server_json["packages"][0]["identifier"]}"`' in docs
