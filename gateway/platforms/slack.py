@@ -3167,18 +3167,23 @@ class SlackAdapter(BasePlatformAdapter):
                     self._team_bot_user_ids.get(msg_team) if msg_team else None
                 ) or self._bot_user_id
 
-                # Exclude only our own prior bot replies (circular context).
-                # Keep:
-                #   - the thread parent even if it was posted by a bot
-                #     (e.g. a cron job summary we are now replying to);
-                #   - other bots' child messages (useful third-party context).
-                if (
+                # Identify our own prior bot replies. These are kept on the
+                # cold-start path (the only path that reaches this method —
+                # the call site is guarded by _has_active_session_for_thread)
+                # so the agent can reconstruct its own prior turns. When an
+                # active session exists, this method is not called and the
+                # session history already carries those replies — so there
+                # is no risk of circular duplication.
+                #
+                # Self-bot replies are labelled with an explicit ``[assistant]``
+                # prefix so the agent can distinguish its own prior turns
+                # from user messages and from third-party bot posts.
+                is_self_bot_reply = (
                     is_bot
                     and not is_parent
                     and self_bot_uid
                     and msg_user == self_bot_uid
-                ):
-                    continue
+                )
 
                 msg_text = msg.get("text", "").strip()
                 if not msg_text:
@@ -3188,13 +3193,24 @@ class SlackAdapter(BasePlatformAdapter):
                 if bot_uid:
                     msg_text = msg_text.replace(f"<@{bot_uid}>", "").strip()
 
-                prefix = "[thread parent] " if is_parent else ""
+                if is_parent:
+                    prefix = "[thread parent] "
+                elif is_self_bot_reply:
+                    prefix = "[assistant] "
+                else:
+                    prefix = ""
                 display_user = msg_user or "unknown"
                 # Prefer the bot's own name when the message is a bot post.
                 if is_bot and not display_user:
                     display_user = msg.get("username") or "bot"
-                name = await self._resolve_user_name(display_user, chat_id=channel_id)
-                context_parts.append(f"{prefix}{name}: {msg_text}")
+                if is_self_bot_reply:
+                    # Skip user-name resolution for self-bot replies — the
+                    # ``[assistant]`` prefix already communicates authorship,
+                    # and the resolved name would just be our own bot handle.
+                    context_parts.append(f"{prefix}{msg_text}")
+                else:
+                    name = await self._resolve_user_name(display_user, chat_id=channel_id)
+                    context_parts.append(f"{prefix}{name}: {msg_text}")
                 if is_parent:
                     parent_text = msg_text
 
