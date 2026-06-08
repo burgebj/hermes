@@ -72,6 +72,7 @@ class TestActionRunDispatchesImmediately:
     def test_action_run_skips_already_running(self, monkeypatch):
         """action='run' returns dispatched=False if the job is already running."""
         import cron.scheduler as sched
+        from cron.jobs import resolve_job_ref
         from tools.cronjob_tools import cronjob
         from cron.jobs import create_job
 
@@ -87,6 +88,7 @@ class TestActionRunDispatchesImmediately:
             name="already-running-test"
         )
         job_id = job["id"]
+        original_next_run_at = resolve_job_ref(job_id)["next_run_at"]
 
         # Simulate the job already running.
         sched._running_job_ids.add(job_id)
@@ -104,6 +106,7 @@ class TestActionRunDispatchesImmediately:
         # Assert a note is present.
         assert "note" in result_dict
         assert "already running" in result_dict["note"].lower()
+        assert resolve_job_ref(job_id)["next_run_at"] == original_next_run_at
 
         sched._running_job_ids.discard(job_id)
         sched._shutdown_parallel_pool()
@@ -296,6 +299,43 @@ class TestRunJobImmediate:
         assert dispatched is True
         assert error is None
         assert used == ["sequential"]
+
+        sched._shutdown_parallel_pool()
+
+    def test_action_run_failed_manual_run_restores_schedule(self, monkeypatch):
+        """A failed immediate manual run must not consume the next scheduled run."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref
+        from tools.cronjob_tools import cronjob
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="failed-manual-run"
+        )
+        job_id = job["id"]
+        original_next_run_at = resolve_job_ref(job_id)["next_run_at"]
+
+        class _InlinePool:
+            def submit(self, fn):
+                fn()
+                return MagicMock()
+
+        monkeypatch.setattr(sched, "_get_parallel_pool", lambda *_a, **_kw: _InlinePool())
+        monkeypatch.setattr(sched, "_get_sequential_pool", lambda: _InlinePool())
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (False, "output", "", "boom"))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        result = json.loads(cronjob(action="run", job_id=job_id))
+
+        assert result["success"] is True
+        assert result["dispatched"] is True
+        assert resolve_job_ref(job_id)["next_run_at"] == original_next_run_at
 
         sched._shutdown_parallel_pool()
 

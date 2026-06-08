@@ -1353,7 +1353,25 @@ def _job_requires_sequential_pool(job: dict) -> bool:
     return bool((job.get("workdir") or "").strip() or (job.get("profile") or "").strip())
 
 
-def run_job_immediate(job_id: str) -> tuple[bool, Optional[str]]:
+def _restore_manual_run_schedule(job_id: str, schedule_snapshot: Optional[dict]) -> None:
+    """Restore the pre-manual-run scheduling fields after a skipped/failed dispatch."""
+    if not schedule_snapshot:
+        return
+    from cron.jobs import update_job
+
+    update_job(
+        job_id,
+        {
+            "enabled": schedule_snapshot.get("enabled", True),
+            "state": schedule_snapshot.get("state"),
+            "paused_at": schedule_snapshot.get("paused_at"),
+            "paused_reason": schedule_snapshot.get("paused_reason"),
+            "next_run_at": schedule_snapshot.get("next_run_at"),
+        },
+    )
+
+
+def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> tuple[bool, Optional[str]]:
     """Execute a job now, bypassing the tick cycle.
 
     Called by the cronjob tool's action='run' path when the gateway is
@@ -1370,10 +1388,9 @@ def run_job_immediate(job_id: str) -> tuple[bool, Optional[str]]:
 
     with _running_lock:
         if job["id"] in _running_job_ids:
+            _restore_manual_run_schedule(job["id"], schedule_snapshot)
             return False, f"Job '{job_id}' is already running; this manual run was not queued"
         _running_job_ids.add(job["id"])
-
-    advance_next_run(job["id"])
 
     pool = _get_sequential_pool() if _job_requires_sequential_pool(job) else _get_parallel_pool(None)
     _ctx = contextvars.copy_context()
@@ -1381,6 +1398,8 @@ def run_job_immediate(job_id: str) -> tuple[bool, Optional[str]]:
     def _run_and_release(j=job, ctx=_ctx):
         try:
             success, output, final_response, error = ctx.run(run_job, j)
+            if success:
+                advance_next_run(j["id"])
             save_job_output(j["id"], output)
             deliver_content = (
                 final_response if success
@@ -1399,9 +1418,12 @@ def run_job_immediate(job_id: str) -> tuple[bool, Optional[str]]:
                 success = False
                 error = "Agent completed but produced empty response"
             mark_job_run(j["id"], success, error, delivery_error=delivery_error)
+            if not success:
+                _restore_manual_run_schedule(j["id"], schedule_snapshot)
         except Exception as e:
             logger.error("Immediate run of job %s failed: %s", j["id"], e)
             mark_job_run(j["id"], False, str(e))
+            _restore_manual_run_schedule(j["id"], schedule_snapshot)
         finally:
             with _running_lock:
                 _running_job_ids.discard(j["id"])
@@ -1411,6 +1433,7 @@ def run_job_immediate(job_id: str) -> tuple[bool, Optional[str]]:
     except Exception:
         with _running_lock:
             _running_job_ids.discard(job["id"])
+        _restore_manual_run_schedule(job["id"], schedule_snapshot)
         raise
     return True, None
 

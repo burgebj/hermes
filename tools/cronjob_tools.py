@@ -622,15 +622,23 @@ def cronjob(
             return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
 
         if normalized in {"run", "run_now", "trigger"}:
+            schedule_snapshot = {
+                "enabled": job.get("enabled", True),
+                "state": job.get("state"),
+                "paused_at": job.get("paused_at"),
+                "paused_reason": job.get("paused_reason"),
+                "next_run_at": job.get("next_run_at"),
+            }
             updated = trigger_job(job_id)
             try:
                 from cron.scheduler import run_job_immediate
-                dispatched, dispatch_error = run_job_immediate(job_id)
+                dispatched, dispatch_error = run_job_immediate(job_id, schedule_snapshot=schedule_snapshot)
             except Exception as _e:
                 dispatched, dispatch_error = False, str(_e)
+            current_job = resolve_job_ref(job_id) or updated
             result = {
                 "success": True,
-                "job": _format_job(updated),
+                "job": _format_job(current_job),
                 "dispatched": dispatched,
             }
             if not dispatched:
