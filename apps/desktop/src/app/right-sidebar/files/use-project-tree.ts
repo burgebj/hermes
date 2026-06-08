@@ -56,6 +56,7 @@ export interface UseProjectTreeResult {
   collapseAll: () => void
   loadChildren: (id: string) => Promise<void>
   refreshRoot: () => Promise<void>
+  refreshDir: (dirPath: string) => Promise<void>
   setNodeOpen: (id: string, open: boolean) => void
 }
 
@@ -235,6 +236,27 @@ export function useProjectTree(cwd: string): UseProjectTreeResult {
     [cwd]
   )
 
+  // Reload a single directory after a mutation (create/rename/delete/upload).
+  // Root changes go through loadRoot; a nested folder just refetches its own
+  // children so the rest of the tree's expand state is untouched.
+  const refreshDir = useCallback(
+    async (dirPath: string) => {
+      clearProjectDirCache(dirPath)
+
+      const norm = (p: string) => p.replace(/[/\\]+$/, '')
+
+      if (!dirPath || norm(dirPath) === norm(cwd)) {
+        await loadRoot(cwd, { force: true })
+
+        return
+      }
+
+      inflight.delete(dirPath)
+      await loadChildren(dirPath)
+    },
+    [cwd, loadChildren]
+  )
+
   useEffect(() => {
     void loadRoot(cwd)
   }, [cwd])
@@ -247,6 +269,7 @@ export function useProjectTree(cwd: string): UseProjectTreeResult {
       loadChildren,
       openState: state.cwd === cwd ? state.openState : {},
       refreshRoot,
+      refreshDir,
       rootError: state.cwd === cwd ? state.rootError : null,
       rootLoading: state.cwd === cwd ? state.rootLoading : Boolean(cwd),
       setNodeOpen
@@ -256,6 +279,7 @@ export function useProjectTree(cwd: string): UseProjectTreeResult {
       cwd,
       loadChildren,
       refreshRoot,
+      refreshDir,
       setNodeOpen,
       state.collapseNonce,
       state.cwd,

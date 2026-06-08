@@ -50,6 +50,13 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   getRecentLogs: () => ipcRenderer.invoke('hermes:logs:recent'),
   readDir: dirPath => ipcRenderer.invoke('hermes:fs:readDir', dirPath),
   gitRoot: startPath => ipcRenderer.invoke('hermes:fs:gitRoot', startPath),
+  getHostInfo: () => ipcRenderer.invoke('hermes:host:info'),
+  mkdir: dirPath => ipcRenderer.invoke('hermes:fs:mkdir', dirPath),
+  newFile: filePath => ipcRenderer.invoke('hermes:fs:newFile', filePath),
+  renamePath: (fromPath, toPath) => ipcRenderer.invoke('hermes:fs:rename', fromPath, toPath),
+  deletePath: targetPath => ipcRenderer.invoke('hermes:fs:delete', targetPath),
+  uploadFile: (localPath, destDir) => ipcRenderer.invoke('hermes:fs:upload', localPath, destDir),
+  writeFile: (filePath, content) => ipcRenderer.invoke('hermes:fs:writeFile', filePath, content),
   terminal: {
     dispose: id => ipcRenderer.invoke('hermes:terminal:dispose', id),
     resize: (id, size) => ipcRenderer.invoke('hermes:terminal:resize', id, size),
