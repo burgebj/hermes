@@ -1,0 +1,5 @@
+name: orcarouter-provider
+kind: model-provider
+version: 1.0.0
+description: OrcaRouter adaptive multi-model router
+author: OrcaRouter team
