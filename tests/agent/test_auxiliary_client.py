@@ -421,6 +421,46 @@ class TestAnthropicOAuthFlag:
         assert mock_build.call_args.args[0] == "sk-ant-oat01-pooled"
 
 
+class TestAPIKeyProviderPoolRouting:
+    def test_explicit_api_key_provider_uses_pool_before_env_resolution(self):
+        class _Entry:
+            access_token = "gemini-pooled-key"
+            base_url = "https://generativelanguage.googleapis.com/v1beta"
+            runtime_api_key = "gemini-pooled-key"
+            runtime_base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(True, _Entry())),
+            patch("hermes_cli.auth.resolve_api_key_provider_credentials", side_effect=AssertionError("legacy env path should not run")),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock(api_key="gemini-pooled-key", base_url="https://example.invalid/v1")
+
+            client, model = resolve_provider_client("gemini", "gemini-3-flash-preview")
+
+        assert client is not None
+        assert model == "gemini-3-flash-preview"
+        assert getattr(client, "api_key", "") == "gemini-pooled-key"
+
+    def test_explicit_api_key_provider_falls_back_to_env_when_pool_absent(self):
+        with (
+            patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)),
+            patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={
+                "api_key": "gemini-env-key",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                "source": "GOOGLE_API_KEY",
+            }),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            mock_openai.return_value = MagicMock(api_key="gemini-env-key", base_url="https://example.invalid/v1")
+
+            client, model = resolve_provider_client("gemini", "gemini-3-flash-preview")
+
+        assert client is not None
+        assert model == "gemini-3-flash-preview"
+        assert getattr(client, "api_key", "") == "gemini-env-key"
+
+
 class TestBuildCodexClient:
     def test_pool_without_selected_entry_falls_back_to_auth_store(self):
         with (

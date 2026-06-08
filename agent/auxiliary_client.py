@@ -3800,8 +3800,18 @@ def resolve_provider_client(
             final_model = _normalize_resolved_model(model or default_model, provider)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode else (client, final_model))
 
-        creds = resolve_api_key_provider_credentials(provider)
-        api_key = str(creds.get("api_key", "")).strip()
+        pool_present, pool_entry = _select_pool_entry(provider)
+        if pool_present:
+            api_key = _pool_runtime_api_key(pool_entry)
+            raw_base_url = (
+                _pool_runtime_base_url(pool_entry, pconfig.inference_base_url)
+                or pconfig.inference_base_url
+            )
+            logger.debug("resolve_provider_client: %s via credential pool", provider)
+        else:
+            creds = resolve_api_key_provider_credentials(provider)
+            api_key = str(creds.get("api_key", "")).strip()
+            raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
         # Honour an explicit api_key override (e.g. from a fallback_model entry
         # or a custom_providers entry) so callers that pass an explicit
         # credential can authenticate against endpoints where no built-in
@@ -3817,7 +3827,6 @@ def resolve_provider_client(
                          provider, ", ".join(tried_sources))
             return None, None
 
-        raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
         base_url = _to_openai_base_url(raw_base_url)
         # Honour an explicit base_url override from the caller — used when a
         # fallback_model entry (or custom_providers lookup) routes through a
