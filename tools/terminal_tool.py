@@ -2588,6 +2588,10 @@ TERMINAL_SCHEMA = {
 
 
 def _handle_terminal(args, **kw):
+    # Security: never forward 'force' from LLM-supplied args.
+    # 'force' bypasses all security checks and is internal-only.
+    if args.get("force"):
+        logger.warning("Blocked LLM attempt to set force=True on terminal tool call")
     return terminal_tool(
         command=args.get("command"),
         background=args.get("background", False),
