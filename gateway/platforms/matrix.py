@@ -64,6 +64,7 @@ except ImportError:
         REACTION = "m.reaction"
         ROOM_ENCRYPTED = "m.room.encrypted"
         ROOM_NAME = "m.room.name"
+        ROOM_MEMBER = "m.room.member"
 
     EventType = _EventTypeStub  # type: ignore[misc,assignment]
 
@@ -2597,14 +2598,18 @@ class MatrixAdapter(BasePlatformAdapter):
         """Check if a room is a DM."""
         if self._dm_rooms.get(room_id, False):
             return True
-        # Fallback: check member count via state store.
-        state_store = (
-            getattr(self._client, "state_store", None) if self._client else None
-        )
-        if state_store:
+        # Fallback: check the is_direct flag on our own m.room.member event.
+        # The Matrix spec sets is_direct=true on the invite/join event when
+        # the room was created as a direct chat.  Member-count heuristics are
+        # unreliable — any two-person group room would be misclassified.
+        if self._client and self._user_id:
             try:
-                members = await state_store.get_members(room_id)
-                if members and len(members) == 2:
+                member_evt = await self._client.get_state_event(
+                    RoomID(room_id),
+                    EventType.ROOM_MEMBER,
+                    UserID(self._user_id),
+                )
+                if member_evt and getattr(member_evt, "is_direct", False):
                     return True
             except Exception:
                 pass

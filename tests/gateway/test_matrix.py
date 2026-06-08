@@ -2859,3 +2859,91 @@ class TestCreateMatrixSession:
                     assert session.connector is fake_connector
                 finally:
                     await session.close()
+
+
+# ---------------------------------------------------------------------------
+# _is_dm_room: is_direct flag check (fix for #24114)
+# ---------------------------------------------------------------------------
+
+class TestMatrixIsDmRoom:
+    """Regression: _is_dm_room must check is_direct flag, not member count."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._user_id = "@bot:example.org"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_returns_true(self):
+        """When the DM cache says the room is a DM, return True immediately."""
+        self.adapter._dm_rooms = {"!room:example.org": True}
+        assert await self.adapter._is_dm_room("!room:example.org") is True
+
+    @pytest.mark.asyncio
+    async def test_is_direct_flag_true_returns_true(self):
+        """When the member event has is_direct=True, the room is a DM."""
+        self.adapter._dm_rooms = {}
+        member_evt = MagicMock()
+        member_evt.is_direct = True
+        self.adapter._client = MagicMock()
+        self.adapter._client.get_state_event = AsyncMock(return_value=member_evt)
+
+        assert await self.adapter._is_dm_room("!room:example.org") is True
+        self.adapter._client.get_state_event.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_is_direct_flag_false_returns_false(self):
+        """When is_direct=False, a 2-person room is NOT a DM."""
+        self.adapter._dm_rooms = {}
+        member_evt = MagicMock()
+        member_evt.is_direct = False
+        self.adapter._client = MagicMock()
+        self.adapter._client.get_state_event = AsyncMock(return_value=member_evt)
+
+        assert await self.adapter._is_dm_room("!room:example.org") is False
+
+    @pytest.mark.asyncio
+    async def test_no_is_direct_attr_returns_false(self):
+        """When the member event lacks is_direct, return False."""
+        self.adapter._dm_rooms = {}
+        member_evt = MagicMock(spec=[])  # no attributes
+        self.adapter._client = MagicMock()
+        self.adapter._client.get_state_event = AsyncMock(return_value=member_evt)
+
+        assert await self.adapter._is_dm_room("!room:example.org") is False
+
+    @pytest.mark.asyncio
+    async def test_no_client_returns_false(self):
+        """When _client is None, return False."""
+        self.adapter._dm_rooms = {}
+        self.adapter._client = None
+
+        assert await self.adapter._is_dm_room("!room:example.org") is False
+
+    @pytest.mark.asyncio
+    async def test_no_user_id_returns_false(self):
+        """When _user_id is empty, return False."""
+        self.adapter._dm_rooms = {}
+        self.adapter._user_id = ""
+        self.adapter._client = MagicMock()
+
+        assert await self.adapter._is_dm_room("!room:example.org") is False
+
+    @pytest.mark.asyncio
+    async def test_get_state_event_exception_returns_false(self):
+        """When get_state_event raises, return False."""
+        self.adapter._dm_rooms = {}
+        self.adapter._client = MagicMock()
+        self.adapter._client.get_state_event = AsyncMock(
+            side_effect=Exception("network error")
+        )
+
+        assert await self.adapter._is_dm_room("!room:example.org") is False
+
+    @pytest.mark.asyncio
+    async def test_none_response_returns_false(self):
+        """When get_state_event returns None, return False."""
+        self.adapter._dm_rooms = {}
+        self.adapter._client = MagicMock()
+        self.adapter._client.get_state_event = AsyncMock(return_value=None)
+
+        assert await self.adapter._is_dm_room("!room:example.org") is False
