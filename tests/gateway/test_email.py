@@ -787,6 +787,58 @@ class TestConnectDisconnect(unittest.TestCase):
             result = asyncio.run(adapter.connect())
             self.assertFalse(result)
 
+    def test_connect_blank_env_vars_fails_fast(self):
+        """connect() should fail fast when env vars are blank — no network I/O."""
+        import asyncio
+        from gateway.config import PlatformConfig
+        from gateway.platforms.email import EmailAdapter
+
+        # Simulate blank-but-present env vars (the exact scenario from #40715)
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "",
+            "EMAIL_PASSWORD": "",
+            "EMAIL_IMAP_HOST": "",
+            "EMAIL_IMAP_PORT": "993",
+            "EMAIL_SMTP_HOST": "",
+            "EMAIL_SMTP_PORT": "587",
+            "EMAIL_POLL_INTERVAL": "15",
+        }):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        # connect() should return False without attempting any network call
+        with patch("imaplib.IMAP4_SSL") as mock_imap, \
+             patch("smtplib.SMTP") as mock_smtp:
+            result = asyncio.run(adapter.connect())
+            self.assertFalse(result)
+            # Neither IMAP nor SMTP should have been called
+            mock_imap.assert_not_called()
+            mock_smtp.assert_not_called()
+
+    def test_connect_partial_blank_env_vars_fails_fast(self):
+        """connect() should fail fast when only some env vars are blank."""
+        import asyncio
+        from gateway.config import PlatformConfig
+        from gateway.platforms.email import EmailAdapter
+
+        # ADDRESS set but IMAP/SMTP host blank
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "user@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "",
+            "EMAIL_IMAP_PORT": "993",
+            "EMAIL_SMTP_HOST": "",
+            "EMAIL_SMTP_PORT": "587",
+            "EMAIL_POLL_INTERVAL": "15",
+        }):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        with patch("imaplib.IMAP4_SSL") as mock_imap, \
+             patch("smtplib.SMTP") as mock_smtp:
+            result = asyncio.run(adapter.connect())
+            self.assertFalse(result)
+            mock_imap.assert_not_called()
+            mock_smtp.assert_not_called()
+
     def test_disconnect_cancels_poll(self):
         """disconnect() should cancel the polling task."""
         import asyncio

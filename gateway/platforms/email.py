@@ -105,6 +105,9 @@ def check_email_requirements() -> bool:
     pwd = os.getenv("EMAIL_PASSWORD")
     imap = os.getenv("EMAIL_IMAP_HOST")
     smtp = os.getenv("EMAIL_SMTP_HOST")
+    # ``all([...])`` returns False when any value is None or empty string,
+    # so blank-but-present env vars (e.g. ``EMAIL_ADDRESS=``) are correctly
+    # rejected here.  The connect() guard is an additional safety net.
     if not all([addr, pwd, imap, smtp]):
         return False
     return True
@@ -295,6 +298,29 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def connect(self) -> bool:
         """Connect to the IMAP server and start polling for new messages."""
+        # Fail fast when required configuration is missing or empty.
+        # Blank-but-present env vars (e.g. ``EMAIL_ADDRESS=``) can slip
+        # past the startup gate — validate here so we never attempt a
+        # network call against an empty hostname/address, which would
+        # loop forever and leak memory on every retry.
+        missing = [
+            name
+            for name, val in [
+                ("EMAIL_IMAP_HOST", self._imap_host),
+                ("EMAIL_ADDRESS", self._address),
+                ("EMAIL_SMTP_HOST", self._smtp_host),
+            ]
+            if not val or not val.strip()
+        ]
+        if missing:
+            logger.error(
+                "[Email] Cannot connect — required env var(s) %s are empty or unset. "
+                "Email platform disabled. Either set them in ~/.hermes/.env or "
+                "remove the keys entirely to silence this warning.",
+                ", ".join(missing),
+            )
+            return False
+
         try:
             # Test IMAP connection
             imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
