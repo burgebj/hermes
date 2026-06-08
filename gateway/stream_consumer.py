@@ -600,6 +600,20 @@ class GatewayStreamConsumer:
                             )
                             if self._final_response_sent:
                                 self._final_content_delivered = True
+                            elif self._already_sent and self._last_sent_text:
+                                # The cursor-strip/finalize edit failed (e.g.
+                                # rate-limited), but the content was already
+                                # delivered to the user via prior streaming
+                                # edits (possibly with a trailing cursor).
+                                # Mark delivered so run.py suppression fires
+                                # and the gateway doesn't re-send the full
+                                # response as a fresh message (#36965).
+                                _visible = self._last_sent_text
+                                if self.cfg.cursor:
+                                    _cursor = self.cfg.cursor
+                                    _visible = _visible.replace(_cursor, "")
+                                if _visible.strip():
+                                    self._final_content_delivered = True
                         elif not self._already_sent:
                             self._final_response_sent = await self._send_or_edit(self._accumulated)
                             if self._final_response_sent:
@@ -1033,6 +1047,12 @@ class GatewayStreamConsumer:
 
     async def _send_commentary(self, text: str) -> bool:
         """Send a completed interim assistant commentary message."""
+        # Guard: do not send commentary after the final response has already
+        # been delivered.  This prevents stale tool-trace or interim messages
+        # queued from a previous turn (context bleed, #37555) from appearing
+        # as extra chat messages after the answer was sent.
+        if self._final_content_delivered or self._final_response_sent:
+            return False
         text = self._clean_for_display(text)
         if not text.strip():
             return False
