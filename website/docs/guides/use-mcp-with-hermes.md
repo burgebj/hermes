@@ -334,6 +334,35 @@ List available MCP resources from the docs server, then read the onboarding guid
 List prompts exposed by the docs server and tell me which ones would help with incident response.
 ```
 
+### Example: iFlow Search over MCP
+
+iFlow Search publishes a stdio MCP server as `@iflow-ai/search-mcp`. Use it when you want web search, image search, and web fetch through Hermes without writing a native Hermes tool.
+
+```yaml
+mcp_servers:
+  iflow-search:
+    command: "npx"
+    args: ["-y", "@iflow-ai/search-mcp@next"]
+    env:
+      IFLOW_API_KEY: "YOUR_IFLOW_API_KEY"
+    tools:
+      include: [iflow_web_search, iflow_image_search, iflow_web_fetch]
+      resources: false
+      prompts: false
+```
+
+Verify the server before using it in a session:
+
+```bash
+hermes mcp test iflow-search
+```
+
+Notes:
+- Keep the real `IFLOW_API_KEY` out of version control; Hermes only passes it because it is explicitly listed in the server `env` block.
+- The package currently exposes `iflow_web_search`, `iflow_image_search`, and `iflow_web_fetch`.
+- With the server name above, Hermes registers those tools as `mcp_iflow_search_iflow_web_search`, `mcp_iflow_search_iflow_image_search`, and `mcp_iflow_search_iflow_web_fetch`.
+- Prefer `@next` or a pinned version in shared config so package upgrades stay intentional.
+
 ## Tutorial: end-to-end setup with filtering
 
 Here is a practical progression.
