@@ -227,6 +227,18 @@ def _mock_tool_call(name="web_search", arguments="{}", call_id=None):
     )
 
 
+class _BrokenModelDumpDict(dict):
+    def model_dump(self):
+        raise AttributeError("'dict' object has no attribute 'model_dump'")
+
+
+class _BrokenModelDumpObject:
+    __slots__ = ()
+
+    def model_dump(self):
+        raise AttributeError("'dict' object has no attribute 'model_dump'")
+
+
 def _mock_response(
     content="Hello",
     finish_reason="stop",
@@ -1877,6 +1889,16 @@ class TestBuildAssistantMessage:
         assert "reasoning_details" in result
         assert result["reasoning_details"][0]["text"] == "step1"
 
+    def test_broken_reasoning_detail_model_dump_is_ignored(self, agent):
+        msg = _mock_assistant_msg(
+            content="ans", reasoning_details=[_BrokenModelDumpObject()]
+        )
+
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert "reasoning_details" not in result
+
+
     def test_empty_content(self, agent):
         msg = _mock_assistant_msg(content=None)
         result = agent._build_assistant_message(msg, "stop")
@@ -1947,6 +1969,21 @@ class TestBuildAssistantMessage:
         tc.extra_content = {"google": {"thought_signature": "abc123"}}
         msg = _mock_assistant_msg(content="", tool_calls=[tc])
         result = agent._build_assistant_message(msg, "tool_calls")
+        assert result["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "abc123"}
+        }
+
+    def test_tool_call_extra_content_broken_model_dump_falls_back(self, agent):
+        tc = _mock_tool_call(
+            name="get_weather", arguments='{"city":"NYC"}', call_id="c2"
+        )
+        tc.extra_content = _BrokenModelDumpDict(
+            {"google": {"thought_signature": "abc123"}}
+        )
+        msg = _mock_assistant_msg(content="", tool_calls=[tc])
+
+        result = agent._build_assistant_message(msg, "tool_calls")
+
         assert result["tool_calls"][0]["extra_content"] == {
             "google": {"thought_signature": "abc123"}
         }
@@ -5724,10 +5761,22 @@ def _make_chunk(content=None, tool_calls=None, finish_reason=None, model="test/m
     return SimpleNamespace(model=model, choices=[choice])
 
 
-def _make_tc_delta(index=0, tc_id=None, name=None, arguments=None):
+def _make_tc_delta(
+    index=0,
+    tc_id=None,
+    name=None,
+    arguments=None,
+    extra_content=None,
+    model_extra=None,
+):
     """Build a SimpleNamespace mimicking a streaming tool_call delta."""
     func = SimpleNamespace(name=name, arguments=arguments)
-    return SimpleNamespace(index=index, id=tc_id, function=func)
+    delta = SimpleNamespace(index=index, id=tc_id, function=func)
+    if extra_content is not None:
+        delta.extra_content = extra_content
+    if model_extra is not None:
+        delta.model_extra = model_extra
+    return delta
 
 
 class TestStreamingApiCall:
@@ -5772,6 +5821,32 @@ class TestStreamingApiCall:
         assert tc[0].function.name == "web_search"
         assert tc[0].function.arguments == '{"q":"test"}'
         assert tc[0].id == "call_1"
+
+    def test_tool_call_extra_content_broken_model_dump_falls_back(self, agent):
+        chunks = [
+            _make_chunk(
+                tool_calls=[
+                    _make_tc_delta(
+                        0,
+                        "call_1",
+                        "web_search",
+                        "{}",
+                        extra_content=_BrokenModelDumpDict(
+                            {"google": {"thought_signature": "sig-123"}}
+                        ),
+                    )
+                ]
+            ),
+            _make_chunk(finish_reason="tool_calls"),
+        ]
+        agent.client.chat.completions.create.return_value = iter(chunks)
+
+        resp = agent._interruptible_streaming_api_call({"messages": []})
+
+        tc = resp.choices[0].message.tool_calls
+        assert tc[0].extra_content == {
+            "google": {"thought_signature": "sig-123"}
+        }
 
     def test_multiple_tool_calls(self, agent):
         chunks = [

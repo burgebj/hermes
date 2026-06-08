@@ -13,6 +13,11 @@ def transport():
     return get_transport("chat_completions")
 
 
+class _BrokenModelDumpDict(dict):
+    def model_dump(self):
+        raise AttributeError("'dict' object has no attribute 'model_dump'")
+
+
 class TestChatCompletionsBasic:
 
     def test_api_mode(self, transport):
@@ -785,6 +790,28 @@ class TestChatCompletionsNormalize:
             usage=None,
         )
         nr = transport.normalize_response(r)
+        assert nr.tool_calls[0].provider_data == {
+            "extra_content": {"google": {"thought_signature": "SIG_ABC123"}}
+        }
+
+    def test_tool_call_extra_content_broken_model_dump_falls_back(self, transport):
+        tc = SimpleNamespace(
+            id="call_gem",
+            function=SimpleNamespace(name="terminal", arguments='{"command": "ls"}'),
+            extra_content=_BrokenModelDumpDict(
+                {"google": {"thought_signature": "SIG_ABC123"}}
+            ),
+        )
+        r = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=None, tool_calls=[tc], reasoning_content=None),
+                finish_reason="tool_calls",
+            )],
+            usage=None,
+        )
+
+        nr = transport.normalize_response(r)
+
         assert nr.tool_calls[0].provider_data == {
             "extra_content": {"google": {"thought_signature": "SIG_ABC123"}}
         }

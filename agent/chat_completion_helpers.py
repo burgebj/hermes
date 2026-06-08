@@ -920,7 +920,10 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
             elif hasattr(d, "__dict__"):
                 preserved.append(d.__dict__)
             elif hasattr(d, "model_dump"):
-                preserved.append(d.model_dump())
+                try:
+                    preserved.append(d.model_dump())
+                except Exception:
+                    pass
         if preserved:
             msg["reasoning_details"] = preserved
 
@@ -993,7 +996,10 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
             extra = getattr(tool_call, "extra_content", None)
             if extra is not None:
                 if hasattr(extra, "model_dump"):
-                    extra = extra.model_dump()
+                    try:
+                        extra = extra.model_dump()
+                    except Exception:
+                        pass
                 tc_dict["extra_content"] = extra
             tool_calls.append(tc_dict)
         msg["tool_calls"] = tool_calls
@@ -1874,7 +1880,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         extra = (tc_delta.model_extra or {}).get("extra_content")
                     if extra is not None:
                         if hasattr(extra, "model_dump"):
-                            extra = extra.model_dump()
+                            try:
+                                extra = extra.model_dump()
+                            except Exception:
+                                pass
                         entry["extra_content"] = extra
                     # Fire once per tool when the full name is available
                     name = entry["function"]["name"]
