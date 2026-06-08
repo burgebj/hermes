@@ -1210,19 +1210,28 @@ def _resolve_runtime_agent_kwargs() -> dict:
         format_runtime_provider_error,
         _get_model_config,
     )
-    from hermes_cli.auth import AuthError, is_rate_limited_auth_error
+    from hermes_cli.auth import AuthError
 
     try:
         runtime = resolve_runtime_provider()
     except AuthError as auth_exc:
-        # Distinguish a transient rate-limit/quota cap (credentials are fine,
-        # re-auth cannot help) from a genuine auth failure (expired/revoked
-        # token). Both fall through to the fallback chain, but the log message
-        # must not mislabel a quota exhaustion as an auth failure (#32790).
-        if is_rate_limited_auth_error(auth_exc):
-            logger.warning("Primary provider rate-limited (429): %s — trying fallback", auth_exc)
+        # An AuthError from credential resolution covers two very different
+        # failure modes: a genuine credential problem (expired/revoked/missing
+        # token → re-auth required, ``relogin_required=True``) and a transient
+        # upstream condition that a perfectly valid credential simply hit — a
+        # 429 usage-limit / rate-limit or a 5xx, which carry
+        # ``relogin_required=False``. Logging both as "auth failed" tells
+        # operators to re-run `hermes auth` on tokens that are actually fine
+        # (see #32790). Branch the wording on the structured hint.
+        if getattr(auth_exc, "relogin_required", False):
+            logger.warning(
+                "Primary provider auth failed: %s — trying fallback", auth_exc
+            )
         else:
-            logger.warning("Primary provider auth failed: %s — trying fallback", auth_exc)
+            logger.warning(
+                "Primary provider unavailable (transient/rate-limit): %s — trying fallback",
+                auth_exc,
+            )
         fb_config = _try_resolve_fallback_provider()
         if fb_config is not None:
             return fb_config
@@ -1294,6 +1303,13 @@ def _try_resolve_fallback_provider() -> dict | None:
                 # OpenAI-compatible path and would otherwise be logged as
                 # "openrouter", contradicting the operator's config (#32790).
                 logger.info(
+                    # Report the literal `provider` key from config, not the
+                    # resolved internal category. resolve_runtime_provider()
+                    # normalizes OpenAI-compatible providers (e.g. `ollama`) to
+                    # the generic `openrouter` runtime, so logging
+                    # runtime.get("provider") mislabels the operator-facing line
+                    # even though traffic correctly hits the configured endpoint
+                    # (see #32790).
                     "Fallback provider resolved: %s model=%s",
                     entry.get("provider") or runtime.get("provider"),
                     entry.get("model"),
