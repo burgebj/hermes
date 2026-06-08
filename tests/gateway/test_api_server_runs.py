@@ -527,3 +527,79 @@ class TestStopRun:
                 body = await events_resp.text()
                 # Stream should have received run.failed and closed
                 assert "run.failed" in body or "stream closed" in body
+
+
+class TestRunsModelOverride:
+    """POST /v1/runs — model override is forwarded to _create_agent."""
+
+    @pytest.fixture
+    def adapter(self):
+        return _make_adapter()
+
+    @pytest.mark.asyncio
+    async def test_model_override_forwarded_to_create_agent(self, adapter):
+        """When 'model' is provided in the request body it must be forwarded
+        to _create_agent as model_override so the agent runs with the
+        requested model instead of the config.yaml default (fixes #33072)."""
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "which model are you?", "model": "claude-haiku-4-5-20251001"},
+                )
+                assert resp.status == 202
+
+                # Wait for the agent to actually run (it may still be in
+                # progress on the executor thread — poll the status briefly).
+                run_id = (await resp.json())["run_id"]
+                for _ in range(20):
+                    status_resp = await cli.get(f"/v1/runs/{run_id}")
+                    if (await status_resp.json()).get("status") == "completed":
+                        break
+                    await asyncio.sleep(0.1)
+
+                # _create_agent must have been called with the override.
+                mock_create.assert_called_once()
+                call_kwargs = mock_create.call_args.kwargs
+                assert call_kwargs.get("model_override") == "claude-haiku-4-5-20251001", (
+                    "model_override was not forwarded to _create_agent; "
+                    "the per-run model field is silently ignored (issue #33072)"
+                )
+
+    @pytest.mark.asyncio
+    async def test_no_model_field_leaves_override_none(self, adapter):
+        """When no 'model' field is present the override must be None so the
+        default config.yaml model is used unchanged."""
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                assert resp.status == 202
+
+                run_id = (await resp.json())["run_id"]
+                for _ in range(20):
+                    status_resp = await cli.get(f"/v1/runs/{run_id}")
+                    if (await status_resp.json()).get("status") == "completed":
+                        break
+                    await asyncio.sleep(0.1)
+
+                mock_create.assert_called_once()
+                call_kwargs = mock_create.call_args.kwargs
+                assert call_kwargs.get("model_override") is None, (
+                    "model_override should be None when no model field provided"
+                )
