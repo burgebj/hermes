@@ -9352,10 +9352,19 @@ class GatewayRunner:
                                             source, session_entry,
                                             reason="hygiene-compression",
                                         )
-
-                                    self.session_store.rewrite_transcript(
-                                        session_entry.session_id, _compressed
-                                    )
+                                        self.session_store.rewrite_transcript(
+                                            session_entry.session_id, _compressed
+                                        )
+                                    else:
+                                        # _session_db was None so no session rotation
+                                        # occurred.  Do NOT overwrite the original
+                                        # transcript — the compressed messages are
+                                        # used in-memory only for this turn.
+                                        logger.info(
+                                            "Session hygiene: compression applied "
+                                            "in-memory (no session DB — original "
+                                            "transcript preserved)"
+                                        )
                                     # Reset stored token count — transcript was rewritten
                                     session_entry.last_prompt_tokens = 0
                                     history = _compressed

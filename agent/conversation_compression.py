@@ -534,6 +534,22 @@ def compress_context(
             agent._last_flushed_db_idx = 0
         except Exception as e:
             logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+    else:
+        # _session_db is None — still rotate the session_id so the caller
+        # (gateway hygiene) can distinguish old vs new transcripts and
+        # avoid overwriting the original session's messages.
+        old_session_id = agent.session_id
+        agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        try:
+            from gateway.session_context import set_current_session_id
+
+            set_current_session_id(agent.session_id)
+        except Exception:
+            os.environ["HERMES_SESSION_ID"] = agent.session_id
+        logger.info(
+            "Session hygiene: rotated session_id %s → %s (no session DB)",
+            old_session_id, agent.session_id,
+        )
 
     # Notify the context engine that the session_id rotated because of
     # compression (not a fresh /new). Plugin engines (e.g. hermes-lcm) use
