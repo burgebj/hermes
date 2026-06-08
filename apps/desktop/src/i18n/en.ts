@@ -42,6 +42,10 @@ export const en: Translations = {
     off: 'Off'
   },
 
+  intro: {
+    neutralCopy: null
+  },
+
   boot: {
     ready: 'Hermes Desktop is ready',
     desktopBootFailedWithMessage: message => `Desktop boot failed: ${message}`,

@@ -27,5 +27,6 @@ describe('model-status-label', () => {
 
   it('returns just the placeholder name when there is no model', () => {
     expect(formatModelStatusLabel('')).toBe('No model')
+    expect(formatModelStatusLabel('', { noModelLabel: 'sin modelo' })).toBe('sin modelo')
   })
 })

@@ -42,6 +42,10 @@ export const zh: Translations = {
     off: '关'
   },
 
+  intro: {
+    neutralCopy: null
+  },
+
   boot: {
     ready: 'Hermes 桌面版已就绪',
     desktopBootFailedWithMessage: message => `桌面启动失败：${message}`,

@@ -1,5 +1,7 @@
 import { type CSSProperties, useState } from 'react'
 
+import { useI18n } from '@/i18n'
+
 import introCopyJsonl from './intro-copy.jsonl?raw'
 
 type IntroCopy = {
@@ -138,7 +140,7 @@ function fallbackCopyForPersonality(personalityKey: string): IntroCopy[] {
   ]
 }
 
-function pickCopy(copies: IntroCopy[], seed = 0): IntroCopy {
+function pickCopy(copies: readonly IntroCopy[], seed = 0): IntroCopy {
   return copies[Math.abs(seed) % copies.length] || FALLBACK_COPY[0]
 }
 
@@ -155,8 +157,13 @@ function resolveCopy(personality?: string, seed?: number): IntroCopy {
 }
 
 export function Intro({ personality, seed }: IntroProps) {
+  const { t } = useI18n()
   const [mountSeed] = useState(() => Math.floor(Math.random() * 100000))
-  const copy = resolveCopy(personality, mountSeed + (seed ?? 0))
+  const personalityKey = normalizeKey(personality)
+  const localizedNeutralCopy = NEUTRAL_PERSONALITIES.has(personalityKey) ? t.intro.neutralCopy : null
+  const copy = localizedNeutralCopy
+    ? pickCopy(localizedNeutralCopy, mountSeed + (seed ?? 0))
+    : resolveCopy(personality, mountSeed + (seed ?? 0))
 
   return (
     <div

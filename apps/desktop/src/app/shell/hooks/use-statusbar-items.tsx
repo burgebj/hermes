@@ -361,6 +361,7 @@ export function useStatusbarItems({
             <span className="truncate">
               {formatModelStatusLabel(currentModel, {
                 fastMode: currentFastMode,
+                noModelLabel: copy.noModel,
                 reasoningEffort: currentReasoningEffort
               })}
             </span>

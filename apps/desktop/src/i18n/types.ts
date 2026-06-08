@@ -5,7 +5,7 @@
 // partial locales should use `defineLocale()` so missing desktop-only strings
 // fall back to English while new keys remain type-checked.
 
-export type Locale = 'en' | 'zh' | 'zh-hant' | 'ja'
+export type Locale = 'en' | 'zh' | 'zh-hant' | 'ja' | 'es'
 
 interface ModeOptionCopy {
   label: string
@@ -15,6 +15,11 @@ interface ModeOptionCopy {
 interface AuxTaskCopy {
   label: string
   hint: string
+}
+
+interface IntroCopy {
+  headline: string
+  body: string
 }
 
 export interface Translations {
@@ -55,6 +60,10 @@ export interface Translations {
     update: string
     on: string
     off: string
+  }
+
+  intro: {
+    neutralCopy: readonly IntroCopy[] | null
   }
 
   boot: {

@@ -177,7 +177,7 @@ export function ChatBar({
     busy && !!onSteer && attachments.length === 0 && trimmedDraft.length > 0 && !SLASH_COMMAND_RE.test(trimmedDraft)
   const showHelpHint = draft === '?'
 
-  const { t } = useI18n()
+  const { locale, t } = useI18n()
   const gatewayState = useStore($gatewayState)
   const newSessionPlaceholders = t.composer.newSessionPlaceholders
   const followUpPlaceholders = t.composer.followUpPlaceholders
@@ -192,24 +192,27 @@ export function ChatBar({
   )
 
   const prevSessionIdRef = useRef(sessionId)
+  const prevLocaleRef = useRef(locale)
 
   useEffect(() => {
     const prev = prevSessionIdRef.current
     prevSessionIdRef.current = sessionId
+    const localeChanged = prevLocaleRef.current !== locale
+    prevLocaleRef.current = locale
 
-    if (prev === sessionId) {
+    if (prev === sessionId && !localeChanged) {
       return
     }
 
     // null → id: the new session we're already in just got persisted. Keep the
     // starter we showed instead of swapping to a follow-up under the user.
-    if (prev == null && sessionId) {
+    if (!localeChanged && prev == null && sessionId) {
       return
     }
 
     resetBrowseState(prev)
     setRestingPlaceholder(pickPlaceholder(sessionId ? followUpPlaceholders : newSessionPlaceholders))
-  }, [followUpPlaceholders, newSessionPlaceholders, sessionId])
+  }, [followUpPlaceholders, locale, newSessionPlaceholders, sessionId])
 
   // When the bar is disabled it's because the gateway isn't open. Distinguish a
   // cold start ("Starting Hermes...") from a dropped connection we're trying to

@@ -72,16 +72,20 @@ export function modelDisplayParts(model: string): { name: string; tag: string } 
 }
 
 /** Friendly one-line model name for menus and the status bar. */
-export function displayModelName(model: string): string {
+export function displayModelName(model: string, options?: { noModelLabel?: string }): string {
+  if (!model.trim() && options?.noModelLabel) {
+    return options.noModelLabel
+  }
+
   return modelDisplayParts(model).name
 }
 
 /** Status bar trigger label — model name plus the live session state (effort/fast). */
 export function formatModelStatusLabel(
   model: string,
-  options?: { fastMode?: boolean; reasoningEffort?: string }
+  options?: { fastMode?: boolean; noModelLabel?: string; reasoningEffort?: string }
 ): string {
-  const name = displayModelName(model)
+  const name = displayModelName(model, options)
 
   if (!model.trim()) {
     return name
