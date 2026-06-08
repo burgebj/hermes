@@ -1570,3 +1570,76 @@ class TestApprovalTimeoutIsNotConsent:
         assert last_post.get("choice") == "timeout", (
             f"hook choice should be 'timeout' on no-response, got {last_post.get('choice')!r}"
         )
+
+
+class TestPermanentAllowlistLock:
+    """_permanent_approved must be read under _lock before save_permanent_allowlist()."""
+
+    def setup_method(self):
+        from tools import approval as mod
+        self._snapshot = set(mod._permanent_approved)
+
+    def teardown_method(self):
+        from tools import approval as mod
+        mod._permanent_approved.clear()
+        mod._permanent_approved.update(self._snapshot)
+
+    def test_parallel_approves_do_not_lose_patterns(self):
+        """Concurrent approve + save must retain every pattern."""
+        from tools import approval as mod
+
+        mod._permanent_approved.clear()
+
+        calls = []
+        original_save = mod.save_permanent_allowlist
+
+        def slow_save(patterns):
+            time.sleep(0.005)
+            calls.append(set(patterns))
+            original_save(patterns)
+
+        with mock_patch.object(mod, "save_permanent_allowlist", side_effect=slow_save):
+            errors = []
+
+            def approve(name):
+                try:
+                    mod.approve_permanent(name)
+                    with mod._lock:
+                        mod.save_permanent_allowlist(mod._permanent_approved.copy())
+                except Exception as e:
+                    errors.append((name, e))
+
+            threads = [threading.Thread(target=approve, args=(f"pat_{i}",)) for i in range(12)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert not errors, f"workers raised: {errors}"
+
+        all_saved = set().union(*calls)
+        assert all_saved == {f"pat_{i}" for i in range(12)}, (
+            f"lost patterns: {sorted({f'pat_{i}' for i in range(12)} - all_saved)}"
+        )
+        assert mod._permanent_approved == {f"pat_{i}" for i in range(12)}
+
+    def test_save_permanent_allowlist_receives_copy_not_live_set(self):
+        """save_permanent_allowlist must get a snapshot, not the live mutable set."""
+        from tools import approval as mod
+
+        captured = []
+
+        def capture(patterns):
+            captured.append(patterns)
+            return None
+
+        with mock_patch.object(mod, "save_permanent_allowlist", side_effect=capture):
+            mod.approve_permanent("live_check")
+            with mod._lock:
+                mod.save_permanent_allowlist(mod._permanent_approved.copy())
+
+        assert len(captured) == 1
+        assert captured[0] is not mod._permanent_approved, (
+            "save_permanent_allowlist was called with the live _permanent_approved set"
+        )
+        assert "live_check" in captured[0]
