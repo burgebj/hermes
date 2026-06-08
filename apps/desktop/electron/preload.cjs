@@ -83,6 +83,11 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     ipcRenderer.on('hermes:window-state-changed', listener)
     return () => ipcRenderer.removeListener('hermes:window-state-changed', listener)
   },
+  onComposerAppendSelection: callback => {
+    const listener = (_event, text) => callback(text)
+    ipcRenderer.on('hermes:composer:append-selection', listener)
+    return () => ipcRenderer.removeListener('hermes:composer:append-selection', listener)
+  },
   onPreviewFileChanged: callback => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('hermes:preview-file-changed', listener)

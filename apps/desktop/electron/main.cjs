@@ -3320,6 +3320,21 @@ function installContextMenu(window) {
 
     if (hasSelection || isEditable) {
       if (template.length) template.push({ type: 'separator' })
+      if (hasSelection && !isEditable) {
+        template.push(
+          {
+            label: 'Send Selection to Composer',
+            click: () => {
+              try {
+                window.webContents.send('hermes:composer:append-selection', params.selectionText)
+              } catch (error) {
+                rememberLog(`composer append-selection send failed: ${error.message}`)
+              }
+            }
+          },
+          { type: 'separator' }
+        )
+      }
       if (isEditable) {
         template.push(
           { role: 'cut', enabled: params.editFlags.canCut },

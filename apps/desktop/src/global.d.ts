@@ -71,6 +71,7 @@ declare global {
       onClosePreviewRequested?: (callback: () => void) => () => void
       onOpenUpdatesRequested?: (callback: () => void) => () => void
       onWindowStateChanged?: (callback: (payload: HermesWindowState) => void) => () => void
+      onComposerAppendSelection?: (callback: (text: string) => void) => () => void
       onPreviewFileChanged: (callback: (payload: HermesPreviewFileChanged) => void) => () => void
       onBackendExit: (callback: (payload: BackendExit) => void) => () => void
       onPowerResume?: (callback: () => void) => () => void
